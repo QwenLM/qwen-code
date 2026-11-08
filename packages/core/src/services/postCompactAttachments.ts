@@ -106,6 +106,21 @@ export function extractRecentFilePaths(
   // call ids so we can skip them: never re-read a file the agent didn't
   // successfully read.
   const failedCallIds = collectFailedCallIds(history);
+  const successfulBridgeCallIds = new Set<string>();
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      const response = part.functionResponse;
+      if (
+        response?.name === ToolNames.TOOL_CALL &&
+        response.id &&
+        response.response &&
+        'output' in response.response &&
+        !('error' in response.response)
+      ) {
+        successfulBridgeCallIds.add(response.id);
+      }
+    }
+  }
 
   const seen = new Set<string>();
   for (let i = history.length - 1; i >= 0; i--) {
@@ -120,10 +135,23 @@ export function extractRecentFilePaths(
     for (let j = parts.length - 1; j >= 0; j--) {
       const part = parts[j];
       const call = part.functionCall;
-      if (!call || !FILE_TOUCHING_TOOLS.has(call.name ?? '')) continue;
-      // Skip paths whose tool call failed (denied / errored).
+      if (!call) continue;
+      // Always pair responses with the outer call id before unwrapping.
       if (call.id && failedCallIds.has(call.id)) continue;
-      const args = call.args as { file_path?: unknown } | undefined;
+      const bridged = call.name === ToolNames.TOOL_CALL;
+      if (bridged && (!call.id || !successfulBridgeCallIds.has(call.id))) {
+        continue;
+      }
+      const name = bridged ? call.args?.['name'] : call.name;
+      if (
+        typeof name !== 'string' ||
+        !FILE_TOUCHING_TOOLS.has(bridged ? name.toLowerCase() : name)
+      ) {
+        continue;
+      }
+      const args = (bridged ? call.args?.['arguments'] : call.args) as
+        | { file_path?: unknown }
+        | undefined;
       const filePath =
         typeof args?.file_path === 'string' ? args.file_path : undefined;
       if (!filePath || seen.has(filePath)) continue;
@@ -233,7 +261,7 @@ export function extractRecentImages(
  * Count images RETURNED BY TOOLS across the whole history — inlineData
  * image parts nested inside `functionResponse.parts`. User-pasted
  * top-level images are intentionally excluded: this drives the
- * computer-use screenshot-overflow auto-compact trigger, whose concern
+ * tool screenshot-overflow auto-compact trigger, whose concern
  * is screenshot accumulation from tool results, not occasional pastes.
  */
 export function countToolResponseImages(history: Content[]): number {
@@ -795,7 +823,7 @@ export async function composePostCompactHistory(
   // Merge every file restoration block AND the image block into a
   // single user Content (Finding 2). Pushing them as separate user
   // Contents produces consecutive same-role entries, which
-  // geminiChat.test.ts:6289 enforces against and which Gemini
+  // llm-chat.test.ts:6289 enforces against and which Gemini
   // providers reject as 400 "consecutive same-role content".
   //
   // Order within the merged user Content:

@@ -1,0 +1,111 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type React from 'react';
+import { useCallback } from 'react';
+import { Box, Text } from 'ink';
+import { theme } from '../semantic-colors.js';
+import { REASONING_EFFORT_TIERS } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
+import { useKeypress } from '../hooks/useKeypress.js';
+import { t } from '../../i18n/index.js';
+
+interface EffortDialogProps {
+  /** Callback when a tier is chosen; `undefined` means the dialog was cancelled. */
+  onSelect: (effort: ReasoningEffort | undefined) => void;
+
+  /** The currently active effort, used to pre-select the list. */
+  currentEffort?: ReasoningEffort;
+  efforts?: readonly ReasoningEffort[];
+}
+
+export const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
+  low: 'Fastest and cheapest; least reasoning.',
+  medium: 'Balanced speed, cost, and reasoning.',
+  high: 'Default — strong reasoning for hard tasks.',
+  xhigh: 'Extended reasoning for agentic/coding work.',
+  max: 'Maximum reasoning; highest cost and latency.',
+};
+
+export function EffortDialog({
+  onSelect,
+  currentEffort,
+  efforts = REASONING_EFFORT_TIERS,
+}: EffortDialogProps): React.JSX.Element {
+  const items = efforts.map((tier) => ({
+    label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
+    value: tier,
+    key: tier,
+  }));
+
+  // Pre-select only a tier this model actually exposes. An unset effort starts
+  // at the top rather than highlighting 'high', and so does a tier the global
+  // `model.reasoningEffort` carried over from another model (only ACP sessions
+  // reconcile it) — either way the cursor must not read as "this tier is
+  // current", or a bare Enter silently overwrites the stored value with it.
+  const configuredIndex = currentEffort ? efforts.indexOf(currentEffort) : -1;
+  const initialIndex = Math.max(0, configuredIndex);
+
+  const handleSelect = useCallback(
+    (effort: ReasoningEffort) => {
+      onSelect(effort);
+    },
+    [onSelect],
+  );
+
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape') {
+        onSelect(undefined);
+      }
+    },
+    { isActive: true },
+  );
+
+  return (
+    <Box
+      borderStyle="round"
+      borderColor={theme.border.default}
+      flexDirection="column"
+      padding={1}
+      width="100%"
+    >
+      <Text bold>
+        {'> '}
+        {t('Reasoning Effort')}{' '}
+        <Text color={theme.text.secondary}>
+          {t('(applied across all providers; clamped per model)')}
+        </Text>
+      </Text>
+      <Box height={1} />
+      <RadioButtonSelect
+        items={items}
+        initialIndex={initialIndex}
+        onSelect={handleSelect}
+        isFocused
+        showNumbers
+      />
+      {configuredIndex === -1 && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} wrap="truncate">
+            {currentEffort
+              ? t(
+                  '{{effort}} is not available for this model — using the model/provider default.',
+                  { effort: currentEffort },
+                )
+              : t('No effort configured — using the model/provider default.')}
+          </Text>
+        </Box>
+      )}
+      <Box marginTop={1}>
+        <Text color={theme.text.secondary} wrap="truncate">
+          {t('(Use Enter to select, Esc to cancel)')}
+        </Text>
+      </Box>
+    </Box>
+  );
+}

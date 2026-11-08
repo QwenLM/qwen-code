@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import stripAnsi from 'strip-ansi';
@@ -72,6 +73,26 @@ describe('textBufferReducer', () => {
       expect(state).toHaveOnlyValidCharacters();
       expect(state.lines).toEqual(['no undo']);
       expect(state.undoStack.length).toBe(0);
+    });
+
+    it('should clear undo and redo history when requested', () => {
+      const stateWithHistory: TextBufferState = {
+        ...initialState,
+        lines: ['history-derived'],
+        undoStack: [{ lines: ['draft'], cursorRow: 0, cursorCol: 5 }],
+        redoStack: [{ lines: ['other'], cursorRow: 0, cursorCol: 5 }],
+      };
+      const state = textBufferReducer(stateWithHistory, {
+        type: 'set_text',
+        payload: '',
+        clearUndoHistory: true,
+      });
+
+      expect(state.lines).toEqual(['']);
+      expect(state.undoStack).toEqual([]);
+      expect(state.redoStack).toEqual([]);
+      expect(textBufferReducer(state, { type: 'undo' }).lines).toEqual(['']);
+      expect(textBufferReducer(state, { type: 'redo' }).lines).toEqual(['']);
     });
   });
 
@@ -2754,5 +2775,135 @@ describe('CJK word navigation', () => {
       expect(newState).toHaveOnlyValidCharacters();
       expect(newState.cursorCol).toBe(14);
     });
+  });
+});
+
+describe('opt-in paste snapshots on the actual undo history', () => {
+  function setup() {
+    let pastes = new Map<string, string>();
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        viewport: { width: 80, height: 8 },
+        isValidPath: () => false,
+        pasteHistory: {
+          capture: () => pastes,
+          restore: (snapshot) => {
+            pastes = new Map(snapshot);
+          },
+        },
+      }),
+    );
+    return {
+      result,
+      get pastes() {
+        return pastes;
+      },
+      insert(body: string) {
+        act(() => {
+          result.current.insert('[Pasted Content 1500 chars]');
+          pastes.set('[Pasted Content 1500 chars]', body);
+        });
+      },
+      discard() {
+        act(() => {
+          result.current.replaceRangeByOffset(
+            0,
+            [...result.current.text].length,
+            '',
+          );
+          pastes.clear();
+        });
+      },
+      clearDraft() {
+        act(() => {
+          result.current.setText('');
+          pastes.clear();
+        });
+      },
+    };
+  }
+
+  it('clones the outgoing live paste map and restores it for undo and redo', () => {
+    const h = setup();
+    h.insert('y'.repeat(1500));
+    h.discard();
+    expect(h.pastes.size).toBe(0);
+    act(() => h.result.current.undo());
+    expect(h.result.current.text).toBe('[Pasted Content 1500 chars]');
+    expect(h.pastes.get('[Pasted Content 1500 chars]')).toBe('y'.repeat(1500));
+    act(() => h.result.current.redo());
+    expect(h.result.current.text).toBe('');
+    expect(h.pastes.size).toBe(0);
+  });
+
+  it('keeps two different bodies behind one reused token across both history directions', () => {
+    const h = setup();
+    const token = '[Pasted Content 1500 chars]';
+    h.insert('a'.repeat(1500));
+    h.discard();
+    h.insert('b'.repeat(1500));
+    act(() => h.result.current.undo());
+    expect(h.result.current.text).toBe('');
+    expect(h.pastes.size).toBe(0);
+    act(() => h.result.current.undo());
+    expect(h.result.current.text).toBe(token);
+    expect(h.pastes.get(token)).toBe('a'.repeat(1500));
+    act(() => h.result.current.redo());
+    expect(h.result.current.text).toBe('');
+    expect(h.pastes.size).toBe(0);
+    act(() => h.result.current.redo());
+    expect(h.result.current.text).toBe(token);
+    expect(h.pastes.get(token)).toBe('b'.repeat(1500));
+  });
+
+  it('keeps no-op undo and movement out of the history', () => {
+    const h = setup();
+    act(() => h.result.current.undo());
+    h.insert('a'.repeat(1500));
+    act(() => h.result.current.move('home'));
+    act(() => h.result.current.move('end'));
+    act(() => h.result.current.undo());
+    expect(h.result.current.text).toBe('');
+    expect(h.pastes.size).toBe(0);
+  });
+
+  it('restores matching paste data when the existing text history undoes a clear', () => {
+    const h = setup();
+    h.insert('a'.repeat(1500));
+    h.clearDraft();
+    act(() => h.result.current.undo());
+    expect(h.result.current.text).toBe('[Pasted Content 1500 chars]');
+    expect(h.pastes.get('[Pasted Content 1500 chars]')).toBe('a'.repeat(1500));
+    act(() => h.result.current.redo());
+    expect(h.result.current.text).toBe('');
+    expect(h.pastes.size).toBe(0);
+  });
+
+  it('keeps the existing explicit clearUndoHistory contract', () => {
+    const h = setup();
+    h.insert('a'.repeat(1500));
+    act(() => {
+      h.result.current.setText('', { clearUndoHistory: true });
+      h.pastes.clear();
+    });
+    act(() => h.result.current.undo());
+    expect(h.result.current.text).toBe('');
+    expect(h.pastes.size).toBe(0);
+  });
+
+  it('keeps the original unconfigured reducer snapshot shape', () => {
+    const changed = textBufferReducer(initialState, {
+      type: 'set_text',
+      payload: 'plain',
+    });
+    expect(changed).not.toHaveProperty('pasteHistory');
+    expect(changed.undoStack).toEqual([
+      { lines: [''], cursorRow: 0, cursorCol: 0 },
+    ]);
+    const undone = textBufferReducer(changed, { type: 'undo' });
+    expect(undone).not.toHaveProperty('pasteHistory');
+    expect(undone.redoStack).toEqual([
+      { lines: ['plain'], cursorRow: 0, cursorCol: 5 },
+    ]);
   });
 });

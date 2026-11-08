@@ -6,15 +6,66 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { EOL } from 'node:os';
+import { promises as fsp } from 'node:fs';
+import { Box } from 'ink';
+
+// Capture launches of the external editor so the full-plan viewer (#7001)
+// can be asserted without spawning a real editor process.
+const { launchEditorMock, isEditorAvailableMock } = vi.hoisted(() => ({
+  launchEditorMock: vi.fn((_filePath: string) => Promise.resolve()),
+  // Editor availability probes PATH for a real binary (`command -v code`),
+  // so leaving it unstubbed would make these tests depend on whether the
+  // host happens to have the configured editor installed. Default to
+  // "configured means available" and opt out per test. The detection itself
+  // is covered by packages/core/src/utils/editor.test.ts.
+  isEditorAvailableMock: vi.fn((editor: string | undefined) => Boolean(editor)),
+}));
+vi.mock('../../hooks/useLaunchEditor.js', () => ({
+  useLaunchEditor: () => launchEditorMock,
+}));
+vi.mock('@qwen-code/qwen-code-core/utils/editor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/editor.js')
+    >();
+  return {
+    ...actual,
+    isEditorAvailable: isEditorAvailableMock,
+  };
+});
+
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import type {
   ToolCallConfirmationDetails,
   Config,
 } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { render } from 'ink-testing-library';
+import { act, useEffect } from 'react';
+import { useKeypressContext } from '../../contexts/KeypressContext.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
+import { ContextMenuOverlay } from '../../context-menu/ContextMenuOverlay.js';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+  type ContextMenuContextValue,
+} from '../../context-menu/ContextMenuContext.js';
 
 describe('ToolConfirmationMessage', () => {
+  // The tree is wrapped in the real ContextMenuProvider (as DefaultAppLayout
+  // does) and `MenuProbe` captures its API so a case can open the menu the way
+  // ContentMouseController does on a right-click.
+  let menuApi: ContextMenuContextValue | null = null;
+  const MenuProbe = () => {
+    menuApi = useContextMenu();
+    return null;
+  };
+
   const mockConfig = {
     isTrustedFolder: () => true,
     getIdeMode: () => false,
@@ -68,6 +119,146 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  it('preserves urls when the prompt is rendered as plain text', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt: 'Review the literal target',
+      urls: ['https://example.com/target'],
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Review the literal target');
+    expect(lastFrame()).toContain('URLs to fetch:');
+    expect(lastFrame()).toContain('- https://example.com/target');
+  });
+
+  it('renders plain-text info prompts without interpreting Markdown or links', () => {
+    const prompt =
+      'Save "[visible](https://hidden.example/target) **bold** `code` <u>under</u>"';
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={160}
+      />,
+    );
+
+    expect(lastFrame()).toContain(prompt);
+    expect(lastFrame()).not.toContain('\u001b]8;;');
+  });
+
+  it('renders every line of a short multiline plain-text info prompt', () => {
+    const prompt =
+      'Save this exact content to the bound Mem0 repository memory?\n"LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>"';
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={10}
+        contentWidth={98}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Save this exact content to the bound Mem0 repository memory?',
+    );
+    expect(lastFrame()).toContain(
+      '"LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE',
+    );
+    expect(lastFrame()).toContain('`code-value` UNDER <u>under-value</u>"');
+  });
+
+  it('marks overflow in constrained plain-text info prompts', () => {
+    const prompt = `Confirm exact content:\n${JSON.stringify(
+      [
+        'PROMPT_TOP',
+        ...Array.from({ length: 80 }, (_, index) => `line-${index}`),
+        'PROMPT_TAIL',
+      ].join('\n'),
+    )}`;
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('PROMPT_TOP');
+    expect(frame).toMatch(/last \d+ lines hidden/);
+    expect(frame).not.toContain('PROMPT_TAIL');
+  });
+
+  it('renders the complete plain-text info prompt when unconstrained', () => {
+    const prompt = `Confirm exact content:\n${JSON.stringify(
+      [
+        'PROMPT_TOP',
+        ...Array.from({ length: 80 }, (_, index) => `line-${index}`),
+        'PROMPT_TAIL',
+      ].join('\n'),
+    )}`;
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('PROMPT_TOP');
+    expect(frame).toContain('PROMPT_TAIL');
+    expect(frame).not.toContain('lines hidden');
+  });
+
   // Regression coverage for issue #4093: exec confirmations carry a
   // user-facing warning for command substitution. Previously such
   // commands were hard-denied at L4 with an opaque "denied by
@@ -117,6 +308,105 @@ describe('ToolConfirmationMessage', () => {
     );
 
     expect(lastFrame() ?? '').not.toContain('command substitution');
+  });
+
+  it('renders classifier fallback guidance and the Default Mode option', async () => {
+    const onConfirm = vi.fn();
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message:
+          "Auto Mode couldn't classify this action. Switching to Default Mode is recommended.",
+      },
+      onConfirm,
+    };
+
+    const { lastFrame, stdin } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain("Auto Mode couldn't classify this action");
+    expect(frame).toContain(
+      'Switch to Default Mode and allow once (recommended)',
+    );
+    expect(frame).not.toContain('Always allow');
+
+    stdin.write('\x1b[B');
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+      ),
+    );
+  });
+
+  it('renders blocked retry guidance without offering a mode switch', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_blocked_retry',
+        message: 'This exact action was previously blocked.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('This exact action was previously blocked.');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).not.toContain('Switch to Default Mode');
+    expect(frame).not.toContain('Always allow');
+  });
+
+  it('offers a mode switch after consecutive classifier failures', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'consecutive_unavailable',
+        message: 'Auto Mode could not classify consecutive actions.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame() ?? '').toContain(
+      'Switch to Default Mode and allow once (recommended)',
+    );
   });
 
   // Regression coverage for the round-1 review on PR #4386 (PR #4386 round-2
@@ -200,6 +490,93 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame()).toContain('No, keep planning');
     expect(lastFrame()).toContain('Implementation Plan');
     expect(lastFrame()).toContain('Step one');
+  });
+
+  describe('full-plan viewer (#7001)', () => {
+    const plan = [
+      '# Big Plan',
+      ...Array.from({ length: 60 }, (_, i) => `- Step ${i + 1}`),
+    ].join('\n');
+
+    const planDetails = (onConfirm = vi.fn()): ToolCallConfirmationDetails => ({
+      type: 'plan',
+      title: 'Would you like to proceed?',
+      plan,
+      onConfirm,
+    });
+
+    it('shows the open-in-editor hint on plan confirmations', () => {
+      launchEditorMock.mockClear();
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={planDetails()}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      expect(lastFrame()).toContain('o open full plan in editor');
+    });
+
+    it('`o` writes the FULL plan to a temp file and opens the editor without confirming', async () => {
+      launchEditorMock.mockClear();
+      const onConfirm = vi.fn();
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={planDetails(onConfirm)}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      stdin.write('o');
+      await vi.waitFor(() => expect(launchEditorMock).toHaveBeenCalledTimes(1));
+
+      const openedPath = launchEditorMock.mock.calls[0]![0];
+      // The staged file must contain the COMPLETE plan, not the truncated view.
+      expect(await fsp.readFile(openedPath, 'utf-8')).toBe(plan);
+      // Viewing the plan must not resolve the confirmation either way.
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it('Ctrl+O does not open the editor', async () => {
+      launchEditorMock.mockClear();
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={planDetails()}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      stdin.write('\x0f'); // Ctrl+O
+      await new Promise((r) => setTimeout(r, 50));
+      expect(launchEditorMock).not.toHaveBeenCalled();
+    });
+
+    it('`o` is inert for non-plan confirmations', async () => {
+      launchEditorMock.mockClear();
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'info',
+        title: 'Confirm Web Fetch',
+        prompt: 'https://example.com',
+        urls: ['https://example.com'],
+        onConfirm: vi.fn(),
+      };
+      const { stdin, lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      expect(lastFrame()).not.toContain('o open full plan in editor');
+      stdin.write('o');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(launchEditorMock).not.toHaveBeenCalled();
+    });
   });
 
   describe('with folder trust', () => {
@@ -297,6 +674,84 @@ describe('ToolConfirmationMessage', () => {
         expect(lastFrame()).not.toContain(alwaysAllowText);
       });
     });
+
+    describe('unguarded entrances', () => {
+      const infoDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'info',
+        title: 'Confirm Web Fetch',
+        prompt: 'https://example.com',
+        urls: ['https://example.com'],
+        onConfirm,
+      });
+
+      const planDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Plan\n- Step 1',
+        onConfirm,
+      });
+
+      const renderWith = (
+        trusted: boolean,
+        details: ToolCallConfirmationDetails,
+        compactMode = false,
+      ) => {
+        const config = {
+          isTrustedFolder: () => trusted,
+          getIdeMode: () => false,
+        } as unknown as Config;
+        return renderWithProviders(
+          <ToolConfirmationMessage
+            confirmationDetails={details}
+            config={config}
+            availableTerminalHeight={30}
+            contentWidth={80}
+            compactMode={compactMode}
+          />,
+        );
+      };
+
+      it('compactMode offers "Allow always" only in a trusted folder', () => {
+        expect(renderWith(true, infoDetails(), true).lastFrame()).toContain(
+          'Allow always',
+        );
+        const untrusted = renderWith(false, infoDetails(), true).lastFrame();
+        expect(untrusted).toContain('Yes, allow once');
+        expect(untrusted).not.toContain('Allow always');
+      });
+
+      it('plan exit offers auto-accept only in a trusted folder', () => {
+        expect(renderWith(true, planDetails()).lastFrame()).toContain(
+          'Yes, and auto-accept edits',
+        );
+        const untrusted = renderWith(false, planDetails()).lastFrame();
+        // Both remaining exits must survive: the gate admits DEFAULT and PLAN.
+        expect(untrusted).toContain('Yes, and manually approve edits');
+        expect(untrusted).toContain('restore previous mode');
+        expect(untrusted).not.toContain('Yes, and auto-accept edits');
+      });
+
+      it('subscribes to the promise onConfirm returns instead of letting it float', async () => {
+        // A floating rejection reaches the process-level handler (llm.tsx) and
+        // shows a "file a bug report" banner over a correctly-refused action,
+        // so the call site must consume what onConfirm returns. Asserted via a
+        // thenable: `Promise.resolve(x).catch(...)` subscribes through `then`,
+        // a bare `onConfirm(outcome)` statement never does.
+        const then = vi.fn();
+        const thenable = { then } as unknown as Promise<void>;
+        const onConfirm = vi.fn(() => thenable);
+        const { stdin } = renderWith(true, infoDetails(onConfirm));
+
+        stdin.write('\r');
+
+        await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+        expect(then).toHaveBeenCalled();
+      });
+    });
   });
 
   describe('external editor option', () => {
@@ -310,12 +765,23 @@ describe('ToolConfirmationMessage', () => {
       newContent: 'b',
       onConfirm: vi.fn(),
     };
+    const execConfirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+    const preferredEditorSettings = {
+      merged: { general: { preferredEditor: 'vscode' } },
+    } as unknown as LoadedSettings;
 
     it('should show "Modify with external editor" when preferredEditor is set', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -324,14 +790,64 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
       expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledWith('vscode');
+    });
+
+    it('probes editor availability once for the dialog lifetime', () => {
+      isEditorAvailableMock.mockClear();
+
+      const component = (height: number) => (
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={height}
+          contentWidth={80}
+        />
+      );
+      const { lastFrame, rerender } = renderWithProviders(component(30), {
+        settings: preferredEditorSettings,
+      });
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+
+      // A terminal resize re-renders the dialog; the availability probe shells
+      // out, so it must not run again.
+      rerender(
+        withProviders(component(31), { settings: preferredEditorSettings }),
+      );
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+    });
+
+    // #10745: the option was offered whenever `preferredEditor` was merely
+    // set, so picking it tried to launch a binary that is not installed and
+    // the modify flow failed. Offer it only when the editor is available.
+    it('should NOT show "Modify with external editor" when the configured editor is unavailable', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+      isEditorAvailableMock.mockClear();
+      isEditorAvailableMock.mockReturnValueOnce(false);
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
     it('should NOT show "Modify with external editor" when preferredEditor is not set', () => {
@@ -339,6 +855,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -354,6 +871,7 @@ describe('ToolConfirmationMessage', () => {
         },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
@@ -362,6 +880,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -370,18 +889,391 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability in compactMode', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
+      expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability for a non-edit confirmation', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={execConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
+    });
+
+    it('renders edit warnings and honors hideAlwaysAllow on small terminals', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            hideAlwaysAllow: true,
+            warnings: [
+              'Unknown shell safety',
+              'Exact shell command: sed -i s/a/b/ test.txt',
+            ],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Unknown shell safety');
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).not.toContain('Yes, allow always');
+    });
+
+    it('budgets edit warnings using their rendered inner width', () => {
+      const availableTerminalHeight = 11;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff: '@@ -1 +1 @@\n-a\n+b',
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: ['x'.repeat(44)],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('x'.repeat(44));
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('keeps a multiline exact command visible within the body budget', () => {
+      const availableTerminalHeight = 11;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff: '@@ -1 +1 @@\n-a\n+b',
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: [
+              'Plan mode could not determine whether this command is read-only.',
+              'Exact shell command: `printf a\nprintf b`',
+            ],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Plan mode could not determine');
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('printf a ↵');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('budgets compact edit warnings at the wrapping boundary', () => {
+      const availableTerminalHeight = 9;
+      const { lastFrame } = renderWithProviders(
+        <Box width={50}>
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              ...editConfirmationDetails,
+              fileDiff: '@@ -1 +1 @@\n-a\n+b',
+              hideAlwaysAllow: true,
+              hideModify: true,
+              warnings: ['x'.repeat(46), 'y'.repeat(46)],
+            }}
+            config={mockConfig}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={50}
+            compactMode={true}
+          />
+        </Box>,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('x'.repeat(46));
+      expect(frame).toContain('y'.repeat(46));
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('keeps one-line compact bodies within the terminal height', () => {
+      const availableTerminalHeight = 5;
+      const { lastFrame } = renderWithProviders(
+        <Box width={50}>
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              ...editConfirmationDetails,
+              fileDiff: '@@ -1 +1 @@\n-a\n+b',
+              hideAlwaysAllow: true,
+              hideModify: true,
+              warnings: [
+                'Plan mode could not determine whether this command is read-only.',
+                'Exact shell command: `printf a\nprintf b`',
+              ],
+            }}
+            config={mockConfig}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={50}
+            compactMode={true}
+          />
+        </Box>,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
+
+    it('keeps the diff placeholder visible without warnings on one-line bodies', () => {
+      const availableTerminalHeight = 8;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff: '@@ -1 +1 @@\n-a\n+b',
+            hideAlwaysAllow: true,
+            hideModify: true,
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('diff hidden');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('keeps compact edit warnings and diff within the available height', () => {
+      const availableTerminalHeight = 9;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff:
+              '@@ -1,3 +1,3 @@\n-old one\n-old two\n+new one\n+new two\n context',
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: [
+              'Plan mode could not determine whether this shell command is read-only. Approval applies only to this exact invocation once.',
+              `Exact shell command: \`python -c "${"open('result.txt', 'a').write('changed');".repeat(12)}"\``,
+            ],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Plan mode could not determine');
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('lines hidden');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
+
+    it('resolves ordinary IDE edits but skips confirmations that have no IDE diff', async () => {
+      const resolveDiffFromCli = vi.fn().mockResolvedValue(undefined);
+      const isDiffingEnabled = vi.fn().mockReturnValue(true);
+      const getInstanceSpy = vi
+        .spyOn(IdeClient, 'getInstance')
+        .mockResolvedValue({
+          isDiffingEnabled,
+          resolveDiffFromCli,
+        } as unknown as IdeClient);
+      const ideConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => true,
+      } as unknown as Config;
+
+      const ordinaryOnConfirm = vi.fn().mockResolvedValue(undefined);
+      const ordinary = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            onConfirm: ordinaryOnConfirm,
+          }}
+          config={ideConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      await vi.waitFor(() => expect(isDiffingEnabled).toHaveBeenCalled());
+      ordinary.stdin.write('\r');
+      await vi.waitFor(() =>
+        expect(resolveDiffFromCli).toHaveBeenCalledWith(
+          '/test.txt',
+          'accepted',
+        ),
+      );
+      ordinary.unmount();
+
+      resolveDiffFromCli.mockClear();
+      isDiffingEnabled.mockClear();
+      const skippedOnConfirm = vi.fn().mockResolvedValue(undefined);
+      const skipped = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            onConfirm: skippedOnConfirm,
+            skipIdeDiff: true,
+          }}
+          config={ideConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      await vi.waitFor(() => expect(isDiffingEnabled).toHaveBeenCalled());
+      skipped.stdin.write('\r');
+      await vi.waitFor(() =>
+        expect(skippedOnConfirm).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+        ),
+      );
+      expect(resolveDiffFromCli).not.toHaveBeenCalled();
+
+      skipped.unmount();
+      getInstanceSpy.mockRestore();
     });
   });
 
   describe('compactMode', () => {
+    it('keeps classifier fallback guidance and all choices visible', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'classifier_unavailable',
+          message:
+            "Auto Mode couldn't classify this action. Switching to Default Mode is recommended.",
+        },
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain("Auto Mode couldn't classify this action");
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain(
+        'Switch to Default Mode and allow once (recommended)',
+      );
+      expect(frame).toContain('No');
+      expect(frame).not.toContain('Allow always');
+    });
+
+    it('budgets the two-option blocked retry layout on a tight terminal', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: ['line-1', 'line-2', 'line-3', 'line-4'].join('\n'),
+        rootCommand: 'line-1',
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'classifier_blocked_retry',
+          message: 'This exact action was previously blocked.',
+        },
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('previously blocked');
+      expect(frame).toContain('line-1');
+      expect(frame).toContain('last 2 lines hidden');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+      expect(frame).not.toContain('Switch to Default Mode');
+      expect(frame).not.toContain('Allow always');
+    });
+
     it('renders the command and exec-specific question for exec confirmations', () => {
       const confirmationDetails: ToolCallConfirmationDetails = {
         type: 'exec',
@@ -506,5 +1398,226 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Line 12');
       expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
     });
+  });
+
+  it.each([true, false])(
+    'handles a right-click and keys in one stdin chunk (menu items: %s)',
+    async (hasItems) => {
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const onMenuSelect = vi.fn();
+      const onUnderlyingKey = vi.fn();
+      const onMenuChange = vi.fn();
+      const OpenOnRightPress = () => {
+        const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
+        const { menu, openMenu } = useContextMenu();
+        useKeypress(onUnderlyingKey, { isActive: menu === null });
+        useEffect(() => {
+          const handler = () => {
+            openMenu(
+              hasItems
+                ? [
+                    {
+                      id: 'open-link',
+                      label: 'Open Link',
+                      onSelect: onMenuSelect,
+                    },
+                  ]
+                : [],
+              { x: 0, y: 0 },
+            );
+            // AppContainer is outside the provider and relies on this callback.
+            expect(onMenuChange).toHaveBeenLastCalledWith(hasItems);
+          };
+          subscribeMouse(handler);
+          return () => unsubscribeMouse(handler);
+        }, [subscribeMouse, unsubscribeMouse, openMenu]);
+        return null;
+      };
+      const { stdin } = render(
+        withProviders(
+          <ContextMenuProvider onMenuChange={onMenuChange}>
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Execution',
+                command: 'echo test',
+                rootCommand: 'echo',
+                onConfirm,
+              }}
+              config={mockConfig}
+              availableTerminalHeight={30}
+              contentWidth={80}
+            />
+            <OpenOnRightPress />
+            <ContextMenuOverlay />
+          </ContextMenuProvider>,
+        ),
+      );
+      await act(async () => {});
+      await act(async () => {
+        stdin.write('\x1b[<2;10;5M\x1b[Z\x1b[C\r');
+      });
+      if (hasItems) {
+        expect(onUnderlyingKey).not.toHaveBeenCalled();
+        expect(onConfirm).not.toHaveBeenCalled();
+        expect(onMenuSelect).not.toHaveBeenCalled();
+        // Once rendered, Enter belongs to the menu, then to the dialog again.
+        await act(async () => {
+          stdin.write('\r');
+        });
+        expect(onMenuSelect).toHaveBeenCalledTimes(1);
+        expect(onConfirm).not.toHaveBeenCalled();
+        await act(async () => {
+          stdin.write('\r');
+        });
+      } else {
+        expect(onUnderlyingKey).toHaveBeenCalled();
+      }
+      await vi.waitFor(() =>
+        expect(onConfirm).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+        ),
+      );
+    },
+  );
+
+  it('does not act on a key aimed at an open context menu', async () => {
+    // The teammate tab mounts this dialog while AgentChatContent's
+    // ContentMouseController makes the right-click menu openable there.
+    // KeypressContext broadcasts to every subscriber and discards return
+    // values (the overlay cannot consume a key for us), so the dialog has to
+    // go quiet itself — RadioButtonSelect's initialIndex is 0 with
+    // "allow once" first, so one Enter aimed at "Open Link" would otherwise
+    // approve the pending call and Esc would silently deny it.
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      onConfirm,
+    };
+
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider>
+          <ToolConfirmationMessage
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <MenuProbe />
+        </ContextMenuProvider>,
+      ),
+    );
+
+    // Control: with no menu open, Enter still approves the pending call.
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    );
+    onConfirm.mockClear();
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\r'); // would approve (ProceedOnce is index 0)
+      stdin.write('\x1b'); // would deny (handleConfirm(Cancel))
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('does not submit a nested custom answer aimed at an open context menu', async () => {
+    // The `ask_user_question` flavour nests a free-text TextInput one level
+    // below the dialog's own subscriber. Quieting only the dialog left that
+    // input hot, so one Enter aimed at "Open Link" submitted the half-typed
+    // draft as the answer and the teammate round proceeded on it.
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'ask_user_question',
+      title: 'Question',
+      questions: [
+        {
+          question: 'What is your favorite color?',
+          header: 'Color',
+          options: [
+            { label: 'Red', description: 'A warm color' },
+            { label: 'Blue', description: 'A cool color' },
+            { label: 'Green', description: '' },
+          ],
+          multiSelect: false,
+        },
+      ],
+      onConfirm,
+    };
+
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider>
+          <ToolConfirmationMessage
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <MenuProbe />
+        </ContextMenuProvider>,
+      ),
+    );
+
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      });
+
+    // Row 4 is the custom answer; typing into it mounts the nested input.
+    await settle();
+    await act(async () => {
+      stdin.write('4');
+    });
+    await settle();
+    await act(async () => {
+      stdin.write('draft');
+    });
+    await settle();
+
+    // Control: with no menu open, Enter submits exactly that draft — which is
+    // also the proof the nested input is mounted and live.
+    await act(async () => {
+      stdin.write('\r');
+    });
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'draft' } },
+      ),
+    );
+    onConfirm.mockClear();
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\r'); // aimed at "Open Link", not at the draft
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

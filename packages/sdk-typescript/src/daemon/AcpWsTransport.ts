@@ -18,7 +18,7 @@ import {
 import {
   matchRoute,
   synthesizeResponse,
-  jsonRpcErrorToHttpStatus,
+  jsonRpcErrorToHttpStatusWithData,
   isRecord,
 } from './acpTransportUtils.js';
 
@@ -66,8 +66,9 @@ const INIT_TIMEOUT_MS = 30_000;
  * single WS connection using JSON-RPC 2.0 framing.
  *
  * Lazy-init: the WebSocket connection is established on the first
- * `fetch()` call. An `initialize` JSON-RPC request is sent on
- * connect and its result is cached for `GET /capabilities` requests.
+ * `fetch()` call. An `initialize` JSON-RPC request is sent on connect. Daemon
+ * capabilities use REST discovery, with the initialize result retained only
+ * as a fallback for ACP-only deployments.
  *
  * **Browser limitation**: The browser WebSocket API does not support
  * custom headers on the upgrade request. In Node (>=22), the token
@@ -109,10 +110,19 @@ export class AcpWsTransport implements DaemonTransport {
 
   readonly type = 'acp-ws' as const;
   readonly supportsReplay = false;
+  readonly restFetch: typeof globalThis.fetch;
 
-  constructor(wsUrl: string, token?: string) {
+  constructor(
+    wsUrl: string,
+    token?: string,
+    restFetch?: typeof globalThis.fetch,
+  ) {
     this.wsUrl = wsUrl;
     this.token = token;
+    // Resolve globalThis.fetch lazily so the transport still constructs in
+    // environments where fetch only exists later (or is injected per call).
+    this.restFetch =
+      restFetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   get connected(): boolean {
@@ -156,18 +166,47 @@ export class AcpWsTransport implements DaemonTransport {
 
     const { mapping, segments } = match;
 
-    // Special handling for capabilities — return cached init result.
+    // The ACP initialize result has a different schema from the daemon
+    // capabilities envelope. Prefer the REST discovery response when this
+    // transport was constructed with a REST fetch (as negotiateTransport
+    // does), and retain the initialize result only as an ACP-only fallback.
+    // The envelope must actually carry a `features` array: a reverse proxy
+    // or SPA can answer 200 with HTML for unknown paths, and accepting that
+    // body would resurface the very `caps.features` TypeError this path
+    // exists to avoid.
     if (mapping.method === '_capabilities') {
-      return synthesizeResponse(200, this.initResult ?? { v: 1 });
+      try {
+        const response = await this.restFetch(url, init);
+        if (!response.ok) {
+          if (response.status !== 404) return response;
+        } else {
+          const envelope: unknown = await response.clone().json();
+          if (isRecord(envelope) && Array.isArray(envelope['features'])) {
+            return response;
+          }
+        }
+      } catch {
+        // ACP-only deployments can still use the initialize fallback.
+      }
+      return synthesizeResponse(200, {
+        ...(isRecord(this.initResult) ? this.initResult : {}),
+        v: 1,
+        features: [],
+      });
     }
 
     // For notifications, send and return 204 immediately.
     if (mapping.notification) {
-      const params = mapping.extractParams(segments, body, httpMethod);
+      const params = mapping.extractParams(
+        segments,
+        body,
+        httpMethod,
+        parsedUrl.searchParams,
+      );
       const notifMeta = extractHeaderMeta(init.headers);
       if (notifMeta) {
-        params._meta = {
-          ...(isRecord(params._meta) ? params._meta : {}),
+        params['_meta'] = {
+          ...(isRecord(params['_meta']) ? params['_meta'] : {}),
           ...notifMeta,
         };
       }
@@ -176,15 +215,20 @@ export class AcpWsTransport implements DaemonTransport {
     }
 
     // Normal request-response.
-    const params = mapping.extractParams(segments, body, httpMethod);
+    const params = mapping.extractParams(
+      segments,
+      body,
+      httpMethod,
+      parsedUrl.searchParams,
+    );
 
     // Forward per-request headers as JSON-RPC _meta so the server can
     // see X-Qwen-Client-Id and similar metadata that HTTP transports
     // carry natively.
     const headerMeta = extractHeaderMeta(init.headers);
     if (headerMeta) {
-      params._meta = {
-        ...(isRecord(params._meta) ? params._meta : {}),
+      params['_meta'] = {
+        ...(isRecord(params['_meta']) ? params['_meta'] : {}),
         ...headerMeta,
       };
     }
@@ -200,7 +244,14 @@ export class AcpWsTransport implements DaemonTransport {
     );
 
     if (response.error) {
-      const status = jsonRpcErrorToHttpStatus(response.error.code);
+      const errorData = response.error.data;
+      const status =
+        isRecord(errorData) && typeof errorData['httpStatus'] === 'number'
+          ? errorData['httpStatus']
+          : jsonRpcErrorToHttpStatusWithData(
+              response.error.code,
+              response.error.data,
+            );
       return synthesizeResponse(status, {
         error: response.error.message,
         ...(response.error.data != null ? { data: response.error.data } : {}),
@@ -215,6 +266,16 @@ export class AcpWsTransport implements DaemonTransport {
     opts: DaemonTransportSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     if (this._disposed) throw new DaemonTransportClosedError();
+
+    // NOTE: `opts.epoch` / `opts.onEpoch` do NOT apply to this transport.
+    // The WS stream has no `Last-Event-ID` resume mechanism (it filters a
+    // live shared notification stream, never replays), so there is no
+    // stale-cursor problem for the epoch token to solve and no HTTP
+    // response headers to learn the epoch from. Intentionally ignored
+    // rather than silently mis-applied — same policy as `maxQueued` and the
+    // REST SSE lifecycle fields (`clientId`, `sseConnectReason`,
+    // `previousSseStreamId`, `onSseStreamAccepted`), which are likewise
+    // REST-only and unused here.
 
     await this.ensureConnected();
 
@@ -536,7 +597,12 @@ export class AcpWsTransport implements DaemonTransport {
         onAbort = () => {
           this.pending.delete(id);
           if (sessionId && method === 'session/prompt') {
-            this.sendNotification('session/cancel', { sessionId });
+            this.sendNotification('session/cancel', {
+              sessionId,
+              _meta: {
+                'qwen.cancelReason': 'interrupted',
+              },
+            });
           }
           reject(new DOMException('The operation was aborted', 'AbortError'));
         };

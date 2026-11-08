@@ -6,8 +6,10 @@
 
 import type {
   AgentEventEmitter,
+  AgentStartEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
+  AgentToolOutputUpdateEvent,
   AgentApprovalRequestEvent,
   AgentUsageEvent,
   AgentStreamTextEvent,
@@ -15,25 +17,38 @@ import type {
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
+
 import {
+  TOOL_LIFECYCLE_DRAIN_MS,
   AgentEventType,
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
-import { z } from 'zod';
-import type { SessionContext } from './types.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+
+import type { AgentIdentity, SessionContext, SubagentMeta } from './types.js';
+import { ROOT_AGENT_IDENTITY, deriveSubagentIdentity } from './types.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
   RequestPermissionRequest,
+  RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
+  type PermissionPersistencePolicy,
+  requestPermissionWithAbort,
+  resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
 
 const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
+
+type PermissionRequester = (
+  params: RequestPermissionRequest,
+  signal: AbortSignal,
+) => Promise<RequestPermissionResponse>;
 
 /**
  * Tracks and emits events for sub-agent tool calls within AgentTool execution.
@@ -45,7 +60,7 @@ const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 export class SubAgentTracker {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly messageEmitter: MessageEmitter;
-  private readonly subagentMeta: {
+  private readonly subagentMeta: SubagentMeta & {
     parentToolCallId: string;
     subagentType: string;
   };
@@ -57,6 +72,7 @@ export class SubAgentTracker {
       args?: Record<string, unknown>;
     }
   >();
+  private readonly approvalNotified = new Set<string>();
 
   constructor(
     private readonly ctx: SessionContext,
@@ -64,10 +80,25 @@ export class SubAgentTracker {
     parentToolCallId: string,
     subagentType: string,
     private readonly onPermissionCancel?: () => void,
+    private readonly permissionRequester: PermissionRequester = (
+      params,
+      signal,
+    ) => requestPermissionWithAbort(this.client, params, signal),
+    private readonly permissionPersistencePolicy?: PermissionPersistencePolicy,
+    private readonly parentAgent: AgentIdentity = ROOT_AGENT_IDENTITY,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
-    this.subagentMeta = { parentToolCallId, subagentType };
+    this.subagentMeta = {
+      parentToolCallId,
+      subagentType,
+      agent: deriveSubagentIdentity(subagentType, parentAgent),
+    };
+  }
+
+  /** The identity every frame this tracker emits is attributed to. */
+  get agentIdentity(): AgentIdentity {
+    return this.subagentMeta.agent!;
   }
 
   /**
@@ -81,22 +112,78 @@ export class SubAgentTracker {
     eventEmitter: AgentEventEmitter,
     abortSignal: AbortSignal,
   ): Array<() => void> {
+    const onStart = (...args: unknown[]) => {
+      const event = args[0] as AgentStartEvent;
+      if (abortSignal.aborted) return;
+      this.subagentMeta.subagentType = event.name;
+      this.subagentMeta.agent = deriveSubagentIdentity(
+        event.name,
+        this.parentAgent,
+      );
+    };
     const onToolCall = this.createToolCallHandler(abortSignal);
     const onToolResult = this.createToolResultHandler(abortSignal);
+    const pending = new Set<string>();
+    let closing = false;
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const stopLifecycle = () => {
+      eventEmitter.off(AgentEventType.TOOL_RESULT, onLifecycle);
+      eventEmitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onLifecycle);
+      if (drainTimer) clearTimeout(drainTimer);
+      pending.clear();
+    };
+    const onLifecycle = (...args: unknown[]) => {
+      const event = args[0] as
+        | AgentToolOutputUpdateEvent
+        | AgentToolResultEvent;
+      const lifecycle = event.lifecycle;
+      if (!lifecycle) return;
+      if (
+        closing &&
+        (lifecycle.phase !== 'ended' || !pending.has(lifecycle.executionId))
+      )
+        return;
+      if (
+        !closing &&
+        abortSignal.aborted &&
+        !pending.has(lifecycle.executionId) &&
+        !this.toolStates.has(this.toolKey(event))
+      )
+        return;
+      if (lifecycle.phase === 'started') pending.add(lifecycle.executionId);
+      else pending.delete(lifecycle.executionId);
+      void this.toolCallEmitter
+        .emitLifecycle(lifecycle)
+        .catch((error) =>
+          debugLogger.debug('Failed to emit subagent tool lifecycle', error),
+        );
+      if (closing && pending.size === 0) stopLifecycle();
+    };
     const onApproval = this.createApprovalHandler(abortSignal);
     const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
     const onStreamText = this.createStreamTextHandler(abortSignal);
 
+    eventEmitter.on(AgentEventType.START, onStart);
     eventEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
+    eventEmitter.on(AgentEventType.TOOL_RESULT, onLifecycle);
     eventEmitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+    eventEmitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onLifecycle);
     eventEmitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     eventEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
     eventEmitter.on(AgentEventType.STREAM_TEXT, onStreamText);
 
     return [
       () => {
+        eventEmitter.off(AgentEventType.START, onStart);
         eventEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
         eventEmitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+        if (closing) return;
+        closing = true;
+        if (pending.size === 0) stopLifecycle();
+        else {
+          drainTimer = setTimeout(stopLifecycle, TOOL_LIFECYCLE_DRAIN_MS);
+          drainTimer.unref();
+        }
         eventEmitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
         eventEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
         eventEmitter.off(AgentEventType.STREAM_TEXT, onStreamText);
@@ -109,6 +196,14 @@ export class SubAgentTracker {
   /**
    * Creates a handler for tool call start events.
    */
+  private toolKey(event: {
+    subagentId: string;
+    round: number;
+    callId: string;
+  }): string {
+    return JSON.stringify([event.subagentId, event.round, event.callId]);
+  }
+
   private createToolCallHandler(
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
@@ -131,19 +226,46 @@ export class SubAgentTracker {
       }
 
       // Store tool, invocation, and args for result handling
-      this.toolStates.set(event.callId, {
+      this.toolStates.set(this.toolKey(event), {
         tool,
         invocation,
         args: event.args,
       });
 
+      // Emit progress update to parent to make subagent execution visible in ACP clients
+      const progressMessage = event.description
+        ? `${tool?.displayName ?? event.name}: ${event.description}`
+        : `Running tool: ${tool?.displayName ?? event.name}`;
+
+      void this.toolCallEmitter
+        .emitProgressUpdate(
+          this.subagentMeta.parentToolCallId,
+          this.subagentMeta.subagentType,
+          progressMessage,
+          event.name,
+          this.subagentMeta.agent,
+        )
+        .catch((error) => {
+          debugLogger.debug(
+            'Failed to emit subagent progress update for tool call:',
+            error,
+          );
+        });
+
       // Use unified emitter - handles TodoWriteTool skipping internally
-      void this.toolCallEmitter.emitStart({
-        toolName: event.name,
-        callId: event.callId,
-        args: event.args,
-        subagentMeta: this.subagentMeta,
-      });
+      void this.toolCallEmitter
+        .emitStart({
+          toolName: event.name,
+          callId: event.callId,
+          args: event.args,
+          subagentMeta: this.subagentMeta,
+        })
+        .catch((error) => {
+          debugLogger.debug(
+            `Failed to emit subagent tool start for ${event.name}:`,
+            error,
+          );
+        });
     };
   }
 
@@ -155,23 +277,32 @@ export class SubAgentTracker {
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
       const event = args[0] as AgentToolResultEvent;
-      if (abortSignal.aborted) return;
+      if (abortSignal.aborted && !this.toolStates.has(this.toolKey(event)))
+        return;
 
-      const state = this.toolStates.get(event.callId);
+      const state = this.toolStates.get(this.toolKey(event));
 
       // Use unified emitter - handles TodoWriteTool plan updates internally
-      void this.toolCallEmitter.emitResult({
-        toolName: event.name,
-        callId: event.callId,
-        success: event.success,
-        message: event.responseParts ?? [],
-        resultDisplay: event.resultDisplay,
-        args: state?.args,
-        subagentMeta: this.subagentMeta,
-      });
+      void this.toolCallEmitter
+        .emitResult({
+          toolName: event.name,
+          callId: event.callId,
+          success: event.success,
+          message: event.responseParts ?? [],
+          resultDisplay: event.resultDisplay,
+          boundaryArtifact: event.boundaryArtifact,
+          args: state?.args,
+          subagentMeta: this.subagentMeta,
+        })
+        .catch((error) => {
+          debugLogger.debug(
+            `Failed to emit subagent tool result for ${event.name}:`,
+            error,
+          );
+        });
 
       // Clean up state
-      this.toolStates.delete(event.callId);
+      this.toolStates.delete(this.toolKey(event));
     };
   }
 
@@ -185,7 +316,26 @@ export class SubAgentTracker {
       const event = args[0] as AgentApprovalRequestEvent;
       if (abortSignal.aborted) return;
 
-      const state = this.toolStates.get(event.callId);
+      const state = this.toolStates.get(this.toolKey(event));
+
+      // Update parent progress to indicate permission is needed
+      if (!this.approvalNotified.has(event.callId) && !abortSignal.aborted) {
+        this.approvalNotified.add(event.callId);
+        void this.toolCallEmitter
+          .emitProgressUpdate(
+            this.subagentMeta.parentToolCallId,
+            this.subagentMeta.subagentType,
+            `Waiting for permission: ${state?.tool?.displayName ?? event.name}`,
+            event.name,
+            this.subagentMeta.agent,
+          )
+          .catch((error) => {
+            debugLogger.debug(
+              'Failed to emit subagent progress update for approval:',
+              error,
+            );
+          });
+      }
 
       // Build permission request
       const fullConfirmationDetails = {
@@ -198,9 +348,17 @@ export class SubAgentTracker {
       const { title, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
+      const permissionOptions = toPermissionOptions(
+        fullConfirmationDetails,
+        false,
+        this.permissionPersistencePolicy,
+      );
+      const offeredPermissionOptions = permissionOptions.map((option) => ({
+        ...option,
+      }));
       const params: RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,
-        options: toPermissionOptions(fullConfirmationDetails),
+        options: permissionOptions,
         toolCall: {
           toolCallId: event.callId,
           status: 'pending',
@@ -214,24 +372,31 @@ export class SubAgentTracker {
           // `kind` ACP can't carry. This is the second producer path (nested
           // sub-agent tool calls); Session.ts adds the same _meta on the primary
           // path.
-          _meta: { toolName: event.name },
+          _meta: {
+            toolName: event.name,
+            ...interactionMetaFields(fullConfirmationDetails),
+          },
         },
       };
 
       try {
         // Request permission from client
-        const output = await this.client.requestPermission(params);
-        const outcome =
-          output.outcome.outcome === 'cancelled'
-            ? ToolConfirmationOutcome.Cancel
-            : z
-                .nativeEnum(ToolConfirmationOutcome)
-                .parse(output.outcome.optionId);
+        const output = await this.permissionRequester(params, abortSignal);
+        const outcome = resolvePermissionOutcome(
+          output,
+          offeredPermissionOptions,
+        );
         // Respond to subagent with the outcome
         await event.respond(outcome, {
-          answers: 'answers' in output ? output.answers : undefined,
+          answers:
+            'answers' in output
+              ? (output.answers as Record<string, string> | undefined)
+              : undefined,
         });
-        if (outcome === ToolConfirmationOutcome.Cancel) {
+        if (
+          outcome === ToolConfirmationOutcome.Cancel &&
+          !abortSignal.aborted
+        ) {
           this.onPermissionCancel?.();
         }
       } catch (error) {
@@ -243,7 +408,9 @@ export class SubAgentTracker {
         // Fail closed: if the client cannot answer a nested permission
         // request, stop the parent turn instead of letting later tools run
         // without the required user input.
-        this.onPermissionCancel?.();
+        if (!abortSignal.aborted) {
+          this.onPermissionCancel?.();
+        }
         try {
           await event.respond(ToolConfirmationOutcome.Cancel);
         } catch (respondError) {
@@ -266,12 +433,11 @@ export class SubAgentTracker {
       const event = args[0] as AgentUsageEvent;
       if (abortSignal.aborted) return;
 
-      this.messageEmitter.emitUsageMetadata(
-        event.usage,
-        '',
-        event.durationMs,
-        this.subagentMeta,
-      );
+      void this.messageEmitter
+        .emitUsageMetadata(event.usage, '', event.durationMs, this.subagentMeta)
+        .catch((error) => {
+          debugLogger.debug('Failed to emit subagent usage metadata:', error);
+        });
     };
   }
 
@@ -287,13 +453,17 @@ export class SubAgentTracker {
       if (abortSignal.aborted) return;
 
       // Emit streamed text as agent message or thought based on the flag
-      void this.messageEmitter.emitMessage(
-        event.text,
-        'assistant',
-        event.thought ?? false,
-        undefined,
-        this.subagentMeta,
-      );
+      void this.messageEmitter
+        .emitMessage(
+          event.text,
+          'assistant',
+          event.thought ?? false,
+          undefined,
+          this.subagentMeta,
+        )
+        .catch((error) => {
+          debugLogger.debug('Failed to emit subagent stream text:', error);
+        });
     };
   }
 }

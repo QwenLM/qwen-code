@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, waitFor } from '@testing-library/react';
@@ -64,6 +65,7 @@ describe('BaseSelectionList', () => {
     vi.mocked(useSelectionList).mockReturnValue({
       activeIndex,
       setActiveIndex: vi.fn(),
+      selectIndex: vi.fn(),
     });
 
     mockRenderItem.mockImplementation(
@@ -288,6 +290,7 @@ describe('BaseSelectionList', () => {
       vi.mocked(useSelectionList).mockReturnValue({
         activeIndex: initialActiveIndex,
         setActiveIndex: vi.fn(),
+        selectIndex: vi.fn(),
       });
 
       mockRenderItem.mockImplementation(
@@ -305,6 +308,7 @@ describe('BaseSelectionList', () => {
         vi.mocked(useSelectionList).mockReturnValue({
           activeIndex: newIndex,
           setActiveIndex: vi.fn(),
+          selectIndex: vi.fn(),
         });
 
         await act(async () => {

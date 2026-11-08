@@ -3,7 +3,13 @@ export default {
   telegram: 'Telegram',
   weixin: 'WeChat',
   dingtalk: 'DingTalk',
+  dws: 'DingTalk Workspace',
+  wecom: 'WeCom',
+  'wecom-callback': 'WeCom Callback',
   feishu: 'Feishu',
   qqbot: 'QQ Bot',
+  email: 'Email',
+  github: 'GitHub',
+  gitlab: 'GitLab',
   plugins: 'Plugins',
 };

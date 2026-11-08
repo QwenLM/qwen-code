@@ -31,6 +31,7 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
 import { substituteHookVariables } from './variables.js';
+import { parseAgentExecutionBackend } from '../subagents/execution-backend.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -52,11 +53,13 @@ export interface ClaudePluginConfig {
   repository?: string;
   license?: string;
   keywords?: string[];
+  dependencies?: unknown;
   commands?: string | string[];
   agents?: string | string[];
   skills?: string | string[];
   hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   mcpServers?: string | Record<string, MCPServerConfig>;
+  workflows?: string | string[];
   outputStyles?: string | string[];
   lspServers?: string | Record<string, unknown>;
 }
@@ -131,7 +134,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Task: 'Task',
   TodoWrite: 'TodoList',
   WebFetch: 'WebFetch',
-  WebSearch: 'None',
+  WebSearch: 'WebSearch',
   Write: 'WriteFile',
   LS: 'ListFiles',
 };
@@ -276,6 +279,8 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
       }
 
       const [, frontmatterYaml, body] = match;
+      // Reject before rewriting so the extension loader can retain a named refusal.
+      const executionBackend = parseAgentExecutionBackend(frontmatterYaml);
       const frontmatter = parseYaml(frontmatterYaml) as Record<string, unknown>;
 
       // Build Claude agent config from frontmatter
@@ -298,6 +303,9 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
 
       // Convert to Qwen format
       const qwenAgent = convertClaudeAgentConfig(claudeAgent);
+      if (executionBackend !== undefined) {
+        qwenAgent['executionBackend'] = executionBackend;
+      }
 
       // Build new frontmatter (excluding systemPrompt as it goes in body).
       const newFrontmatter: Record<string, unknown> = {};
@@ -331,36 +339,54 @@ ${systemPrompt}
 }
 
 /**
- * Maps Claude `.mcp.json` server entries to Qwen's MCPServerConfig shape.
+ * Maps a single Claude `.mcp.json` server entry to Qwen's MCPServerConfig shape.
  * Claude discriminates transport with a `type` field (`http`/`sse`/`stdio`),
  * whereas Qwen keys off which field is set: `httpUrl` (streamable HTTP),
- * `url` (SSE) or `command` (stdio). A Claude `type: 'http'` entry therefore
- * has to move its `url` to `httpUrl`, and the now-meaningless `type` is dropped.
+ * `url` (SSE) or `command` (stdio). A Claude `type: 'http'` entry therefore has
+ * to move its `url` to `httpUrl`. Qwen reserves `type` for `'sdk'`, so any other
+ * `type` value (Claude's transport discriminator) is dropped while `'sdk'` —
+ * which `isSdkMcpServerConfig` depends on — is always preserved.
+ */
+export function normalizeClaudeMcpServer(
+  raw: MCPServerConfig,
+): MCPServerConfig {
+  const server = raw as unknown as Record<string, unknown>;
+  // stdio / already-Qwen-shaped configs pass through; only a non-sdk `type`
+  // (Claude's transport discriminator) is stripped.
+  if (server['command'] || server['httpUrl'] || server['tcp']) {
+    if (server['type'] === undefined || server['type'] === 'sdk') {
+      return raw;
+    }
+    const rest = { ...server };
+    delete rest['type'];
+    return rest as unknown as MCPServerConfig;
+  }
+  if (typeof server['url'] === 'string') {
+    const rest = { ...server };
+    delete rest['url'];
+    if (rest['type'] !== 'sdk') {
+      delete rest['type'];
+    }
+    return {
+      ...rest,
+      ...(server['type'] === 'http'
+        ? { httpUrl: server['url'] }
+        : { url: server['url'] }),
+    } as unknown as MCPServerConfig;
+  }
+  return raw;
+}
+
+/**
+ * Maps Claude `.mcp.json` server entries to Qwen's MCPServerConfig shape.
+ * @see normalizeClaudeMcpServer for the per-server transport mapping.
  */
 function normalizeClaudeMcpServers(
   servers: Record<string, MCPServerConfig>,
 ): Record<string, MCPServerConfig> {
   const normalized: Record<string, MCPServerConfig> = {};
   for (const [name, raw] of Object.entries(servers)) {
-    const server = raw as unknown as Record<string, unknown>;
-    // stdio / already-Qwen-shaped configs pass through unchanged.
-    if (server['command'] || server['httpUrl'] || server['tcp']) {
-      normalized[name] = raw;
-      continue;
-    }
-    if (typeof server['url'] === 'string') {
-      const rest = { ...server };
-      delete rest['type'];
-      delete rest['url'];
-      normalized[name] = {
-        ...rest,
-        ...(server['type'] === 'http'
-          ? { httpUrl: server['url'] }
-          : { url: server['url'] }),
-      } as unknown as MCPServerConfig;
-      continue;
-    }
-    normalized[name] = raw;
+    normalized[name] = normalizeClaudeMcpServer(raw);
   }
   return normalized;
 }
@@ -433,7 +459,14 @@ export function convertClaudeToQwenConfig(
 export async function convertClaudePluginPackage(
   extensionDir: string,
   pluginName: string,
-): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
+): Promise<{
+  config: ExtensionConfig;
+  convertedDir: string;
+  externalContent: boolean;
+}> {
+  signal?.throwIfAborted();
   // Step 1: Load marketplace.json
   const marketplaceJsonPath = path.join(
     extensionDir,
@@ -472,10 +505,12 @@ export async function convertClaudePluginPackage(
   );
   await fs.promises.mkdir(pluginDir, { recursive: true });
 
-  const pluginSource = await resolvePluginSource(
+  const { pluginSource, externalContent } = await resolvePluginSource(
     marketplacePlugin,
     extensionDir,
     pluginDir,
+    networkPolicy,
+    signal,
   );
 
   if (!fs.existsSync(pluginSource)) {
@@ -521,7 +556,11 @@ export async function convertClaudePluginPackage(
     mergedConfig = marketplacePlugin as ClaudePluginConfig;
   }
 
-  return buildQwenExtensionFromPlugin(pluginSource, mergedConfig);
+  const converted = await buildQwenExtensionFromPlugin(
+    pluginSource,
+    mergedConfig,
+  );
+  return { ...converted, externalContent };
 }
 
 /**
@@ -531,7 +570,7 @@ export async function convertClaudePluginPackage(
  * could otherwise make the converter read sensitive files outside the plugin.
  * Returns the confined absolute path, or null when the reference is unsafe.
  */
-function resolvePluginRelativeFile(
+export function resolvePluginRelativeFile(
   pluginSource: string,
   relativePath: string,
 ): string | null {
@@ -568,10 +607,12 @@ function resolvePluginRelativeFile(
  * (`convertClaudePluginPackage`) and standalone (`convertClaudePluginStandalone`)
  * conversion paths.
  */
-async function buildQwenExtensionFromPlugin(
+export async function buildQwenExtensionFromPlugin(
   pluginSource: string,
   mergedConfig: ClaudePluginConfig,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  // Mod discovery needs the effective paths before classic config is resolved.
+  const claudeManifest = JSON.stringify(mergedConfig, null, 2);
   // Resolve MCP servers from a JSON file path if needed.
   if (mergedConfig.mcpServers && typeof mergedConfig.mcpServers === 'string') {
     const mcpServersPath = resolvePluginRelativeFile(
@@ -598,6 +639,14 @@ async function buildQwenExtensionFromPlugin(
 
   try {
     await copyDirectory(pluginSource, tmpDir);
+
+    const manifestDir = path.join(tmpDir, '.claude-plugin');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, 'plugin.json'),
+      claudeManifest,
+      'utf-8',
+    );
 
     // A standalone plugin's source is a full git clone; drop VCS metadata so
     // it isn't shipped into the installed extension.
@@ -630,6 +679,18 @@ async function buildQwenExtensionFromPlugin(
         fs.rmSync(folderPath, { recursive: true, force: true });
       }
     }
+
+    // Declared workflows keep their relative paths, so same-named files in
+    // different directories do not overwrite each other, and the converted
+    // manifest lists the exact files. Undeclared, the copied workflows/ stays.
+    const workflowPaths =
+      mergedConfig.workflows == null
+        ? undefined
+        : collectWorkflowResources(
+            mergedConfig.workflows,
+            pluginSource,
+            tmpDir,
+          );
 
     // Handle hooks from a file path if needed.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
@@ -667,6 +728,9 @@ async function buildQwenExtensionFromPlugin(
     await convertAgentFiles(agentsDestDir);
 
     const qwenConfig = convertClaudeToQwenConfig(mergedConfig);
+    if (workflowPaths !== undefined) {
+      qwenConfig.workflows = workflowPaths;
+    }
 
     const qwenConfigPath = path.join(tmpDir, 'qwen-extension.json');
     fs.writeFileSync(
@@ -772,6 +836,88 @@ export async function convertClaudePluginStandalone(
   }
 
   return buildQwenExtensionFromPlugin(extensionDir, mergedConfig);
+}
+
+/**
+ * Copies a plugin's declared workflow files into the converted extension at
+ * their relative paths and returns that file list for the manifest. Reads one
+ * directory level of `.js` files, every source confined to the plugin: a
+ * symlink is accepted only when its target resolves inside the plugin, like
+ * `collectResources`, and the copy dereferences it, so the converted extension
+ * holds a regular file the workflow loader will read. Re-copying restores a
+ * workflow file the commands/skills/agents remapping removed.
+ */
+function collectWorkflowResources(
+  resourcePaths: unknown,
+  pluginRoot: string,
+  destDir: string,
+): string[] {
+  const paths = Array.isArray(resourcePaths) ? resourcePaths : [resourcePaths];
+  const collected = new Set<string>();
+
+  const copy = (srcFile: string) => {
+    const relativePath = path
+      .relative(pluginRoot, srcFile)
+      .split(path.sep)
+      .join('/');
+    if (collected.has(relativePath)) return;
+    const destFile = path.join(destDir, relativePath);
+    fs.mkdirSync(path.dirname(destFile), { recursive: true });
+    fs.copyFileSync(srcFile, destFile);
+    collected.add(relativePath);
+  };
+
+  for (const resourcePath of paths) {
+    if (typeof resourcePath !== 'string' || resourcePath.length === 0) {
+      debugLogger.warn(
+        'Ignoring a non-string workflows entry in plugin config',
+      );
+      continue;
+    }
+    const resolvedPath = resolvePluginRelativeFile(pluginRoot, resourcePath);
+    if (!resolvedPath) continue;
+    if (!fs.existsSync(resolvedPath)) {
+      debugLogger.warn(`Workflow path not found: ${resolvedPath}`);
+      continue;
+    }
+    const stat = fs.statSync(resolvedPath);
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(resolvedPath).sort()) {
+        if (!name.endsWith('.js')) continue;
+        const srcFile = path.join(resolvedPath, name);
+        if (!isRegularFileWithinPlugin(srcFile, pluginRoot)) {
+          debugLogger.debug(
+            `Skipping workflow file that is not a regular file inside the plugin: ${srcFile}`,
+          );
+          continue;
+        }
+        copy(srcFile);
+      }
+    } else if (stat.isFile() && resolvedPath.endsWith('.js')) {
+      copy(resolvedPath);
+    } else {
+      debugLogger.warn(
+        `Ignoring workflows entry that is neither a directory nor a .js file: ${resolvedPath}`,
+      );
+    }
+  }
+  return [...collected];
+}
+
+/** True when `filePath` resolves, through any symlink, to a regular file inside the plugin. */
+function isRegularFileWithinPlugin(
+  filePath: string,
+  pluginRoot: string,
+): boolean {
+  try {
+    // The shared containment primitive, so this rule cannot drift from the
+    // other symlink guards; `isFile()` excludes the plugin root itself.
+    return (
+      fs.statSync(filePath).isFile() && realPathWithin(filePath, pluginRoot)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -924,9 +1070,14 @@ export function mergeClaudeConfigs(
     merged.repository = marketplacePlugin.repository;
   if (marketplacePlugin.license) merged.license = marketplacePlugin.license;
   if (marketplacePlugin.keywords) merged.keywords = marketplacePlugin.keywords;
+  if (marketplacePlugin.dependencies !== undefined)
+    merged.dependencies = marketplacePlugin.dependencies;
   if (marketplacePlugin.commands) merged.commands = marketplacePlugin.commands;
   if (marketplacePlugin.agents) merged.agents = marketplacePlugin.agents;
   if (marketplacePlugin.skills) merged.skills = marketplacePlugin.skills;
+  // `null` reads as undeclared, as it does in the workflow loader.
+  if (marketplacePlugin.workflows != null)
+    merged.workflows = marketplacePlugin.workflows;
   if (marketplacePlugin.hooks) merged.hooks = marketplacePlugin.hooks;
   if (marketplacePlugin.mcpServers)
     merged.mcpServers = marketplacePlugin.mcpServers;
@@ -991,13 +1142,19 @@ export function isClaudePluginConfig(
 
 /**
  * Resolve plugin source from marketplace plugin configuration.
- * Returns the absolute path to the plugin source directory.
+ * Returns the absolute path to the plugin source directory and whether the
+ * plugin content was fetched from a source external to the marketplace
+ * repository (in which case the marketplace clone's commit does not describe
+ * the installed content).
  */
 async function resolvePluginSource(
   pluginConfig: ClaudeMarketplacePluginConfig,
   marketplaceDir: string,
   pluginDir: string,
-): Promise<string> {
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
+): Promise<{ pluginSource: string; externalContent: boolean }> {
+  signal?.throwIfAborted();
   const source = pluginConfig.source;
 
   // Handle string source (relative path or URL)
@@ -1013,13 +1170,15 @@ async function resolvePluginSource(
         source,
         type: 'git',
         originSource: 'Claude',
+        networkPolicy,
       };
       try {
-        await downloadFromGitHubRelease(installMetadata, pluginDir);
+        await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
       } catch {
-        await cloneFromGit(installMetadata, pluginDir);
+        signal?.throwIfAborted();
+        await cloneFromGit(installMetadata, pluginDir, signal);
       }
-      return pluginDir;
+      return { pluginSource: pluginDir, externalContent: true };
     }
 
     // Relative path within marketplace. Confine it: a manifest source like
@@ -1054,12 +1213,12 @@ async function resolvePluginSource(
     // If source path equals marketplace dir (source is '.' or ''),
     // return marketplaceDir directly to avoid copying to subdirectory of self
     if (path.resolve(sourcePath) === path.resolve(marketplaceDir)) {
-      return marketplaceDir;
+      return { pluginSource: marketplaceDir, externalContent: false };
     }
 
     // Copy to plugin directory
     await fs.promises.cp(sourcePath, pluginDir, { recursive: true });
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: false };
   }
 
   // Handle object source (github or url)
@@ -1067,26 +1226,30 @@ async function resolvePluginSource(
     const installMetadata: ExtensionInstallMetadata = {
       source: `https://github.com/${source.repo}`,
       type: 'git',
+      networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: true };
   }
 
   if (source.source === 'url') {
     const installMetadata: ExtensionInstallMetadata = {
       source: source.url,
       type: 'git',
+      networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: true };
   }
 
   if (source.source === 'git-subdir') {
@@ -1098,8 +1261,9 @@ async function resolvePluginSource(
       // Prefer the immutable SHA pin when present; fall back to a named ref.
       ref: source.sha || source.ref,
       originSource: 'Claude',
+      networkPolicy,
     };
-    await cloneFromGit(installMetadata, pluginDir);
+    await cloneFromGit(installMetadata, pluginDir, signal);
     // `source.path` comes from an untrusted manifest. Confine it to the cloned
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
     if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {
@@ -1129,7 +1293,7 @@ async function resolvePluginSource(
         `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`,
       );
     }
-    return subDir;
+    return { pluginSource: subDir, externalContent: true };
   }
 
   throw new Error(`Unsupported plugin source type: ${JSON.stringify(source)}`);

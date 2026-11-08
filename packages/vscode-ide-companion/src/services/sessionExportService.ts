@@ -23,7 +23,7 @@ import {
   isSessionExportFormat,
   type SessionExportFormat,
 } from '../utils/exportSlashCommand.js';
-import { stripZeroWidthSpaces } from '@qwen-code/webui';
+import { stripZeroWidthSpaces } from '../utils/inputPlaceholder.js';
 
 export { EXPORT_SESSION_FORMATS as SESSION_EXPORT_FORMATS };
 export type { SessionExportFormat } from '../utils/exportSlashCommand.js';
@@ -69,10 +69,11 @@ export function parseExportSlashCommand(
 function renderExportContent(
   format: SessionExportFormat,
   normalizedData: Awaited<ReturnType<typeof normalizeSessionData>>,
+  records: readonly unknown[],
 ): string {
   switch (format) {
     case 'html':
-      return toHtml(normalizedData);
+      return toHtml(normalizedData, records);
     case 'md':
       return toMarkdown(normalizedData);
     case 'json':
@@ -117,7 +118,11 @@ export async function exportSessionToFile(options: {
     sessionData.conversation.messages,
     EXPORT_CONFIG,
   );
-  const content = renderExportContent(format, normalizedData);
+  const content = renderExportContent(
+    format,
+    normalizedData,
+    sessionData.conversation.messages,
+  );
   const defaultFilename = generateExportFilename(format);
 
   // Show native Save dialog so users can choose destination and filename

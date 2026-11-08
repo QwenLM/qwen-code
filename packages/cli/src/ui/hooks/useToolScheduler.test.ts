@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { Mock } from 'vitest';
@@ -30,17 +31,47 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   ApprovalMode,
+  CoreToolScheduler,
+  getRuntimeContentGenerator,
   MockTool,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import { ToolCallStatus } from '../types.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+} from '@qwen-code/qwen-code-core/tools/tool-call.js';
 
 // Mocks
+const { debugLoggerErrors } = vi.hoisted(() => ({
+  debugLoggerErrors: [] as string[],
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const actual = await vi.importActual('@qwen-code/qwen-code-core');
+  const realCreateDebugLogger = (
+    actual as {
+      createDebugLogger: (tag?: string) => { error: (...a: unknown[]) => void };
+    }
+  ).createDebugLogger;
   return {
     ...actual,
     ToolRegistry: vi.fn(),
     Config: vi.fn(),
+    // Delegates to the real logger and records `error` lines, so tests can
+    // assert a contained failure was reported. The real logger is a no-op
+    // without an active debug session, which would make it unobservable.
+    createDebugLogger: (tag?: string) => {
+      const real = realCreateDebugLogger(tag);
+      return {
+        ...real,
+        error: (...args: unknown[]) => {
+          debugLoggerErrors.push(args.map(String).join(' '));
+          real.error(...args);
+        },
+      };
+    },
   };
 });
 
@@ -66,10 +97,11 @@ const mockConfig = {
     model: 'test-model',
     authType: 'gemini',
   }),
+  getBaseLlmClient: vi.fn(),
   getUseModelRouter: () => false,
-  getGeminiClient: () => null, // No client needed for these tests
+  getLlmClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
-  getChatRecordingService: () => undefined,
+  getChatRecordingService: vi.fn(() => undefined),
   getMessageBus: vi.fn().mockReturnValue(undefined),
   getDisableAllHooks: vi.fn().mockReturnValue(true),
   getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -104,6 +136,8 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     setPendingHistoryItem = vi.fn();
     mockToolRegistry.getTool.mockClear();
     mockToolRegistry.ensureTool.mockClear();
+    (mockConfig.getBaseLlmClient as Mock).mockReset();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
 
@@ -173,13 +207,13 @@ describe('useReactToolScheduler in YOLO Mode', () => {
         response: expect.objectContaining({
           resultDisplay: 'YOLO Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'yoloCall',
                 name: 'mockToolRequiresConfirmation',
                 response: { output: expectedOutput },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -192,6 +226,171 @@ describe('useReactToolScheduler in YOLO Mode', () => {
       return item?.tools?.[0]?.confirmationDetails;
     });
     expect(confirmationCall).toBeUndefined();
+  });
+
+  it("hands a batch's completion to its own callback instead of onComplete", async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockToolRequiresConfirmation);
+    (mockToolRequiresConfirmation.execute as Mock).mockResolvedValue({
+      llmContent: 'awaited output',
+      returnDisplay: 'awaited output',
+    } as ToolResult);
+    const onBatchComplete = vi.fn(async () => {});
+
+    const { result } = renderSchedulerInYoloMode();
+    const schedule = result.current[1];
+    const request: ToolCallRequestInfo = {
+      callId: 'awaitedCall',
+      name: 'mockToolRequiresConfirmation',
+      args: { data: 'any data' },
+    } as any;
+
+    act(() => {
+      schedule(
+        request,
+        new AbortController().signal,
+        undefined,
+        onBatchComplete,
+      );
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+
+    expect(onBatchComplete).toHaveBeenCalledWith([
+      expect.objectContaining({ status: 'success', request }),
+    ]);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    // A later batch without its own callback goes back to onComplete.
+    act(() => {
+      schedule(
+        { ...request, callId: 'laterCall' },
+        new AbortController().signal,
+      );
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'success',
+        request: expect.objectContaining({ callId: 'laterCall' }),
+      }),
+    ]);
+  });
+
+  it("releases a batch's callback when scheduling fails without completing it", async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    (mockTool.execute as Mock).mockResolvedValue({
+      llmContent: 'later output',
+      returnDisplay: 'later output',
+    } as ToolResult);
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const onBatchComplete = vi.fn(async () => {});
+    const { result } = renderSchedulerInYoloMode();
+    const request = {
+      callId: 'reusedCall',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        request,
+        new AbortController().signal,
+        undefined,
+        onBatchComplete,
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    // The caller stops waiting, with no calls.
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onBatchComplete).toHaveBeenCalledWith([]);
+    scheduleSpy.mockRestore();
+
+    // A later batch reusing the call id goes to onComplete, not the old one.
+    act(() => {
+      result.current[1](request, new AbortController().signal);
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({ status: 'success', request }),
+    ]);
+  });
+
+  it('keeps shell heartbeats out of liveOutput while retaining display chunks', async () => {
+    let resolveExecute: (result: ToolResult) => void;
+    let emitUpdate: ((output: unknown) => void) | undefined;
+    const streamingTool = new MockTool({
+      name: 'streamingTool',
+      displayName: 'Streaming Tool',
+      canUpdateOutput: true,
+      execute: vi.fn(
+        (_params: unknown, _signal?: AbortSignal, updateOutput?: unknown) => {
+          emitUpdate = updateOutput as (output: unknown) => void;
+          return new Promise<ToolResult>((resolve) => {
+            resolveExecute = resolve;
+          });
+        },
+      ) as any,
+    });
+    mockToolRegistry.getTool.mockReturnValue(streamingTool);
+
+    const { result } = renderSchedulerInYoloMode();
+    const schedule = result.current[1];
+
+    act(() => {
+      schedule(
+        {
+          callId: 'hbCall',
+          name: 'streamingTool',
+          args: {},
+        } as any,
+        new AbortController().signal,
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    act(() => {
+      emitUpdate!('streamed text');
+      emitUpdate!({ type: 'shell_progress', elapsedMs: 10_000 });
+    });
+
+    const executing = result.current[0].find(
+      (tc) => tc.request.callId === 'hbCall',
+    ) as { liveOutput?: unknown };
+    // The display chunk is retained; the later heartbeat did not replace it.
+    expect(executing?.liveOutput).toBe('streamed text');
+
+    act(() => {
+      resolveExecute!({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      } as ToolResult);
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
   });
 });
 
@@ -208,12 +407,14 @@ describe('useReactToolScheduler', () => {
   beforeEach(() => {
     onComplete = vi.fn();
     setPendingHistoryItem = vi.fn();
+    debugLoggerErrors.length = 0;
 
     mockToolRegistry.getTool.mockClear();
     mockToolRegistry.ensureTool.mockClear();
     (mockTool.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
 
     mockOnUserConfirmForToolConfirmation = vi.fn();
     (
@@ -288,18 +489,736 @@ describe('useReactToolScheduler', () => {
         response: expect.objectContaining({
           resultDisplay: 'Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'call1',
                 name: 'mockTool',
                 response: { output: 'Tool output' },
               },
-            },
+            }),
           ],
         }),
       }),
     ]);
     expect(result.current[0]).toEqual([]);
+  });
+
+  it('resolves full-turn tool calls against the exact model runtime', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockTool.execute as Mock).mockImplementation(async () => {
+      expect(getRuntimeContentGenerator()).toBe(runtimeView);
+      return {
+        llmContent: 'Tool output',
+        returnDisplay: 'Tool output',
+      } as ToolResult;
+    });
+    const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel,
+    });
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'openai:vision-agent\0https://vision.example.com/v1\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(resolveForModel).toHaveBeenCalledWith(
+      'openai:vision-agent\0https://vision.example.com/v1',
+      { failClosed: true },
+    );
+    expect(mockTool.execute).toHaveBeenCalled();
+  });
+
+  it('fails closed when the full-turn tool runtime cannot be resolved', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const recordToolResult = vi.fn();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue({
+      recordToolResult,
+    });
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockRejectedValue(new Error('missing route')),
+    });
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'unresolved-full-turn-call',
+      name: ToolNames.TOOL_CALL,
+      args: { name: ToolNames.AGENT, arguments: {} },
+      isClientInitiated: false,
+      prompt_id: 'unresolved-full-turn-prompt',
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const message =
+      'Full-turn tool scheduling failed. The tool was not executed.';
+    const modelFacingMessage = `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`;
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(recordToolResult).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request,
+        response: expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('tool was not executed'),
+          }),
+          executionStatus: 'not_started',
+          errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+          resultDisplay: message,
+          contentLength: modelFacingMessage.length,
+          responseParts: [
+            expect.objectContaining({
+              functionResponse: {
+                id: request.callId,
+                name: ToolNames.TOOL_CALL,
+                response: { error: modelFacingMessage },
+              },
+            }),
+          ],
+        }),
+      }),
+    ]);
+  });
+
+  it('fails closed when full-turn tool scheduling rejects', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'rejected-full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request,
+        response: expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('tool was not executed'),
+          }),
+          executionStatus: 'not_started',
+          errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      }),
+    ]);
+    scheduleSpy.mockRestore();
+  });
+
+  it('keeps a full-turn cancellation when the signal aborts while the request is queued', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    // Mirrors the busy-scheduler branch of CoreToolScheduler.schedule: the
+    // request parks in the queue and its abort listener rejects with the
+    // queue-cancellation error.
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(
+        (_request, signal) =>
+          new Promise<void>((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => reject(new Error('Tool call cancelled while in queue.')),
+              { once: true },
+            );
+          }),
+      );
+    try {
+      const { result } = renderScheduler();
+      const request = {
+        callId: 'queued-full-turn-call',
+        name: ToolNames.TOOL_CALL,
+        args: { name: ToolNames.AGENT, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'queued-full-turn-prompt',
+      } as ToolCallRequestInfo;
+      const abortController = new AbortController();
+
+      act(() => {
+        result.current[1]([request], abortController.signal, 'vision-agent\0');
+      });
+      // Let resolveForModel settle so the request is queued before the abort.
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+      expect(scheduleSpy).toHaveBeenCalled();
+
+      act(() => {
+        abortController.abort();
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      expect(mockTool.execute).not.toHaveBeenCalled();
+      expect(result.current[0]).toEqual([]);
+      expect(
+        onComplete.mock.calls
+          .flat(Infinity)
+          .filter(
+            (toolCall: any) =>
+              toolCall?.status === 'error' ||
+              toolCall?.response?.errorType ===
+                ToolErrorType.UNHANDLED_EXCEPTION,
+          ),
+      ).toEqual([]);
+      // The cancelled call still travels the completion path so the caller
+      // releases the batch and continuation ownership it registered.
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(onComplete).toHaveBeenCalledWith([
+        expect.objectContaining({
+          status: 'cancelled',
+          request,
+          response: expect.objectContaining({
+            callId: request.callId,
+            errorType: undefined,
+            executionStatus: 'not_started',
+            responseParts: [
+              expect.objectContaining({
+                functionResponse: {
+                  id: request.callId,
+                  name: ToolNames.TOOL_CALL,
+                  response: {
+                    error: `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}[Operation Cancelled] Reason: Tool call cancelled before execution.`,
+                  },
+                },
+              }),
+            ],
+          }),
+        }),
+      ]);
+    } finally {
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('keeps a full-turn cancellation when the signal is already aborted before scheduling', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('Tool call cancelled while in queue.'));
+    const { result } = renderScheduler();
+    // Two requests in one batch pin the arity of the completion: every
+    // queued callId must be completed exactly once.
+    const request = {
+      callId: 'pre-aborted-full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+    const secondRequest = {
+      callId: 'pre-aborted-full-turn-call-2',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+    const abortController = new AbortController();
+    abortController.abort();
+
+    act(() => {
+      result.current[1](
+        [request, secondRequest],
+        abortController.signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(result.current[0]).toEqual([]);
+    expect(
+      onComplete.mock.calls
+        .flat(Infinity)
+        .filter(
+          (toolCall: any) =>
+            toolCall?.status === 'error' ||
+            toolCall?.response?.errorType === ToolErrorType.UNHANDLED_EXCEPTION,
+        ),
+    ).toEqual([]);
+    const cancelledPart = (toolRequest: ToolCallRequestInfo) => ({
+      functionResponse: {
+        id: toolRequest.callId,
+        name: 'mockTool',
+        response: {
+          error:
+            '[Operation Cancelled] Reason: Tool call cancelled before execution.',
+        },
+      },
+    });
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'cancelled',
+        request,
+        response: expect.objectContaining({
+          callId: request.callId,
+          errorType: undefined,
+          executionStatus: 'not_started',
+          responseParts: [expect.objectContaining(cancelledPart(request))],
+        }),
+      }),
+      expect.objectContaining({
+        status: 'cancelled',
+        request: secondRequest,
+        response: expect.objectContaining({
+          callId: secondRequest.callId,
+          errorType: undefined,
+          executionStatus: 'not_started',
+          responseParts: [
+            expect.objectContaining(cancelledPart(secondRequest)),
+          ],
+        }),
+      }),
+    ]);
+    scheduleSpy.mockRestore();
+  });
+
+  it('reports a fail-closed resolution failure as an error even when the signal is aborted', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockRejectedValue(new Error('missing route')),
+    });
+    const scheduleSpy = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
+    try {
+      const { result } = renderScheduler();
+      const request = {
+        callId: 'aborted-resolution-full-turn-call',
+        name: 'mockTool',
+        args: {},
+      } as ToolCallRequestInfo;
+      const abortController = new AbortController();
+      abortController.abort();
+
+      act(() => {
+        result.current[1]([request], abortController.signal, 'vision-agent\0');
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      // The signal aborted, but a fail-closed resolution rejection is a
+      // scheduling failure, not a cancellation: it must stay on the error
+      // path (and its log line) instead of vanishing into the cancellation
+      // branch, and the request must never reach the scheduler.
+      expect(mockTool.execute).not.toHaveBeenCalled();
+      expect(scheduleSpy).not.toHaveBeenCalled();
+      // The production comment promises the error path *and its log line*;
+      // the user-visible message alone would survive deleting the
+      // `debugLogger.error` call in `completeAsSchedulingError`, so pin it.
+      expect(
+        debugLoggerErrors.filter((line) =>
+          line.includes('Full-turn tool scheduling failed: missing route'),
+        ),
+      ).toHaveLength(1);
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(onComplete).toHaveBeenCalledWith([
+        expect.objectContaining({
+          status: 'error',
+          request,
+          response: expect.objectContaining({
+            error: expect.objectContaining({
+              message: expect.stringContaining('tool was not executed'),
+            }),
+            executionStatus: 'not_started',
+            errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+          }),
+        }),
+      ]);
+    } finally {
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('reports a non-queue scheduler rejection as an error even when the signal is aborted', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    // Runtime resolution succeeds, so the rejection comes from the scheduler
+    // itself — but it is *not* the Core queue rejection. An aborted signal
+    // alone must not reclassify it as a user cancellation.
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    try {
+      const { result } = renderScheduler();
+      const request = {
+        callId: 'aborted-non-queue-full-turn-call',
+        name: 'mockTool',
+        args: {},
+      } as ToolCallRequestInfo;
+      const abortController = new AbortController();
+      abortController.abort();
+
+      act(() => {
+        result.current[1]([request], abortController.signal, 'vision-agent\0');
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      expect(mockTool.execute).not.toHaveBeenCalled();
+      expect(scheduleSpy).toHaveBeenCalledTimes(1);
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(
+        onComplete.mock.calls
+          .flat(Infinity)
+          .filter((toolCall: any) => toolCall?.status === 'cancelled'),
+      ).toEqual([]);
+      expect(onComplete).toHaveBeenCalledWith([
+        expect.objectContaining({
+          status: 'error',
+          request,
+          response: expect.objectContaining({
+            error: expect.objectContaining({
+              message: expect.stringContaining('tool was not executed'),
+            }),
+            executionStatus: 'not_started',
+            errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+          }),
+        }),
+      ]);
+    } finally {
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('classifies the queue rejections real Core produces as cancellations', async () => {
+    // Contract pin for the cancellation classifier. Every other test here
+    // stubs `schedule()` with its own copy of Core's queue-rejection text, so
+    // all of them stay green if Core rewords that string and the hook's
+    // `error.message === …` comparison silently stops matching — which would
+    // send a user's Esc back down the error path (#11148). This one makes the
+    // real scheduler busy by parking a batch on a tool that never settles, so
+    // both reject sites in `CoreToolScheduler.schedule` are reached through
+    // public behaviour: one for a signal already aborted at schedule time,
+    // and one for an abort that lands while the request sits in the queue —
+    // the #11148 path.
+    let releaseParked: ((result: ToolResult) => void) | undefined;
+    const parkedTool = new MockTool({
+      name: 'mockTool',
+      displayName: 'Mock Tool',
+      execute: vi.fn(
+        () =>
+          new Promise<ToolResult>((resolve) => {
+            releaseParked = resolve;
+          }),
+      ) as any,
+    });
+    mockToolRegistry.getTool.mockReturnValue(parkedTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const realSchedule = CoreToolScheduler.prototype.schedule;
+    // Record what Core's own `schedule()` rejected with, so the assertions
+    // below pin Core's half of the contract and not only the hook's.
+    const coreRejections: string[] = [];
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(function (
+        this: CoreToolScheduler,
+        ...args: Parameters<typeof realSchedule>
+      ) {
+        return realSchedule.apply(this, args).catch((error: unknown) => {
+          coreRejections.push(
+            error instanceof Error ? error.message : String(error),
+          );
+          throw error;
+        });
+      });
+    try {
+      // Rendered directly rather than through `renderScheduler()`: that
+      // helper passes an inline arrow as `onEditorClose`, which is a
+      // `useMemo` dependency of the scheduler, so the display update from the
+      // parked batch below would swap in a fresh `CoreToolScheduler` and
+      // strand the batch that is supposed to keep it busy.
+      const onEditorClose = () => {};
+      const { result } = renderHook(() =>
+        useReactToolScheduler(
+          onComplete,
+          mockConfig as unknown as Config,
+          setPendingHistoryItem,
+          onEditorClose,
+        ),
+      );
+      const flush = async () => {
+        await act(async () => {
+          await vi.runAllTimersAsync();
+        });
+      };
+      const scheduleFullTurn = (callId: string, signal: AbortSignal) => {
+        const request = {
+          callId,
+          name: 'mockTool',
+          args: {},
+        } as ToolCallRequestInfo;
+        act(() => {
+          result.current[1]([request], signal, 'vision-agent\0');
+        });
+        return request;
+      };
+      const cancelledCallsFor = (callId: string) =>
+        onComplete.mock.calls
+          .flat(Infinity)
+          .filter(
+            (toolCall: any) =>
+              toolCall?.request?.callId === callId &&
+              toolCall?.status === 'cancelled',
+          );
+      const expectCancelledOnce = (
+        callId: string,
+        request: ToolCallRequestInfo,
+      ) => {
+        expect(cancelledCallsFor(callId)).toHaveLength(1);
+        // Core's own rejection was read as a user cancellation: no error
+        // history item, no UNHANDLED_EXCEPTION reported back to the model.
+        expect(onComplete).toHaveBeenCalledWith([
+          expect.objectContaining({
+            status: 'cancelled',
+            request,
+            response: expect.objectContaining({
+              callId,
+              error: undefined,
+              errorType: undefined,
+              executionStatus: 'not_started',
+            }),
+          }),
+        ]);
+      };
+
+      // Busy for real: the parked batch reaches `execute` and stays there, so
+      // `isRunning()` holds without touching any private scheduler field.
+      act(() => {
+        result.current[1](
+          [
+            {
+              callId: 'parked-call',
+              name: 'mockTool',
+              args: {},
+            } as ToolCallRequestInfo,
+          ],
+          new AbortController().signal,
+        );
+      });
+      await flush();
+      expect(releaseParked).toBeDefined();
+      expect(coreRejections).toHaveLength(0);
+
+      // Site 1: the signal is already aborted when Core is asked to schedule.
+      const preAbortedController = new AbortController();
+      preAbortedController.abort();
+      const preAbortedRequest = scheduleFullTurn(
+        'real-core-pre-aborted-call',
+        preAbortedController.signal,
+      );
+      await flush();
+      expect(coreRejections).toHaveLength(1);
+      expectCancelledOnce('real-core-pre-aborted-call', preAbortedRequest);
+
+      // Site 2: a live signal parks in `requestQueue` behind the busy batch
+      // and only the later abort rejects it. Site 1 rejects synchronously at
+      // schedule time, so a rejection that appears only after the abort
+      // cannot have come from it.
+      const queuedController = new AbortController();
+      const queuedRequest = scheduleFullTurn(
+        'real-core-queued-call',
+        queuedController.signal,
+      );
+      await flush();
+      expect(coreRejections).toHaveLength(1);
+
+      act(() => {
+        queuedController.abort();
+      });
+      await flush();
+      expect(coreRejections).toHaveLength(2);
+      expectCancelledOnce('real-core-queued-call', queuedRequest);
+
+      // Only the parked tool ever ran; neither full-turn batch executed, and
+      // neither was reported to the model as an unhandled failure.
+      expect(parkedTool.execute).toHaveBeenCalledTimes(1);
+      expect(
+        onComplete.mock.calls
+          .flat(Infinity)
+          .filter(
+            (toolCall: any) =>
+              toolCall?.response?.errorType ===
+              ToolErrorType.UNHANDLED_EXCEPTION,
+          ),
+      ).toEqual([]);
+    } finally {
+      scheduleSpy.mockRestore();
+      act(() => {
+        releaseParked?.({
+          llmContent: 'done',
+          returnDisplay: 'done',
+        } as ToolResult);
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+  });
+
+  it('contains a rejected full-turn cancellation completion without a second completion', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('Tool call cancelled while in queue.'));
+    // The caller's completion callback rejects while releasing the batch.
+    onComplete.mockRejectedValue(new Error('cleanup failed'));
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { result } = renderScheduler();
+      const request = {
+        callId: 'rejected-completion-full-turn-call',
+        name: 'mockTool',
+        args: {},
+      } as ToolCallRequestInfo;
+      const abortController = new AbortController();
+      abortController.abort();
+
+      act(() => {
+        result.current[1]([request], abortController.signal, 'vision-agent\0');
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      // Give the detached task a real turn boundary so a rejection left
+      // unhandled would surface.
+      vi.useRealTimers();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // The terminal handler logs the failure instead of letting it escape…
+      const completionFailures = debugLoggerErrors.filter((line) =>
+        line.includes('Full-turn tool completion failed'),
+      );
+      expect(completionFailures).toHaveLength(1);
+      // …naming the batch it failed to complete…
+      expect(completionFailures[0]).toContain(
+        'callIds rejected-completion-full-turn-call',
+      );
+      // …and keeping the stack, not just the message, so the throw site is
+      // recoverable from the line alone.
+      expect(completionFailures[0]).toContain('Error: cleanup failed');
+      expect(completionFailures[0]).toMatch(/\n\s+at /);
+      // …without retrying the completion a second time…
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      // …and without an unhandled rejection.
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      scheduleSpy.mockRestore();
+    }
   });
 
   it('should handle tool not found', async () => {
@@ -482,13 +1401,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 1',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi1',
               name: 'tool1',
               response: { output: 'Output 1' },
             },
-          },
+          }),
         ],
       }),
     });
@@ -498,13 +1417,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 2',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi2',
               name: 'tool2',
               response: { output: 'Output 2' },
             },
-          },
+          }),
         ],
       }),
     });
@@ -758,6 +1677,20 @@ describe('mapToDisplay', () => {
       expectedResultDisplay: 'Cancelled display',
       expectedName: baseTool.displayName,
       expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'cancelled before tool resolution',
+      status: 'cancelled',
+      extraProps: {
+        response: {
+          ...baseResponse,
+          resultDisplay: 'Cancelled before resolution',
+        },
+      },
+      expectedStatus: ToolCallStatus.Canceled,
+      expectedResultDisplay: 'Cancelled before resolution',
+      expectedName: baseRequest.name,
+      expectedDescription: JSON.stringify(baseRequest.args),
     },
   ];
 

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { matches, nextFireTime, parseCron } from './cronParser.js';
 
 describe('parseCron', () => {
@@ -35,9 +35,31 @@ describe('parseCron', () => {
     expect([...fields.minute].sort((a, b) => a - b)).toEqual([0, 15, 30, 45]);
   });
 
+  it('uses the leading character for Vixie day wildcard flags', () => {
+    expect(parseCron('0 0 */2 * 1').domIsWild).toBe(true);
+    expect(parseCron('0 0 15 * */3').dowIsWild).toBe(true);
+    expect(parseCron('0 0 *,10 * 1').domIsWild).toBe(true);
+    expect(parseCron('0 0 15 * *,3').dowIsWild).toBe(true);
+    expect(parseCron('0 0 1,* * 1').domIsWild).toBe(false);
+    expect(parseCron('0 0 15 * 1,*').dowIsWild).toBe(false);
+  });
+
   it('parses range with step', () => {
     const fields = parseCron('1-10/3 * * * *');
     expect([...fields.minute].sort((a, b) => a - b)).toEqual([1, 4, 7, 10]);
+  });
+
+  it('applies a step to a single starting value (N/step means N-max/step)', () => {
+    // Vixie-cron: `5/15` starts at 5 and steps to the field maximum,
+    // i.e. minutes 5, 20, 35, 50 — not just {5}.
+    const fields = parseCron('5/15 * * * *');
+    expect([...fields.minute].sort((a, b) => a - b)).toEqual([5, 20, 35, 50]);
+  });
+
+  it('applies a step to a single starting hour value', () => {
+    // `0/6` in the hour field → hours 0, 6, 12, 18.
+    const fields = parseCron('* 0/6 * * *');
+    expect([...fields.hour].sort((a, b) => a - b)).toEqual([0, 6, 12, 18]);
   });
 
   it('throws on wrong number of fields', () => {
@@ -120,6 +142,20 @@ describe('matches', () => {
     expect(matches('0 10 * * 1', date)).toBe(false);
   });
 
+  it('uses AND logic for day fields that start with a wildcard step', () => {
+    const date = new Date(2025, 0, 1, 0, 0); // Wednesday
+    expect(matches('0 0 */2 * 1', date)).toBe(false);
+    expect(matches('0 0 15 * */3', date)).toBe(false);
+  });
+
+  it('matches an N/step minute pattern at every stepped minute', () => {
+    // `5/15` fires at :05, :20, :35, :50 — not only :05.
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 5))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 20))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 50))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 10))).toBe(false);
+  });
+
   it('matches every-N-minutes pattern', () => {
     const date0 = new Date(2025, 0, 15, 10, 0);
     const date5 = new Date(2025, 0, 15, 10, 5);
@@ -179,5 +215,79 @@ describe('nextFireTime', () => {
     const now = new Date(2025, 0, 15, 10, 0, 0); // exactly 10:00:00
     const next = nextFireTime('*/5 * * * *', now);
     expect(next.getTime()).toBeGreaterThan(now.getTime());
+  });
+
+  it('uses AND logic for leading-wildcard day fields', () => {
+    const after = new Date(2024, 11, 31, 23, 59);
+    expect(nextFireTime('0 0 */2 * 1', after)).toEqual(
+      new Date(2025, 0, 13, 0, 0),
+    );
+    expect(nextFireTime('0 0 15 * */3', after)).toEqual(
+      new Date(2025, 0, 15, 0, 0),
+    );
+  });
+});
+
+describe('nextFireTime across DST transitions', () => {
+  // America/New_York spring forward 2026-03-08 02:00, fall back 2026-11-01 02:00.
+  // The repeated local hour 01:00–01:59 on fall-back day exists twice
+  // (EDT = UTC-4 first, EST = UTC-5 second). Local Date setters resolve the
+  // ambiguous wall-clock to the earlier occurrence, which used to re-project
+  // a live instant into the past (see issue #11720).
+  const originalTz = process.env.TZ;
+
+  beforeAll(() => {
+    process.env.TZ = 'America/New_York';
+  });
+
+  afterAll(() => {
+    if (originalTz === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = originalTz;
+    }
+  });
+
+  it('returns a strictly-later instant for an anchor inside the repeated hour', () => {
+    // 06:30:15Z is the second 01:30 (EST). The old local-setter scan snapped
+    // back to 05:31Z, 59 minutes before the input.
+    const after = new Date('2026-11-01T06:30:15.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:31:00.000Z');
+    expect(next.getTime()).toBeGreaterThan(after.getTime());
+  });
+
+  it('reaches the second occurrence of the repeated hour when scanning forward', () => {
+    // 05:59Z is the first 01:59 (EDT). Local setMinutes(60) built local
+    // 02:00 (EST only) and jumped straight to 07:00Z, skipping 06:00Z.
+    const after = new Date('2026-11-01T05:59:00.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:00:00.000Z');
+  });
+
+  it('fires a fixed-hour job in both occurrences of the repeated hour', () => {
+    // Anchored at the first 01:30 (05:30Z), the second 01:30 (06:30Z) must
+    // still be reachable rather than skipped to the next day.
+    const after = new Date('2026-11-01T05:30:00.000Z');
+    const next = nextFireTime('30 1 * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:30:00.000Z');
+  });
+
+  it('advances across the spring-forward gap', () => {
+    // 06:59Z is 01:59 EST; 02:00–02:59 does not exist that morning, so the
+    // next real minute is 03:00 EDT (07:00Z).
+    const after = new Date('2026-03-08T06:59:00.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-03-08T07:00:00.000Z');
+    expect(next.getTime()).toBeGreaterThan(after.getTime());
+  });
+
+  it('returns a strictly-later instant when anchored exactly on a repeated-hour match', () => {
+    // 06:00Z is exactly the second 01:00 (EST). The old scan re-materialised
+    // 01:01 as EDT (05:01Z), one minute before the input.
+    const after = new Date('2026-11-01T06:00:00.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:01:00.000Z');
+    expect(next.getTime()).toBeGreaterThan(after.getTime());
   });
 });

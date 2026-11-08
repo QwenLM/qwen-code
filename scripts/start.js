@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * @license
  * Copyright 2025 Google LLC
@@ -18,18 +20,38 @@
 // limitations under the License.
 
 import { spawn, execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+const startupWarningsFile = join(
+  tmpdir(),
+  `qwen-code-warnings-${process.pid}-${randomUUID()}.txt`,
+);
+
+const env = {
+  ...process.env,
+  CLI_VERSION: pkg.version,
+  DEV: 'true',
+  QWEN_CODE_WARNINGS_FILE: startupWarningsFile,
+  // The entry a `qwen …` subprocess should call to reach THIS build. This
+  // launcher runs `node packages/cli` directly — no bin wrapper in the chain, so
+  // nothing else publishes it, and a /review run from `npm start` would fall
+  // back to whatever `qwen` PATH resolves to. Assignment, not `||=`, for the
+  // same reason as scripts/dev.js: an inherited value is another session's CLI.
+  QWEN_CODE_CLI: fileURLToPath(import.meta.url),
+};
 
 // check build status, write warnings to file for app to display if needed
 execSync('node ./scripts/check-build-status.js', {
   stdio: 'inherit',
   cwd: root,
+  env,
 });
 
 const nodeArgs = ['--expose-gc'];
@@ -58,12 +80,6 @@ if (process.env.DEBUG && !sandboxCommand) {
 nodeArgs.push(join(root, 'packages', 'cli'));
 nodeArgs.push(...process.argv.slice(2));
 
-const env = {
-  ...process.env,
-  CLI_VERSION: pkg.version,
-  DEV: 'true',
-};
-
 if (process.env.DEBUG) {
   // If this is not set, the debugger will pause on the outer process rather
   // than the relaunched process making it harder to debug.
@@ -78,6 +94,23 @@ const child = spawn('node', nodeArgs, {
   cwd: workingDir,
 });
 
-child.on('close', (code) => {
-  process.exit(code);
+child.on('close', (code, signal) => {
+  try {
+    rmSync(startupWarningsFile, { force: true });
+  } catch {
+    // The checker or startup warnings consumer may already have removed it.
+  }
+
+  // Same contract as scripts/dev.js: this launcher is a QWEN_CODE_CLI entry, and
+  // a signal-killed child (`code === null`) must not exit 0 — `process.exit(null)`
+  // coerces to success. Re-raise the signal; fall back to a non-zero exit.
+  if (signal) {
+    try {
+      process.kill(process.pid, signal);
+      return;
+    } catch {
+      process.exit(1);
+    }
+  }
+  process.exit(code ?? 1);
 });

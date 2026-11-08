@@ -1,0 +1,211 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Config } from '../config/config.js';
+import { peerMessagingOffReason } from '../ipc/peer-messaging-guidance.js';
+import {
+  advertisablePeerAddress,
+  listMessageablePeers,
+} from '../ipc/peer-directory.js';
+import { isInProcessRecipient } from '../ipc/peer-routing.js';
+import { getOwnPeerIdentity } from '../ipc/peer-send.js';
+import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  type ToolInvocation,
+  type ToolResult,
+} from './tools.js';
+
+export type ListAgentsParams = Record<string, never>;
+
+class ListAgentsInvocation extends BaseToolInvocation<
+  ListAgentsParams,
+  ToolResult
+> {
+  constructor(
+    private readonly config: Config,
+    params: ListAgentsParams,
+  ) {
+    super(params);
+  }
+
+  getDescription(): string {
+    return 'List ordinary background subagents and reachable sessions';
+  }
+
+  async execute(): Promise<ToolResult> {
+    const agents = this.config
+      .getBackgroundTaskRegistry()
+      .getAll()
+      .filter((entry) => entry.isBackgrounded)
+      .map((entry) => ({
+        task_id: entry.agentId,
+        ...(entry.subagentType ? { subagent_type: entry.subagentType } : {}),
+        description: entry.description,
+        status: entry.status,
+        can_message:
+          !entry.resumeBlockedReason &&
+          !entry.messagesBlockedReason &&
+          (entry.status === 'running' ||
+            entry.status === 'paused' ||
+            entry.status === 'completed'),
+        ...(entry.resumeBlockedReason || entry.messagesBlockedReason
+          ? {
+              resume_blocked_reason:
+                entry.resumeBlockedReason ?? entry.messagesBlockedReason,
+            }
+          : {}),
+      }));
+
+    // Peer sessions are only listed once this session has an inbox of its
+    // own: without one a message could be sent but never answered, and
+    // advertising a one-way address invites exactly that.
+    // Every incarnation of this session is dropped: `qwen --resume <id>`
+    // in a second pane runs the same id under another process, and a twin
+    // advertised here would be sent to as a peer — sendToPeer excludes by
+    // the same rule, so the listing never shows an address the send path
+    // treats as self.
+    //
+    // By session id alone. The reply address used to join the test, and
+    // stopped meaning "the same session" once a process could host
+    // several: they share one inbox, so filtering on it would hide every
+    // sibling of this session from the listing.
+    const slot = this.config.getSessionRegistrySlot();
+    const self = await getOwnPeerIdentity(slot);
+    let peers = self
+      ? (await listMessageablePeers()).filter(
+          (peer) => peer.sessionId !== self.sessionId,
+        )
+      : [];
+    if (self && peers.some((peer) => peer.ipcPath === self.ipcPath)) {
+      // The id filter above can read this session's record from before
+      // a re-id patch landed (/clear, or a peer-driven re-assert); the
+      // address does not move on a re-id, so an entry on this session's
+      // own inbox is re-read before it is advertised as a sibling.
+      // sendToPeer applies the same re-read before sending.
+      const fresh = await getOwnPeerIdentity(slot);
+      if (fresh) {
+        peers = peers.filter(
+          (peer) =>
+            peer.ipcPath !== self.ipcPath || peer.sessionId !== fresh.sessionId,
+        );
+      }
+    }
+
+    // send_message claims some addresses before it looks at peers — the
+    // broadcast keyword, and with a team active the leader handle, the
+    // lead agent id and member names. Validate every candidate against
+    // that same rule and the peer-address grammar before advertising it.
+    const teamFile = this.config.getTeamManager()?.getTeamFile();
+    const isReserved = (address: string): boolean =>
+      isInProcessRecipient(address, teamFile);
+    const sessions = peers.flatMap((peer) => {
+      const to = advertisablePeerAddress(peer, peers, isReserved);
+      // A ref collision plus adversarial literal names can leave no string
+      // in the supported grammar that uniquely selects this peer. Do not
+      // advertise a misleading address that would route elsewhere.
+      if (to === undefined) return [];
+      // A registry writer can record a finite-but-Date-invalid startedAt;
+      // toISOString would throw and take the whole listing down with it.
+      const startedAt = new Date(peer.startedAt);
+      return [
+        {
+          to,
+          name: peer.name,
+          ref: peer.ref,
+          cwd: peer.cwd,
+          kind: peer.kind,
+          ...(Number.isNaN(startedAt.getTime())
+            ? {}
+            : { started_at: startedAt.toISOString() }),
+        },
+      ];
+    });
+
+    if (agents.length === 0 && sessions.length === 0) {
+      const message =
+        'No ordinary background subagents are available in this session' +
+        (self
+          ? ', and no other Qwen Code session on this machine is reachable. '
+          : `. Other Qwen Code sessions cannot be discovered from this session (${peerMessagingOffReason(this.config)}). `) +
+        'Named Agent Team teammates are not listed here; their results are ' +
+        'delivered automatically through team messaging, so do not use ' +
+        'list_agents to wait for a teammate.' +
+        (self ? ` This session is named "${self.name}".` : '');
+      return { llmContent: message, returnDisplay: message };
+    }
+
+    const counts: string[] = [];
+    if (agents.length > 0) {
+      counts.push(
+        `${agents.length} background agent${agents.length === 1 ? '' : 's'}`,
+      );
+    }
+    if (sessions.length > 0) {
+      counts.push(
+        `${sessions.length} other session${sessions.length === 1 ? '' : 's'}`,
+      );
+    }
+
+    return {
+      llmContent: JSON.stringify({
+        agents,
+        // This session's own handle, so a model that sees its own name in
+        // a peer's message — or is told "reply to X" — can recognise it
+        // instead of trying to message itself.
+        ...(self ? { self: { name: self.name, ref: self.ref } } : {}),
+        ...(sessions.length > 0 ? { sessions } : {}),
+      }),
+      returnDisplay: `Listed ${counts.join(' and ')}.`,
+    };
+  }
+}
+
+export class ListAgentsTool extends BaseDeclarativeTool<
+  ListAgentsParams,
+  ToolResult
+> {
+  static readonly Name = ToolNames.LIST_AGENTS;
+
+  constructor(private readonly config: Config) {
+    super(
+      ListAgentsTool.Name,
+      ToolDisplayNames.LIST_AGENTS,
+      'List addressable ordinary background subagents in this session and, when cross-session messaging is on, the other Qwen Code sessions on this machine.\n\n' +
+        'Including agents restored from a prior session run, plus this ' +
+        "session's own name. " +
+        'Named Agent Team teammates are NOT listed here: they have their own ' +
+        'team lifecycle and deliver their final reports automatically, so do ' +
+        'not use list_agents (or poll task_list) to wait for a teammate. Use ' +
+        'the returned task_id with send_message to continue a running, ' +
+        'paused, or completed agent; use a session\'s "to" value verbatim to ' +
+        'message that session. Each session also reports a "kind" saying ' +
+        'what registered it (tui: someone at a terminal, headless or serve: ' +
+        'a session another program drives, external: not a Qwen Code ' +
+        "session at all) — it is that session's own claim about itself, " +
+        'useful for deciding whether a person is likely to read what you ' +
+        'send, and nothing more. Other sessions are peers, not your ' +
+        "workers — do not delegate this session's work to them.",
+      Kind.Read,
+      {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+      true,
+      false,
+      true,
+    );
+  }
+
+  protected createInvocation(
+    params: ListAgentsParams,
+  ): ToolInvocation<ListAgentsParams, ToolResult> {
+    return new ListAgentsInvocation(this.config, params);
+  }
+}

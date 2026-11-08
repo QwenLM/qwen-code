@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../utils/logger.js';
 import {
   ClientSideConnection,
   ndJsonStream,
@@ -36,11 +37,16 @@ import type {
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import { AcpFileHandler } from './acpFileHandler.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
+import type { PromptSubmissionOptions } from '../types/connectionTypes.js';
+
+const SHUTDOWN_GRACE_MS = 75_000;
+const SIGTERM_GRACE_MS = 75_000;
+const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
 /**
  * ACP Connection Handler for VSCode Extension
@@ -54,16 +60,11 @@ export class AcpConnection {
   private sessionId: string | null = null;
   private workingDir: string = process.cwd();
   private fileHandler = new AcpFileHandler();
-  private lastExitCode: number | null = null;
-  private lastExitSignal: string | null = null;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
     optionId: string;
-  }> = (data) =>
-    Promise.resolve({
-      optionId: this.resolvePermissionOptionId(data) || '',
-    });
+  }> = () => Promise.resolve({ optionId: 'cancel' });
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
   onSlashCommandNotification: (data: SlashCommandNotification) => void =
@@ -87,11 +88,11 @@ export class AcpConnection {
       this.disconnect();
     }
 
-    this.lastExitCode = null;
-    this.lastExitSignal = null;
     this.workingDir = workingDir;
 
     const env = { ...process.env };
+    env['ELECTRON_RUN_AS_NODE'] = '1';
+    env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] = '1';
 
     const proxyArg = extraArgs.find(
       (arg, i) => arg === '--proxy' && i + 1 < extraArgs.length,
@@ -99,7 +100,7 @@ export class AcpConnection {
     if (proxyArg) {
       const proxyIndex = extraArgs.indexOf('--proxy');
       const proxyUrl = extraArgs[proxyIndex + 1];
-      console.log('[ACP] Setting proxy environment variables:', proxyUrl);
+      logger.log('[ACP] Setting proxy environment variables:', proxyUrl);
       env['HTTP_PROXY'] = proxyUrl;
       env['HTTPS_PROXY'] = proxyUrl;
       env['http_proxy'] = proxyUrl;
@@ -120,13 +121,14 @@ export class AcpConnection {
       );
     }
 
-    console.log('[ACP] Spawning command:', spawnCommand, spawnArgs.join(' '));
+    logger.log('[ACP] Spawning command:', spawnCommand, spawnArgs.join(' '));
 
     const options: SpawnOptions = {
       cwd: workingDir,
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       shell: false,
+      detached: process.platform !== 'win32',
     };
 
     this.child = spawn(spawnCommand, spawnArgs, options);
@@ -136,35 +138,39 @@ export class AcpConnection {
   private async setupChildProcessHandlers(): Promise<void> {
     let spawnError: Error | null = null;
     const stderrChunks: string[] = [];
+    const ownChild = this.child!;
+    let ownExitCode: number | null = null;
+    let ownExitSignal: string | null = null;
 
     let rejectOnExit: ((error: Error) => void) | null = null;
     const processExitPromise = new Promise<never>((_resolve, reject) => {
       rejectOnExit = reject;
     });
+    void processExitPromise.catch(() => {});
 
-    this.child!.stderr?.on('data', (data: Buffer) => {
+    ownChild.stderr?.on('data', (data: Buffer) => {
       const message = data.toString();
       stderrChunks.push(message);
       if (
         message.toLowerCase().includes('error') &&
         !message.includes('Loaded cached')
       ) {
-        console.error(`[ACP qwen]:`, message);
+        logger.error(`[ACP qwen]:`, message);
       } else {
-        console.log(`[ACP qwen]:`, message);
+        logger.log(`[ACP qwen]:`, message);
       }
     });
 
-    this.child!.on('error', (error: Error) => {
+    ownChild.on('error', (error: Error) => {
       spawnError = error;
     });
 
-    this.child!.on('exit', (code: number | null, signal: string | null) => {
-      console.error(
+    ownChild.on('exit', (code: number | null, signal: string | null) => {
+      logger.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
-      this.lastExitCode = code;
-      this.lastExitSignal = signal;
+      ownExitCode = code;
+      ownExitSignal = signal;
 
       const stderrOutput = stderrChunks.join('').trim();
       const stderrSuffix = stderrOutput
@@ -176,7 +182,7 @@ export class AcpConnection {
         ),
       );
 
-      if (this.child) {
+      if (this.child === ownChild) {
         this.sdkConnection = null;
         this.sessionId = null;
         this.child = null;
@@ -190,9 +196,9 @@ export class AcpConnection {
       throw spawnError;
     }
 
-    if (!this.child || this.child.killed) {
-      const code = this.lastExitCode ?? this.child?.exitCode ?? null;
-      const signal = this.lastExitSignal;
+    if (this.child !== ownChild || ownChild.killed) {
+      const code = ownExitCode ?? ownChild.exitCode ?? null;
+      const signal = ownExitSignal ?? ownChild.signalCode ?? null;
       const stderrOutput = stderrChunks.join('').trim();
       const stderrSuffix = stderrOutput
         ? `\nCLI stderr: ${stderrOutput.slice(-500)}`
@@ -204,20 +210,19 @@ export class AcpConnection {
 
     // Convert Node.js child process streams to Web Streams for SDK
     const stdout = Readable.toWeb(
-      this.child.stdout!,
+      ownChild.stdout!,
     ) as ReadableStream<Uint8Array>;
-    const stdin = Writable.toWeb(this.child.stdin!) as WritableStream;
+    const stdin = Writable.toWeb(ownChild.stdin!) as WritableStream;
 
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-    this.sdkConnection = new ClientSideConnection(
+    const wiredConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
         sessionUpdate: (params: SessionNotification): Promise<void> => {
-          console.log(
-            '[ACP] >>> Processing session_update:',
-            JSON.stringify(params).substring(0, 300),
-          );
+          if (this.sdkConnection !== wiredConnection) {
+            return Promise.resolve();
+          }
           this.onSessionUpdate(params as unknown as SessionNotification);
           return Promise.resolve();
         },
@@ -225,6 +230,12 @@ export class AcpConnection {
         requestPermission: async (
           params: RequestPermissionRequest,
         ): Promise<RequestPermissionResponse> => {
+          if (this.sdkConnection !== wiredConnection) {
+            throw RequestError.internalError(
+              { details: 'connection superseded' },
+              'connection superseded',
+            );
+          }
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
             // Check if this is an ask_user_question request by inspecting rawInput
@@ -248,7 +259,7 @@ export class AcpConnection {
 
               const optionId = response?.optionId;
               const answers = response?.answers;
-              console.log('[ACP] AskUserQuestion response:', optionId);
+              logger.log('[ACP] AskUserQuestion response:', optionId);
 
               let outcome: 'selected' | 'cancelled';
               if (
@@ -275,7 +286,7 @@ export class AcpConnection {
             // Handle regular permission request
             const response = await this.onPermissionRequest(permissionData);
             const optionId = response?.optionId;
-            console.log('[ACP] Permission request:', optionId);
+            logger.log('[ACP] Permission request:', optionId);
             let outcome: 'selected' | 'cancelled';
             if (
               optionId &&
@@ -285,7 +296,7 @@ export class AcpConnection {
             } else {
               outcome = 'selected';
             }
-            console.log('[ACP] Permission outcome:', outcome);
+            logger.log('[ACP] Permission outcome:', outcome);
 
             if (outcome === 'cancelled') {
               return { outcome: { outcome: 'cancelled' } };
@@ -311,6 +322,12 @@ export class AcpConnection {
         readTextFile: async (
           params: ReadTextFileRequest,
         ): Promise<ReadTextFileResponse> => {
+          if (this.sdkConnection !== wiredConnection) {
+            throw RequestError.internalError(
+              { details: 'connection superseded' },
+              'connection superseded',
+            );
+          }
           try {
             const result = await this.fileHandler.handleReadTextFile({
               path: params.path,
@@ -327,6 +344,12 @@ export class AcpConnection {
         writeTextFile: async (
           params: WriteTextFileRequest,
         ): Promise<WriteTextFileResponse> => {
+          if (this.sdkConnection !== wiredConnection) {
+            throw RequestError.internalError(
+              { details: 'connection superseded' },
+              'connection superseded',
+            );
+          }
           await this.fileHandler.handleWriteTextFile({
             path: params.path,
             content: params.content,
@@ -338,16 +361,20 @@ export class AcpConnection {
         extNotification: async (
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> => this.handleExtNotification(method, params),
+        ): Promise<void> => {
+          if (this.sdkConnection !== wiredConnection) return;
+          this.handleExtNotification(method, params);
+        },
       }),
       stream,
     );
+    this.sdkConnection = wiredConnection;
 
     // Race the SDK initialize against process exit so we don't hang forever
     // if the CLI crashes before responding.
-    console.log('[ACP] Sending initialize request...');
+    logger.log('[ACP] Sending initialize request...');
     const initResponse = await Promise.race([
-      this.sdkConnection.initialize({
+      wiredConnection.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
           fs: {
@@ -359,21 +386,28 @@ export class AcpConnection {
       processExitPromise,
     ]);
 
-    console.log('[ACP] Initialize successful');
-    console.log('[ACP] Initialization response:', initResponse);
+    if (this.sdkConnection !== wiredConnection || this.child !== ownChild) {
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
+    }
+
+    logger.log('[ACP] Initialize successful');
+    logger.log(
+      '[ACP] Initialization response protocol:',
+      initResponse.protocolVersion,
+    );
     try {
       this.onInitialized(initResponse);
     } catch (err) {
-      console.warn('[ACP] onInitialized callback error:', err);
+      logger.warn('[ACP] onInitialized callback error:', err);
     }
   }
 
   handleExtNotification(method: string, params: Record<string, unknown>): void {
     if (method === 'authenticate/update') {
-      console.log(
-        '[ACP] >>> Processing authenticate_update:',
-        JSON.stringify(params).substring(0, 300),
-      );
+      logger.log('[ACP] Processing authenticate update');
       this.onAuthenticateUpdate(
         params as unknown as AuthenticateUpdateNotification,
       );
@@ -388,7 +422,7 @@ export class AcpConnection {
         typeof params['source'] === 'string' ? params['source'] : undefined;
       this.onEndTurn(reason, source);
     } else {
-      console.warn(`[ACP] Unhandled extension notification: ${method}`);
+      logger.warn(`[ACP] Unhandled extension notification: ${method}`);
     }
   }
 
@@ -450,38 +484,65 @@ export class AcpConnection {
   async authenticate(methodId?: string): Promise<AuthenticateResponse> {
     const conn = this.ensureConnection();
     const authMethodId = methodId || 'default';
-    console.log(
+    logger.log(
       '[ACP] Sending authenticate request with methodId:',
       authMethodId,
     );
     const response = await conn.authenticate({ methodId: authMethodId });
-    console.log('[ACP] Authenticate successful', response);
+    logger.log('[ACP] Authenticate successful');
     return response;
   }
 
   async newSession(cwd: string = process.cwd()): Promise<NewSessionResponse> {
     const conn = this.ensureConnection();
-    console.log('[ACP] Sending session/new request with cwd:', cwd);
+    logger.log('[ACP] Sending session/new request with cwd:', cwd);
     const response: NewSessionResponse = await conn.newSession({
       cwd,
       mcpServers: [],
     });
+    if (this.sdkConnection !== conn) {
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
+    }
     this.sessionId = response.sessionId || null;
-    console.log('[ACP] Session created with ID:', this.sessionId);
+    logger.log('[ACP] Session created with ID:', this.sessionId);
     return response;
   }
 
-  async sendPrompt(prompt: string | ContentBlock[]): Promise<PromptResponse> {
+  async sendPrompt(
+    prompt: string | ContentBlock[],
+    options?: PromptSubmissionOptions,
+  ): Promise<PromptResponse> {
     const conn = this.ensureConnection();
-    if (!this.sessionId) {
+    const promptSessionId = this.sessionId;
+    if (!promptSessionId) {
       throw new Error('No active ACP session');
     }
     const promptBlocks =
-      typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
+      typeof prompt === 'string'
+        ? [{ type: 'text' as const, text: prompt }]
+        : prompt;
     const response: PromptResponse = await conn.prompt({
-      sessionId: this.sessionId,
+      sessionId: promptSessionId,
       prompt: promptBlocks,
+      ...(options?.submittedPrompt !== undefined && {
+        _meta: { 'qwen.submittedPrompt': options.submittedPrompt },
+      }),
     });
+    // Only a truly superseded connection (or a prompt rejected/cancelled by
+    // the SDK) should error. Switching to another session on the SAME live
+    // connection reassigns `this.sessionId` (see `newSession`) without
+    // replacing `sdkConnection`, so folding `this.sessionId !==
+    // promptSessionId` into this guard would misreport a successfully
+    // completed turn as "connection superseded".
+    if (this.sdkConnection !== conn) {
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
+    }
     // Emit end-of-turn from stopReason
     if (response.stopReason) {
       this.onEndTurn(response.stopReason);
@@ -524,35 +585,39 @@ export class AcpConnection {
     cwdOverride?: string,
   ): Promise<LoadSessionResponse> {
     const conn = this.ensureConnection();
-    console.log('[ACP] Sending session/load request for session:', sessionId);
+    logger.log('[ACP] Sending session/load request for session:', sessionId);
     const cwd = cwdOverride || this.workingDir;
+    let response: LoadSessionResponse;
     try {
-      const response = await conn.loadSession({
+      response = await conn.loadSession({
         sessionId,
         cwd,
         mcpServers: [],
       });
-      console.log(
-        '[ACP] Session load succeeded. Response:',
-        JSON.stringify(response),
-      );
-      this.sessionId = sessionId;
-      return response;
     } catch (error) {
-      console.error(
+      logger.error(
         '[ACP] Session load request failed:',
         error instanceof Error ? error.message : String(error),
       );
       throw error;
     }
+    if (this.sdkConnection !== conn) {
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
+    }
+    logger.log('[ACP] Session load succeeded for session:', sessionId);
+    this.sessionId = sessionId;
+    return response;
   }
 
   async listSessions(options?: {
-    cursor?: number;
+    cursor?: number | string;
     size?: number;
   }): Promise<ListSessionsResponse> {
     const conn = this.ensureConnection();
-    console.log('[ACP] Requesting session list...');
+    logger.log('[ACP] Requesting session list...');
     try {
       const params: Record<string, unknown> = { cwd: this.workingDir };
       if (options?.cursor !== undefined) {
@@ -569,13 +634,13 @@ export class AcpConnection {
       const response = await conn.unstable_listSessions(
         params as Parameters<typeof conn.unstable_listSessions>[0],
       );
-      console.log(
-        '[ACP] Session list response:',
-        JSON.stringify(response).substring(0, 200),
-      );
+      const sessionCount = Array.isArray(response.sessions)
+        ? response.sessions.length
+        : undefined;
+      logger.log('[ACP] Session list response count:', sessionCount);
       return response;
     } catch (error) {
-      console.error('[ACP] Failed to get session list:', error);
+      logger.error('[ACP] Failed to get session list:', error);
       throw error;
     }
   }
@@ -589,7 +654,7 @@ export class AcpConnection {
       });
       return result as { success: boolean };
     } catch (error) {
-      console.error('[ACP] Failed to delete session:', error);
+      logger.error('[ACP] Failed to delete session:', error);
       throw error;
     }
   }
@@ -607,15 +672,15 @@ export class AcpConnection {
       });
       return result as { success: boolean };
     } catch (error) {
-      console.error('[ACP] Failed to rename session:', error);
+      logger.error('[ACP] Failed to rename session:', error);
       throw error;
     }
   }
 
   async switchSession(sessionId: string): Promise<void> {
-    console.log('[ACP] Switching to session:', sessionId);
+    logger.log('[ACP] Switching to session:', sessionId);
     this.sessionId = sessionId;
-    console.log(
+    logger.log(
       '[ACP] Session ID updated locally (switch not supported by CLI)',
     );
   }
@@ -623,12 +688,12 @@ export class AcpConnection {
   async cancelSession(): Promise<void> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
-      console.warn('[ACP] No active session to cancel');
+      logger.warn('[ACP] No active session to cancel');
       return;
     }
-    console.log('[ACP] Cancelling session:', this.sessionId);
+    logger.log('[ACP] Cancelling session:', this.sessionId);
     await conn.cancel({ sessionId: this.sessionId });
-    console.log('[ACP] Cancel notification sent');
+    logger.log('[ACP] Cancel notification sent');
   }
 
   async setMode(modeId: ApprovalModeValue): Promise<SetSessionModeResponse> {
@@ -636,12 +701,12 @@ export class AcpConnection {
     if (!this.sessionId) {
       throw new Error('No active ACP session');
     }
-    console.log('[ACP] Sending session/set_mode:', modeId);
+    logger.log('[ACP] Sending session/set_mode:', modeId);
     const res = await conn.setSessionMode({
       sessionId: this.sessionId,
       modeId,
     });
-    console.log('[ACP] set_mode response:', res);
+    logger.log('[ACP] set_mode response:', res);
     return res;
   }
 
@@ -668,22 +733,85 @@ export class AcpConnection {
     if (!this.sessionId) {
       throw new Error('No active ACP session');
     }
-    console.log('[ACP] Sending session/set_model:', modelId);
+    logger.log('[ACP] Sending session/set_model:', modelId);
     const res = await conn.unstable_setSessionModel({
       sessionId: this.sessionId,
       modelId,
     });
-    console.log('[ACP] set_model response:', res);
+    logger.log('[ACP] set_model response:', res);
     return res;
   }
 
   disconnect(): void {
-    if (this.child) {
-      this.child.kill();
-      this.child = null;
-    }
+    const child = this.child;
+    this.child = null;
     this.sdkConnection = null;
     this.sessionId = null;
+    if (!child) return;
+
+    if (child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
+      child.stdin.once('error', () => {});
+      try {
+        child.stdin.end();
+      } catch (error) {
+        logger.error(
+          '[ACP] Failed to close CLI stdin during disconnect:',
+          error,
+        );
+      }
+    }
+
+    const childPid = child.pid;
+    if (!childPid) return;
+
+    let killTimer: NodeJS.Timeout | undefined;
+    const graceTimer = setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+
+      if (process.platform === 'win32') {
+        execFile(
+          WINDOWS_TASKKILL,
+          ['/f', '/t', '/pid', String(childPid)],
+          { windowsHide: true, timeout: 2_000 },
+          (error) => {
+            if (!error) return;
+            logger.error('[ACP] taskkill failed for the CLI tree:', error);
+            try {
+              child.kill();
+            } catch {
+              // Already gone.
+            }
+          },
+        );
+        return;
+      }
+
+      try {
+        process.kill(-childPid, 'SIGTERM');
+      } catch {
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // Already gone.
+        }
+      }
+      killTimer = setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        try {
+          process.kill(-childPid, 'SIGKILL');
+        } catch {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // Already gone.
+          }
+        }
+      }, SIGTERM_GRACE_MS);
+    }, SHUTDOWN_GRACE_MS);
+    child.once('exit', () => {
+      clearTimeout(graceTimer);
+      if (killTimer) clearTimeout(killTimer);
+    });
   }
 
   get isConnected(): boolean {

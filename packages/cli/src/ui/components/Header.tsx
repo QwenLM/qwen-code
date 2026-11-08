@@ -7,7 +7,10 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import Gradient from 'ink-gradient';
-import { shortenPath, tildeifyPath } from '@qwen-code/qwen-code-core';
+import {
+  shortenPath,
+  tildeifyPath,
+} from '@qwen-code/qwen-code-core/utils/paths.js';
 import { theme } from '../semantic-colors.js';
 import { shortAsciiLogo } from './AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
@@ -15,6 +18,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { getRenderableGradientColors } from '../utils/gradientUtils.js';
 import { pickAsciiArtTier } from '../utils/customBanner.js';
 import { t } from '../../i18n/index.js';
+import { formatVersionLabel } from '../../utils/version.js';
 
 /**
  * Auth display type for the Header component.
@@ -72,6 +76,7 @@ interface HeaderProps {
   customBannerSubtitle?: string;
   version: string;
   authDisplayType?: AuthDisplayType | string;
+  subscriptionPlan?: 'plus' | 'pro';
   model: string;
   workingDirectory: string;
 }
@@ -82,12 +87,14 @@ export const Header: React.FC<HeaderProps> = ({
   customBannerSubtitle,
   version,
   authDisplayType,
+  subscriptionPlan,
   model,
   workingDirectory,
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
 
   const formattedAuthType = formatAuthDisplayType(authDisplayType);
+  const versionLabel = formatVersionLabel(version);
 
   // Calculate available space properly:
   // First determine if logo can be shown, then use remaining space for path
@@ -147,7 +154,10 @@ export const Header: React.FC<HeaderProps> = ({
     0,
     availableInfoPanelWidth - infoPanelChromeWidth,
   );
-  const authModelText = `${formattedAuthType} | ${model}`;
+  const authModelText =
+    authDisplayType === 'Qwen Subscription'
+      ? `${subscriptionPlan ? `Qwen ${subscriptionPlan.charAt(0).toUpperCase() + subscriptionPlan.slice(1)} | ` : ''}[Qwen Subscription] ${model}`
+      : `${formattedAuthType} | ${model}`;
   const modelHintText = ' (/model to change)';
   const showModelHint =
     infoPanelContentWidth > 0 &&
@@ -209,14 +219,12 @@ export const Header: React.FC<HeaderProps> = ({
           <Text bold color={theme.text.accent}>
             {customBannerTitle ? customBannerTitle : '>_ Qwen Code'}
           </Text>
-          <Text color={theme.text.secondary}> (v{version})</Text>
+          <Text color={theme.text.secondary}> ({versionLabel})</Text>
         </Text>
-        {/* Subtitle (when set) replaces the blank spacer row. We always
-            emit a row here so the auth/model line stays at the same
-            vertical position regardless of whether the subtitle is set. */}
+        {/* Subscription headers omit the default spacer, while custom subtitles remain. */}
         {customBannerSubtitle ? (
           <Text color={theme.text.secondary}>{customBannerSubtitle}</Text>
-        ) : (
+        ) : authDisplayType === 'Qwen Subscription' ? null : (
           <Text> </Text>
         )}
         {/* Auth and Model line */}

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 /**
@@ -45,6 +49,7 @@ export function isSyntheticHistoryItem(
     case 'warning':
     case 'success':
     case 'retry_countdown':
+    case 'vision_notice':
     case 'notification':
     case 'tool_use_summary':
     case 'gemini_thought':
@@ -56,21 +61,29 @@ export function isSyntheticHistoryItem(
     case 'stop_hook_system_message':
       return true;
 
+    // Steer messages (mid-turn user injections) are typed 'user' but
+    // carry sentToModel === false; treat them as synthetic so the
+    // cancel handler can still do a full rewind when only a steer
+    // follows the real prompt.
+    case 'user':
+      return item.sentToModel === false;
+
     // Meaningful: user input, model text, tool runs, slash-command
     // results the user explicitly asked for. Auto-restore must bail
     // when any of these appear after the candidate user prompt.
-    case 'user':
     case 'user_shell':
     case 'gemini':
     case 'gemini_content':
     case 'tool_group':
     case 'btw':
+    case 'advisor':
     case 'memory_saved':
     case 'about':
     case 'help':
     case 'stats':
     case 'model_stats':
     case 'tool_stats':
+    case 'skill_stats':
     case 'quit':
     case 'compression':
     case 'summary':
@@ -84,6 +97,7 @@ export function isSyntheticHistoryItem(
     case 'arena_agent_complete':
     case 'arena_session_complete':
     case 'goal_status':
+    case 'goal_state':
       return false;
 
     default: {
@@ -120,35 +134,77 @@ export function itemsAfterAreOnlySynthetic(
 /** Index of the last `user` (real prompt) item, or -1. */
 export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].type === 'user') return i;
+    const item = history[i];
+    if (item.type === 'user' && item.sentToModel !== false) return i;
   }
   return -1;
 }
 
 /**
- * For each `gemini_thought` item that is immediately followed by one or
- * more `gemini_thought_content` continuations, build the concatenated
- * full text (header + continuations joined by newlines).  Items with no
- * continuation are omitted from the result — callers fall back to
- * `item.text` in that case.
+ * The user-authored text of a model-bound prompt, with the one-shot
+ * `<system-reminder>` envelopes the TUI prepends left out.
+ *
+ * `handleFinalSubmit` folds recovered-agent, worktree-restore and
+ * workflow-steering notices into the same string that is queued, sent to the
+ * model, and rendered. The model must keep seeing them; the transcript, the
+ * cross-session recall log and the cancel-restore buffer must not (#11553).
+ * Only a leading run of complete envelopes is removed, so text the user typed
+ * is never touched or swallowed, and a prompt that is nothing but envelopes
+ * keeps its raw text rather than displaying as empty.
  */
-export function buildThinkingFullTextMap(
+export function stripLeadingSystemReminders(text: string): string {
+  let rest = text;
+  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+    const close = rest.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    // Require the closing tag to end its own line (or the string), the shape
+    // every producer emits; anything else is text the user typed.
+    const after = close === -1 ? -1 : close + SYSTEM_REMINDER_CLOSE.length;
+    if (after === -1 || (after < rest.length && rest[after] !== '\n')) {
+      return text;
+    }
+    rest = rest.slice(after).replace(/^\n+/, '');
+  }
+  return rest.trim() === '' ? text : rest.trim();
+}
+
+/** Texts of real (non-steer) user prompts in `history`, oldest-first. */
+export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
+  return history
+    .filter(
+      (item): item is HistoryItem & { type: 'user'; text: string } =>
+        item.type === 'user' &&
+        item.sentToModel !== false &&
+        typeof item.text === 'string' &&
+        item.text.trim() !== '',
+    )
+    .map((item) => item.recallText ?? item.text);
+}
+
+/**
+ * Map every thought item to the id of its group's `gemini_thought` head.
+ *
+ * A "thought" is one `gemini_thought` head followed by zero or more
+ * `gemini_thought_content` continuations. Both the head and its continuations
+ * map to the head id, so a single click on the head can expand/collapse the
+ * whole group as a unit (see the per-thought inline expansion in
+ * HistoryItemDisplay).
+ */
+export function buildThoughtHeadIdMap(
   items: readonly HistoryItem[],
-): Map<HistoryItem, string> {
-  const map = new Map<HistoryItem, string>();
+): Map<HistoryItem, number> {
+  const map = new Map<HistoryItem, number>();
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
     if (item.type !== 'gemini_thought') continue;
-    let fullText = item.text;
-    let hasContinuation = false;
+    const headId = item.id;
+    map.set(item, headId);
     for (let j = i + 1; j < items.length; j++) {
       const next = items[j]!;
       if (next.type !== 'gemini_thought_content') break;
-      fullText += '\n' + next.text;
-      hasContinuation = true;
-    }
-    if (hasContinuation) {
-      map.set(item, fullText);
+      map.set(next, headId);
     }
   }
   return map;

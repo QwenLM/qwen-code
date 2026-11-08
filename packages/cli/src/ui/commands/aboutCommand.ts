@@ -7,7 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType, type HistoryItemAbout } from '../types.js';
-import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
+import { getExtendedSystemInfo } from '../systemInfo.js';
 import { t } from '../../i18n/index.js';
 import {
   collectSessionPathInfo,
@@ -22,15 +22,20 @@ export const aboutCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (context) => {
     const systemInfo = await getExtendedSystemInfo(context);
 
     if (context.executionMode !== 'interactive') {
+      const authLabel =
+        systemInfo.selectedAuthType === 'qwen-subscription'
+          ? 'Qwen Subscription'
+          : systemInfo.selectedAuthType;
       const lines = [
         `Qwen Code v${systemInfo.cliVersion}`,
         `Model: ${systemInfo.modelVersion}`,
         `Fast Model: ${systemInfo.fastModel ?? 'not set'}`,
-        `Auth: ${systemInfo.selectedAuthType}`,
+        `Auth: ${authLabel}`,
         `Platform: ${systemInfo.osPlatform} ${systemInfo.osArch} (${systemInfo.osRelease})`,
         `Node.js: ${systemInfo.nodeVersion}`,
         `Session: ${systemInfo.sessionId}`,
@@ -63,6 +68,7 @@ export const aboutCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      canRunDuringStreaming: true,
       action: async (context) => {
         const info = await collectSessionPathInfo(context);
         const content = formatSessionPathInfo(info);

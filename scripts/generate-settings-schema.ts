@@ -38,6 +38,9 @@ interface JsonSchemaProperty {
   items?: JsonSchemaProperty;
   enum?: (string | number)[];
   default?: unknown;
+  minimum?: number;
+  maximum?: number;
+  not?: JsonSchemaProperty;
   additionalProperties?: boolean | JsonSchemaProperty;
   required?: string[];
   oneOf?: JsonSchemaProperty[];
@@ -126,6 +129,9 @@ function convertSettingToJsonSchema(
     case 'number':
       schema.type = 'number';
       break;
+    case 'integer':
+      schema.type = 'integer';
+      break;
     case 'array':
       schema.type = 'array';
       if (setting.items) {
@@ -182,6 +188,22 @@ function convertSettingToJsonSchema(
       // default value (e.g. `{commit: true, pr: true}` for gitCoAuthor).
       schema.default = defaultVal;
     }
+  }
+
+  if (
+    (setting.type === 'number' || setting.type === 'integer') &&
+    setting.minimum !== undefined
+  ) {
+    schema.minimum = setting.minimum;
+  }
+  if (
+    (setting.type === 'number' || setting.type === 'integer') &&
+    setting.maximum !== undefined
+  ) {
+    schema.maximum = setting.maximum;
+  }
+  if (setting.excludedValues && setting.excludedValues.length > 0) {
+    schema.not = { enum: [...setting.excludedValues] };
   }
 
   // If the field accepts a legacy primitive shape (e.g. a boolean that was

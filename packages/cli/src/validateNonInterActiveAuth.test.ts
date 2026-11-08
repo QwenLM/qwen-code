@@ -90,7 +90,7 @@ describe('validateNonInterActiveAuth', () => {
         },
       },
       isTrusted: true,
-      migratedInMemorScopes: new Set(),
+      migratedInMemoryScopes: new Set(),
       forScope: vi.fn(),
       computeMergedSettings: vi.fn(),
     } as unknown as LoadedSettings;
@@ -288,6 +288,26 @@ describe('validateNonInterActiveAuth', () => {
       'The configured auth type is qwen-oauth, but the current auth type is openai. Please re-authenticate with the correct type.',
     );
     expect(processExitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('does not broaden enforced OpenAI auth to the Responses API', async () => {
+    mockSettings.merged.security!.auth!.enforcedType = AuthType.USE_OPENAI;
+    const nonInteractiveConfig = createMockConfig({
+      refreshAuth: refreshAuthMock,
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi
+          .fn()
+          .mockReturnValue(AuthType.USE_OPENAI_RESPONSES),
+      }),
+    });
+
+    await expect(
+      validateNonInteractiveAuth(undefined, nonInteractiveConfig, mockSettings),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'The configured auth type is openai, but the current auth type is openai-responses. Please re-authenticate with the correct type.',
+    );
+    expect(refreshAuthMock).not.toHaveBeenCalled();
   });
 
   describe('JSON output mode', () => {

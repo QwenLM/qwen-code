@@ -53,13 +53,65 @@ describe('UrlValidator', () => {
     it('should allow public URLs', () => {
       const validator = new UrlValidator([]);
       expect(validator.isBlocked('https://api.example.com/hook')).toBe(false);
-      expect(validator.isBlocked('https://webhook.site/test')).toBe(false);
+      expect(validator.isBlocked('https://hooks.example.com/test')).toBe(false);
     });
 
     it('should block invalid URLs', () => {
       const validator = new UrlValidator([]);
       expect(validator.isBlocked('not-a-url')).toBe(true);
       expect(validator.isBlocked('')).toBe(true);
+    });
+
+    describe('with allowPrivateNetworkHosts', () => {
+      it('should allow private IP ranges', () => {
+        const validator = new UrlValidator([], true);
+        expect(validator.isBlocked('http://192.168.1.1/api')).toBe(false);
+        expect(validator.isBlocked('http://10.0.0.1/api')).toBe(false);
+        expect(validator.isBlocked('http://172.16.0.1/api')).toBe(false);
+      });
+
+      it('should still block cloud metadata endpoints', () => {
+        const validator = new UrlValidator([], true);
+        expect(
+          validator.isBlocked('http://169.254.169.254/latest/meta-data'),
+        ).toBe(true);
+        expect(
+          validator.isBlocked(
+            'http://metadata.google.internal/computeMetadata',
+          ),
+        ).toBe(true);
+      });
+
+      it('should still block the Alibaba Cloud metadata IP (CGNAT range)', () => {
+        const validator = new UrlValidator([], true);
+        expect(
+          validator.isBlocked('http://100.100.100.200/latest/meta-data'),
+        ).toBe(true);
+      });
+
+      it('should still block IPv4-mapped IPv6 forms of metadata IPs', () => {
+        const validator = new UrlValidator([], true);
+        // ::ffff:169.254.169.254 (mixed dotted form)
+        expect(
+          validator.isBlocked(
+            'http://[::ffff:169.254.169.254]/latest/meta-data',
+          ),
+        ).toBe(true);
+        // ::ffff:a9fe:a9fe = 169.254.169.254
+        expect(
+          validator.isBlocked('http://[::ffff:a9fe:a9fe]/latest/meta-data'),
+        ).toBe(true);
+        // ::ffff:6464:64c8 = 100.100.100.200
+        expect(
+          validator.isBlocked('http://[::ffff:6464:64c8]/latest/meta-data'),
+        ).toBe(true);
+      });
+
+      it('should allow IPv4-mapped IPv6 forms of ordinary private IPs', () => {
+        const validator = new UrlValidator([], true);
+        // ::ffff:ac10:1 = 172.16.0.1 — private, but not a metadata endpoint
+        expect(validator.isBlocked('http://[::ffff:ac10:1]/api')).toBe(false);
+      });
     });
   });
 
@@ -85,10 +137,10 @@ describe('UrlValidator', () => {
     it('should match multiple patterns', () => {
       const validator = new UrlValidator([
         'https://api\\.example\\.com/*',
-        'https://webhook\\.site/*',
+        'https://hooks\\.example\\.com/*',
       ]);
       expect(validator.isAllowed('https://api.example.com/hook')).toBe(true);
-      expect(validator.isAllowed('https://webhook.site/test')).toBe(true);
+      expect(validator.isAllowed('https://hooks.example.com/test')).toBe(true);
       expect(validator.isAllowed('https://other.com/hook')).toBe(false);
     });
 

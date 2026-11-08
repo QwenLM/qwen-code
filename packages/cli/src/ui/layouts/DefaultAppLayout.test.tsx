@@ -17,9 +17,16 @@ import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { StreamingState } from '../types.js';
 
 const dialogManagerMockState = vi.hoisted(() => ({ lineCount: 1 }));
+const btwMessagePropsSpy = vi.hoisted(() => vi.fn());
 
 vi.mock('../components/MainContent.js', () => ({
   MainContent: () => <Text>MainContent</Text>,
+}));
+
+vi.mock('../components/UpdateNotification.js', () => ({
+  UpdateNotification: ({ message }: { message: string }) => (
+    <Text>{`UpdateNotification: ${message}`}</Text>
+  ),
 }));
 
 vi.mock('../components/DialogManager.js', () => ({
@@ -42,7 +49,10 @@ vi.mock('../components/ExitWarning.js', () => ({
 }));
 
 vi.mock('../components/messages/BtwMessage.js', () => ({
-  BtwMessage: () => <Text>BtwMessage</Text>,
+  BtwMessage: (props: unknown) => {
+    btwMessagePropsSpy(props);
+    return <Text>BtwMessage</Text>;
+  },
 }));
 
 vi.mock('../components/StickyTodoList.js', () => ({
@@ -84,7 +94,9 @@ const baseUIState: Partial<UIState> = {
   terminalHeight: 24,
   staticExtraHeight: 0,
   constrainHeight: true,
-  streamingState: StreamingState.Idle,
+  auth: {} as UIState['auth'],
+  streamingState: StreamingState.Responding,
+  useTerminalBuffer: false,
   historyManager: {
     addItem: vi.fn(),
     history: [],
@@ -136,6 +148,78 @@ describe('DefaultAppLayout', () => {
       output.indexOf('MainContent'),
     );
     expect(output.indexOf('StickyTodoList')).toBeLessThan(
+      output.indexOf('Composer'),
+    );
+  });
+
+  it('budgets the /btw answer viewport from the terminal height', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    btwMessagePropsSpy.mockClear();
+
+    renderLayout({
+      ...baseUIState,
+      useTerminalBuffer: true,
+      terminalHeight: 24,
+      btwItem: {
+        type: 'btw',
+        btw: { question: 'side', answer: 'long answer', isPending: false },
+      },
+    });
+
+    expect(btwMessagePropsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ maxAnswerRows: 12 }),
+    );
+  });
+
+  it('renders the whole /btw answer outside VP mode', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    btwMessagePropsSpy.mockClear();
+
+    renderLayout({
+      ...baseUIState,
+      useTerminalBuffer: false,
+      terminalHeight: 24,
+      btwItem: {
+        type: 'btw',
+        btw: { question: 'side', answer: 'long answer', isPending: false },
+      },
+    });
+
+    // A row budget would mount the panel's ScrollableList, which arms SGR
+    // mouse tracking (bypassVpGate) on the non-VP main screen.
+    expect(btwMessagePropsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ maxAnswerRows: undefined }),
+    );
+  });
+
+  it('renders an update that arrives after startup above the composer', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      updateInfo: {
+        message: 'Update successful!',
+        update: {
+          latest: '0.20.0',
+          current: '0.19.12',
+          type: 'latest',
+          name: '@qwen-code/qwen-code',
+        },
+      },
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('UpdateNotification: Update successful!');
+    expect(output.indexOf('UpdateNotification')).toBeLessThan(
       output.indexOf('Composer'),
     );
   });
@@ -196,6 +280,27 @@ describe('DefaultAppLayout', () => {
     expect(output).toContain('DialogManager 20');
   });
 
+  it.each<Partial<UIState['auth']>>([
+    { isAuthDialogOpen: true },
+    { authError: 'Authentication failed' },
+  ])('does not clip authentication content for %j', (auth) => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    dialogManagerMockState.lineCount = 25;
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      terminalHeight: 24,
+      staticExtraHeight: 3,
+      auth: auth as UIState['auth'],
+    });
+
+    expect(lastFrame()).toContain('DialogManager 1');
+    expect(lastFrame()).toContain('DialogManager 25');
+  });
+
   it('does not render sticky todo list while waiting for confirmation', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',
@@ -205,6 +310,22 @@ describe('DefaultAppLayout', () => {
     const { lastFrame } = renderLayout({
       ...baseUIState,
       streamingState: StreamingState.WaitingForConfirmation,
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).not.toContain('StickyTodoList');
+    expect(output).toContain('Composer');
+  });
+
+  it('does not render sticky todo list when agent is idle', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      streamingState: StreamingState.Idle,
     });
 
     const output = lastFrame() ?? '';
@@ -240,5 +361,31 @@ describe('DefaultAppLayout', () => {
     expect(output).not.toContain('StickyTodoList');
     expect(output).toContain('AgentChatView');
     expect(output).toContain('AgentComposer');
+  });
+
+  it('renders update notifications in an agent tab view', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'agent-1',
+      agents: new Map([['agent-1', {}]]),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      updateInfo: {
+        message: 'Update successful!',
+        update: {
+          latest: '0.20.0',
+          current: '0.19.12',
+          type: 'latest',
+          name: '@qwen-code/qwen-code',
+        },
+      },
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('UpdateNotification: Update successful!');
+    expect(output.indexOf('UpdateNotification')).toBeLessThan(
+      output.indexOf('AgentComposer'),
+    );
   });
 });

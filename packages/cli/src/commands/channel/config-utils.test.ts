@@ -8,18 +8,52 @@ vi.mock('./channel-registry.js', () => ({
   getPlugin: async (type: string) => {
     const plugins: Record<
       string,
-      { channelType: string; requiredConfigFields?: string[] }
+      {
+        channelType: string;
+        requiredConfigFields?: string[];
+        envResolvableConfigFields?: string[];
+        defaultSessionScope?: string;
+        supportsOutputMode?: boolean;
+      }
     > = {
       telegram: { channelType: 'telegram', requiredConfigFields: ['token'] },
       dingtalk: {
         channelType: 'dingtalk',
         requiredConfigFields: ['clientId', 'clientSecret'],
+        supportsOutputMode: true,
+      },
+      wecom: {
+        channelType: 'wecom',
+        requiredConfigFields: ['botId', 'secret'],
+        envResolvableConfigFields: ['wsUrl'],
+      },
+      numeric: {
+        channelType: 'numeric',
+        requiredConfigFields: ['port'],
+      },
+      overlap: {
+        channelType: 'overlap',
+        requiredConfigFields: ['endpoint'],
+        envResolvableConfigFields: ['endpoint'],
       },
       bare: { channelType: 'bare' }, // no requiredConfigFields
+      github: {
+        channelType: 'github',
+        requiredConfigFields: ['token'],
+        defaultSessionScope: 'chat_thread',
+      },
     };
     return plugins[type];
   },
-  supportedTypes: async () => ['telegram', 'dingtalk', 'bare'],
+  supportedTypes: async () => [
+    'telegram',
+    'dingtalk',
+    'wecom',
+    'numeric',
+    'overlap',
+    'bare',
+    'github',
+  ],
 }));
 
 describe('resolveEnvVars', () => {
@@ -38,6 +72,10 @@ describe('resolveEnvVars', () => {
     expect(resolveEnvVars(`$${ENV_KEY}`)).toBe('secret');
   });
 
+  it('supports $$ escapes for literal dollar-prefixed values', () => {
+    expect(resolveEnvVars('$$literal-token')).toBe('$literal-token');
+  });
+
   it('throws when referenced env var is not set', () => {
     expect(() => resolveEnvVars(`$${ENV_KEY}`)).toThrow(
       `Environment variable ${ENV_KEY} is not set`,
@@ -51,6 +89,77 @@ describe('resolveEnvVars', () => {
 });
 
 describe('parseChannelConfig', () => {
+  it('accepts independent session rotation bounds', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+    expect(config.sessionRotation).toEqual({ maxTurns: 200, maxAgeHours: 24 });
+    expect(
+      (await parseChannelConfig('bot', { type: 'bare' })).sessionRotation,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    null,
+    [],
+    {},
+    { maxTurns: 0 },
+    { maxTurns: 1.5 },
+    { maxAgeHours: -1 },
+    { maxAgeHours: Infinity },
+    { maxTurns: 1, unknown: 2 },
+  ])('rejects invalid session rotation %j', async (sessionRotation) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', sessionRotation }),
+    ).rejects.toThrow('sessionRotation');
+  });
+
+  it('rejects rotation with named tasks', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        sessionScope: 'user',
+        multiSession: true,
+        sessionRotation: { maxTurns: 2 },
+      }),
+    ).rejects.toThrow('cannot use sessionRotation');
+  });
+
+  it('normalizes message routes and resolves the default route', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      messageRoutes: { ' /review ': ' Review code. ', '/QA': '' },
+      defaultMessageRoute: ' /QA ',
+    });
+    expect(config.messageRoutes).toEqual({
+      '/review': 'Review code.',
+      '/QA': '',
+    });
+    expect(config.defaultMessageRoute).toBe('/QA');
+  });
+
+  it.each([
+    { messageRoutes: null },
+    { messageRoutes: [] },
+    { messageRoutes: '/review' },
+    { messageRoutes: {} },
+    { messageRoutes: { ' ': 'instructions' } },
+    { messageRoutes: { ' constructor ': 'instructions' } },
+    { messageRoutes: { '/review': 1 } },
+    { messageRoutes: { '/review': '', ' /review ': '' } },
+    { messageRoutes: { '/review': '' }, multiSession: true },
+    { defaultMessageRoute: '/review' },
+    { messageRoutes: { '/review': '' }, defaultMessageRoute: '/missing' },
+    { defaultMessageRoute: '' },
+    { defaultMessageRoute: null },
+    { defaultMessageRoute: 1 },
+  ])('rejects invalid message routing %j', async (routing) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', ...routing }),
+    ).rejects.toThrow(/messageRoutes|defaultMessageRoute/);
+  });
+
   it('throws when type is missing', async () => {
     await expect(parseChannelConfig('bot', {})).rejects.toThrow(
       'missing required field "type"',
@@ -67,6 +176,43 @@ describe('parseChannelConfig', () => {
     await expect(
       parseChannelConfig('bot', { type: 'telegram' }),
     ).rejects.toThrow('requires "token"');
+  });
+
+  it('resolves env vars in plugin-required bot credentials', async () => {
+    process.env['TEST_WECOM_BOT_ID'] = 'bot-from-env';
+    process.env['TEST_WECOM_SECRET'] = 'secret-from-env';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: '$TEST_WECOM_BOT_ID',
+      secret: '$TEST_WECOM_SECRET',
+    });
+
+    expect(result['botId']).toBe('bot-from-env');
+    expect(result['secret']).toBe('secret-from-env');
+
+    delete process.env['TEST_WECOM_BOT_ID'];
+    delete process.env['TEST_WECOM_SECRET'];
+  });
+
+  it('supports $$ escapes in plugin-required bot credentials', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: '$$literal-bot-id',
+      secret: '$$literal-secret',
+    });
+
+    expect(result['botId']).toBe('$literal-bot-id');
+    expect(result['secret']).toBe('$literal-secret');
+  });
+
+  it('allows non-string plugin-required fields', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'numeric',
+      port: 443,
+    });
+
+    expect(result['port']).toBe(443);
   });
 
   it('throws a clear error when token is not a string', async () => {
@@ -92,6 +238,52 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow('Channel "bot" field "clientSecret" must be a string.');
   });
 
+  it.each([
+    [{}, 'allowlist'],
+    [{ senderPolicy: 'open' }, 'open'],
+    [{ senderPolicy: 'pairing' }, 'pairing'],
+    [{ senderPolicy: 'pairing', dmPolicy: 'disabled' }, 'disabled'],
+    [
+      {
+        privatePolicy: 'open',
+        dmPolicy: 'disabled',
+        senderPolicy: 'allowlist',
+      },
+      'open',
+    ],
+    [{ privatePolicy: 'disabled', senderPolicy: 'open' }, 'disabled'],
+    [{ privatePolicy: 'allowlist', senderPolicy: 'open' }, 'allowlist'],
+    [
+      { privatePolicy: 'pairing', senderPolicy: 'open', dmPolicy: 'disabled' },
+      'pairing',
+    ],
+  ])('resolves private access for %j', async (config, expected) => {
+    const result = await parseChannelConfig('bot', { type: 'bare', ...config });
+    expect(result.privatePolicy).toBe(expected);
+  });
+
+  it.each(['opne', '', null, false, 1])(
+    'rejects invalid explicit privatePolicy %j',
+    async (privatePolicy) => {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'bare',
+          privatePolicy,
+          senderPolicy: 'open',
+        }),
+      ).rejects.toThrow('Channel privatePolicy must be one of:');
+    },
+  );
+
+  it('rejects removed group senders inherit', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        groups: { '*': { senders: 'inherit' } },
+      }),
+    ).rejects.toThrow('must be one of: open, allowlist');
+  });
+
   it('parses minimal valid config with defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
@@ -104,8 +296,80 @@ describe('parseChannelConfig', () => {
     expect(result.sessionScope).toBe('user');
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
+    expect(result.dmPolicy).toBe('open');
     expect(result.groups).toEqual({});
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
+    expect(result.outputMode).toBeUndefined();
   });
+
+  it.each(['per_task', 'per_response', 'per_turn'])(
+    'accepts shared outputMode %s for an opted-in adapter',
+    async (outputMode) => {
+      const result = await parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: 'secret',
+        outputMode,
+      });
+      expect(result.outputMode).toBe(outputMode);
+    },
+  );
+
+  it('defaults output mode to per turn for an opted-in adapter when omitted', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'dingtalk',
+      clientId: 'client-id',
+      clientSecret: 'secret',
+    });
+    expect(result.outputMode).toBe('per_turn');
+  });
+
+  it.each([
+    'final_only',
+    'process_and_result',
+    'all',
+    '',
+    null,
+    false,
+    1,
+    '$OUTPUT_MODE',
+  ])(
+    'rejects invalid shared outputMode %j before adapter startup',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'dingtalk',
+          clientId: 'client-id',
+          clientSecret: 'secret',
+          outputMode,
+        }),
+      ).rejects.toThrow(
+        'Channel "bot" outputMode must be "per_task", "per_response", or "per_turn".',
+      );
+    },
+  );
+
+  it.each(['per_task', 'per_response', 'per_turn'])(
+    'rejects outputMode %s for adapters that have not opted in',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', outputMode }),
+      ).rejects.toThrow('Channel "bot" does not support outputMode.');
+    },
+  );
+
+  it.each(['  /review  ', false])(
+    'treats an old messagePrefix value as unknown configuration data: %s',
+    async (messagePrefix) => {
+      const result = await parseChannelConfig('bot', {
+        type: 'bare',
+        messagePrefix,
+      });
+
+      expect(result).toMatchObject({ type: 'bare', messagePrefix });
+    },
+  );
 
   it('resolves env vars in token, clientId, clientSecret', async () => {
     process.env['TEST_TOKEN'] = 'tok123';
@@ -128,31 +392,425 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_SEC'];
   });
 
+  it('resolves env vars in plugin-declared optional config fields', async () => {
+    process.env['TEST_WECOM_WS_URL'] = 'wss://example.invalid/ws';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: 'bot-id',
+      secret: 'bot-secret',
+      wsUrl: '$TEST_WECOM_WS_URL',
+    });
+
+    expect(result['wsUrl']).toBe('wss://example.invalid/ws');
+
+    delete process.env['TEST_WECOM_WS_URL'];
+  });
+
+  it('supports $$ escapes in plugin-declared optional config fields', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: 'bot-id',
+      secret: 'bot-secret',
+      wsUrl: '$$literal-ws-url',
+    });
+
+    expect(result['wsUrl']).toBe('$literal-ws-url');
+  });
+
+  it('does not resolve plugin fields twice when declarations overlap', async () => {
+    process.env['TEST_OVERLAP_ENDPOINT'] = '$ENDPOINT_LITERAL';
+
+    const result = await parseChannelConfig(
+      'bot',
+      {
+        type: 'overlap',
+        endpoint: '$TEST_OVERLAP_ENDPOINT',
+      },
+      process.cwd(),
+      { resolveEnvVars: 'available' },
+    );
+
+    expect(result['endpoint']).toBe('$ENDPOINT_LITERAL');
+
+    delete process.env['TEST_OVERLAP_ENDPOINT'];
+  });
+
+  it('does not resolve known credential fields twice', async () => {
+    process.env['TEST_TOKEN'] = '$TOKEN_LITERAL_VALUE';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: '$TEST_TOKEN',
+    });
+
+    expect(result.token).toBe('$TOKEN_LITERAL_VALUE');
+
+    delete process.env['TEST_TOKEN'];
+  });
+
+  it('rejects available env vars when explicitly empty', async () => {
+    process.env['TEST_EMPTY_SECRET'] = '';
+
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'wecom',
+          botId: 'bot-id',
+          secret: '$TEST_EMPTY_SECRET',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_EMPTY_SECRET is empty (referenced as $TEST_EMPTY_SECRET)',
+    );
+
+    delete process.env['TEST_EMPTY_SECRET'];
+  });
+
+  it('rejects available env vars when unset', async () => {
+    delete process.env['TEST_MISSING_SECRET'];
+
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'wecom',
+          botId: 'bot-id',
+          secret: '$TEST_MISSING_SECRET',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_MISSING_SECRET is not set (referenced as $TEST_MISSING_SECRET). Set the variable or remove the $ prefix to use a literal value.',
+    );
+  });
+
+  it('rejects unavailable required credential env vars', async () => {
+    delete process.env['TEST_MISSING_TOKEN'];
+
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'telegram',
+          token: '$TEST_MISSING_TOKEN',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_MISSING_TOKEN is not set (referenced as $TEST_MISSING_TOKEN). Set the variable or remove the $ prefix to use a literal value.',
+    );
+  });
+
   it('preserves explicit config values over defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
       token: 'literal-tok',
       senderPolicy: 'open',
       allowedUsers: ['alice'],
-      sessionScope: 'thread',
+      sessionScope: 'chat_thread',
       cwd: '/custom',
       approvalMode: 'auto',
       instructions: 'Be helpful',
+      identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+      memoryScope: { namespace: 'qwen-tag:ops', mode: 'metadata-only' },
       model: 'qwen-coder',
       groupPolicy: 'open',
+      dmPolicy: 'disabled',
       groups: { g1: { mentionKeywords: ['@bot'] } },
     });
 
     expect(result.token).toBe('literal-tok');
     expect(result.senderPolicy).toBe('open');
     expect(result.allowedUsers).toEqual(['alice']);
-    expect(result.sessionScope).toBe('thread');
-    expect(result.cwd).toBe('/custom');
+    expect(result.sessionScope).toBe('chat_thread');
+    expect(result.cwd).toBe(path.resolve('/custom'));
     expect(result.approvalMode).toBe('auto');
     expect(result.instructions).toBe('Be helpful');
+    expect(result.identity).toEqual({
+      id: 'ops-agent',
+      displayName: 'Ops Agent',
+    });
+    expect(result.memoryScope).toEqual({
+      namespace: 'qwen-tag:ops',
+      mode: 'metadata-only',
+    });
     expect(result.model).toBe('qwen-coder');
     expect(result.groupPolicy).toBe('open');
+    expect(result.dmPolicy).toBe('disabled');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
+  });
+
+  it('preserves the deprecated thread scope for existing routes', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionScope: 'thread',
+    });
+
+    expect(result.sessionScope).toBe('thread');
+  });
+
+  it('uses plugin defaultSessionScope when sessionScope is not configured', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+    });
+    expect(result.sessionScope).toBe('chat_thread');
+  });
+
+  it('explicit sessionScope overrides plugin defaultSessionScope', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      sessionScope: 'user',
+    });
+    expect(result.sessionScope).toBe('user');
+  });
+
+  it('resolves an unconfigured scope to user when multiSession is enabled', async () => {
+    // github's defaultSessionScope is 'chat_thread'; multiSession requires
+    // per-sender sessions, so the exemption must win before the compatibility
+    // check (otherwise this config throws).
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      multiSession: true,
+    });
+    expect(result.multiSession).toBe(true);
+    expect(result.sessionScope).toBe('user');
+  });
+
+  it('validates purgeLegacySessions like the other optional booleans', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      purgeLegacySessions: true,
+    });
+    expect(result['purgeLegacySessions']).toBe(true);
+    // A stringified "true" must not silently leave the QQ purge off.
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'github',
+        token: 'ghp_test',
+        purgeLegacySessions: 'true',
+      }),
+    ).rejects.toThrow(/purgeLegacySessions.*must be a boolean/);
+  });
+
+  it('validates forwardBotMessages like the other optional booleans', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      forwardBotMessages: true,
+    });
+    expect(result['forwardBotMessages']).toBe(true);
+    // A stringified "true" must not silently leave bot forwarding off.
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'github',
+        token: 'ghp_test',
+        forwardBotMessages: 'true',
+      }),
+    ).rejects.toThrow(/forwardBotMessages.*must be a boolean/);
+  });
+
+  it('parses owner-scoped named sessions only for user scope', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionScope: 'user',
+      multiSession: true,
+    });
+    expect(result.multiSession).toBe(true);
+
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        sessionScope: 'chat_thread',
+        multiSession: true,
+      }),
+    ).rejects.toThrow(
+      'requires sessionScope "user" when multiSession is enabled',
+    );
+  });
+
+  it('rejects malformed or unsupported multiSession combinations', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: 'true',
+      }),
+    ).rejects.toThrow('field "multiSession" must be a boolean');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        groupHistoryLimit: 1,
+      }),
+    ).rejects.toThrow(
+      'cannot use groupHistoryLimit when multiSession is enabled',
+    );
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        groups: { group1: { groupHistoryLimit: 1 } },
+      }),
+    ).rejects.toThrow(
+      'group "group1" cannot use groupHistoryLimit when multiSession is enabled',
+    );
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        webhooks: {
+          sources: {
+            ci: {
+              secret: 'secret',
+              targets: {
+                default: { chatId: 'chat', senderId: 'sender' },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow('cannot use webhooks when multiSession is enabled');
+  });
+
+  it('rejects an unknown approvalMode', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        approvalMode: 'YOLO',
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "approvalMode" must be one of: plan, default, auto-edit, auto, yolo.',
+    );
+  });
+
+  it('rejects an unknown group senders value instead of widening access', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        groups: { '*': { senders: 'opne' } },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "groups.*.senders" must be one of: open, allowlist.',
+    );
+  });
+
+  it('keeps per-group senders and allowedUsers when they are configured', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      groups: { ops: { senders: 'allowlist', allowedUsers: ['member1'] } },
+    });
+
+    expect(result.groups['ops']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['member1'],
+    });
+  });
+
+  it('rejects a non-array per-group allowedUsers', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        groups: { ops: { allowedUsers: 'member1' } },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "groups.ops.allowedUsers" must be an array of user IDs.',
+    );
+  });
+
+  it.each([
+    ['groupSenderPolicy', 'open', 'groups["*"].senders'],
+    ['allowedGroupUsers', ['member1'], 'groups["*"].allowedUsers'],
+  ])(
+    'points the moved top-level %s at its new home',
+    async (key, value, newHome) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', [key]: value }),
+      ).rejects.toThrow(`Channel "bot" field "${key}" moved to ${newHome}.`);
+    },
+  );
+
+  it('parses an operators list, keeping an empty one distinct from unset', async () => {
+    const listed = await parseChannelConfig('bot', {
+      type: 'bare',
+      operators: ['admin'],
+    });
+    const empty = await parseChannelConfig('bot', {
+      type: 'bare',
+      operators: [],
+    });
+    const unset = await parseChannelConfig('bot', { type: 'bare' });
+
+    expect(listed.operators).toEqual(['admin']);
+    expect(empty.operators).toEqual([]);
+    expect(unset.operators).toBeUndefined();
+  });
+
+  it('rejects a non-array operators list', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        operators: 'admin',
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "operators" must be an array of user IDs.',
+    );
+  });
+
+  it('drops empty identity and memory scope objects', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: '', displayName: null, description: undefined },
+      memoryScope: { namespace: '', mode: undefined },
+    });
+
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
+  });
+
+  it('rejects a non-object identity', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: 'ops' }),
+    ).rejects.toThrow('Channel "bot" field "identity" must be an object.');
+  });
+
+  it('rejects a non-string identity field', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: { id: 123 } }),
+    ).rejects.toThrow('Channel "bot" field "identity.id" must be a string.');
+  });
+
+  it('rejects a non-object memoryScope', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', memoryScope: ['ops'] }),
+    ).rejects.toThrow('Channel "bot" field "memoryScope" must be an object.');
+  });
+
+  it('rejects an unknown memoryScope.mode', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        memoryScope: { mode: 'full' },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "memoryScope.mode" must be "metadata-only".',
+    );
+  });
+
+  it('drops empty identity fields instead of failing', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: 'ops-agent', displayName: '', description: null },
+    });
+    expect(result.identity).toEqual({ id: 'ops-agent' });
   });
 
   it('spreads extra fields from raw config', async () => {
@@ -176,15 +834,20 @@ describe('parseChannelConfig', () => {
       type: 'bare',
       cwd: '~',
     });
-    expect(result.cwd).toBe(os.homedir());
+    expect(result.cwd).toBe(path.normalize(os.homedir()));
   });
 
-  it('resolves relative cwd against process.cwd', async () => {
-    const result = await parseChannelConfig('bot', {
-      type: 'bare',
-      cwd: 'relative/dir',
-    });
-    expect(result.cwd).toBe(path.resolve('relative/dir'));
+  it('resolves relative cwd against the default workspace', async () => {
+    const workspace = path.resolve('/workspace/project');
+    const result = await parseChannelConfig(
+      'bot',
+      {
+        type: 'bare',
+        cwd: 'relative/dir',
+      },
+      workspace,
+    );
+    expect(result.cwd).toBe(path.join(workspace, 'relative/dir'));
   });
 
   it('leaves absolute cwd unchanged', async () => {
@@ -194,5 +857,389 @@ describe('parseChannelConfig', () => {
       cwd: abs,
     });
     expect(result.cwd).toBe(abs);
+  });
+
+  it('parses webhook source targets and resolves secret env refs', async () => {
+    process.env['QWEN_TEST_WEBHOOK_SECRET'] = 'env-secret';
+    const config = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secretEnv: 'QWEN_TEST_WEBHOOK_SECRET',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+                isGroup: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config).toMatchObject({
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secret: 'env-secret',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+                isGroup: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    delete process.env['QWEN_TEST_WEBHOOK_SECRET'];
+  });
+
+  it('accepts webhook secretEnv refs with the standard $ prefix', async () => {
+    process.env['QWEN_TEST_WEBHOOK_SECRET'] = 'env-secret';
+    const config = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secretEnv: '$QWEN_TEST_WEBHOOK_SECRET',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config).toMatchObject({
+      webhooks: { sources: { 'github-ci': { secret: 'env-secret' } } },
+    });
+    delete process.env['QWEN_TEST_WEBHOOK_SECRET'];
+  });
+
+  it('accepts webhook secretEnv refs that are bare env var names without underscores', async () => {
+    process.env['MYSECRET'] = 'env-secret';
+    const config = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secretEnv: 'MYSECRET',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config).toMatchObject({
+      webhooks: { sources: { 'github-ci': { secret: 'env-secret' } } },
+    });
+    delete process.env['MYSECRET'];
+  });
+
+  it('rejects non-env webhook secretEnv values', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            'github-ci': {
+              secretEnv: 'whsec-from-settings',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:github-ci',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.github-ci.secretEnv" must be an environment variable name or $-prefixed reference.',
+    );
+  });
+
+  it('resolves existing uppercase webhook secretEnv names without underscores', async () => {
+    process.env['MYSECRET'] = 'secret-from-env';
+    try {
+      const config = await parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            'github-ci': {
+              secretEnv: 'MYSECRET',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:github-ci',
+                },
+              },
+            },
+          },
+        },
+      });
+
+      expect(config['webhooks']?.sources['github-ci']?.secret).toBe(
+        'secret-from-env',
+      );
+    } finally {
+      delete process.env['MYSECRET'];
+    }
+  });
+
+  it('rejects webhook secretEnv refs when the environment variable is unset', async () => {
+    delete process.env['QWEN_MISSING_WEBHOOK_SECRET'];
+
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secretEnv: 'QWEN_MISSING_WEBHOOK_SECRET',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom.secretEnv" references an unset environment variable.',
+    );
+  });
+
+  it('rejects webhook secretEnv refs when the environment variable is empty', async () => {
+    process.env['QWEN_EMPTY_WEBHOOK_SECRET'] = '';
+    try {
+      await expect(
+        parseChannelConfig('dingtalk-main', {
+          type: 'bare',
+          token: 'token',
+          webhooks: {
+            sources: {
+              custom: {
+                secretEnv: 'QWEN_EMPTY_WEBHOOK_SECRET',
+                targets: {
+                  default: {
+                    chatId: 'group-1',
+                    senderId: 'webhook:custom',
+                  },
+                },
+              },
+            },
+          },
+        }),
+      ).rejects.toThrow(
+        'Channel "dingtalk-main" field "webhooks.sources.custom.secretEnv" references an empty environment variable.',
+      );
+    } finally {
+      delete process.env['QWEN_EMPTY_WEBHOOK_SECRET'];
+    }
+  });
+
+  it('rejects webhook targets without chatId or senderId', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              targets: {
+                default: { chatId: 'group-1' },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom.targets.default.senderId" must be a string.',
+    );
+  });
+
+  it('rejects webhook sources with non-string secretEnv', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secretEnv: 123,
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom.secretEnv" must be a string.',
+    );
+  });
+
+  it('rejects webhook sources with non-string secret', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secret: false,
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom.secret" must be a string.',
+    );
+  });
+
+  it('rejects webhook sources without a secret', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom" must define exactly one of "secret" or "secretEnv".',
+    );
+  });
+
+  it('rejects webhook sources with both secret and secretEnv', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secret: 'secret-value',
+              secretEnv: 'QWEN_TEST_WEBHOOK_SECRET',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom" must define exactly one of "secret" or "secretEnv".',
+    );
+  });
+});
+
+describe('Qwen-internal secrets are never resolved into channel config', () => {
+  const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+    else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+  });
+
+  it('resolveEnvVars throws instead of yielding the daemon token', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    expect(() => resolveEnvVars('$QWEN_SERVER_TOKEN')).toThrow(
+      'Environment variable QWEN_SERVER_TOKEN is a Qwen-internal secret',
+    );
+    expect(() =>
+      resolveEnvVars('$qwen_server_token', { qwen_server_token: 'x' }),
+    ).toThrow('is a Qwen-internal secret');
+  });
+
+  it('keeps the $$ escape as a literal, not a reference', () => {
+    expect(resolveEnvVars('$$QWEN_SERVER_TOKEN')).toBe('$QWEN_SERVER_TOKEN');
+  });
+
+  it('rejects a credential field that references the daemon token', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        token: '$QWEN_SERVER_TOKEN',
+        baseUrl: 'https://attacker.example/api',
+      }),
+    ).rejects.toThrow(
+      'Environment variable QWEN_SERVER_TOKEN is a Qwen-internal secret',
+    );
+  });
+
+  it('rejects a plugin-declared env-resolvable field that references the daemon token', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    await expect(
+      parseChannelConfig(
+        'wecom-main',
+        { type: 'wecom', botId: 'b', secret: 's', wsUrl: '$QWEN_SERVER_TOKEN' },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow('is a Qwen-internal secret');
+  });
+
+  it('rejects a webhook secretEnv that names the daemon token', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            'github-ci': {
+              secretEnv: 'QWEN_SERVER_TOKEN',
+              targets: {
+                default: { chatId: 'group-1', senderId: 'webhook:github-ci' },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow('is a Qwen-internal secret');
   });
 });

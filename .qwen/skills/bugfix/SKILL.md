@@ -85,10 +85,14 @@ Run unit tests for any packages you modified. If the test engineer wrote a
 failing test during reproduction, make sure it passes after the fix. Otherwise,
 add focused regression coverage for the failure scenario.
 
-## Step 6: Code Review
+## Step 6: Self-Audit and Code Review
 
-Skip this only for a plain one-line or trivial config fix. For anything else,
-run `/review` with a review task listing all changed files. Triage each comment
+First self-audit the full diff per the self-audit step in AGENTS.md's General
+workflow (open-ended passes plus presume-wrong verification, until two
+consecutive clean passes; one clean pass suffices for a trivial fix). If the
+audit changes source, re-run Step 4 before resuming it. Skip the review below
+only for a plain one-line or trivial config fix. For anything else, run
+`/review` with a review task listing all changed files. Triage each comment
 with a verdict:
 
 - **Valid**: real bug or meaningful improvement. Fix it.
@@ -102,5 +106,6 @@ check.
 ## Iteration Rules
 
 - If Step 4 fails, go back to Step 3, then re-run Step 4.
-- If Step 6 finds valid issues, fix them, then re-run Step 4 as a sanity check.
+- If Step 6 finds valid issues, fix them, re-run Step 4 as a sanity check,
+  and re-run the self-audit.
 - Do not loop more than 3 times between Steps 3-6 without asking the user.

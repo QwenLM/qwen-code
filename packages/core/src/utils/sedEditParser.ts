@@ -152,10 +152,17 @@ function isSafeCombinedFlagArg(arg: string): boolean {
     return false;
   }
   const flags = arg.slice(1);
-  // GNU sed treats everything after -i in a combined flag as the backup suffix:
-  // -iE means in-place with .E backup, not -i + -E. Only forms with i last
+  // sed treats everything after -i in a combined flag as the backup suffix:
+  // -iE means in-place with an .E backup, not -i + -E. Only forms with i last
   // (for example, -Ei/-ri) are safe.
-  if (flags.startsWith('i') || !/^[Eri]+$/u.test(flags)) {
+  //
+  // Testing `startsWith('i')` only rejected i FIRST, not i anywhere but last,
+  // so -Eir and -riE were accepted. Real sed reads those as -E plus in-place
+  // with the backup suffix `r` / `E`, writing an f.txtr or f.txtE alongside
+  // the edit. The simulation creates no backup, so the user asked for one and
+  // silently did not get it -- the same reason `-i.bak` is already declined a
+  // few lines up, just spelled as a combined flag.
+  if (!/^[Er]*i?$/u.test(flags)) {
     return false;
   }
   return true;
@@ -172,12 +179,14 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
     if (
-      hasPosixBracketExpression(jsPattern) ||
-      hasSedJavascriptDivergentEscape(jsPattern)
+      hasPosixBracketExpression(sedInfo.pattern) ||
+      hasLeadingBracketLiteral(jsPattern) ||
+      hasSedJavascriptDivergentEscape(jsPattern) ||
+      hasBracketCharacterEscape(sedInfo.pattern)
     ) {
       return false;
     }
-    new RegExp(jsPattern);
+    new RegExp(jsPattern, 'su');
     if (
       hasReplacementBackrefBeyondCaptures(
         sedInfo.replacement,
@@ -193,11 +202,105 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
 }
 
 function hasPosixBracketExpression(pattern: string): boolean {
-  return /\[\[:[A-Za-z]+:\]\]/u.test(pattern);
+  // A character class, collating symbol or equivalence class opens with `[:`,
+  // `[.` or `[=` only *inside* a bracket expression (`[[:alpha:]]`, `[[.ch.]]`,
+  // `[[=a=]]`). Matching the byte sequence anywhere also rejected plain classes
+  // such as `[.]`, a common literal-dot idiom the translator handles correctly.
+  let inBracketExpression = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      // An escaped `[` outside a bracket expression is a literal, so
+      // `\[[:alpha:]]` is a literal `[` followed by an ordinary `[:alpha:]`
+      // class to BSD sed. GNU sed rejects the whole pattern as a malformed
+      // bracket expression, so the simulation cannot match both; declining
+      // lets the real sed decide. Only the POSIX-shaped lookalike is declined
+      // — a plain `\[` is a literal in every sed and keeps its fast path —
+      // and an escaped `[` inside a class is just a member.
+      if (
+        !inBracketExpression &&
+        pattern[i + 1] === '[' &&
+        pattern[i + 2] === '[' &&
+        /[:.=]/u.test(pattern[i + 3] ?? '')
+      ) {
+        return true;
+      }
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      if (inBracketExpression && /[:.=]/u.test(pattern[i + 1] ?? '')) {
+        return true;
+      }
+      inBracketExpression = true;
+      continue;
+    }
+    if (char === ']') {
+      inBracketExpression = false;
+    }
+  }
+  return false;
 }
 
+/**
+ * `]` immediately after `[` or `[^` is a literal member of a POSIX bracket
+ * expression, but means something else entirely in JavaScript: `[]` is an
+ * empty class that matches nothing, and `[^]` matches ANY character. So
+ * `s/[]a]/X/g` silently does nothing, and `s/[^]]/X/g` on `a]b` writes `Xb`
+ * where sed writes `X]X` -- a byte deleted from the user's file.
+ *
+ * Since these edits are simulated and written to disk rather than handed to
+ * sed, declining is the safe answer: the command then runs as the real sed
+ * and behaves exactly as asked. That is already what this parser does for
+ * the other constructs it cannot translate faithfully -- see
+ * `hasPosixBracketExpression` above.
+ *
+ * The test is deliberately blunt and matches the byte sequence anywhere, so
+ * a pattern such as `[a[]]` (a class containing `[`, which would in fact
+ * translate correctly) is declined too. Erring toward the real sed costs
+ * nothing but a fast path; erring the other way rewrites a file wrongly.
+ */
+function hasLeadingBracketLiteral(pattern: string): boolean {
+  return /\[\^?\]/u.test(pattern);
+}
+
+// `\p{…}`, `\P{…}` and `\u{…}` are literals to sed but Unicode property and
+// code-point escapes to an ES regex with the `u` flag, so the simulation would
+// rewrite a file that real sed rejects or leaves alone. `\0` is the mirror
+// case: NUL to an ES regex, a literal `0` to sed. Declining falls back to real
+// sed, which is the module's documented policy for divergent constructs.
 function hasSedJavascriptDivergentEscape(pattern: string): boolean {
-  return /\\[<>dDwWsS]/u.test(pattern);
+  return /\\[0<>dDwWsSpPu]/u.test(pattern);
+}
+
+/**
+ * True when a bracket expression holds a character escape such as `\t`,
+ * `\n` or `\x41`. GNU sed expands these, so `[ \t]` is a space or a TAB;
+ * POSIX reads a backslash and a `t`, as the translation does. The seds
+ * disagree, so the caller declines the pattern and real sed runs it.
+ */
+function hasBracketCharacterEscape(pattern: string): boolean {
+  let inCharacterClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      const next = pattern[i + 1] ?? '';
+      if (inCharacterClass && /[ntrfvadoxc]/u.test(next)) {
+        return true;
+      }
+      // Inside a bracket only `\\` pairs up, so `[\\t]` ends in a plain `t`.
+      if (!inCharacterClass || next === '\\') {
+        i++;
+      }
+      continue;
+    }
+    if (char === '[') {
+      inCharacterClass = true;
+    } else if (char === ']') {
+      inCharacterClass = false;
+    }
+  }
+  return false;
 }
 
 function hasReplacementBackrefBeyondCaptures(
@@ -451,7 +554,7 @@ export function applySedSubstitution(
   const replaceAll = sedInfo.flags.includes('g');
 
   try {
-    const globalRegex = new RegExp(jsPattern, 'g');
+    const globalRegex = new RegExp(jsPattern, 'gsu');
     const parts = content.split(/(\n)/);
     const processableParts = content.endsWith('\n')
       ? parts.slice(0, -1)
@@ -475,15 +578,13 @@ export function applySedSubstitution(
 function toJavascriptPattern(sedInfo: SedEditInfo): string {
   const pattern = unescapeSedDelimiter(sedInfo.pattern);
 
-  if (sedInfo.extendedRegex) {
-    return pattern;
-  }
-
   let jsPattern = '';
   let inCharacterClass = false;
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i]!;
     if (inCharacterClass) {
+      // A backslash inside a bracket expression is a literal member in BRE
+      // and ERE alike, not an escape as in JS.
       if (char === '\\') {
         jsPattern += '\\\\';
         continue;
@@ -498,6 +599,21 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
     if (char === '[') {
       inCharacterClass = true;
       jsPattern += char;
+      continue;
+    }
+
+    if (char === ']') {
+      jsPattern += '\\]';
+      continue;
+    }
+
+    if (sedInfo.extendedRegex) {
+      if (char === '\\' && i + 1 < pattern.length) {
+        jsPattern += char + pattern[i + 1]!;
+        i++;
+      } else {
+        jsPattern += char;
+      }
       continue;
     }
 

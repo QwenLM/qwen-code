@@ -14,7 +14,7 @@
  * which wraps these controllers with a stable programmatic API.
  *
  * Controllers:
- * - SystemController: initialize, interrupt, set_model, supported_commands, get_context_usage
+ * - SystemController: initialize, interrupt, set_model, set_effort, supported_commands, get_context_usage, get_available_models, get_usage_info
  * - PermissionController: can_use_tool, set_permission_mode
  * - SdkMcpController: mcp_server_status (mcp_message handled via callback)
  *
@@ -36,7 +36,7 @@ import type {
   ControlResponse,
   ControlRequestPayload,
 } from '../types.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('CONTROL_DISPATCHER');
 
@@ -78,6 +78,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     new Map();
 
   private abortHandler: (() => void) | null = null;
+  private isShutdown = false;
 
   constructor(context: IControlContext) {
     this.context = context;
@@ -109,7 +110,10 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   /**
    * Routes an incoming request to the appropriate controller and sends response
    */
-  async dispatch(request: CLIControlRequest): Promise<void> {
+  async dispatch(
+    request: CLIControlRequest,
+    propagateError = false,
+  ): Promise<void> {
     const { request_id, request: payload } = request;
 
     try {
@@ -124,6 +128,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       this.sendErrorResponse(request_id, errorMessage);
+      if (propagateError) throw error;
     }
   }
 
@@ -237,6 +242,10 @@ export class ControlDispatcher implements IPendingRequestRegistry {
    * Stops all pending requests and cleans up all controllers
    */
   shutdown(): void {
+    if (this.isShutdown) {
+      return;
+    }
+    this.isShutdown = true;
     debugLogger.debug('[ControlDispatcher] Shutting down');
 
     // Remove abort listener to prevent memory leak
@@ -373,9 +382,15 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     switch (subtype) {
       case 'initialize':
       case 'interrupt':
+      case 'continue_last_turn':
       case 'set_model':
+      case 'get_workflow_mode':
+      case 'set_workflow_mode':
+      case 'set_effort':
       case 'supported_commands':
       case 'get_context_usage':
+      case 'get_available_models':
+      case 'get_usage_info':
         return this.systemController;
 
       case 'can_use_tool':

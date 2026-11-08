@@ -10,8 +10,22 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 const RETRY_DELAY_MS = 200;
 const debugLogger = createDebugLogger('VOICE_STREAM');
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, abortSignal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (abortSignal?.aborted) {
+      reject(new Error('Voice stream opening was aborted.'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      abortSignal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('Voice stream opening was aborted.'));
+    };
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function isRetryable(error: unknown): boolean {
@@ -28,7 +42,11 @@ function isRetryable(error: unknown): boolean {
 
 export async function openVoiceStreamWithRetry(
   open: () => Promise<VoiceStreamSession>,
+  opts: { abortSignal?: AbortSignal } = {},
 ): Promise<VoiceStreamSession> {
+  if (opts.abortSignal?.aborted) {
+    throw new Error('Voice stream opening was aborted.');
+  }
   try {
     return await open();
   } catch (error) {
@@ -36,7 +54,10 @@ export async function openVoiceStreamWithRetry(
       throw error;
     }
     debugLogger.debug('[voice] stream open failed, retrying:', error);
-    await delay(RETRY_DELAY_MS);
+    await delay(RETRY_DELAY_MS, opts.abortSignal);
+    if (opts.abortSignal?.aborted) {
+      throw new Error('Voice stream opening was aborted.');
+    }
     return open();
   }
 }

@@ -11,6 +11,7 @@ import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
+  BARE_URL_PATTERN,
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -22,6 +23,12 @@ import {
   supportsHyperlinks,
   trimTrailingUrlPunctuation,
 } from './osc8.js';
+import {
+  INLINE_CODE_SPAN_PATTERN_SOURCE,
+  mergeInlineMathMatches,
+  unescapeMarkdownBeforeMath,
+  unescapeMarkdownDollars,
+} from './inline-math.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -30,20 +37,9 @@ const STRIKETHROUGH_MARKER_LENGTH = 2; // For "~~")
 const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
-const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
-const INLINE_MATH_MAX_CHARS = 1024;
-const INLINE_MATH_PATTERN = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
-  'g',
-);
 const INLINE_MARKDOWN_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
-  'g',
-);
-const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
+  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_(?!_)[^_]*_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
   'g',
 );
 
@@ -63,7 +59,8 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   // Early return for plain text without markdown or URLs
   if (
     !/[*_~`<[]|https?:/.test(text) &&
-    !(enableInlineMath && text.includes('$'))
+    !(enableInlineMath && text.includes('$')) &&
+    !text.includes('\\$')
   ) {
     return <Text color={textColor}>{text}</Text>;
   }
@@ -73,24 +70,39 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   // Capability is stable for the duration of a single render — read it once
   // here so each matched link/URL doesn't re-walk the env-var table.
   const canHyperlink = supportsHyperlinks();
-  const inlineRegex = enableInlineMath
-    ? INLINE_MARKDOWN_WITH_MATH_REGEX
-    : INLINE_MARKDOWN_REGEX;
-  inlineRegex.lastIndex = 0;
-  let match;
+  for (const token of mergeInlineMathMatches(
+    text,
+    INLINE_MARKDOWN_REGEX,
+    enableInlineMath,
+  )) {
+    const index =
+      token.kind === 'math' ? token.span.index : (token.match.index ?? 0);
 
-  while ((match = inlineRegex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
+    if (index > lastIndex) {
+      const prose = text.slice(lastIndex, index);
       nodes.push(
         <Text key={`t-${lastIndex}`}>
-          {text.slice(lastIndex, match.index)}
+          {token.kind === 'math'
+            ? unescapeMarkdownBeforeMath(prose)
+            : unescapeMarkdownDollars(prose)}
         </Text>,
       );
     }
 
+    if (token.kind === 'math') {
+      nodes.push(
+        <Text key={`m-${index}`} color={theme.text.accent}>
+          {renderInlineLatex(unescapeMarkdownDollars(token.span.content))}
+        </Text>,
+      );
+      lastIndex = index + token.span.raw.length;
+      continue;
+    }
+
+    const match = token.match;
     const fullMatch = match[0];
     let renderedNode: React.ReactNode = null;
-    const key = `m-${match.index}`;
+    const key = `m-${index}`;
 
     try {
       if (
@@ -100,25 +112,35 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
       ) {
         renderedNode = (
           <Text key={key} bold>
-            {fullMatch.slice(BOLD_MARKER_LENGTH, -BOLD_MARKER_LENGTH)}
+            {unescapeMarkdownDollars(
+              fullMatch.slice(BOLD_MARKER_LENGTH, -BOLD_MARKER_LENGTH),
+            )}
           </Text>
         );
       } else if (
         fullMatch.length > ITALIC_MARKER_LENGTH * 2 &&
         ((fullMatch.startsWith('*') && fullMatch.endsWith('*')) ||
           (fullMatch.startsWith('_') && fullMatch.endsWith('_'))) &&
-        !/\w/.test(text.substring(match.index - 1, match.index)) &&
+        !/\w/.test(text.substring(index - 1, index)) &&
         !/\w/.test(
-          text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 1),
+          text.substring(
+            index + fullMatch.length,
+            index + fullMatch.length + 1,
+          ),
         ) &&
-        !/\S[./\\]/.test(text.substring(match.index - 2, match.index)) &&
+        !/\S[./\\]/.test(text.substring(index - 2, index)) &&
         !/[./\\]\S/.test(
-          text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 2),
+          text.substring(
+            index + fullMatch.length,
+            index + fullMatch.length + 2,
+          ),
         )
       ) {
         renderedNode = (
           <Text key={key} italic>
-            {fullMatch.slice(ITALIC_MARKER_LENGTH, -ITALIC_MARKER_LENGTH)}
+            {unescapeMarkdownDollars(
+              fullMatch.slice(ITALIC_MARKER_LENGTH, -ITALIC_MARKER_LENGTH),
+            )}
           </Text>
         );
       } else if (
@@ -128,9 +150,11 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
       ) {
         renderedNode = (
           <Text key={key} strikethrough>
-            {fullMatch.slice(
-              STRIKETHROUGH_MARKER_LENGTH,
-              -STRIKETHROUGH_MARKER_LENGTH,
+            {unescapeMarkdownDollars(
+              fullMatch.slice(
+                STRIKETHROUGH_MARKER_LENGTH,
+                -STRIKETHROUGH_MARKER_LENGTH,
+              ),
             )}
           </Text>
         );
@@ -174,7 +198,10 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
           // `(url)` suffix) when OSC 8 is active. The legacy `label (url)`
           // branch leaves both intact so today's unsupported-terminal
           // output stays byte-identical.
-          const safeLabel = wrapOsc8 ? sanitizeForOsc(linkText) : linkText;
+          const renderedLinkText = unescapeMarkdownDollars(linkText);
+          const safeLabel = wrapOsc8
+            ? sanitizeForOsc(renderedLinkText)
+            : renderedLinkText;
           const safeUrl = wrapOsc8 ? sanitizeForOsc(url) : url;
           // Keep the `(url)` suffix visible when the label itself looks
           // like a (mismatched) URL — pre-OSC-8 rendering always showed the
@@ -194,7 +221,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
             </Text>
           ) : (
             <Text key={key}>
-              {linkText}
+              {renderedLinkText}
               <Text color={theme.text.link}> ({url})</Text>
             </Text>
           );
@@ -207,24 +234,10 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
       ) {
         renderedNode = (
           <Text key={key} underline>
-            {fullMatch.slice(
-              UNDERLINE_TAG_START_LENGTH,
-              -UNDERLINE_TAG_END_LENGTH,
-            )}
-          </Text>
-        );
-      } else if (
-        enableInlineMath &&
-        fullMatch.startsWith('$') &&
-        fullMatch.endsWith('$') &&
-        fullMatch.length > INLINE_MATH_MARKER_LENGTH * 2
-      ) {
-        renderedNode = (
-          <Text key={key} color={theme.text.accent}>
-            {renderInlineLatex(
+            {unescapeMarkdownDollars(
               fullMatch.slice(
-                INLINE_MATH_MARKER_LENGTH,
-                -INLINE_MATH_MARKER_LENGTH,
+                UNDERLINE_TAG_START_LENGTH,
+                -UNDERLINE_TAG_END_LENGTH,
               ),
             )}
           </Text>
@@ -237,7 +250,10 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         // alternative is anchored on `https?://`, so `isSafeOscScheme` is
         // redundant but kept as a cheap defense-in-depth assertion.
         const trimmedUrl = canHyperlink
-          ? trimTrailingUrlPunctuation(fullMatch)
+          ? trimTrailingUrlPunctuation(
+              fullMatch,
+              text[index + fullMatch.length],
+            )
           : fullMatch;
         const wrapOsc8 = canHyperlink && isSafeOscScheme(trimmedUrl);
         renderedNode = (
@@ -253,12 +269,20 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
       renderedNode = null;
     }
 
-    nodes.push(renderedNode ?? <Text key={key}>{fullMatch}</Text>);
-    lastIndex = inlineRegex.lastIndex;
+    nodes.push(
+      renderedNode ?? (
+        <Text key={key}>{unescapeMarkdownDollars(fullMatch)}</Text>
+      ),
+    );
+    lastIndex = index + fullMatch.length;
   }
 
   if (lastIndex < text.length) {
-    nodes.push(<Text key={`t-${lastIndex}`}>{text.slice(lastIndex)}</Text>);
+    nodes.push(
+      <Text key={`t-${lastIndex}`}>
+        {unescapeMarkdownDollars(text.slice(lastIndex))}
+      </Text>,
+    );
   }
 
   return <>{nodes.filter((node) => node !== null)}</>;
@@ -274,19 +298,48 @@ export const getPlainTextLength = (
   text: string,
   enableInlineMath = false,
 ): number => {
-  const cleanText = text
+  let normalizedText = '';
+  let lastIndex = 0;
+
+  for (const token of mergeInlineMathMatches(
+    text,
+    INLINE_MARKDOWN_REGEX,
+    enableInlineMath,
+  )) {
+    const index =
+      token.kind === 'math' ? token.span.index : (token.match.index ?? 0);
+    const prose = text.slice(lastIndex, index);
+    normalizedText +=
+      token.kind === 'math'
+        ? unescapeMarkdownBeforeMath(prose)
+        : unescapeMarkdownDollars(prose);
+
+    if (token.kind === 'math') {
+      normalizedText += renderInlineLatex(
+        unescapeMarkdownDollars(token.span.content),
+      );
+      lastIndex = index + token.span.raw.length;
+      continue;
+    }
+
+    const match = token.match;
+    const fullMatch = match[0];
+    const codeMatch = fullMatch.match(/^(`+)(.+?)\1$/s);
+
+    if (codeMatch?.[2]) {
+      normalizedText += codeMatch[2];
+    } else {
+      normalizedText += unescapeMarkdownDollars(fullMatch);
+    }
+    lastIndex = index + fullMatch.length;
+  }
+  normalizedText += unescapeMarkdownDollars(text.slice(lastIndex));
+
+  const cleanText = normalizedText
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/_(.*?)_/g, '$1')
     .replace(/~~(.*?)~~/g, '$1')
-    .replace(/`(.*?)`/g, '$1')
-    .replace(INLINE_MATH_PATTERN, (match: string) =>
-      enableInlineMath
-        ? renderInlineLatex(
-            match.slice(INLINE_MATH_MARKER_LENGTH, -INLINE_MATH_MARKER_LENGTH),
-          )
-        : match,
-    )
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');
   return stringWidth(cleanText);

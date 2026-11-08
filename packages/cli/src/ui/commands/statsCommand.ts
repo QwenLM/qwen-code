@@ -17,12 +17,17 @@ import {
   CommandKind,
 } from './types.js';
 import { getCurrentLanguage, t } from '../../i18n/index.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
   isSubpath,
   queryTokenUsage,
+  type SkillMetrics,
+  type GenerationMetrics,
   type TokenUsageExportFormat,
   type TokenUsageGroupSummary,
   type TokenUsagePeriod,
@@ -30,6 +35,51 @@ import {
 } from '@qwen-code/qwen-code-core';
 
 const VALID_EXPORT_FORMATS = new Set<TokenUsageExportFormat>(['csv', 'json']);
+
+const EMPTY_SKILL_METRICS: SkillMetrics = {
+  totalCalls: 0,
+  totalSuccess: 0,
+  totalFail: 0,
+  byName: {},
+};
+
+function formatGenerationMetrics(metrics: GenerationMetrics | undefined) {
+  const last = metrics?.last;
+  if (!metrics || !last) {
+    return [];
+  }
+
+  const lastTps =
+    last.generationDurationMs > 0
+      ? last.outputTokens / (last.generationDurationMs / 1000)
+      : undefined;
+  const averageTtft =
+    metrics.timedRequests > 0
+      ? metrics.totalTtftMs / metrics.timedRequests
+      : undefined;
+  const sessionTps =
+    metrics.totalGenerationDurationMs > 0
+      ? metrics.totalThroughputOutputTokens /
+        (metrics.totalGenerationDurationMs / 1000)
+      : undefined;
+
+  return [
+    '',
+    `${t('Generation Metrics')} (${t('Latest Request')})`,
+    `${t('Model')}: ${last.model}`,
+    `TTFT: ${formatDuration(last.ttftMs)}`,
+    `${t('Generation Time')}: ${formatDuration(last.generationDurationMs)}`,
+    `${t('Output Tokens')}: ${formatInteger(last.outputTokens)}`,
+    `TPS: ${lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}`,
+    `${t('Requests')}: ${formatInteger(metrics.timedRequests)}`,
+    `${t('Average TTFT')}: ${
+      averageTtft === undefined ? '—' : formatDuration(averageTtft)
+    }`,
+    `${t('Session TPS')}: ${
+      sessionTps === undefined ? '—' : `${sessionTps.toFixed(1)} tok/s`
+    }`,
+  ];
+}
 
 type ParsedStatsExportArgs = {
   period: TokenUsagePeriod;
@@ -63,6 +113,34 @@ function formatGroupLines(
       })}`;
     }),
   ];
+}
+
+function formatSkillStats(skills: SkillMetrics): string {
+  const skillNames = Object.keys(skills.byName).sort((a, b) => {
+    const countDelta = skills.byName[b]!.count - skills.byName[a]!.count;
+    return countDelta !== 0 ? countDelta : a.localeCompare(b);
+  });
+
+  if (skillNames.length === 0) {
+    return t('No skill usage data yet.');
+  }
+
+  return [
+    t('Skill calls: {{total}} ({{success}} ok, {{fail}} fail)', {
+      total: String(skills.totalCalls),
+      success: String(skills.totalSuccess),
+      fail: String(skills.totalFail),
+    }),
+    ...skillNames.map((name) => {
+      const stats = skills.byName[name]!;
+      return t('  {{name}}: {{count}} ({{success}} ok, {{fail}} fail)', {
+        name,
+        count: String(stats.count),
+        success: String(stats.success),
+        fail: String(stats.fail),
+      });
+    }),
+  ].join('\n');
 }
 
 function formatTokenUsageSummary(summary: TokenUsageSummary): string {
@@ -636,7 +714,7 @@ export const statsCommand: SlashCommand = {
   get description() {
     return t('Show usage statistics dashboard.');
   },
-  argumentHint: '[model|tools|daily|monthly|export]',
+  argumentHint: '[model|tools|skills|daily|monthly|export]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: (
@@ -669,6 +747,7 @@ export const statsCommand: SlashCommand = {
             prompt: String(totalPromptTokens),
             output: String(totalCandidateTokens),
           }),
+          ...formatGenerationMetrics(metrics.generation),
           t('Tool calls: {{total}} ({{success}} ok, {{fail}} fail)', {
             total: String(metrics.tools.totalCalls),
             success: String(metrics.tools.totalSuccess),
@@ -703,10 +782,19 @@ export const statsCommand: SlashCommand = {
             lines.push(
               `${modelName}: ${t('prompt')}=${modelMetrics.tokens.prompt}, ${t('output')}=${modelMetrics.tokens.candidates}, ${t('cached')}=${modelMetrics.tokens.cached}`,
             );
+            // billableOutputTokens clamps per record and is not additive, so
+            // bill the same per-source buckets the stats panel renders; the
+            // model aggregate can fall out of band and re-bill reasoning.
+            const buckets = Object.values(modelMetrics.bySource);
+            if (buckets.length === 0) buckets.push(modelMetrics);
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
               outputTokens:
-                modelMetrics.tokens.candidates + modelMetrics.tokens.thoughts,
+                metrics.billableOutputTokens?.[modelName]?.total ??
+                buckets.reduce(
+                  (sum, bucket) => sum + billableOutputTokens(bucket.tokens),
+                  0,
+                ),
               pricing: pricing?.[modelName],
             });
             if (cost != null) {
@@ -760,6 +848,31 @@ export const statsCommand: SlashCommand = {
         context.ui.addItem(
           {
             type: MessageType.TOOL_STATS,
+          },
+          Date.now(),
+        );
+      },
+    },
+    {
+      name: 'skills',
+      get description() {
+        return t('Show skill-specific usage statistics.');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: (context: CommandContext): MessageActionReturn | void => {
+        if (context.executionMode !== 'interactive') {
+          const skills =
+            context.session.stats.metrics.skills ?? EMPTY_SKILL_METRICS;
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: formatSkillStats(skills),
+          };
+        }
+        context.ui.addItem(
+          {
+            type: MessageType.SKILL_STATS,
           },
           Date.now(),
         );

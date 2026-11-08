@@ -7,11 +7,10 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { Config } from '@qwen-code/qwen-code-core';
-import {
-  fireNotificationHook,
-  NotificationType,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { captureHookExecutionOwner } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
+import { fireNotificationHook } from '@qwen-code/qwen-code-core/core/toolHookTriggers.js';
+import { NotificationType } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { TerminalNotification } from './useTerminalNotification.js';
 import type { TrackedToolCall } from './useReactToolScheduler.js';
 import { sendNotification } from '../../services/notificationService.js';
@@ -19,6 +18,17 @@ import { sendNotification } from '../../services/notificationService.js';
 export const LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS = 20;
 
 const NOTIFICATION_TITLE = 'Qwen Code';
+
+// The two accepted values for `general.notificationMode`:
+//   - 'all' (default, historical behavior) — fire on every WaitingForConfirmation
+//     transition AND on long-task idle.
+//   - 'task-complete' — suppress per-approval notifications; only fire on
+//     long-task idle. Requested in #6898: users driving many tool approvals
+//     otherwise get "几十次弹窗" per task.
+// The value read from settings is defensively narrowed at the call site — an
+// unknown value falls back to 'all' rather than silently disabling approval
+// notifications.
+export type NotificationMode = 'all' | 'task-complete';
 
 interface UseAttentionNotificationsOptions {
   isFocused: boolean;
@@ -41,6 +51,15 @@ export const useAttentionNotifications = ({
 }: UseAttentionNotificationsOptions) => {
   const terminalBellEnabled: boolean =
     (settings?.merged?.general?.terminalBell as boolean) ?? true;
+  // Only 'task-complete' suppresses the per-approval notification; any other
+  // value (including missing / legacy configs) preserves the historical "all"
+  // behavior. See #6898.
+  const notificationMode: NotificationMode =
+    (settings?.merged?.general as { notificationMode?: unknown } | undefined)
+      ?.notificationMode === 'task-complete'
+      ? 'task-complete'
+      : 'all';
+  const approvalNotificationsEnabled = notificationMode === 'all';
 
   const awaitingNotificationSentRef = useRef(false);
   const respondingElapsedRef = useRef(0);
@@ -60,7 +79,8 @@ export const useAttentionNotifications = ({
       streamingState === StreamingState.WaitingForConfirmation &&
       !isFocused &&
       !awaitingNotificationSentRef.current &&
-      terminalBellEnabled
+      terminalBellEnabled &&
+      approvalNotificationsEnabled
     ) {
       const message = awaitingToolName
         ? `Qwen Code needs your permission to use ${awaitingToolName}`
@@ -81,6 +101,7 @@ export const useAttentionNotifications = ({
     isFocused,
     streamingState,
     terminalBellEnabled,
+    approvalNotificationsEnabled,
     terminal,
     awaitingToolName,
   ]);
@@ -118,6 +139,8 @@ export const useAttentionNotifications = ({
             'Qwen Code is waiting for your input',
             NotificationType.IdlePrompt,
             'Waiting for input',
+            undefined,
+            captureHookExecutionOwner(config, null),
           )
             .then((hookResult) => {
               if (hookResult.terminalSequence) {

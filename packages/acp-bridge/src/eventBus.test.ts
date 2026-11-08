@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
+import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
+  DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
+  type EventBusSubscriberDiagnostic,
 } from './eventBus.js';
 
 async function collect(
@@ -24,6 +28,329 @@ async function collect(
 }
 
 describe('EventBus', () => {
+  it('clears stale replay and keeps the compaction engine usable', async () => {
+    const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
+    bus.seedReplayEvents([{ type: 'old', data: { text: 'deleted' } }]);
+    expect(bus.snapshotReplay()?.compactedTurns).toHaveLength(1);
+    bus.resetReplay();
+    expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
+    expect(bus.lastEventId).toBe(1);
+    bus.seedReplayEvents([{ type: 'new', data: { text: 'retained' } }]);
+    expect(bus.snapshotReplay()?.compactedTurns).toMatchObject([
+      { id: 2, type: 'new', data: { text: 'retained' } },
+    ]);
+    const rewind = bus.publish({
+      type: 'session_rewound',
+      data: { replay: [] },
+    });
+    expect(rewind?.id).toBe(3);
+    expect(await collect(bus.subscribe({ lastEventId: 2 }), 1)).toEqual([
+      rewind,
+    ]);
+    const snapshot = bus.snapshotReplay()!;
+    expect(
+      [...snapshot.compactedTurns, ...snapshot.liveJournal].some(
+        (event) => event.type === 'session_rewound',
+      ),
+    ).toBe(false);
+    bus.resetReplay();
+    expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
+    expect(bus.snapshotReplay()?.liveJournal).toEqual([]);
+    expect(bus.lastEventId).toBe(3);
+    bus.close();
+  });
+
+  beforeEach(() => {
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('retains only the latest skill body while preserving live frames and replay IDs', async () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+    const live = bus.subscribe()[Symbol.asyncIterator]();
+    const makeUpdate = (body: string) => ({
+      type: 'session_update',
+      data: {
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'skill', description: 'A skill' }],
+          _meta: {
+            availableSkills: ['skill'],
+            availableSkillDetails: [{ name: 'skill', body }],
+          },
+        },
+      },
+    });
+    const first = bus.publish(makeUpdate('old body'))!;
+    expect((await live.next()).value).toBe(first);
+    const second = bus.publish(makeUpdate('new body'))!;
+    expect((await live.next()).value).toBe(second);
+    const retained = engine.snapshot().liveJournal;
+    expect(JSON.stringify(retained)).not.toContain('availableSkillDetails');
+    expect(retained.map((event) => event.id)).toEqual([1, 2]);
+    const replay = await collect(bus.subscribe({ lastEventId: 0 }), 3);
+    expect(replay.map((event) => event.id)).toEqual([1, 2, undefined]);
+    expect(JSON.stringify(replay[0])).not.toContain('old body');
+    expect(replay[1]).toBe(second);
+    expect(bus.snapshotReplay()?.liveJournal[1]).toBe(second);
+    expect(bus.liveJournalSnapshot()?.[1]).toBe(second);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(
+      Buffer.byteLength(JSON.stringify(second)),
+    );
+    expect(first.data).toEqual(makeUpdate('old body').data);
+    await live.return?.();
+    bus.close();
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 0,
+      ringBytes: 0,
+      availableCommandsSnapshotBytes: 0,
+    });
+  });
+
+  it('projects seeded flat command snapshots and clears the latest full snapshot on reset', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+    const seeded = bus.seedReplayEvents(
+      ['old', 'new'].map((body) => ({
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ name: 'skill', body }] },
+        },
+      })),
+    );
+    expect(JSON.stringify(engine.snapshot())).not.toContain(
+      'availableSkillDetails',
+    );
+    expect(bus.snapshotReplay()?.compactedTurns[1]).toBe(seeded[1]);
+    expect(
+      JSON.stringify(bus.snapshotReplay()?.compactedTurns[0]),
+    ).not.toContain('old');
+    expect(bus.retentionSnapshot().ringCount).toBe(0);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(
+      Buffer.byteLength(JSON.stringify(seeded[1])),
+    );
+    bus.resetReplay();
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
+    bus.close();
+  });
+
+  it('does not serialize ordinary history for command snapshot accounting', () => {
+    const bus = new EventBus();
+    const history = Array.from({ length: 200 }, () => ({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'x'.repeat(4096) },
+        },
+      },
+    }));
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const seeded = bus.seedReplayEvents(history);
+    expect(stringify).not.toHaveBeenCalled();
+    expect(seeded).toHaveLength(200);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    bus.close();
+  });
+
+  it('replaces full skill details with an empty command update', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ body: 'private body' }] },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+        },
+      },
+    });
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    expect(JSON.stringify(bus.snapshotReplay())).not.toContain('private body');
+    bus.close();
+  });
+
+  it('bounds retained bytes and preserves eviction and replay watermarks', async () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 500 });
+    const events = Array.from(
+      { length: 20 },
+      () => bus.publish({ type: 'text', data: { text: '你好'.repeat(20) } })!,
+    );
+    const state = bus.retentionSnapshot();
+    expect(state.ringBytes).toBeLessThanOrEqual(500);
+    expect(state.ringCount).toBeLessThan(20);
+    expect(state.evictedEvents).toBe(20 - state.ringCount);
+    expect(state.evictedBytes + state.ringBytes).toBe(
+      events.reduce(
+        (sum, event) => sum + Buffer.byteLength(JSON.stringify(event)),
+        0,
+      ),
+    );
+    const stale = await collect(bus.subscribe({ lastEventId: 0 }), 1);
+    expect(stale[0].data).toEqual({
+      reason: 'ring_evicted',
+      lastDeliveredId: 0,
+      earliestAvailableId: state.earliestEventId,
+    });
+    const current = await collect(
+      bus.subscribe({ lastEventId: state.earliestEventId! - 1 }),
+      state.ringCount + 1,
+    );
+    expect(current.slice(0, -1).map((event) => event.id)).toEqual(
+      events.slice(-state.ringCount).map((event) => event.id),
+    );
+    expect(current.at(-1)?.type).toBe('replay_complete');
+    const lifetimeEvictions = {
+      evictedEvents: state.evictedEvents,
+      evictedBytes: state.evictedBytes,
+    };
+    bus.resetReplay();
+    expect(bus.retentionSnapshot().ringBytes).toBe(0);
+    expect(bus.retentionSnapshot()).toMatchObject(lifetimeEvictions);
+    bus.seedReplayEvents([{ type: 'text', data: 'seeded history' }]);
+    expect(bus.retentionSnapshot()).toMatchObject(lifetimeEvictions);
+    bus.close();
+  });
+
+  it('retains a single oversized event until a newer event replaces it', () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 100 });
+    bus.publish({ type: 'large', data: 'x'.repeat(1000) });
+    expect(bus.retentionSnapshot().ringCount).toBe(1);
+    expect(bus.retentionSnapshot().ringBytes).toBeGreaterThan(100);
+    bus.publish({ type: 'small', data: 1 });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 2,
+    });
+    expect(bus.retentionSnapshot().ringBytes).toBeLessThanOrEqual(100);
+    bus.close();
+  });
+
+  it('counts the latest full command snapshot against the ring budget', () => {
+    const bus = new EventBus(
+      1000,
+      undefined,
+      new TurnBoundaryCompactionEngine(),
+      { maxRingBytes: 2000 },
+    );
+    for (let i = 0; i < 100; i++) {
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [],
+            _meta: {
+              availableSkillDetails: [{ body: `body-${i}`.repeat(180) }],
+            },
+          },
+        },
+      });
+      expect(bus.retentionSnapshot().ringBytes).toBeLessThanOrEqual(2000);
+    }
+    for (let i = 0; i < 4; i++) {
+      bus.publish({ type: 'text', data: { text: 'x'.repeat(350) } });
+    }
+    expect(bus.retentionSnapshot().ringCount).toBe(1);
+    const replay = JSON.stringify(bus.snapshotReplay());
+    expect(replay.match(/availableSkillDetails/g)).toHaveLength(1);
+    expect(replay).toContain('body-99');
+    expect(replay).not.toContain('body-98');
+    bus.close();
+  });
+
+  it('retains at most one ring event when the full command snapshot exceeds the budget', () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 2000 });
+    bus.publish({ type: 'text', data: 'before snapshot' });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ body: 'x'.repeat(3000) }] },
+        },
+      },
+    });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 2,
+    });
+    expect(
+      bus.retentionSnapshot().availableCommandsSnapshotBytes,
+    ).toBeGreaterThan(2000);
+    bus.publish({ type: 'text', data: 'after snapshot' });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 3,
+    });
+    expect(bus.retentionSnapshot().ringBytes).toBeGreaterThan(2000);
+    bus.close();
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, 256 * 1024 * 1024 + 1])(
+    'rejects invalid ring byte limit %s',
+    (maxRingBytes) => {
+      expect(
+        () => new EventBus(10, undefined, undefined, { maxRingBytes }),
+      ).toThrow('eventRingMaxBytes');
+    },
+  );
+
+  it('rejects projection failures without consuming IDs or changing retention', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    const first = bus.publish({ type: 'text', data: 'retained' });
+    const before = bus.retentionSnapshot();
+    const data = {};
+    Object.defineProperty(data, 'update', {
+      get: () => {
+        throw new Error('projection failed');
+      },
+    });
+    expect(JSON.stringify(data)).toBe('{}');
+    expect(bus.publish({ type: 'session_update', data })).toBeUndefined();
+    expect(bus.retentionSnapshot()).toEqual(before);
+    expect(bus.lastEventId).toBe(first?.id);
+    expect(bus.publish({ type: 'text', data: 'next' })?.id).toBe(2);
+    bus.close();
+  });
+
+  it('handles seeded projection failures as degraded replay without retaining partial full snapshots', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    const data = {};
+    Object.defineProperty(data, 'update', {
+      get: () => {
+        throw new Error('seed projection failed');
+      },
+    });
+    expect(() =>
+      bus.seedReplayEvents([{ type: 'session_update', data }]),
+    ).not.toThrow();
+    expect(bus.snapshotReplay()?.degraded).toBe(true);
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 0,
+      ringBytes: 0,
+    });
+    bus.close();
+  });
+
   it('assigns monotonic ids and the right schema version', () => {
     const bus = new EventBus();
     const a = bus.publish({ type: 'foo', data: 1 });
@@ -32,6 +359,91 @@ describe('EventBus', () => {
     expect(b?.id).toBe(2);
     expect(a?.v).toBe(EVENT_SCHEMA_VERSION);
     expect(bus.lastEventId).toBe(2);
+  });
+
+  it('projects before ring retention and fanout without consuming filtered IDs', async () => {
+    const bus = new EventBus();
+    const iter = bus.subscribe()[Symbol.asyncIterator]();
+    bus.setEventDetailMode('summary');
+    const nested = {
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'private detail' },
+          _meta: { parentToolCallId: 'agent-1' },
+        },
+      },
+    };
+    expect(bus.publish(nested)).toBeUndefined();
+    const childUsage = {
+      ...nested,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            parentToolCallId: 'agent-1',
+            usage: { inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+    };
+    expect(bus.publish(childUsage)).toBeUndefined();
+    expect(bus.lastEventId).toBe(0);
+    const result = bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'agent-1',
+          status: 'completed',
+          rawOutput: {
+            type: 'task_execution',
+            toolCalls: ['detail'],
+            taskPrompt: 'prompt',
+            result: 'answer',
+            tokenCount: 2,
+            executionSummary: { inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+    });
+    expect(result?.id).toBe(1);
+    expect(result).toHaveProperty('data.update.rawOutput.executionSummary', {
+      inputTokens: 10,
+      outputTokens: 2,
+    });
+    expect(result).toHaveProperty('data.update.rawOutput.tokenCount', 2);
+    expect((await iter.next()).value).toEqual(result);
+    expect(JSON.stringify(result)).not.toContain('toolCalls');
+    bus.setEventDetailMode('full');
+    expect(bus.publish(nested)?.id).toBe(2);
+    expect((await iter.next()).value?.data).toEqual(nested.data);
+    const replay = await collect(bus.subscribe({ lastEventId: 0 }), 3);
+    expect(replay.slice(0, 2).map((e) => e.id)).toEqual([1, 2]);
+    expect(replay[0]).toEqual(result);
+    expect(replay[2]?.type).toBe('replay_complete');
+    await iter.return?.();
+    bus.close();
+  });
+
+  it('rejects invalid maxQueuedBytes options', () => {
+    expect(
+      () => new EventBus(100, undefined, undefined, { maxQueuedBytes: 0 }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.POSITIVE_INFINITY,
+        }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.MAX_SAFE_INTEGER + 1,
+        }),
+    ).toThrow(TypeError);
   });
 
   it('stamps published events with serverTimestamp metadata', () => {
@@ -68,26 +480,28 @@ describe('EventBus', () => {
     // Need to start consuming before publishing so the subscriber is
     // registered in the loop below.
     setTimeout(() => {
-      bus.publish({ type: 'foo', data: 'a' });
+      bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-live' });
       bus.publish({ type: 'foo', data: 'b' });
     }, 5);
 
     const events = await collect(iter, 2);
     expect(events.map((e) => e.data)).toEqual(['a', 'b']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-live', undefined]);
     abort.abort();
   });
 
   it('replays events newer than lastEventId from the ring', async () => {
     const bus = new EventBus();
-    bus.publish({ type: 'foo', data: 'a' });
-    bus.publish({ type: 'foo', data: 'b' });
-    bus.publish({ type: 'foo', data: 'c' });
+    bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-a' });
+    bus.publish({ type: 'foo', data: 'b', promptId: 'prompt-b' });
+    bus.publish({ type: 'foo', data: 'c', promptId: 'prompt-c' });
 
     const abort = new AbortController();
     const iter = bus.subscribe({ lastEventId: 1, signal: abort.signal });
     const events = await collect(iter, 2);
     expect(events.map((e) => e.id)).toEqual([2, 3]);
     expect(events.map((e) => e.data)).toEqual(['b', 'c']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-b', 'prompt-c']);
     abort.abort();
   });
 
@@ -167,8 +581,105 @@ describe('EventBus', () => {
     expect(collected[1]?.data).toBe(2);
     expect(collected[2]?.type).toBe('slow_client_warning');
     expect(collected[3]?.type).toBe('client_evicted');
+    expect(collected[3]?.data).toMatchObject({
+      reason: 'queue_overflow',
+      queueSize: 2,
+      maxQueued: 2,
+      maxQueuedBytes: DEFAULT_MAX_QUEUED_BYTES,
+    });
+    expect(
+      (collected[3]?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (collected[3]?.data as { eventBytes?: number }).eventBytes,
+    ).toBeUndefined();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_overflow"',
+      ),
+    );
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
+  });
+
+  it('routes contextual subscriber diagnostics without duplicating legacy stderr', async () => {
+    const bus = new EventBus();
+    const diagnostics: EventBusSubscriberDiagnostic[] = [];
+    const iter = bus.subscribe({
+      maxQueued: 2,
+      onSubscriberDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return true;
+      },
+    });
+
+    bus.publish({ type: 'first', data: 1 });
+    const thresholdEvent = bus.publish({
+      type: 'threshold-crossing',
+      data: 2,
+    });
+    const overflowingEvent = bus.publish({ type: 'overflowing', data: 3 });
+    const thresholdJson = JSON.stringify(thresholdEvent);
+    const overflowingJson = JSON.stringify(overflowingEvent);
+    if (!thresholdJson || !overflowingJson) {
+      throw new Error('Expected serializable published events');
+    }
+
+    for await (const _event of iter) {
+      // Drain the terminal subscription.
+    }
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[0]).toMatchObject({
+      type: 'slow_client_warning',
+      data: {
+        triggerEventType: 'threshold-crossing',
+        triggerEventBytes: expect.any(Number),
+      },
+    });
+    expect(diagnostics[1]).toMatchObject({
+      type: 'client_evicted',
+      data: {
+        reason: 'queue_overflow',
+        triggerEventType: 'overflowing',
+        triggerEventBytes: expect.any(Number),
+      },
+    });
+    expect(diagnostics[0]?.data.triggerEventBytes).toBe(
+      new TextEncoder().encode(thresholdJson).byteLength,
+    );
+    expect(diagnostics[1]?.data.triggerEventBytes).toBe(
+      new TextEncoder().encode(overflowingJson).byteLength,
+    );
+    expect(process.stderr.write).not.toHaveBeenCalledWith(
+      expect.stringContaining('EventBus slow_client_warning'),
+    );
+    expect(process.stderr.write).not.toHaveBeenCalledWith(
+      expect.stringContaining('EventBus subscriber evicted'),
+    );
+  });
+
+  it.each([
+    ['returns false', () => false],
+    [
+      'throws',
+      () => {
+        throw new Error('diagnostic sink failed');
+      },
+    ],
+  ])('preserves legacy stderr when the diagnostic callback %s', (_name, cb) => {
+    const bus = new EventBus();
+    bus.subscribe({ maxQueued: 1, onSubscriberDiagnostic: cb });
+
+    expect(() => {
+      bus.publish({ type: 'threshold', data: 1 });
+      bus.publish({ type: 'overflow', data: 2 });
+    }).not.toThrow();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('EventBus slow_client_warning'),
+    );
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('EventBus subscriber evicted'),
+    );
   });
 
   it('emits slow_client_warning exactly once per overflow episode', async () => {
@@ -189,7 +700,48 @@ describe('EventBus', () => {
     }
     const warnings = collected.filter((e) => e.type === 'slow_client_warning');
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.data).toMatchObject({ maxQueued: 8 });
+    expect(warnings[0]?.data).toMatchObject({
+      maxQueued: 8,
+      threshold: 'frames',
+    });
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus slow_client_warning {"queueSize":6,"maxQueued":8',
+      ),
+    );
+    abort.abort();
+  });
+
+  it('reports frames_and_bytes when both warning thresholds are crossed', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 4, signal: abort.signal });
+
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(300),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const collected: BridgeEvent[] = [];
+    const it = iter[Symbol.asyncIterator]();
+    for (let i = 0; i < 4; i++) collected.push((await it.next()).value);
+
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning?.data).toMatchObject({
+      queueSize: 3,
+      maxQueued: 4,
+      maxQueuedBytes: 1200,
+      threshold: 'frames_and_bytes',
+      lastEventId: 3,
+    });
+    expect(
+      (warning?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThanOrEqual(900);
     abort.abort();
   });
 
@@ -245,6 +797,639 @@ describe('EventBus', () => {
     for (let i = 8; i <= 13; i++) bus.publish({ type: 'foo', data: i });
     const secondEpisode: BridgeEvent[] = [];
     for (let i = 0; i < 7; i++) secondEpisode.push((await it.next()).value);
+    expect(
+      secondEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('does not rearm slow_client_warning until frame and byte backlogs both reset', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 16000,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 8, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    for (let i = 1; i <= 6; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const partiallyDrained: BridgeEvent[] = [];
+    for (let i = 0; i < 3; i++) {
+      partiallyDrained.push((await it.next()).value);
+    }
+    expect(
+      partiallyDrained.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(0);
+
+    for (let i = 7; i <= 9; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'y'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterPartialDrain: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterPartialDrain.push((await it.next()).value);
+    }
+    expect(
+      afterPartialDrain.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    bus.publish({
+      type: 'foo',
+      data: 'small',
+      _meta: { serverTimestamp: 10 },
+    });
+    expect((await it.next()).value.data).toBe('small');
+
+    for (let i = 11; i <= 16; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'z'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterFullReset: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterFullReset.push((await it.next()).value);
+    }
+    expect(
+      afterFullReset.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('degrades queued App HTML without disconnecting or changing healthy delivery and replay', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const slow = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    const fast = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      const pending = bus.publish({
+        type: 'session_update',
+        data: {
+          update: { sessionUpdate: 'tool_call_update', status: 'in_progress' },
+        },
+      });
+      await fast.next();
+      const fastDelivery = fast.next();
+      const html = 'x'.repeat(3 * 1024 * 1024);
+      const completed = bus.publish({
+        type: 'session_update',
+        data: {
+          sessionId: 'app-session',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'app-call',
+            status: 'completed',
+            rawOutput: {
+              type: 'mcp_app',
+              html,
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'Dashboard ready' }],
+              },
+            },
+          },
+        },
+      });
+      expect((await fastDelivery).value).toBe(completed);
+      expect((await slow.next()).value).toBe(pending);
+      const fallback = (await slow.next()).value;
+      expect(fallback).toMatchObject({
+        id: completed?.id,
+        type: 'session_update',
+        data: {
+          sessionId: 'app-session',
+          update: {
+            toolCallId: 'app-call',
+            status: 'completed',
+            rawOutput: {
+              type: 'mcp_app',
+              html: '',
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'Dashboard ready' }],
+              },
+            },
+          },
+        },
+      });
+      expect(completed).toHaveProperty('data.update.rawOutput.html', html);
+      expect(bus.subscriberCount).toBe(2);
+      const resumed = bus
+        .subscribe({ lastEventId: pending?.id, signal: abort.signal })
+        [Symbol.asyncIterator]();
+      expect((await resumed.next()).value).toBe(completed);
+      const following = bus.publish({
+        type: 'session_update',
+        data: { text: 'Done' },
+      });
+      expect((await slow.next()).value).toBe(following);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it('keeps an oversized App intact in an empty queue and evicts on the next frame', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      const app = bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(3 * 1024 * 1024),
+              fallbackText: 'Dashboard ready',
+            },
+          },
+        },
+      });
+      bus.publish({
+        type: 'session_update',
+        data: { text: 'Done' },
+      });
+      const delivered = (await iter.next()).value;
+      expect(delivered).toMatchObject({ id: app?.id, type: 'session_update' });
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.html',
+        'x'.repeat(3 * 1024 * 1024),
+      );
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.fallbackText',
+        'Dashboard ready',
+      );
+      expect((await iter.next()).value).toMatchObject({
+        type: 'slow_client_warning',
+      });
+      expect((await iter.next()).value).toMatchObject({
+        type: 'client_evicted',
+        data: { reason: 'queue_bytes_overflow' },
+      });
+      expect(bus.subscriberCount).toBe(0);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it.each([false, true])(
+    'bounds an App whose degraded frame still exceeds the queue budget (pending: %s)',
+    async (pending) => {
+      const bus = new EventBus(100, undefined, undefined, {
+        maxQueuedBytes: 1200,
+      });
+      const abort = new AbortController();
+      const iterator = bus
+        .subscribe({ signal: abort.signal })
+        [Symbol.asyncIterator]();
+      if (pending) bus.publish({ type: 'session_update', data: 'pending' });
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(2000),
+              fallbackText: 'y'.repeat(2000),
+            },
+          },
+        },
+      });
+      if (pending) {
+        // A backlogged subscriber still evicts: the degraded frame does
+        // not fit behind the pending one.
+        expect((await iterator.next()).value).toMatchObject({
+          type: 'session_update',
+          data: 'pending',
+        });
+        expect((await iterator.next()).value).toMatchObject({
+          type: 'client_evicted',
+          data: { reason: 'queue_bytes_overflow' },
+        });
+        expect(bus.subscriberCount).toBe(0);
+      } else {
+        // First-item rule: an empty queue admits the original frame — the
+        // subscriber is keeping up, and the ring keeps the original frame
+        // for a `Last-Event-ID` resume.
+        const delivered = (await iterator.next()).value;
+        expect(delivered).toMatchObject({ type: 'session_update' });
+        expect(delivered).toHaveProperty(
+          'data.update.rawOutput.html',
+          'x'.repeat(2000),
+        );
+        expect(delivered).toHaveProperty(
+          'data.update.rawOutput.fallbackText',
+          'y'.repeat(2000),
+        );
+        expect(bus.subscriberCount).toBe(1);
+      }
+      abort.abort();
+      bus.close();
+    },
+  );
+
+  it('preserves App HTML when its tool result overflows an empty queue', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iterator = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      // `html` is tiny; the untruncated `toolResult` is what overflows.
+      // An empty queue admits the original frame without stripping HTML.
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: '<b>ok</b>',
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'z'.repeat(2000) }],
+              },
+            },
+          },
+        },
+      });
+      const delivered = (await iterator.next()).value;
+      expect(delivered).toMatchObject({ type: 'session_update' });
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.html',
+        '<b>ok</b>',
+      );
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.fallbackText',
+        'Dashboard ready',
+      );
+      expect(delivered).toHaveProperty('data.update.rawOutput.toolResult', {
+        content: [{ type: 'text', text: 'z'.repeat(2000) }],
+      });
+      expect(bus.subscriberCount).toBe(1);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it('still evicts an over-budget App frame whose fallbackText is empty', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iterator = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      bus.publish({ type: 'session_update', data: 'pending' });
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(2000),
+              fallbackText: '',
+            },
+          },
+        },
+      });
+      // A degraded frame with empty fallback text would render nothing at
+      // all, so the bus keeps the pre-degrade contract: evict the lagging
+      // subscriber and let a resume replay the original from the ring.
+      expect((await iterator.next()).value).toMatchObject({
+        type: 'session_update',
+        data: 'pending',
+      });
+      expect((await iterator.next()).value).toMatchObject({
+        type: 'client_evicted',
+        data: { reason: 'queue_bytes_overflow' },
+      });
+      expect(bus.subscriberCount).toBe(0);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it('evicts a slow subscriber when live queued bytes overflow', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    const live = collected.filter((e) => e.type === 'foo');
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(live).toHaveLength(1);
+    expect(evicted).toBeDefined();
+    expect(evicted!.id).toBeUndefined();
+    expect(evicted!.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 1200,
+    });
+    expect(
+      (evicted!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (evicted!.data as { eventBytes?: number }).eventBytes,
+    ).toBeGreaterThan(0);
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_bytes_overflow"',
+      ),
+    );
+    expect(bus.subscriberCount).toBe(0);
+    abort.abort();
+  });
+
+  it('keeps sibling subscribers alive after one subscriber is byte-evicted', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const slowAbort = new AbortController();
+    const fastAbort = new AbortController();
+    const slowIter = bus.subscribe({
+      maxQueued: 100,
+      signal: slowAbort.signal,
+    });
+    const fastIter = bus.subscribe({
+      maxQueued: 100,
+      signal: fastAbort.signal,
+    });
+    const fastIt = fastIter[Symbol.asyncIterator]();
+
+    const fastFirst = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    expect((await fastFirst).value.data).toBe('x'.repeat(1000));
+
+    const fastSecond = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    expect((await fastSecond).value.data).toBe('y'.repeat(1000));
+
+    const slowEvents: BridgeEvent[] = [];
+    for await (const e of slowIter) slowEvents.push(e);
+    expect(
+      slowEvents.find((e) => e.type === 'client_evicted')?.data,
+    ).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    expect(bus.subscriberCount).toBe(1);
+
+    const fastThird = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await fastThird).value.data).toBe('tail');
+
+    await fastIt.return?.();
+    slowAbort.abort();
+    fastAbort.abort();
+  });
+
+  it('allows one oversized live event on an empty queue before byte eviction', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1024),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    expect(collected[0]?.type).toBe('foo');
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning).toBeDefined();
+    expect(warning!.id).toBeUndefined();
+    expect(warning!.data).toMatchObject({
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 256,
+      threshold: 'bytes',
+      lastEventId: 1,
+    });
+    expect(
+      (warning!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(256);
+
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(evicted?.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    abort.abort();
+  });
+
+  it('rejects an unserializable event without throwing, even with a waiting subscriber', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const next = it.next();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    // never-throws holds; the circular event is rejected at the
+    // serializability gate (DAEMON-011) instead of being delivered
+    // with a fake 0-byte weight.
+    expect(() => bus.publish({ type: 'foo', data: circular })).not.toThrow();
+    expect(bus.publish({ type: 'foo', data: 'tail' })?.id).toBe(1);
+
+    const delivered = await next;
+    expect(delivered.done).toBe(false);
+    expect(delivered.value.data).toBe('tail');
+    expect(bus.subscriberCount).toBe(1);
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('rejects a buffered unserializable event and keeps the queue healthy', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(() => {
+      bus.publish({
+        type: 'foo',
+        data: circular,
+        _meta: { serverTimestamp: 1 },
+      });
+      bus.publish({
+        type: 'foo',
+        data: 'tail',
+        _meta: { serverTimestamp: 2 },
+      });
+    }).not.toThrow();
+
+    // The unserializable event is rejected at the gate (DAEMON-011);
+    // only the healthy tail event reaches the buffered queue.
+    const first = await it.next();
+    expect(first.done).toBe(false);
+    expect(first.value.data).toBe('tail');
+    expect(first.value.id).toBe(1);
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus event sizing failed {"type":"foo"}',
+      ),
+    );
+    expect(bus.subscriberCount).toBe(1);
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('does not count replay frames toward queued bytes', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 64,
+    });
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'replay',
+        data: 'x'.repeat(512),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const abort = new AbortController();
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 2,
+      signal: abort.signal,
+    });
+    bus.publish({
+      type: 'live',
+      data: 'y'.repeat(512),
+      _meta: { serverTimestamp: 4 },
+    });
+
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) {
+      events.push(e);
+      if (events.length === 5) break;
+    }
+
+    expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
+    expect(events.filter((e) => e.type === 'replay')).toHaveLength(3);
+    expect(events.find((e) => e.type === 'replay_complete')).toBeDefined();
+    expect(events.at(-1)?.type).toBe('live');
+    abort.abort();
+  });
+
+  it('rearms byte-based slow_client_warning after queued bytes drain', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    const firstEpisode: BridgeEvent[] = [];
+    firstEpisode.push((await it.next()).value);
+    firstEpisode.push((await it.next()).value);
+    expect(
+      firstEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    // A large event can jump from fully drained to above the byte warn
+    // threshold; that single publish must not both re-arm and warn.
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    expect((await it.next()).value.data).toBe('y'.repeat(1000));
+
+    bus.publish({
+      type: 'foo',
+      data: 'reset',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await it.next()).value.data).toBe('reset');
+
+    bus.publish({
+      type: 'foo',
+      data: 'z'.repeat(1000),
+      _meta: { serverTimestamp: 4 },
+    });
+    const secondEpisode: BridgeEvent[] = [];
+    secondEpisode.push((await it.next()).value);
+    secondEpisode.push((await it.next()).value);
     expect(
       secondEpisode.filter((e) => e.type === 'slow_client_warning'),
     ).toHaveLength(1);
@@ -313,9 +1498,9 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('default ring size is 8000 (#3803 §02 target)', async () => {
+  it('default ring size is 8000', async () => {
     const bus = new EventBus();
-    for (let i = 1; i <= 8001; i++) bus.publish({ type: 'foo', data: i });
+    for (let i = 1; i <= 8_001; i++) bus.publish({ type: 'foo', data: i });
     // After publishing 8001 frames into the default ring, the replay
     // backlog should hold the most recent 8000 (oldest dropped).
     // A `lastEventId: 0` resume with a queue cap larger than the ring
@@ -326,23 +1511,23 @@ describe('EventBus', () => {
     // crosses the eviction-detection threshold (earliest > last + 1),
     // so an extra synthetic `state_resync_required` frame is emitted
     // FIRST. The filter below restricts to live ids, which excludes
-    // the synthetic (no id), so the original "8000 live frames"
+    // the synthetic (no id), so the original "N live frames"
     // invariant is preserved.
     const abort = new AbortController();
     const iter = bus.subscribe({
       lastEventId: 0,
-      maxQueued: 9000,
+      maxQueued: 9_000,
       signal: abort.signal,
     });
     // Collect 8001 frames now: 1 synthetic resync + 8000 live.
-    const events = await collect(iter, 8001);
+    const events = await collect(iter, 8_001);
     abort.abort();
     const liveIds = events
       .filter((e) => e.id !== undefined)
       .map((e) => e.id as number);
-    expect(liveIds).toHaveLength(8000);
+    expect(liveIds).toHaveLength(8_000);
     expect(liveIds[0]).toBe(2);
-    expect(liveIds[liveIds.length - 1]).toBe(8001);
+    expect(liveIds[liveIds.length - 1]).toBe(8_001);
     // The synthetic resync frame is the first one.
     expect(events[0]?.type).toBe('state_resync_required');
   });
@@ -411,6 +1596,27 @@ describe('EventBus', () => {
     }
     expect(events).toEqual([]);
     expect(bus.subscriberCount).toBe(0);
+  });
+
+  it('disposes never-iterated subscribers on bus.close(), detaching their abort listeners (DAEMON-010)', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    // Subscribe but never iterate — the subscriber's abort listener is
+    // the only external reference keeping its queue + closures alive.
+    const iter = bus.subscribe({ signal: abort.signal });
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1);
+
+    bus.close();
+
+    // close() must dispose (not just close the queue): the listener is
+    // gone even though the consumer never called next().
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
+    expect(bus.subscriberCount).toBe(0);
+
+    // Idempotent, and a late iteration attempt unwinds immediately.
+    bus.close();
+    const first = await iter[Symbol.asyncIterator]().next();
+    expect(first.done).toBe(true);
   });
 
   it('force-pushes replay events past maxQueued so Last-Event-ID is honored', async () => {
@@ -761,6 +1967,369 @@ describe('EventBus', () => {
       expect(out[0]?.type).toBe('foo');
       expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
       abort.abort();
+    });
+  });
+
+  describe('serializability gate (DAEMON-011)', () => {
+    it('rejects an unserializable event without burning an id', async () => {
+      const bus = new EventBus();
+      const abort = new AbortController();
+      const iter = bus.subscribe({ signal: abort.signal });
+
+      const ok1 = bus.publish({ type: 'foo', data: 1 });
+      const rejected = bus.publish({
+        type: 'bad',
+        data: { big: BigInt(1) },
+      });
+      const ok2 = bus.publish({ type: 'foo', data: 2 });
+
+      expect(ok1?.id).toBe(1);
+      expect(rejected).toBeUndefined();
+      // The rejected event must not burn an id — a gap would be misread
+      // as ring eviction by resume logic.
+      expect(ok2?.id).toBe(2);
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringContaining('EventBus event sizing failed'),
+      );
+
+      // Live fanout skips the rejected event entirely.
+      const collected = await collect(iter, 2);
+      expect(collected.map((e) => e.data)).toEqual([1, 2]);
+      abort.abort();
+
+      // Replay (ring) never saw it either.
+      const replayAbort = new AbortController();
+      const replayed = await collect(
+        bus.subscribe({ lastEventId: 0, signal: replayAbort.signal }),
+        3,
+      );
+      expect(replayed.map((e) => e.type)).toEqual([
+        'foo',
+        'foo',
+        'replay_complete',
+      ]);
+      replayAbort.abort();
+    });
+
+    it('does not ingest a rejected event into the compaction engine', () => {
+      const ingested: BridgeEvent[] = [];
+      const engine = {
+        ingest(event: BridgeEvent) {
+          ingested.push(event);
+        },
+        seedReplayEvents() {},
+        snapshot() {
+          return { compactedTurns: [], liveJournal: [], lastEventId: 0 };
+        },
+        close() {},
+      };
+      const bus = new EventBus(100, undefined, engine);
+
+      bus.publish({ type: 'ok', data: 1 });
+      bus.publish({ type: 'bad', data: { big: BigInt(1) } });
+
+      expect(ingested.map((e) => e.type)).toEqual(['ok']);
+    });
+  });
+
+  describe('replay budget (DAEMON-011)', () => {
+    const bigPayload = () => 'x'.repeat(100);
+
+    it('truncates an over-budget replay burst and demands a resync', async () => {
+      const bus = new EventBus(100, undefined, undefined, {
+        replayBudgetBytes: 400,
+      });
+      for (let i = 0; i < 5; i++) {
+        bus.publish({ type: 'payload', data: bigPayload() });
+      }
+
+      const abort = new AbortController();
+      const iter = bus.subscribe({ lastEventId: 0, signal: abort.signal });
+      const it = iter[Symbol.asyncIterator]();
+      const frames: BridgeEvent[] = [];
+      for (let i = 0; i < 4; i++) {
+        frames.push((await it.next()).value as BridgeEvent);
+      }
+
+      // Two ~190-byte frames fit the 400-byte budget; the third trips it.
+      expect(frames[0]?.id).toBe(1);
+      expect(frames[1]?.id).toBe(2);
+      expect(frames[2]?.type).toBe('state_resync_required');
+      expect(frames[2]?.data).toEqual({
+        reason: 'replay_budget_exceeded',
+        lastDeliveredId: 2,
+        earliestAvailableId: 3,
+      });
+      expect(frames[3]?.type).toBe('replay_complete');
+      expect((frames[3]?.data as { replayedCount: number }).replayedCount).toBe(
+        2,
+      );
+
+      // Truncation is NOT eviction: the subscription stays live.
+      const nextLive = it.next();
+      const live = bus.publish({ type: 'after', data: 1 });
+      expect(((await nextLive).value as BridgeEvent).id).toBe(live?.id);
+      abort.abort();
+    });
+
+    it('replays a single frame larger than the budget (first-item rule)', async () => {
+      const bus = new EventBus(100, undefined, undefined, {
+        replayBudgetBytes: 10,
+      });
+      bus.publish({ type: 'payload', data: bigPayload() });
+
+      const abort = new AbortController();
+      const frames = await collect(
+        bus.subscribe({ lastEventId: 0, signal: abort.signal }),
+        2,
+      );
+      expect(frames[0]?.id).toBe(1);
+      expect(frames[1]?.type).toBe('replay_complete');
+      abort.abort();
+    });
+
+    it('does not emit a resync frame when the replay fits the budget', async () => {
+      const bus = new EventBus();
+      for (let i = 0; i < 5; i++) {
+        bus.publish({ type: 'payload', data: bigPayload() });
+      }
+
+      const abort = new AbortController();
+      const frames = await collect(
+        bus.subscribe({ lastEventId: 0, signal: abort.signal }),
+        6,
+      );
+      expect(frames.some((e) => e.type === 'state_resync_required')).toBe(
+        false,
+      );
+      expect(frames[5]?.type).toBe('replay_complete');
+      expect((frames[5]?.data as { replayedCount: number }).replayedCount).toBe(
+        5,
+      );
+      abort.abort();
+    });
+  });
+
+  describe('epoch token (DAEMON-001)', () => {
+    it('exposes a stable per-instance epoch that differs across instances', () => {
+      const a = new EventBus();
+      const b = new EventBus();
+      expect(a.epoch).toBeTruthy();
+      expect(a.epoch).toBe(a.epoch);
+      expect(a.epoch).not.toBe(b.epoch);
+    });
+
+    it('forces epoch_reset resync with detail=epoch_mismatch when the presented epoch does not match', async () => {
+      // The numeric heuristic alone is defeated once the new epoch's event
+      // count catches up with the stale cursor: lastEventId 2 with 3 fresh
+      // events looks like a perfectly valid suffix resume. The epoch token
+      // makes staleness provable regardless of the numbers.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        epoch: 'dead-epoch-token',
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 full-ring replay frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        detail?: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('epoch_reset');
+      expect(data.detail).toBe('epoch_mismatch');
+      expect(data.lastDeliveredId).toBe(2);
+      expect(data.earliestAvailableId).toBe(1);
+      // Full fresh-ring replay: the stale cursor must not filter low ids.
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([1, 2, 3]);
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
+      abort.abort();
+    });
+
+    it('resumes normally (no resync frame) when the presented epoch matches', async () => {
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 1,
+        epoch: bus.epoch,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // 2 suffix replay frames + replay_complete = 3.
+        if (out.length === 3) break;
+      }
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      expect(out.slice(0, 2).map((e) => e.id)).toEqual([2, 3]);
+      expect(out[2]?.type).toBe('replay_complete');
+      abort.abort();
+    });
+
+    it('numeric-heuristic epoch_reset does NOT carry detail (only epoch-token mismatches do)', async () => {
+      // `detail` is the operator-facing discriminator between the two
+      // triggers — the heuristic path must not claim it.
+      const bus = new EventBus(10);
+      const abort = new AbortController();
+      const iter = bus.subscribe({ lastEventId: 5, signal: abort.signal });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + replay_complete (empty ring) = 2.
+        if (out.length === 2) break;
+      }
+      const data = out[0]?.data as { reason: string; detail?: string };
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(data.reason).toBe('epoch_reset');
+      expect(data.detail).toBeUndefined();
+      abort.abort();
+    });
+
+    it('ring_evicted resync does NOT carry detail either', async () => {
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 1,
+        epoch: bus.epoch,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 surviving frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      const data = out[0]?.data as { reason: string; detail?: string };
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(data.reason).toBe('ring_evicted');
+      expect(data.detail).toBeUndefined();
+      abort.abort();
+    });
+
+    it('ignores a mismatching epoch when no lastEventId is presented (nothing to resume)', async () => {
+      // Without a cursor there is no stale state to protect — the fresh
+      // subscriber is live-only regardless of what epoch it presents.
+      const bus = new EventBus(10);
+      bus.publish({ type: 'foo', data: 1 });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        epoch: 'dead-epoch-token',
+        signal: abort.signal,
+      });
+      setTimeout(() => bus.publish({ type: 'foo', data: 2 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 1) break;
+      }
+      expect(out[0]?.type).toBe('foo');
+      expect(out[0]?.id).toBe(2);
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
+  });
+
+  describe('compaction degradation (DAEMON-008)', () => {
+    function makeEngine(
+      overrides: Partial<{
+        ingest: (event: BridgeEvent) => void;
+        seedReplayEvents: (events: BridgeEvent[]) => void;
+      }> = {},
+    ) {
+      return {
+        ingest: overrides.ingest ?? vi.fn(),
+        seedReplayEvents: overrides.seedReplayEvents ?? vi.fn(),
+        snapshot: () => ({
+          compactedTurns: [],
+          liveJournal: [],
+          lastEventId: 0,
+        }),
+        close: vi.fn(),
+      };
+    }
+
+    it('marks the snapshot degraded and fires onCompactionError exactly once when ingest throws', () => {
+      const onCompactionError = vi.fn();
+      const engine = makeEngine({
+        ingest: () => {
+          throw new Error('boom');
+        },
+      });
+      const bus = new EventBus(10, undefined, engine, { onCompactionError });
+
+      // publish() keeps its never-throws contract across repeated failures.
+      expect(() => bus.publish({ type: 'foo', data: 1 })).not.toThrow();
+      expect(() => bus.publish({ type: 'foo', data: 2 })).not.toThrow();
+
+      expect(onCompactionError).toHaveBeenCalledTimes(1);
+      expect((onCompactionError.mock.calls[0]![0] as Error).message).toBe(
+        'boom',
+      );
+      expect(bus.snapshotReplay()?.degraded).toBe(true);
+    });
+
+    it('marks the snapshot degraded when seedReplayEvents throws', () => {
+      const onCompactionError = vi.fn();
+      const engine = makeEngine({
+        seedReplayEvents: () => {
+          throw new Error('seed boom');
+        },
+      });
+      const bus = new EventBus(10, undefined, engine, { onCompactionError });
+
+      expect(() =>
+        bus.seedReplayEvents([{ type: 'foo', data: 1 }]),
+      ).not.toThrow();
+
+      expect(onCompactionError).toHaveBeenCalledTimes(1);
+      expect(bus.snapshotReplay()?.degraded).toBe(true);
+    });
+
+    it('does not mark degraded on the healthy path', () => {
+      const engine = makeEngine();
+      const bus = new EventBus(10, undefined, engine);
+      bus.publish({ type: 'foo', data: 1 });
+      expect(bus.snapshotReplay()?.degraded).toBeUndefined();
+    });
+
+    it('defaults replay snapshots to full and forwards summary mode', () => {
+      const engine = makeEngine();
+      const snapshot = vi.spyOn(engine, 'snapshot');
+      const bus = new EventBus(10, undefined, engine);
+
+      bus.snapshotReplay();
+      bus.snapshotReplay('summary');
+
+      expect(snapshot).toHaveBeenNthCalledWith(1, 'full');
+      expect(snapshot).toHaveBeenNthCalledWith(2, 'summary');
+    });
+
+    it('survives a throwing onCompactionError callback', () => {
+      const engine = makeEngine({
+        ingest: () => {
+          throw new Error('boom');
+        },
+      });
+      const bus = new EventBus(10, undefined, engine, {
+        onCompactionError: () => {
+          throw new Error('diagnostics blew up');
+        },
+      });
+      expect(() => bus.publish({ type: 'foo', data: 1 })).not.toThrow();
+      expect(bus.snapshotReplay()?.degraded).toBe(true);
     });
   });
 });

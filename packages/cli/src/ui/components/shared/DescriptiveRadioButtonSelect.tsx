@@ -63,16 +63,24 @@ export function DescriptiveRadioButtonSelect<T>({
       showScrollArrows={showScrollArrows}
       maxItemsToShow={maxItemsToShow}
       itemGap={itemGap}
-      renderItem={(item, { titleColor }) => (
-        <Box flexDirection="column" key={item.key}>
-          <Text color={titleColor}>{item.title}</Text>
-          {typeof item.description === 'string' ? (
-            <Text color={theme.text.secondary}>{item.description}</Text>
-          ) : (
-            item.description
-          )}
-        </Box>
-      )}
+      renderItem={(item, { titleColor }) => {
+        const hasDescription =
+          typeof item.description === 'string'
+            ? item.description.trim().length > 0
+            : item.description != null;
+
+        return (
+          <Box flexDirection="column" key={item.key}>
+            <Text color={titleColor}>{item.title}</Text>
+            {hasDescription &&
+              (typeof item.description === 'string' ? (
+                <Text color={theme.text.secondary}>{item.description}</Text>
+              ) : (
+                item.description
+              ))}
+          </Box>
+        );
+      }}
     />
   );
 }

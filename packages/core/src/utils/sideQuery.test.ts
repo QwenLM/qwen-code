@@ -272,9 +272,10 @@ describe('runSideQuery', () => {
       await runSideQuery<{ ok: boolean }>(mockConfig, {
         ...baseOptions,
         maxAttempts: 1,
+        boundedRetries: true,
       });
       expect(mockBaseLlmClient.generateJson).toHaveBeenLastCalledWith(
-        expect.objectContaining({ maxAttempts: 1 }),
+        expect.objectContaining({ maxAttempts: 1, boundedRetries: true }),
       );
 
       await runSideQuery<{ ok: boolean }>(mockConfig, baseOptions);
@@ -283,6 +284,7 @@ describe('runSideQuery', () => {
         .mock.calls.at(-1)?.[0];
       expect(lastCall).toBeDefined();
       expect(lastCall as object).not.toHaveProperty('maxAttempts');
+      expect(lastCall as object).not.toHaveProperty('boundedRetries');
     });
 
     it('propagates rejections from generateJson', async () => {
@@ -343,6 +345,35 @@ describe('runSideQuery', () => {
           }),
         }),
       );
+    });
+
+    it('forwards stream:true to generateText when opted in', async () => {
+      mockTextResult('streamed');
+
+      await runSideQuery(mockConfig, {
+        purpose: 'chat-compression',
+        contents: [{ role: 'user', parts: [{ text: 'summarize' }] }],
+        abortSignal: abortController.signal,
+        stream: true,
+      });
+
+      expect(mockBaseLlmClient.generateText).toHaveBeenCalledWith(
+        expect.objectContaining({ stream: true }),
+      );
+    });
+
+    it('omits stream from the generateText call when not set (backward-compat)', async () => {
+      mockTextResult('ok');
+
+      await runSideQuery(mockConfig, {
+        purpose: 'p',
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        abortSignal: abortController.signal,
+      });
+
+      const callArg = vi.mocked(mockBaseLlmClient.generateText).mock
+        .calls[0][0];
+      expect(callArg).not.toHaveProperty('stream');
     });
 
     it('prefers fastModel when available', async () => {

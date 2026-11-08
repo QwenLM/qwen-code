@@ -1,0 +1,49 @@
+[package]
+name = "platform-linux"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+cua-driver-core = { path = "../cua-driver-core" }
+cua-driver-contract = { path = "../cua-driver-contract" }
+cursor-overlay = { path = "../cursor-overlay" }
+pip-preview = { path = "../pip-preview" }
+# tiny-skia for cursor rendering (shared cross-platform)
+tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+clipboard-rs = "0.3.5"
+# X11 background input + window enumeration + MIT-SHM capture
+x11rb = { version = "0.13", features = ["xinput", "randr", "xfixes", "composite", "shape", "xtest", "shm", "res"] }
+x11 = { version = "2.21", features = ["xlib", "xinput", "xtest"] }
+base64 = { workspace = true }
+image = { workspace = true }
+# Map X server-returned MIT-SHM CreateSegment FDs (no SysV shmget/shmat).
+memmap2 = "0.9"
+# kill(2) for the kill_app tool — SIGKILL via libc::kill.
+libc = "0.2"
+# Native AT-SPI over D-Bus (pure Rust, via zbus) — replaces the pyatspi
+# subprocess bridge so accessibility input/readback needs no Python or GI
+# typelibs at runtime. `tokio` matches the driver's async runtime; `zbus`
+# re-exports the bus types we need (fdo::DBusProxy for pid resolution).
+atspi = { version = "0.30", default-features = false, features = ["proxies", "wrappers", "tokio", "zbus"] }
+atspi-connection = { version = "0.14", default-features = false, features = ["wrappers"] }
+evdev = "0.12"
+# Math-expression evaluator for parallel_mouse_drag `fn` paths (y = f(x)).
+meval = "0.2"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[features]
+default = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

@@ -17,6 +17,7 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { ICommandLoader } from './types.js';
+import { stripUtf8Bom } from '../config/execution-sandbox-settings.js';
 import {
   parseMarkdownCommand,
   MarkdownCommandDefSchema,
@@ -171,7 +172,12 @@ export class FileCommandLoader implements ICommandLoader {
     if (this.config) {
       const activeExtensions = this.config
         .getExtensions()
-        .filter((ext) => ext.isActive)
+        .filter(
+          (ext) =>
+            ext.isActive &&
+            ext.format !== 'agent-plugins-v1' &&
+            ext.installMetadata?.originSource !== 'AgentPlugins',
+        )
         .sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically for deterministic loading
 
       // Collect command directories from each extension
@@ -269,7 +275,8 @@ export class FileCommandLoader implements ICommandLoader {
 
     let parsed: unknown;
     try {
-      parsed = toml.parse(fileContent);
+      // Markdown commands already ignore a leading BOM; do the same here.
+      parsed = toml.parse(stripUtf8Bom(fileContent));
     } catch (error: unknown) {
       debugLogger.error(
         `[FileCommandLoader] Failed to parse TOML file ${filePath}:`,

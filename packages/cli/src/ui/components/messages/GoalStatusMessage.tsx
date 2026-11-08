@@ -6,56 +6,146 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
+import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
-import { formatDuration } from '../../utils/formatters.js';
-import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
+import { ICON } from '../../constants.js';
+import {
+  describeGoalCard,
+  describeLegacyGoalCard,
+  type GoalCardColor,
+} from '../../utils/goal-card-view.js';
+import type { GoalStatusKind } from '../../types.js';
 
-interface GoalStatusMessageProps {
+interface LegacyGoalStatusMessageProps {
   kind: GoalStatusKind;
   condition: string;
   iterations?: number;
   durationMs?: number;
   lastReason?: string;
+  snapshot?: never;
+  cause?: never;
 }
 
-const pluralTurns = (n: number) => (n === 1 ? 'turn' : 'turns');
-
-function assertNeverGoalStatusKind(kind: never): never {
-  throw new Error(`Unexpected goal status kind: ${kind}`);
+interface GoalStateMessageProps {
+  snapshot: GoalSnapshotV2;
+  cause?: GoalStateCause;
+  kind?: never;
+  condition?: never;
+  iterations?: never;
+  durationMs?: never;
+  lastReason?: never;
 }
 
-const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
-  kind,
-  condition,
-  iterations,
-  durationMs,
-  lastReason,
+type GoalStatusMessageProps =
+  | LegacyGoalStatusMessageProps
+  | GoalStateMessageProps;
+
+/** The theme colour of each palette slot a card view names. */
+export function goalCardThemeColor(color: GoalCardColor): string {
+  switch (color) {
+    case 'secondary':
+      return theme.text.secondary;
+    case 'accent':
+      return theme.text.accent;
+    case 'warning':
+      return theme.status.warning;
+    case 'error':
+      return theme.status.error;
+    case 'success':
+      return theme.status.success;
+    default: {
+      const exhaustive: never = color;
+      throw new Error(`Unexpected goal card colour: ${String(exhaustive)}`);
+    }
+  }
+}
+
+const GoalStateCard: React.FC<GoalStateMessageProps> = ({
+  snapshot,
+  cause,
 }) => {
-  // The "checking" kind is the per-iteration "judge said not met, continuing"
-  // marker that replaces the generic `stop_hook_loop` rendering for /goal.
-  // Show the active condition and latest judge reason on every iteration so
-  // the user can see why the loop is continuing.
-  if (kind === 'checking') {
-    const reason = lastReason?.trim();
+  const view = describeGoalCard(snapshot, cause);
+  if (view.state === 'hidden') {
+    // A Goal is on the record but its status is one this build cannot word.
+    if (snapshot.goal) throw new Error('Unexpected Goal status');
+    return null;
+  }
+  if (view.state === 'cleared') {
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
-          <Text color={theme.text.secondary}>○</Text>
+          <Text color={theme.text.secondary}>{ICON.CIRCLE_EMPTY}</Text>
+        </Box>
+        <Text color={theme.text.secondary}>Goal cleared</Text>
+      </Box>
+    );
+  }
+  const color = goalCardThemeColor(view.color);
+  // This renderer writes straight to the terminal, so the reason is
+  // sanitized here: a pause reason can embed a raw provider error.
+  const reason =
+    view.reason === undefined
+      ? undefined
+      : sanitizeTerminalText(view.reason).trim();
+
+  return (
+    <Box flexDirection="row">
+      <Box width={2} flexShrink={0}>
+        <Text color={color}>{view.icon}</Text>
+      </Box>
+      <Box flexGrow={1} flexDirection="column">
+        <Text color={color}>
+          {view.title}
+          {view.subtitle ? (
+            <Text color={theme.text.secondary}> · {view.subtitle}</Text>
+          ) : null}
+        </Text>
+        <Box flexDirection="row">
+          <Box flexShrink={0} marginRight={1}>
+            <Text color={theme.text.secondary}>Goal:</Text>
+          </Box>
+          <Box flexGrow={1}>
+            <Text wrap="wrap">{view.objective}</Text>
+          </Box>
+        </Box>
+        {reason ? (
+          <Text color={theme.text.secondary} wrap="wrap">
+            Reason: {reason}
+          </Text>
+        ) : null}
+      </Box>
+    </Box>
+  );
+};
+
+const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
+  if (props.snapshot) return <GoalStateCard {...props} />;
+  const { kind, condition, iterations, durationMs, lastReason } = props;
+  const view = describeLegacyGoalCard({
+    kind,
+    condition,
+    iterations,
+    durationMs,
+    lastReason,
+  });
+  if (view.state === 'hidden') {
+    throw new Error(`Unexpected goal status kind: ${kind}`);
+  }
+  if (view.state === 'checking') {
+    return (
+      <Box flexDirection="row">
+        <Box width={2} flexShrink={0}>
+          <Text color={theme.text.secondary}>{ICON.CIRCLE_EMPTY}</Text>
         </Box>
         <Box flexGrow={1} flexDirection="column">
-          <Text color={theme.text.secondary}>
-            Goal check
-            {typeof iterations === 'number' && iterations > 0
-              ? ` · turn ${iterations}`
-              : ''}{' '}
-            · not yet met
-          </Text>
+          <Text color={theme.text.secondary}>{view.title}</Text>
           <Text color={theme.text.secondary} wrap="wrap">
-            Goal: {condition}
+            Goal: {view.condition}
           </Text>
-          {reason ? (
+          {view.judgeReason ? (
             <Text color={theme.text.secondary} wrap="wrap">
-              Judge: {reason}
+              Judge: {view.judgeReason}
             </Text>
           ) : null}
         </Box>
@@ -63,94 +153,30 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
     );
   }
 
-  const { prefix, prefixColor, title } = (() => {
-    switch (kind) {
-      case 'set':
-        // ◎ matches the footer GoalPill's icon — same visual identity for
-        // "goal is on / armed" between the history card and the live pill.
-        return {
-          prefix: '◎',
-          prefixColor: theme.text.accent,
-          title: 'Goal set',
-        };
-      case 'achieved':
-        return {
-          prefix: '✓',
-          prefixColor: theme.status.success,
-          title: 'Goal achieved',
-        };
-      case 'cleared':
-        return {
-          prefix: '○',
-          prefixColor: theme.text.secondary,
-          title: 'Goal cleared',
-        };
-      case 'failed':
-        return {
-          prefix: '✖',
-          prefixColor: theme.status.error,
-          title: 'Goal could not be achieved',
-        };
-      case 'aborted':
-        return {
-          prefix: '!',
-          prefixColor: theme.status.warning,
-          title: 'Goal aborted',
-        };
-      default:
-        return assertNeverGoalStatusKind(kind);
-    }
-  })();
-
-  const stats: string[] = [];
-  if (typeof iterations === 'number' && iterations > 0) {
-    stats.push(`${iterations} ${pluralTurns(iterations)}`);
-  }
-  if (typeof durationMs === 'number') {
-    stats.push(formatDuration(durationMs, { hideTrailingZeros: true }));
-  }
-  const subtitle = stats.length > 0 ? stats.join(' · ') : null;
-
+  const color = goalCardThemeColor(view.color);
   return (
     <Box flexDirection="row">
       <Box width={2} flexShrink={0}>
-        <Text color={prefixColor}>{prefix}</Text>
+        <Text color={color}>{view.icon}</Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        <Text color={prefixColor}>
-          {title}
-          {subtitle ? (
-            <Text color={theme.text.secondary}> · {subtitle}</Text>
+        <Text color={color}>
+          {view.title}
+          {view.subtitle ? (
+            <Text color={theme.text.secondary}> · {view.subtitle}</Text>
           ) : null}
         </Text>
-        {/* Ink's flex-row layout strips trailing whitespace inside the label
-            Text (so "Last check: " renders as "Last check:" with the value
-            slammed up against the colon, and wrapped lines align with col 0
-            of the value instead of after the colon-space). Use marginRight
-            on the label Box to introduce a real 1-column gap that survives
-            the row layout — same fix applies to the "Goal:" row. */}
         <Box flexDirection="row">
           <Box flexShrink={0} marginRight={1}>
             <Text color={theme.text.secondary}>Goal:</Text>
           </Box>
           <Box flexGrow={1}>
-            <Text wrap="wrap">{condition}</Text>
+            <Text wrap="wrap">{view.condition}</Text>
           </Box>
         </Box>
-        {/* `lastReason` is shown on terminal cards (achieved / aborted /
-            failed) so
-            the final summary records *why* the judge ruled the goal complete
-            or why the loop gave up. Skipped for `cleared` because user-driven
-            clears don't carry a judge reason.
-            Rendered as a single `<Text wrap="wrap">` (label + value inline)
-            rather than the flex-row split used for `Goal:` above — the judge
-            reason is capped at 240 chars and almost always wraps, and the
-            flex-row variant hangs the continuation at the value column's
-            left edge (≈12 cols of empty space, easily mistaken for a blank
-            line). One Text + natural wrap keeps the continuation flush. */}
-        {isTerminalGoalStatusKind(kind) && lastReason?.trim() ? (
+        {view.lastCheck ? (
           <Text color={theme.text.secondary} wrap="wrap">
-            Last check: {lastReason.trim()}
+            Last check: {view.lastCheck}
           </Text>
         ) : null}
       </Box>

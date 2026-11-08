@@ -1,0 +1,749 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  PairingStore,
+  resolvePrivatePolicy,
+  sanitizeLogText,
+  type PairingRequest,
+} from '@qwen-code/channel-base';
+import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
+import { getPlugin } from '../commands/channel/channel-registry.js';
+import type {
+  ChannelSecretUpdate,
+  ChannelSettingsMutationOptions,
+  ChannelSettingsSnapshot,
+  ChannelSettingsUpsertOptions,
+  WorkspaceChannelSettingsStore,
+} from './channel-settings-store.js';
+import { isAllChannelSelectionName } from './channel-selection.js';
+import type { ChannelRestoreFailures } from './channel-restore-failures.js';
+import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
+import type {
+  ChannelWorkerControlState,
+  ChannelWorkerManager,
+  ChannelWorkerRequiredOwner,
+} from './channel-worker-manager.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+
+export interface ChannelRuntimeState {
+  state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
+  lastError?: string;
+}
+
+export interface ChannelSecretState {
+  present: boolean;
+  source?: 'literal' | 'environment';
+}
+
+export interface ChannelInstanceSnapshot {
+  name: string;
+  config: Record<string, unknown>;
+  secrets: Record<string, ChannelSecretState>;
+  startsWithServe: boolean;
+  runtime: ChannelRuntimeState;
+}
+
+export interface DaemonChannelsSnapshot {
+  revision: string;
+  instances: Record<string, ChannelInstanceSnapshot>;
+}
+
+export interface ChannelUpsertRequest {
+  expectedRevision: string;
+  config: Record<string, unknown> & { type: string };
+  secrets?: Record<string, ChannelSecretUpdate>;
+}
+
+export type RevisionRequest = ChannelSettingsMutationOptions;
+
+export interface ChannelStartupRequest extends RevisionRequest {
+  enabled: boolean;
+}
+
+export interface ChannelMutationResult {
+  snapshot: DaemonChannelsSnapshot;
+  instance: ChannelInstanceSnapshot;
+}
+
+export interface ChannelPairingRequestsSnapshot {
+  requests: PairingRequest[];
+}
+
+export interface ChannelPairingApprovalResult
+  extends ChannelPairingRequestsSnapshot {
+  approved: PairingRequest;
+}
+
+export interface ChannelPairingApprovalsSnapshot {
+  senderIds: string[];
+  groupIds: string[];
+}
+
+export interface ChannelPairingApprovalSubject {
+  type: 'user' | 'group';
+  id: string;
+}
+
+export interface ChannelPairingRevocationResult
+  extends ChannelPairingApprovalsSnapshot {
+  revoked: string;
+}
+
+export interface ChannelManagementService {
+  list(): Promise<DaemonChannelsSnapshot>;
+  upsert(
+    name: string,
+    request: ChannelUpsertRequest,
+  ): Promise<ChannelMutationResult>;
+  remove(
+    name: string,
+    request: RevisionRequest,
+  ): Promise<ChannelMutationResult>;
+  setStartup(
+    name: string,
+    request: ChannelStartupRequest,
+  ): Promise<ChannelMutationResult>;
+  start(name: string): Promise<ChannelMutationResult>;
+  stop(name: string): Promise<ChannelMutationResult>;
+  restart(name: string): Promise<ChannelMutationResult>;
+  pairingRequests(name: string): Promise<ChannelPairingRequestsSnapshot>;
+  approvePairing(
+    name: string,
+    code: string,
+  ): Promise<ChannelPairingApprovalResult>;
+  pairingApprovals(name: string): Promise<ChannelPairingApprovalsSnapshot>;
+  revokePairingApproval(
+    name: string,
+    subject: ChannelPairingApprovalSubject,
+  ): Promise<ChannelPairingRevocationResult>;
+}
+
+interface ChannelManagementSettingsStore {
+  snapshot(): ChannelSettingsSnapshot;
+  upsert(
+    name: string,
+    options: ChannelSettingsUpsertOptions,
+  ): Promise<ChannelSettingsSnapshot>;
+  remove(
+    name: string,
+    options: ChannelSettingsMutationOptions,
+  ): Promise<ChannelSettingsSnapshot>;
+  setStartupNames(
+    names: readonly string[],
+    options: ChannelSettingsMutationOptions,
+  ): Promise<ChannelSettingsSnapshot>;
+}
+
+export interface ChannelManagementWorkerManager {
+  committedChannelNames(): string[];
+  state(): ChannelWorkerControlState;
+  setChannelEnabled(
+    owner: ChannelWorkerRequiredOwner,
+    enabled: boolean,
+  ): Promise<unknown>;
+  reloadWorkspace(
+    workspaceCwd: string,
+    name: string,
+  ): Promise<ChannelWorkerSnapshot>;
+}
+
+export interface CreateChannelManagementServiceOptions {
+  workspaceCwd: string;
+  store: ChannelManagementSettingsStore | WorkspaceChannelSettingsStore;
+  manager: ChannelManagementWorkerManager | ChannelWorkerManager;
+  /**
+   * A workspace's merged channel config map (system + user + workspace
+   * scopes) — the same view the worker resolves. `remove` consults it to
+   * distinguish a configuration that is lost from one this scope never held.
+   * It must read settings from disk at call time with environment loading
+   * skipped, the way the `resolveChannelWorkspaceGroups` injections receive
+   * it: the default `loadSettings(cwd)` would write the target workspace's
+   * `.env` into the daemon's process-global environment.
+   */
+  loadChannelsConfig: (workspaceCwd: string) => Record<string, unknown>;
+  /**
+   * The daemon's record of `serve.channels` names that were not restored. A
+   * failed restore never reaches the committed selection, so without it such
+   * a channel would list as `stopped`.
+   */
+  restoreFailures?: Pick<ChannelRestoreFailures, 'get' | 'clear'>;
+}
+
+export class ChannelManagementError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ChannelManagementError';
+  }
+}
+
+function diagnostic(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return sanitizeLogText(
+    redactLogCredentials(normalizeWorkerDiagnostic(message)),
+    512,
+  );
+}
+
+function usesEnvironment(value: unknown): boolean {
+  return typeof value === 'string' && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+}
+
+export function createChannelManagementService(
+  opts: CreateChannelManagementServiceOptions,
+): ChannelManagementService {
+  const diagnostics = new Map<string, string>();
+  // An operator acting on a channel supersedes both what a previous action
+  // left behind and a restore failure: the outcome that matters is now theirs.
+  const forgetDiagnostics = (name: string): void => {
+    diagnostics.delete(name);
+    opts.restoreFailures?.clear(opts.workspaceCwd, name);
+  };
+  let mutationTail = Promise.resolve();
+
+  const inMutationLane = <T>(mutation: () => Promise<T>): Promise<T> => {
+    const result = mutationTail.then(mutation, mutation);
+    mutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
+  const assertExpectedRevision = (
+    snapshot: ChannelSettingsSnapshot,
+    expectedRevision: string,
+  ): void => {
+    if (snapshot.revision !== expectedRevision) {
+      throw new ChannelManagementError(
+        'channel_settings_conflict',
+        'Channel settings changed; reload before trying again.',
+      );
+    }
+  };
+
+  const workerFor = (name: string) => {
+    const matches = opts.manager
+      .state()
+      .workers.filter(
+        (worker) =>
+          worker.adapters?.some((adapter) => adapter.name === name) ||
+          worker.requestedChannels?.includes(name) ||
+          worker.channels.includes(name),
+      );
+    return matches;
+  };
+
+  const ownedWorkers = (name: string) =>
+    workerFor(name).filter(
+      (worker) => worker.workspaceCwd === opts.workspaceCwd,
+    );
+
+  const workspaceCommittedNames = (): string[] =>
+    opts.manager
+      .committedChannelNames()
+      .filter((name) => ownedWorkers(name).length > 0);
+
+  const runtimeOwnerMismatch = (name: string, reason?: string) =>
+    new ChannelManagementError(
+      'channel_runtime_owner_mismatch',
+      `Channel "${name}" does not have one confirmed runtime owner in this workspace.${reason ? ` ${reason}` : ''}`,
+    );
+
+  const assertOwnedRuntime = (name: string): void => {
+    if (!workspaceCommittedNames().includes(name)) return;
+    if (ownedWorkers(name).length !== 1) {
+      throw runtimeOwnerMismatch(name);
+    }
+  };
+
+  // Returns whether exactly one committed worker owned by this workspace was
+  // confirmed, so `remove` can stop it without re-deriving ownership.
+  const assertConvergeableRuntimeOwner = (name: string): boolean => {
+    const workers = workerFor(name);
+    const committed = opts.manager.committedChannelNames().includes(name);
+    if (!committed && workers.length === 0) return false;
+    if (committed && workers.length === 1 && ownedWorkers(name).length === 1) {
+      return true;
+    }
+    const reason = !committed
+      ? 'A worker exists but the channel is not committed.'
+      : workers.length === 0
+        ? 'Committed selection has no observed worker.'
+        : workers.length !== 1
+          ? `${workers.length} workers claim this channel.`
+          : 'The only worker belongs to another workspace.';
+    throw runtimeOwnerMismatch(name, reason);
+  };
+
+  // Whether a mid-transition manager may be bringing this channel up. It
+  // publishes neither a committed name nor a worker for a channel it is still
+  // starting, so any name in its candidate selection that this workspace does
+  // not already run is unknown until it settles. A channel this workspace
+  // runs is safe to act on — its stop queues behind the transition and
+  // rechecks the owner inside the manager's lane — and so is one the
+  // candidate selection leaves out.
+  const mayBeStarting = (name: string): boolean => {
+    const { transition, pendingSelection } = opts.manager.state();
+    if (transition === 'idle' || !pendingSelection) return false;
+    if (workspaceCommittedNames().includes(name)) return false;
+    return (
+      pendingSelection.mode === 'all' || pendingSelection.names.includes(name)
+    );
+  };
+
+  const runtimeFor = (name: string): ChannelRuntimeState => {
+    const retainedError = diagnostics.get(name);
+    if (retainedError) return { state: 'error', lastError: retainedError };
+    if (!workspaceCommittedNames().includes(name)) {
+      const restoreFailure = opts.restoreFailures?.get(opts.workspaceCwd, name);
+      if (restoreFailure) {
+        return { state: 'error', lastError: restoreFailure.message };
+      }
+      return { state: 'stopped' };
+    }
+    const state = opts.manager.state();
+    const workers = ownedWorkers(name);
+    if (workers.length !== 1) {
+      return {
+        state: 'error',
+        lastError: 'Channel runtime owner is unknown or ambiguous.',
+      };
+    }
+    const worker = workers[0]!;
+    const adapter = worker.adapters?.find((item) => item.name === name);
+    if (adapter?.state === 'connected') return { state: 'connected' };
+    if (adapter?.state === 'error') {
+      return {
+        state: 'error',
+        ...(adapter.error ? { lastError: diagnostic(adapter.error) } : {}),
+      };
+    }
+    if (
+      adapter?.state === 'starting' ||
+      state.transition === 'starting' ||
+      state.transition === 'reconciling'
+    ) {
+      return { state: 'starting' };
+    }
+    if (worker.state === 'running') return { state: 'partial' };
+    return {
+      state: 'error',
+      ...(worker.error ? { lastError: diagnostic(worker.error) } : {}),
+    };
+  };
+
+  const instanceFrom = async (
+    name: string,
+    rawConfig: Record<string, unknown>,
+    startupNames: readonly string[],
+  ): Promise<ChannelInstanceSnapshot> => {
+    const type = typeof rawConfig['type'] === 'string' ? rawConfig['type'] : '';
+    const plugin = type ? await getPlugin(type) : undefined;
+    if (!plugin?.management) {
+      return {
+        name,
+        config: type ? { type } : {},
+        secrets: {},
+        startsWithServe:
+          startupNames.some(isAllChannelSelectionName) ||
+          startupNames.includes(name),
+        runtime: runtimeFor(name),
+      };
+    }
+    const secretKeys = new Set(
+      plugin.management.fields
+        .filter((field) => field.kind === 'secret')
+        .map((field) => field.key),
+    );
+    const config: Record<string, unknown> = {};
+    const secrets: Record<string, ChannelSecretState> = {};
+    for (const [key, value] of Object.entries(rawConfig)) {
+      if (!secretKeys.has(key)) {
+        config[key] = value;
+        continue;
+      }
+      secrets[key] = {
+        present: value !== undefined,
+        ...(value !== undefined
+          ? { source: usesEnvironment(value) ? 'environment' : 'literal' }
+          : {}),
+      };
+    }
+    for (const key of secretKeys) {
+      secrets[key] ??= { present: false };
+    }
+    return {
+      name,
+      config,
+      secrets,
+      startsWithServe:
+        startupNames.some(isAllChannelSelectionName) ||
+        startupNames.includes(name),
+      runtime: runtimeFor(name),
+    };
+  };
+
+  const listFrom = async (
+    persisted: ChannelSettingsSnapshot,
+  ): Promise<DaemonChannelsSnapshot> => {
+    const entries = await Promise.all(
+      Object.entries(persisted.channels).map(
+        async ([name, config]) =>
+          [
+            name,
+            await instanceFrom(name, config, persisted.startupNames),
+          ] as const,
+      ),
+    );
+    return {
+      revision: persisted.revision,
+      instances: Object.fromEntries(entries),
+    };
+  };
+
+  const resultFor = async (
+    name: string,
+    persisted = opts.store.snapshot(),
+  ): Promise<ChannelMutationResult> => {
+    const snapshot = await listFrom(persisted);
+    const instance = Object.hasOwn(snapshot.instances, name)
+      ? snapshot.instances[name]!
+      : ({
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: runtimeFor(name),
+        } satisfies ChannelInstanceSnapshot);
+    return { snapshot, instance };
+  };
+
+  const stopChannel = (name: string): Promise<unknown> =>
+    opts.manager.setChannelEnabled(
+      { name, workspaceCwd: opts.workspaceCwd },
+      false,
+    );
+
+  const assertManageableInstanceName = (name: string): void => {
+    if (isAllChannelSelectionName(name)) {
+      throw new ChannelManagementError(
+        'invalid_channel_instance_name',
+        'Channel instance name "all" is reserved for startup selection.',
+      );
+    }
+  };
+
+  const assertWorkspaceConfig = (config: Record<string, unknown>): void => {
+    const rawCwd = config['cwd'];
+    if (typeof rawCwd !== 'string') return;
+    const workspaceCwd = canonicalizeWorkspace(opts.workspaceCwd);
+    const channelCwd = canonicalizeWorkspace(
+      resolveChannelCwd(rawCwd, workspaceCwd),
+    );
+    if (channelCwd !== workspaceCwd) {
+      throw new ChannelManagementError(
+        'channel_workspace_mismatch',
+        'Channel workspace must match the selected workspace.',
+      );
+    }
+  };
+
+  const pairingStoreFor = (name: string): PairingStore => {
+    assertManageableInstanceName(name);
+    const channels = opts.store.snapshot().channels;
+    if (!Object.hasOwn(channels, name)) {
+      throw new ChannelManagementError(
+        'channel_instance_not_found',
+        `Channel "${name}" is not configured in this workspace.`,
+      );
+    }
+    const config = channels[name]!;
+    assertWorkspaceConfig(config);
+    if (
+      resolvePrivatePolicy(config) !== 'pairing' &&
+      config['groupPolicy'] !== 'pairing'
+    ) {
+      throw new ChannelManagementError(
+        'channel_pairing_not_enabled',
+        `Channel "${name}" does not use pairing mode.`,
+      );
+    }
+    return new PairingStore(name, opts.workspaceCwd);
+  };
+
+  const service: ChannelManagementService = {
+    async list() {
+      return listFrom(opts.store.snapshot());
+    },
+    async upsert(name, request) {
+      assertManageableInstanceName(name);
+      assertWorkspaceConfig(request.config);
+      // The submitted config is asserted above; the stored entry is a separate
+      // input. `upsert` replaces the stored config wholesale, so a caller who
+      // omits `cwd` would otherwise adopt (and drop the `cwd` of) an entry this
+      // workspace does not own — e.g. a user-scope channel pointing at another
+      // project, now reachable because a home-directory workspace resolves its
+      // channel scope to the shared user file. Mirror `remove`, which asserts
+      // the stored entry rather than the submitted one.
+      const current = opts.store.snapshot();
+      if (Object.hasOwn(current.channels, name)) {
+        assertWorkspaceConfig(current.channels[name]!);
+      }
+      const active = workspaceCommittedNames().includes(name);
+      if (active) assertOwnedRuntime(name);
+      const persisted = await opts.store.upsert(name, request);
+      forgetDiagnostics(name);
+      if (active) {
+        try {
+          await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
+        } catch (error) {
+          diagnostics.set(name, diagnostic(error));
+          try {
+            await stopChannel(name);
+          } catch {
+            // Keep the reload diagnostic when best-effort cleanup also fails.
+          }
+        }
+      }
+      return resultFor(name, persisted);
+    },
+    async remove(name, request) {
+      assertManageableInstanceName(name);
+      const current = opts.store.snapshot();
+      const configured = Object.hasOwn(current.channels, name);
+      if (configured) assertWorkspaceConfig(current.channels[name]!);
+      assertExpectedRevision(current, request.expectedRevision);
+      // A mid-transition manager reports the candidate selection as no
+      // workers and nothing committed, which reads as silent without being
+      // it; the caller retries once the manager settles. Guarded above the
+      // branch split because the configured branch reads the same
+      // mid-transition committed set, but only for a channel the transition
+      // may be starting: `transition` is one value for the whole daemon.
+      if (
+        configured
+          ? mayBeStarting(name)
+          : opts.manager.state().transition !== 'idle'
+      ) {
+        throw new ChannelManagementError(
+          'channel_service_conflict',
+          'The channel runtime is mid-transition; retry shortly.',
+        );
+      }
+      if (!configured) {
+        // Only a record-valued merged entry proves the channel lives in
+        // another scope: every other reader of the merged map filters
+        // non-record values, so a legacy scalar entry runs nothing and its
+        // stale startup selection is exactly what this branch converges.
+        const mergedHoldsConfig = (): boolean => {
+          const merged = opts.loadChannelsConfig(opts.workspaceCwd);
+          if (!Object.hasOwn(merged, name)) return false;
+          const entry = merged[name];
+          return (
+            typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+          );
+        };
+        if (mergedHoldsConfig()) {
+          // The worker resolves the merged system + user + workspace view, so
+          // a channel configured outside this scope still runs here. Its
+          // configuration is not lost — this scope never held it — and
+          // stopping the worker would tear down a channel this route never
+          // listed and cannot delete, so report the scope-local truth
+          // instead.
+          throw new ChannelManagementError(
+            'channel_instance_not_found',
+            `Channel "${name}" is not configured in this workspace's settings scope, but its runtime is resolved from another scope (user or system settings); it cannot be deleted from here.`,
+          );
+        }
+        if (assertConvergeableRuntimeOwner(name)) {
+          await stopChannel(name);
+        }
+        // The revision token covers only this scope's files, so the merged
+        // view is re-read after the stop window: a configuration that
+        // reappeared at another scope mid-delete must fail closed rather
+        // than converge.
+        if (mergedHoldsConfig()) {
+          throw new ChannelManagementError(
+            'channel_settings_conflict',
+            'Channel settings changed; reload before trying again.',
+          );
+        }
+      } else if (workspaceCommittedNames().includes(name)) {
+        assertOwnedRuntime(name);
+        await stopChannel(name);
+      }
+      const persisted = await opts.store.remove(name, request);
+      forgetDiagnostics(name);
+      return resultFor(name, persisted);
+    },
+    async setStartup(name, request) {
+      assertManageableInstanceName(name);
+      const current = opts.store.snapshot();
+      if (!Object.hasOwn(current.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      assertWorkspaceConfig(current.channels[name]!);
+      const startsAll = current.startupNames.some(isAllChannelSelectionName);
+      if (startsAll && request.enabled) {
+        assertExpectedRevision(current, request.expectedRevision);
+        return resultFor(name, current);
+      }
+      const startupNames = startsAll
+        ? Object.keys(current.channels).filter(
+            (item) => !isAllChannelSelectionName(item) && item !== name,
+          )
+        : request.enabled
+          ? current.startupNames.includes(name)
+            ? current.startupNames
+            : [...current.startupNames, name]
+          : current.startupNames.filter((item) => item !== name);
+      const persisted = await opts.store.setStartupNames(startupNames, {
+        expectedRevision: request.expectedRevision,
+      });
+      return resultFor(name, persisted);
+    },
+    async start(name) {
+      assertManageableInstanceName(name);
+      const persisted = opts.store.snapshot();
+      if (!Object.hasOwn(persisted.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      assertWorkspaceConfig(persisted.channels[name]!);
+      await opts.manager.setChannelEnabled(
+        { name, workspaceCwd: opts.workspaceCwd },
+        true,
+      );
+      forgetDiagnostics(name);
+      return resultFor(name, persisted);
+    },
+    async stop(name) {
+      assertManageableInstanceName(name);
+      const persisted = opts.store.snapshot();
+      if (!Object.hasOwn(persisted.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      assertWorkspaceConfig(persisted.channels[name]!);
+      await opts.manager.setChannelEnabled(
+        { name, workspaceCwd: opts.workspaceCwd },
+        false,
+      );
+      forgetDiagnostics(name);
+      return resultFor(name, persisted);
+    },
+    async restart(name) {
+      assertManageableInstanceName(name);
+      const persisted = opts.store.snapshot();
+      if (!Object.hasOwn(persisted.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      assertWorkspaceConfig(persisted.channels[name]!);
+      if (!workspaceCommittedNames().includes(name)) {
+        // A channel listed as `error` with nothing running — a restore that
+        // failed, or a replacement rolled back after its reload failed — has
+        // no worker to restart. Clients offer "retry" for that state, and
+        // retrying it means starting it.
+        if (
+          diagnostics.has(name) ||
+          opts.restoreFailures?.get(opts.workspaceCwd, name)
+        ) {
+          await opts.manager.setChannelEnabled(
+            { name, workspaceCwd: opts.workspaceCwd },
+            true,
+          );
+          forgetDiagnostics(name);
+          return resultFor(name, persisted);
+        }
+        throw new ChannelManagementError(
+          'channel_worker_not_enabled',
+          `Channel "${name}" is not running.`,
+        );
+      }
+      assertOwnedRuntime(name);
+      try {
+        await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
+        forgetDiagnostics(name);
+      } catch (error) {
+        diagnostics.set(name, diagnostic(error));
+        throw error;
+      }
+      return resultFor(name, persisted);
+    },
+    async pairingRequests(name) {
+      return { requests: pairingStoreFor(name).listPending() };
+    },
+    async approvePairing(name, code) {
+      const store = pairingStoreFor(name);
+      const approved = store.approve(code);
+      if (!approved) {
+        throw new ChannelManagementError(
+          'channel_pairing_request_not_found',
+          'Pairing request was not found or has expired.',
+        );
+      }
+      return { approved, requests: store.listPending() };
+    },
+    async pairingApprovals(name) {
+      const store = pairingStoreFor(name);
+      return {
+        senderIds: store.getAllowlist(),
+        groupIds: store.getGroupAllowlist(),
+      };
+    },
+    async revokePairingApproval(name, subject) {
+      const store = pairingStoreFor(name);
+      const revoked =
+        subject.type === 'group'
+          ? store.revokeGroup(subject.id)
+          : store.revoke(subject.id);
+      if (!revoked) {
+        throw new ChannelManagementError(
+          'channel_pairing_approval_not_found',
+          'Pairing approval was not found.',
+        );
+      }
+      return {
+        revoked: subject.id,
+        senderIds: store.getAllowlist(),
+        groupIds: store.getGroupAllowlist(),
+      };
+    },
+  };
+  return {
+    list: () => service.list(),
+    upsert: (name, request) =>
+      inMutationLane(() => service.upsert(name, request)),
+    remove: (name, request) =>
+      inMutationLane(() => service.remove(name, request)),
+    setStartup: (name, request) =>
+      inMutationLane(() => service.setStartup(name, request)),
+    start: (name) => inMutationLane(() => service.start(name)),
+    stop: (name) => inMutationLane(() => service.stop(name)),
+    restart: (name) => inMutationLane(() => service.restart(name)),
+    pairingRequests: (name) => service.pairingRequests(name),
+    approvePairing: (name, code) =>
+      inMutationLane(() => service.approvePairing(name, code)),
+    pairingApprovals: (name) => service.pairingApprovals(name),
+    revokePairingApproval: (name, subject) =>
+      inMutationLane(() => service.revokePairingApproval(name, subject)),
+  };
+}

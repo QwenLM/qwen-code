@@ -5,13 +5,20 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, Logger } from '@qwen-code/qwen-code-core';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
+import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
 
 export interface UseDeleteCommandOptions {
   config: Config | null;
   addItem: UseHistoryManagerReturn['addItem'];
+  /**
+   * The session's live {@link Logger}, used to purge a deleted session's
+   * prompts from the project-shared log history. Optional so callers that
+   * only drive the dialog don't have to wire it up.
+   */
+  logger?: Logger | null;
 }
 
 export interface UseDeleteCommandResult {
@@ -35,9 +42,31 @@ export function useDeleteCommand(
     setIsDeleteDialogOpen(false);
   }, []);
 
-  const { config, addItem } = options ?? {};
+  const { config, addItem, logger } = options ?? {};
 
   const isDeletingManyRef = useRef(false);
+
+  // Deleting a session removes its transcript, but its prompts also live in
+  // the project-shared `<tmp>/<project-hash>/logs.json` that backs
+  // cross-session ↑-history. Without this they keep coming back via
+  // `getPreviousUserMessages()`, which reads every session's rows by design.
+  // Fire-and-forget: the Logger drops the rows from its in-memory cache
+  // synchronously, so the ↑-history list the "Session deleted" history item
+  // re-renders is already correct, and the delete flow never blocks on disk.
+  const purgeSessionLogs = useCallback(
+    (sessionIds: readonly string[]) => {
+      if (sessionIds.length === 0) return;
+      // One call for the whole batch: per-id purges would each rewrite the
+      // entire project-shared `logs.json` and queue behind one another.
+      void logger
+        ?.removeSessionsMessages(sessionIds)
+        .catch((error: unknown) => {
+          // eslint-disable-next-line no-console
+          console.error('Failed to purge deleted sessions from log:', error);
+        });
+    },
+    [logger],
+  );
 
   const handleDelete = useCallback(
     async (sessionId: string) => {
@@ -75,6 +104,8 @@ export function useDeleteCommand(
         const success = await sessionService.removeSession(sessionId);
 
         if (success) {
+          purgeSessionLogs([sessionId]);
+          fireSessionDeleteHook(config, sessionId);
           addItem?.(
             {
               type: 'info',
@@ -103,7 +134,7 @@ export function useDeleteCommand(
         );
       }
     },
-    [closeDeleteDialog, config, addItem],
+    [closeDeleteDialog, config, addItem, purgeSessionLogs],
   );
 
   const handleDeleteMany = useCallback(
@@ -161,6 +192,11 @@ export function useDeleteCommand(
 
         const sessionService = config.getSessionService();
         const result = await sessionService.removeSessions(filtered);
+
+        purgeSessionLogs(result.removed);
+        for (const sessionId of result.removed) {
+          fireSessionDeleteHook(config, sessionId);
+        }
 
         const removedCount = result.removed.length;
         const failedIds = [
@@ -236,7 +272,7 @@ export function useDeleteCommand(
         isDeletingManyRef.current = false;
       }
     },
-    [closeDeleteDialog, config, addItem],
+    [closeDeleteDialog, config, addItem, purgeSessionLogs],
   );
 
   return {

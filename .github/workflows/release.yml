@@ -2,10 +2,11 @@ name: 'Release'
 
 on:
   schedule:
-    # Runs every day at midnight UTC for the nightly release.
-    - cron: '0 0 * * *'
-    # Runs every Tuesday at 23:59 UTC for the preview release.
-    - cron: '59 23 * * 2'
+    # Keep these strings in sync with run-release-step.sh.
+    # Runs every day at 21:00 UTC for the nightly release.
+    - cron: '0 21 * * *'
+    # Runs every Tuesday at 17:00 UTC for the preview release.
+    - cron: '0 17 * * 2'
   workflow_dispatch:
     inputs:
       version:
@@ -38,15 +39,27 @@ on:
         type: 'boolean'
         default: false
 
+concurrency:
+  # Serialize scheduled releases; manual runs remain independent.
+  group: "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}"
+  cancel-in-progress: false
+
 jobs:
+  # The dedicated hk4 label isolates release validation from regular CI.
   prepare:
     name: 'Prepare Release Metadata'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
       contents: 'read'
+      actions: 'read'
     outputs:
+      release_sha: '${{ steps.source.outputs.release_sha }}'
+      audio_prebuild_key: '${{ steps.audio_key.outputs.cache_key }}'
+      audio_artifact_id: '${{ steps.audio_reuse.outputs.artifact_id }}'
+      audio_run_id: '${{ steps.audio_reuse.outputs.run_id }}'
       release_tag: '${{ steps.version.outputs.RELEASE_TAG }}'
       release_version: '${{ steps.version.outputs.RELEASE_VERSION }}'
       npm_tag: '${{ steps.version.outputs.NPM_TAG }}'
@@ -56,11 +69,37 @@ jobs:
       is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
 
     steps:
+      - &restore_release_workspace
+        name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
+
+      - &checkout_release_workflow_scripts
+        name: 'Checkout release workflow scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.workflow_sha }}'
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |-
+            /.github/scripts
+            /.github/workflows/audio-capture-prebuilds.yml
+            /scripts/assert-release-version.mjs
+            /scripts/check-release-tarball-exec-bits.mjs
+            /scripts/release-packages.mjs
+            /scripts/workspaces.js
+            /package.json
+            /packages/*/package.json
+            /packages/channels/*/package.json
+            /integrations/*/package.json
+          sparse-checkout-cone-mode: false
+          path: '.release-workflow'
 
       - name: 'Set booleans for simplified logic'
         id: 'vars'
@@ -69,37 +108,101 @@ jobs:
           CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
           CRON: '${{ github.event.schedule }}'
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
-        run: |-
-          is_nightly="false"
-          if [[ "${CRON}" == "0 0 * * *" || "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
-            is_nightly="true"
-          fi
-          echo "is_nightly=${is_nightly}" >> "${GITHUB_OUTPUT}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh set-flags'
 
-          is_preview="false"
-          if [[ "${CRON}" == "59 23 * * 2" || "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
-            is_preview="true"
-          fi
-          echo "is_preview=${is_preview}" >> "${GITHUB_OUTPUT}"
+      - name: 'Resolve release commit'
+        id: 'source'
+        run: '.release-workflow/.github/scripts/run-release-step.sh resolve-commit'
 
-          is_dry_run="false"
-          if [[ "${DRY_RUN_INPUT}" == "true" ]]; then
-            is_dry_run="true"
-          fi
-          echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
-
-      - name: 'Setup Node.js'
+      - name: 'Set up Node.js (hosted)'
+        if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
+
+      # ECS uses its pre-installed Node because nodejs.org may be unreachable.
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      # Fail fast on a saturated pool instance instead of dying on ENOSPC
+      # mid-job (#10035): a re-run lands on an instance with headroom. The
+      # script rides the selected ref, so a ref that predates it skips.
+      - &release_disk_floor_gate
+        name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if [ -f .github/scripts/check-disk-floor.sh ]; then
+            bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"
+          fi
 
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          npm ci --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
+          npm run postinstall
+          npm run generate
+
+      - &reset_release_workflow_scripts
+        name: 'Reset release workflow scripts'
+        run: 'rm -rf -- .release-workflow'
+
+      - *checkout_release_workflow_scripts
+
+      - name: 'Fingerprint audio build inputs'
+        id: 'audio_key'
+        continue-on-error: true
+        env:
+          RELEASE_SHA: '${{ steps.source.outputs.release_sha }}'
+        run: |-
+          directory=$(mktemp -d "${RUNNER_TEMP}/audio-reuse.XXXXXX")
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
+          node .release-workflow/.github/scripts/audio-prebuilds.mjs key "$RELEASE_SHA" .release-workflow >> "$GITHUB_OUTPUT"
+
+      - name: 'Find reusable audio prebuilds'
+        id: 'audio_candidate'
+        continue-on-error: true
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          AUDIO_KEY: '${{ steps.audio_key.outputs.cache_key }}'
+        with:
+          script: |-
+            const { findAudioArtifact } = await import(process.env.GITHUB_WORKSPACE + '/.release-workflow/.github/scripts/audio-prebuilds.mjs');
+            const artifact = await findAudioArtifact(github, context.repo, process.env.AUDIO_KEY, core.warning);
+            for (const [key, value] of Object.entries(artifact ?? {})) core.setOutput(key, value);
+
+      - name: 'Try reusable audio prebuilds'
+        id: 'audio_download'
+        if: "${{ steps.audio_candidate.outputs.artifact_id != '' }}"
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          artifact-ids: '${{ steps.audio_candidate.outputs.artifact_id }}'
+          run-id: '${{ steps.audio_candidate.outputs.run_id }}'
+          github-token: '${{ github.token }}'
+          merge-multiple: true
+          path: '${{ steps.audio_key.outputs.directory }}'
+
+      - name: 'Accept complete audio prebuilds'
+        id: 'audio_reuse'
+        if: "${{ steps.audio_download.outcome == 'success' }}"
+        continue-on-error: true
+        env:
+          AUDIO_DIRECTORY: '${{ steps.audio_key.outputs.directory }}'
+          AUDIO_ARTIFACT_ID: '${{ steps.audio_candidate.outputs.artifact_id }}'
+          AUDIO_RUN_ID: '${{ steps.audio_candidate.outputs.run_id }}'
+        run: |-
+          node .release-workflow/.github/scripts/audio-prebuilds.mjs validate "$AUDIO_DIRECTORY"
+          echo "artifact_id=$AUDIO_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "run_id=$AUDIO_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: 'Remove trial audio download'
+        if: "${{ always() && steps.audio_key.outputs.directory != '' }}"
+        env:
+          AUDIO_DIRECTORY: '${{ steps.audio_key.outputs.directory }}'
+        run: 'rm -rf -- "$AUDIO_DIRECTORY"'
 
       - name: 'Get the version'
         id: 'version'
@@ -108,205 +211,399 @@ jobs:
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
-        run: |-
-          VERSION_ARGS=()
-          if [[ "${IS_NIGHTLY}" == "true" ]]; then
-            VERSION_ARGS+=(--type=nightly)
-          elif [[ "${IS_PREVIEW}" == "true" ]]; then
-            VERSION_ARGS+=(--type=preview)
-            if [[ -n "${MANUAL_VERSION}" ]]; then
-              MANUAL_CLEAN="${MANUAL_VERSION#v}"
-              if [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
-                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}")
-              elif [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}-preview.0")
-              else
-                echo "::error::For preview releases, version must be X.Y.Z or X.Y.Z-preview.N; got ${MANUAL_VERSION}"
-                exit 1
-              fi
-            fi
-          else
-            VERSION_ARGS+=(--type=stable)
-            if [[ -n "${MANUAL_VERSION}" ]]; then
-              VERSION_ARGS+=("--stable_version_override=${MANUAL_VERSION}")
-            fi
-          fi
+        run: '.release-workflow/.github/scripts/run-release-step.sh resolve-version'
 
-          VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}")
-          echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
-          echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
-          echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
-          echo "PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)" >> "$GITHUB_OUTPUT"
+  quality_static:
+    name: 'Quality Checks (Static)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Retunable for contention on the dedicated runner; values are minutes.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: &release_test_env
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+    steps:
+      - *restore_release_workspace
+
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_static timeout budget: ${BUDGET} minutes (QWEN_RELEASE_STATIC_TIMEOUT_MINUTES set=${VARIABLE_SET})"
+
+      - &checkout_release_validation
+        name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ needs.prepare.outputs.release_sha }}'
+          fetch-depth: 1
+
+      - &setup_release_node_hosted
+        name: 'Set up Node.js (hosted)'
+        if: "${{ runner.environment != 'self-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          package-manager-cache: false
+
+      # ECS uses its pre-installed Node because nodejs.org may be unreachable.
+      - &setup_release_node_self_hosted
+        name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - *release_disk_floor_gate
+      - &install_release_dependencies
+        name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
+          npm run postinstall
+          npm run generate
+
+      - name: 'Run Lint'
+        run: 'npm run lint:ci'
+
+  quality_build:
+    name: 'Quality Checks (Build)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Same contention knob as quality_static.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_build timeout budget: ${BUDGET} minutes (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES set=${VARIABLE_SET})"
+
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
+      - *install_release_dependencies
+
+      # This materializes the repo-root dist packed below.
+      - name: 'Check Serve Fast Path Bundle'
+        run: 'npm run check:serve-fast-path-bundle'
+
+      - name: 'Build Project'
+        run: 'npm run build'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Pack Build Outputs'
+        run: '.release-workflow/.github/scripts/run-release-step.sh pack-build'
+
+      - name: 'Upload Build Outputs'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-quality-build'
+          path: '${{ runner.temp }}/release-build.tgz'
+          retention-days: 3
+          if-no-files-found: 'error'
+          overwrite: true
+
+      # Fail package guards here, while keeping the uploaded build unchanged.
+      - name: 'Verify Prepared Package'
+        run: '.release-workflow/.github/scripts/run-release-step.sh verify-package'
+
+  quality_typecheck:
+    name: 'Quality Checks (Typecheck)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
+      - *install_release_dependencies
+
+      - &download_release_build
+        name: 'Download Build Outputs'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'release-quality-build'
+          path: '${{ runner.temp }}/release-quality-build'
+
+      - &unpack_release_build
+        name: 'Unpack Build Outputs'
+        run: 'tar -xzf "${RUNNER_TEMP}/release-quality-build/release-build.tgz"'
+
+      - name: 'Typecheck Project'
+        run: 'npm run typecheck'
+
+  workspace_tests:
+    name: 'Workspace Tests (${{ matrix.shard }}/3)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Retunable for contention on the dedicated runner.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
+      - *install_release_dependencies
+      - *download_release_build
+      - *unpack_release_build
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Run Workspace Tests'
+        shell: 'bash'
+        env:
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
+          NO_COLOR: 'true'
+          # Same fleet predicate as ci.yml's unit lane (#10870): millisecond
+          # budgets measure the neighbours on this pool, not the code.
+          QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+        run: '.release-workflow/.github/scripts/run-release-workspace-tests.sh "${{ matrix.shard }}"'
+
+  quality_scripts:
+    name: 'Quality Checks (Scripts)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
+      - *install_release_dependencies
+      - *download_release_build
+      - *unpack_release_build
+
+      # Same host-wide archive cache as ci.yml's test job, which runs the same
+      # standalone runtime regression; this job also runs on a persistent host.
+      - name: 'Configure persistent standalone runtime cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/standalone-runtimes"
+          echo "QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent standalone runtime cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Run Script Tests'
+        env:
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+        run: 'npm run test:scripts'
 
   quality:
     name: 'Quality Checks'
-    runs-on: 'ubuntu-latest'
-    needs: 'prepare'
+    # Same pool as the checks it aggregates. On 2026-10-15 this hosted-only
+    # gate job queued 53 minutes behind PR automation while every ECS machine
+    # it depends on sat idle, and it gates publish.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    needs:
+      - 'prepare'
+      - 'quality_static'
+      - 'quality_build'
+      - 'quality_typecheck'
+      - 'workspace_tests'
+      - 'quality_scripts'
+    # Cancelled runs stay cancelled; completed validation fails closed.
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
-
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
-
-      - name: 'Install Dependencies'
+      - *restore_release_workspace
+      - name: 'Verify quality results'
         env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
+          STATIC_RESULT: '${{ needs.quality_static.result }}'
+          BUILD_RESULT: '${{ needs.quality_build.result }}'
+          TYPECHECK_RESULT: '${{ needs.quality_typecheck.result }}'
+          WORKSPACE_TEST_RESULT: '${{ needs.workspace_tests.result }}'
+          SCRIPT_TEST_RESULT: '${{ needs.quality_scripts.result }}'
         run: |-
-          npm ci --no-audit --progress=false
-
-      - name: 'Format Project'
-        run: |-
-          npm run format
-
-      - name: 'Run Lint'
-        run: |-
-          npm run lint:ci
-
-      - name: 'Build Project'
-        run: |-
-          npm run build
-
-      - name: 'Typecheck Project'
-        run: |-
-          npm run typecheck
-
-      - name: 'Run Workspace Tests'
-        run: |-
-          npm run test:ci
+          for result in \
+            "${STATIC_RESULT}" \
+            "${BUILD_RESULT}" \
+            "${TYPECHECK_RESULT}" \
+            "${WORKSPACE_TEST_RESULT}" \
+            "${SCRIPT_TEST_RESULT}"; do
+            if [[ "${result}" != 'success' ]]; then
+              echo "::error::A release quality check did not succeed."
+              exit 1
+            fi
+          done
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 120
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
+      - *install_release_dependencies
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
-
-      - name: 'Install Dependencies'
-        env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
-        run: |-
-          npm ci --no-audit --progress=false
+      - name: 'Build Bundle'
+        run: 'npm run build && npm run bundle'
 
       - name: 'Run CLI Integration Tests'
-        run: |-
-          npm run test:integration:cli:sandbox:none
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        run: 'npm run test:integration:cli:sandbox:none'
 
       - name: 'Run Interactive Integration Tests'
-        run: |-
-          npm run test:integration:interactive:sandbox:none
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        run: 'npm run test:integration:interactive:sandbox:none'
 
   integration_docker:
     name: 'Integration Tests (Docker)'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 120
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
+      - *restore_release_workspace
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
-
-      - name: 'Install Dependencies'
-        env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
+      - name: 'Check docker daemon'
         run: |-
-          npm ci --no-audit --progress=false
+          if ! docker_info_output="$(docker info 2>&1)"; then
+            echo "::error::docker daemon is not reachable on this runner; docker integration tests cannot run."
+            printf '%s\n' "$docker_info_output"
+            exit 1
+          fi
+
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
+      - *install_release_dependencies
+
+      - name: 'Build Bundle'
+        run: 'npm run build && npm run bundle'
 
       - name: 'Set up Docker'
-        uses: 'docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd' # ratchet:docker/setup-buildx-action@v4
+        if: "${{ runner.environment != 'self-hosted' }}"
+        uses: 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' # ratchet:docker/setup-buildx-action@v4
 
-      - name: 'Build Sandbox'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Run Docker Integration Tests'
         env:
           QWEN_SANDBOX: 'docker'
-        run: |-
-          npm run build:sandbox -- -s
+          BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
+          RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-release'
+          SANDBOX_FLAGS: '--label org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}'
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        run: '.release-workflow/.github/scripts/run-release-docker-integration.sh'
 
-      - name: 'Run CLI Docker Integration Tests'
-        run: |-
-          # The package.json docker test scripts each rebuild the sandbox image.
-          # Run vitest directly here so this job reuses the image built above.
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
-
-      - name: 'Run Interactive Docker Integration Tests'
-        run: |-
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+      - name: 'Remove job-owned release containers'
+        if: "${{ always() && runner.environment == 'self-hosted' }}"
+        env:
+          RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-release'
+        run: '.release-workflow/.github/scripts/run-release-docker-integration.sh cleanup'
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'
     needs: 'prepare'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{ github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.audio_artifact_id == '' }}
     uses: './.github/workflows/audio-capture-prebuilds.yml'
+    with:
+      ref: '${{ needs.prepare.outputs.release_sha }}'
+      cache_key: '${{ needs.prepare.outputs.audio_prebuild_key }}'
 
-  publish:
-    name: 'Publish Release'
-    runs-on: 'ubuntu-latest'
+  build_release:
+    name: 'Build Release Artifacts'
+    # Reserve release-labelled runner slots before enabling this lane.
+    runs-on: ['self-hosted', 'linux', 'ecs-qwen-release-host']
+    timeout-minutes: 90
     needs:
-      - 'prepare'
-      - 'quality'
-      - 'integration_none'
-      - 'integration_docker'
-      - 'audio_capture_prebuilds'
+      [
+        'prepare',
+        'quality',
+        'integration_none',
+        'integration_docker',
+        'audio_capture_prebuilds',
+      ]
     if: |-
       ${{
         always() &&
+        github.repository == 'QwenLM/qwen-code' &&
+        vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true' &&
         needs.prepare.result == 'success' &&
         (
-          github.repository != 'QwenLM/qwen-code' ||
-          needs.audio_capture_prebuilds.result == 'success'
+          needs.audio_capture_prebuilds.result == 'success' ||
+          (needs.audio_capture_prebuilds.result == 'skipped' && needs.prepare.outputs.audio_artifact_id != '')
         ) &&
         (
           github.event.inputs.force_skip_tests == 'true' ||
@@ -317,243 +614,341 @@ jobs:
           )
         )
       }}
-    environment:
-      name: 'production-release'
-      url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
     permissions:
-      contents: 'write'
-      packages: 'write'
-      id-token: 'write'
-      pull-requests: 'write'
-      issues: 'write'
-
+      contents: 'read'
+      actions: 'read'
+    outputs:
+      release_commit: '${{ steps.handoff.outputs.release_commit }}'
+      artifact_id: '${{ steps.upload.outputs.artifact-id }}'
     steps:
+      - *restore_release_workspace
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          # Persist the bot PAT for release-branch pushes so downstream CI
-          # workflows are triggered.
-          token: '${{ secrets.CI_BOT_PAT }}'
-          ref: '${{ github.event.inputs.ref || github.sha }}'
+          ref: '${{ needs.prepare.outputs.release_sha }}'
           fetch-depth: 0
-
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
+          persist-credentials: false
+      - *release_disk_floor_gate
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        uses: './.github/actions/self-hosted-node'
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          npm ci --no-audit --progress=false
-
-      - name: 'Configure Git User'
-        run: |-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: 'Create and switch to a release branch'
-        id: 'release_branch'
+          corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
+          npm run postinstall
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Prepare release branch'
         env:
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          BRANCH_NAME="release/${RELEASE_TAG}"
-          git switch -c "${BRANCH_NAME}"
-          echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_OUTPUT}"
-
-      - name: 'Update package versions'
-        env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
-        run: |-
-          npm run release:version "${RELEASE_VERSION}"
-
-      - name: 'Commit and Conditionally Push package versions'
+        run: '.release-workflow/.github/scripts/run-release-step.sh prepare-release-branch'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Commit release version locally'
         env:
-          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json
-          if git diff --staged --quiet; then
-            echo "No version changes to commit"
-          else
-            git commit -m "chore(release): ${RELEASE_TAG}"
-          fi
-          if [[ "${IS_DRY_RUN}" == "false" ]]; then
-            echo "Pushing release branch to remote..."
-            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
-          else
-            echo "Dry run enabled. Skipping push."
-          fi
+        run: '.release-workflow/.github/scripts/run-release-step.sh commit-release-branch'
 
-      - name: 'Build Bundle and Prepare Package'
-        run: |-
-          npm run bundle
-          npm run prepare:package
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - &verify_reused_audio
+        name: 'Verify reusable audio source'
+        if: "${{ needs.prepare.outputs.audio_artifact_id != '' }}"
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
+          AUDIO_ARTIFACT_ID: '${{ needs.prepare.outputs.audio_artifact_id }}'
+        with:
+          script: |-
+            const { audioPrebuildKey, verifyAudioArtifact } = await import(process.env.GITHUB_WORKSPACE + '/.release-workflow/.github/scripts/audio-prebuilds.mjs');
+            const key = audioPrebuildKey(process.env.GITHUB_WORKSPACE, process.env.RELEASE_SHA, process.env.GITHUB_WORKSPACE + '/.release-workflow');
+            const { data: artifact } = await github.rest.actions.getArtifact({ ...context.repo, artifact_id: Number(process.env.AUDIO_ARTIFACT_ID) });
+            await verifyAudioArtifact(github, context.repo, artifact, key);
 
-      - name: 'Download audio capture prebuilds'
+      - &download_reused_audio
+        name: 'Download reusable audio prebuilds'
+        if: "${{ needs.prepare.outputs.audio_artifact_id != '' }}"
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          artifact-ids: '${{ needs.prepare.outputs.audio_artifact_id }}'
+          run-id: '${{ needs.prepare.outputs.audio_run_id }}'
+          github-token: '${{ github.token }}'
+          merge-multiple: true
+          path: 'packages/audio-capture/prebuilds'
+
+      - &download_fresh_audio
+        name: 'Download audio capture prebuilds'
         if: |-
-          ${{ github.repository == 'QwenLM/qwen-code' }}
+          ${{ github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.audio_artifact_id == '' }}
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'audio-capture-prebuilds'
           path: 'packages/audio-capture/prebuilds'
 
+      - &validate_audio
+        name: 'Validate complete audio prebuilds'
+        if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+        run: 'node .release-workflow/.github/scripts/audio-prebuilds.mjs validate packages/audio-capture/prebuilds'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Build Bundle and Prepare Package'
+        env:
+          QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1'
+        run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
       - name: 'Build Standalone Archives'
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
-          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
-        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
-
-      - name: 'Publish @qwen-code/audio-capture'
-        if: |-
-          ${{ github.repository == 'QwenLM/qwen-code' }}
-        working-directory: 'packages/audio-capture'
-        run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
-
-      - name: 'Publish @qwen-code/qwen-code'
-        working-directory: 'dist'
-        run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
-
-      - name: 'Publish @qwen-code/channel-base'
-        working-directory: 'packages/channels/base'
-        run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
-
+          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1'
+          QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1'
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh build-archives'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
       - name: 'Verify Standalone Archives'
-        run: |-
-          npm run verify:installation-release -- --dir dist/standalone
-
-      - name: 'Create GitHub Release and Tag'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
-          # CI_BOT_PAT required: GITHUB_TOKEN events cannot trigger downstream workflows (sync-release-to-oss.yml).
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
-          IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
-          IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
-        run: |-
-          PRERELEASE_FLAG=""
-          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
-
-          gh release create "${RELEASE_TAG}" \
-            dist/cli.js \
-            dist/standalone/qwen-code-* \
-            dist/standalone/SHA256SUMS \
-            --target "${RELEASE_BRANCH}" \
-            --title "Release ${RELEASE_TAG}" \
-            --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
-            --generate-notes \
-            ${PRERELEASE_FLAG}
-
-      - name: 'Regenerate CHANGELOG.md'
-        # Stable releases only: nightly/preview ship daily and would drown out
-        # the changelog. The just-created GitHub Release is already queryable,
-        # so the generator picks it up. The release branch was already pushed
-        # above, so push this follow-up commit too — otherwise the PR opened
-        # below (whose head is the remote branch) would not include it.
-        #
-        # Non-blocking by design: the only realistic failures are transient
-        # (the gh API read or the git push). The changelog is rebuilt from the
-        # full release history on every run, so a skipped update self-heals on
-        # the next stable release — never worth blocking the version-bump PR to
-        # main that follows.
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        continue-on-error: true
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh verify-archives'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Pack release handoff'
+        id: 'handoff'
         env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-        run: |-
-          set -euo pipefail
-          node scripts/generate-changelog.js
-          git add CHANGELOG.md
-          if git diff --cached --quiet -- CHANGELOG.md; then
-            echo "CHANGELOG.md already up to date."
-          else
-            git commit -m "docs(changelog): sync for ${RELEASE_TAG}"
-            git push origin "${BRANCH_NAME}"
-          fi
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
+          BRANCH_NAME: "${{ format('release/{0}', needs.prepare.outputs.release_tag) }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh pack-release'
+      - name: 'Upload release handoff'
+        id: 'upload'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-publish-build'
+          path: '${{ runner.temp }}/release-publish-build/'
+          if-no-files-found: 'error'
+          overwrite: true
+          retention-days: 3
 
-      - name: 'Create PR to merge release branch into main'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        id: 'pr'
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-
-          pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
-          if [[ -z "${pr_url}" ]]; then
-            pr_url="$(gh pr create \
-              --base main \
-              --head "${RELEASE_BRANCH}" \
-              --title "chore(release): ${RELEASE_TAG}" \
-              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
-          fi
-
-          echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
-
-      - name: 'Approve release PR'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        env:
-          # Separate bot account from the PR author (CI_BOT_PAT) so GitHub
-          # allows the approval; covers one of the two required reviews.
-          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-        run: |-
-          set -euo pipefail
-          gh pr review "${PR_URL}" --approve --body "Automated approval for the release version bump."
-
-      - name: 'Enable auto-merge for release PR'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-          # Keep [skip ci] only on the squash commit that lands on main. The
-          # release branch commit and PR title intentionally omit it so tag-push
-          # workflows and PR metadata stay unaffected.
-          gh pr merge "${PR_URL}" \
-            --squash \
-            --auto \
-            --delete-branch \
-            --subject "chore(release): ${RELEASE_TAG} [skip ci]"
-
-  notify_failure:
-    name: 'Notify Release Failure'
+  publish:
+    name: 'Publish Release'
+    # npm trusted publishing and provenance require GitHub-hosted runners.
     runs-on: 'ubuntu-latest'
     needs:
       - 'prepare'
       - 'quality'
       - 'integration_none'
       - 'integration_docker'
+      - 'audio_capture_prebuilds'
+      - 'build_release'
+    if: |-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        (
+          needs.build_release.result == 'success' ||
+          (needs.build_release.result == 'skipped' && (github.repository != 'QwenLM/qwen-code' || vars.ECS_RELEASE_HOST_RUNNER_ENABLED != 'true'))
+        ) &&
+        (
+          github.repository != 'QwenLM/qwen-code' ||
+          needs.audio_capture_prebuilds.result == 'success' ||
+          (needs.audio_capture_prebuilds.result == 'skipped' && needs.prepare.outputs.audio_artifact_id != '')
+        ) &&
+        (
+          github.event.inputs.force_skip_tests == 'true' ||
+          (
+            needs.quality.result == 'success' &&
+            needs.integration_none.result == 'success' &&
+            needs.integration_docker.result == 'success'
+          )
+        )
+      }}
+    outputs:
+      version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
+    # Serialize each real/dry release tag; never cancel an active publish.
+    concurrency:
+      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
+      cancel-in-progress: false
+    timeout-minutes: 90
+    environment:
+      name: 'production-release'
+      url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
+    permissions:
+      contents: 'write'
+      actions: 'read'
+      issues: 'write'
+      packages: 'write'
+      id-token: 'write'
+      pull-requests: 'write'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          # Read-only fetch with the job token; the bot PAT is only exported
+          # to the write steps.
+          token: '${{ github.token }}'
+          ref: '${{ needs.prepare.outputs.release_sha }}'
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *checkout_release_workflow_scripts
+      - name: 'Download release handoff'
+        if: "${{ needs.build_release.result == 'success' }}"
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          artifact-ids: '${{ needs.build_release.outputs.artifact_id }}'
+          merge-multiple: true
+          path: '${{ runner.temp }}/release-publish-build'
+      - name: 'Restore release commit and outputs'
+        if: "${{ needs.build_release.result == 'success' }}"
+        env:
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
+          RELEASE_COMMIT: '${{ needs.build_release.outputs.release_commit }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh restore-release'
+
+      - name: 'Setup Node.js (hosted)'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          package-manager-cache: false
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
+          npm run postinstall
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Prepare release branch'
+        if: "${{ needs.build_release.result != 'success' }}"
+        id: 'release_branch'
+        env:
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh prepare-release-branch'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Conditionally push release branch'
+        id: 'push_release_branch'
+        env:
+          GITHUB_TOKEN: '${{ github.token }}'
+          BRANCH_NAME: "${{ format('release/{0}', needs.prepare.outputs.release_tag) }}"
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh push-release-branch'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - *verify_reused_audio
+      - *download_reused_audio
+      - *download_fresh_audio
+
+      - *validate_audio
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Build Bundle and Prepare Package'
+        if: "${{ needs.build_release.result != 'success' }}"
+        env:
+          QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Build Standalone Archives'
+        if: "${{ needs.build_release.result != 'success' }}"
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+          QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh build-archives'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Publish npm packages'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
+          PUBLISH_AUDIO_CAPTURE: "${{ github.repository == 'QwenLM/qwen-code' }}"
+          PUBLISH_EXTERNAL_CONTEXT_MEM0: "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh publish-packages'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Verify Standalone Archives'
+        env:
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh verify-archives'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Auto-label internal CI PRs for release notes exclusion'
+        continue-on-error: true
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          GITHUB_TOKEN: '${{ github.token }}'
+          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh label-release-prs'
+
+      - name: 'Create GitHub Release and Tag'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          # CI_BOT_PAT required: GITHUB_TOKEN events cannot trigger downstream release-event workflows.
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_BRANCH: "${{ format('release/{0}', needs.prepare.outputs.release_tag) }}"
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
+          IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh create-github-release'
+
+      - name: 'Trigger ECS runner qwen update'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' &&
+              needs.prepare.outputs.is_dry_run == 'false' &&
+              needs.prepare.outputs.npm_tag == 'latest' }}
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh dispatch-update'
+
+  notify_failure:
+    name: 'Notify Release Failure'
+    # Hosted so failure reporting survives self-hosted pool failures.
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    needs:
+      - 'prepare'
+      - 'quality'
+      - 'integration_none'
+      - 'integration_docker'
+      - 'audio_capture_prebuilds'
+      - 'build_release'
       - 'publish'
     if: |-
       ${{
@@ -564,18 +959,36 @@ jobs:
         ) &&
         (
           needs.prepare.result == 'failure' ||
+          needs.audio_capture_prebuilds.result == 'failure' ||
+          needs.build_release.result == 'failure' ||
           needs.quality.result == 'failure' ||
           needs.integration_none.result == 'failure' ||
           needs.integration_docker.result == 'failure' ||
-          needs.publish.result == 'failure'
+          (
+            needs.publish.result == 'failure' &&
+            needs.publish.outputs.version_refusal != 'true'
+          )
         )
       }}
     permissions:
       actions: 'write'
+      contents: 'read'
       issues: 'write'
 
     steps:
+      - *checkout_release_workflow_scripts
+
+      # The notifier is the one job that must survive whatever broke the
+      # others, and the extraction gave it a dependency it did not have at
+      # base: a checkout of `github.workflow_sha`, plus a shell script that a
+      # syntax error or a dropped exec bit can take out wholesale. Neither the
+      # checkout nor the runner is allowed to swallow the report, so this step
+      # runs regardless, absorbs its own failure, and hands off to the inline
+      # fallback below.
       - name: 'Create Issue on Failure'
+        id: 'notify'
+        if: '${{ always() }}'
+        continue-on-error: true
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GH_REPO: '${{ github.repository }}'
@@ -583,105 +996,76 @@ jobs:
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           PREPARE_RESULT: '${{ needs.prepare.result }}'
           QUALITY_RESULT: '${{ needs.quality.result }}'
           INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
           INTEGRATION_DOCKER_RESULT: '${{ needs.integration_docker.result }}'
+          AUDIO_PREBUILDS_RESULT: '${{ needs.audio_capture_prebuilds.result }}'
+          BUILD_RELEASE_RESULT: '${{ needs.build_release.result }}'
           PUBLISH_RESULT: '${{ needs.publish.result }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh notify-failure'
+
+      # Inline on purpose: this runs precisely when the trusted checkout or the
+      # extracted runner is what failed, so it may not depend on either. It
+      # files a human-triage issue with only the bug label, no reuse or autofix.
+      - name: 'File a fallback failure issue'
+        if: "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}"
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
-          failed_jobs="$(
-            for job in \
-              "prepare:${PREPARE_RESULT}" \
-              "quality:${QUALITY_RESULT}" \
-              "integration_none:${INTEGRATION_NONE_RESULT}" \
-              "integration_docker:${INTEGRATION_DOCKER_RESULT}" \
-              "publish:${PUBLISH_RESULT}"; do
-              name="${job%%:*}"
-              result="${job#*:}"
-              if [[ "${result}" == "failure" ]]; then
-                printf -- '- %s\n' "${name}"
-              fi
-            done
-          )"
-          if [[ -z "${failed_jobs}" ]]; then
-            failed_jobs='- unknown'
-          fi
+          echo "::warning::Primary notifier did not succeed; filing a fallback issue."
+          gh issue create --repo "${GH_REPO}" \
+            --title "Release Failed for ${RELEASE_TAG} on $(date -u +%Y-%m-%d)" \
+            --label 'type/bug' \
+            --body "The release workflow failed and the primary failure notifier did not run to completion. Run: ${DETAILS_URL}"
 
-          body_file="$(mktemp)"
-          cat > "${body_file}" <<BODY
-          The release workflow failed.
+  reconcile_failure:
+    name: 'Close Stale Release Failure Issue'
+    # Success-gated sibling of notify_failure: that job is skipped the moment a
+    # re-run passes, which is exactly why the issue it filed outlives the
+    # failure (#15705). Hosted for the same reason as the notifier.
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    needs:
+      - 'prepare'
+      - 'quality'
+      - 'integration_none'
+      - 'integration_docker'
+      - 'audio_capture_prebuilds'
+      - 'build_release'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        (
+          github.event_name == 'schedule' ||
+          github.event.inputs.dry_run != 'true'
+        ) &&
+        needs.publish.result == 'success' &&
+        needs.prepare.result != 'failure' &&
+        needs.audio_capture_prebuilds.result != 'failure' &&
+        needs.build_release.result != 'failure' &&
+        needs.quality.result != 'failure' &&
+        needs.integration_none.result != 'failure' &&
+        needs.integration_docker.result != 'failure'
+      }}
+    permissions:
+      contents: 'read'
+      issues: 'write'
 
-          Release tag: ${RELEASE_TAG}
-          Run: ${DETAILS_URL}
+    steps:
+      - *checkout_release_workflow_scripts
 
-          Failed job(s):
-          ${failed_jobs}
-          BODY
-
-          # `in:title` is a fuzzy full-text search, so anchor the reuse on an
-          # exact "Release Failed for <tag> on " title prefix — otherwise a tag
-          # that is a prefix of another (v0.18.1 vs v0.18.10) could reuse the
-          # wrong release's issue. Prefer a workflow-owned (github-actions[bot])
-          # match so a same-titled human/foreign issue sorting first can't make
-          # us skip an existing bot issue and open duplicates.
-          existing_issue="$(
-            gh issue list --repo "${GH_REPO}" \
-              --state open \
-              --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
-              --limit 30 \
-              --json number,url,labels,author,title \
-            | jq -c --arg tag "${RELEASE_TAG}" \
-              '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "github-actions[bot]"))[0] // .[0]) // empty'
-          )"
-          if [[ -n "${existing_issue}" ]]; then
-            issue_number="$(jq -r '.number' <<<"${existing_issue}")"
-            issue_url="$(jq -r '.url' <<<"${existing_issue}")"
-            issue_author="$(jq -r '.author.login // ""' <<<"${existing_issue}")"
-            if [[ "${issue_author}" != "github-actions[bot]" ]]; then
-              echo "::warning::Existing ${issue_url} was opened by ${issue_author:-unknown}; creating a workflow-owned issue instead."
-              existing_issue=''
-            elif jq -e \
-              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
-              <<<"${existing_issue}" > /dev/null; then
-              echo "::warning::Release failed but existing ${issue_url} has an autofix exclusion label; no autofix dispatched."
-              exit 0
-            else
-              gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
-                || echo "::warning::Failed to comment on existing issue #${issue_number}; proceeding with dispatch."
-              # Mirror the scheduled scan's exclusions for this release-forced
-              # dispatch: don't send the agent onto an issue a maintainer has
-              # taken over (assignee / linked PR / status/need-information /
-              # status/need-retesting). Fail closed — if the check can't run,
-              # skip the dispatch.
-              still_eligible="$(gh issue list --repo "${GH_REPO}" --state open \
-                --search "\"Release Failed for ${RELEASE_TAG}\" in:title no:assignee -linked:pr -label:status/need-information -label:status/need-retesting" \
-                --json number --jq "any(.[]; .number == ${issue_number})" || echo 'false')"
-              if [[ "${still_eligible}" != "true" ]]; then
-                echo "::warning::Reused ${issue_url} looks maintainer-owned (assignee / linked PR / need-information / need-retesting); skipping autofix dispatch."
-                exit 0
-              fi
-              # Ensure the fallback labels are present so that, if the dispatch
-              # below fails, the scheduled ready-for-agent scan can still find it.
-              gh issue edit "${issue_number}" --repo "${GH_REPO}" \
-                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL}" \
-                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL} on issue #${issue_number}."
-            fi
-          fi
-
-          if [[ -z "${existing_issue}" ]]; then
-            issue_url="$(gh issue create --repo "${GH_REPO}" \
-              --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
-              --body-file "${body_file}" \
-              --label "${BUG_LABEL}" \
-              --label "${READY_FOR_AGENT_LABEL}")"
-            issue_number="${issue_url##*/}"
-          fi
-
-          echo "Using ${issue_url}; dispatching autofix."
-          if ! gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
-            -f phase=issue \
-            -f issue_number="${issue_number}" \
-            -f dry_run=false; then
-            echo "::warning::Autofix dispatch failed; scheduled autofix can still pick up issue #${issue_number}."
-            exit 1
-          fi
+      - name: 'Close the issue an earlier attempt filed'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          RUN_ATTEMPT: '${{ github.run_attempt }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh reconcile-failure'

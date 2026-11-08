@@ -14,6 +14,8 @@ import { formatFetchErrorForUser } from '../utils/fetch.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { openBrowserSecurely } from '../utils/secure-browser-launcher.js';
+import { osc8Hyperlink, supportsHyperlinks } from '../utils/osc8.js';
+import { withQwenChatTracking } from './oauth-config.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -702,15 +704,40 @@ export async function getQwenOAuthClient(
 }
 
 /**
- * Displays a formatted box with OAuth device authorization URL.
- * Uses process.stderr.write() to ensure the auth URL is always visible to users,
- * especially in non-interactive mode. Using stderr prevents corruption of
- * structured JSON output (which goes to stdout) and follows the standard Unix
- * convention of user-facing messages to stderr.
+ * Displays the OAuth device authorization URL to the user.
+ *
+ * When the terminal supports OSC 8 hyperlinks the URL is emitted as a single
+ * clickable link, which stays one copy/click unit even when it wraps (e.g.
+ * over SSH). Otherwise it falls back to a fixed-width ASCII box.
+ *
+ * Writes to `out` (default `process.stderr`) so the auth URL is always visible
+ * to users, especially in non-interactive mode. Using stderr prevents
+ * corruption of structured JSON output (which goes to stdout) and follows the
+ * standard Unix convention of user-facing messages to stderr. `out` is
+ * injectable for testing.
  */
-function showFallbackMessage(verificationUriComplete: string): void {
+export function showFallbackMessage(
+  verificationUriComplete: string,
+  out: NodeJS.WriteStream = process.stderr,
+): void {
   const title = 'Qwen OAuth Device Authorization';
   const url = verificationUriComplete;
+
+  // When the terminal supports OSC 8 hyperlinks, emit the URL as a single
+  // clickable link. Unlike the fixed-width ASCII box below, an OSC 8 envelope
+  // survives line-wrapping (e.g. over SSH), so the URL stays one copy/click
+  // unit instead of being split across lines and reassembled by hand.
+  if (
+    supportsHyperlinks(out) &&
+    (url.startsWith('https://') || url.startsWith('http://'))
+  ) {
+    out.write('\n' + title + '\n');
+    out.write('Please visit the following URL in your browser to authorize:\n');
+    out.write(osc8Hyperlink(url) + '\n');
+    out.write('Waiting for authorization to complete...\n\n');
+    return;
+  }
+
   const minWidth = 70;
   const maxWidth = 80;
   const boxWidth = Math.min(Math.max(title.length + 4, minWidth), maxWidth);
@@ -774,34 +801,30 @@ function showFallbackMessage(verificationUriComplete: string): void {
   const waitingLine = 'Waiting for authorization to complete...';
 
   // Write the box
-  process.stderr.write('\n' + topBorder + '\n');
-  process.stderr.write(emptyLine + '\n');
+  out.write('\n' + topBorder + '\n');
+  out.write(emptyLine + '\n');
 
   // Write instructions
   for (const line of instructionLines) {
-    process.stderr.write(
-      '| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n',
-    );
+    out.write('| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n');
   }
 
-  process.stderr.write(emptyLine + '\n');
+  out.write(emptyLine + '\n');
 
   // Write URL
   for (const line of urlLines) {
-    process.stderr.write(
-      '| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n',
-    );
+    out.write('| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n');
   }
 
-  process.stderr.write(emptyLine + '\n');
+  out.write(emptyLine + '\n');
 
   // Write waiting message
-  process.stderr.write(
+  out.write(
     '| ' + waitingLine + ' '.repeat(contentWidth - waitingLine.length) + ' |\n',
   );
 
-  process.stderr.write(emptyLine + '\n');
-  process.stderr.write(bottomBorder + '\n\n');
+  out.write(emptyLine + '\n');
+  out.write(bottomBorder + '\n\n');
 }
 
 async function authWithQwenDeviceFlow(
@@ -865,15 +888,26 @@ async function authWithQwenDeviceFlow(
     }
 
     // Emit device authorization event for UI integration immediately
-    qwenOAuth2Events.emit(QwenOAuth2Event.AuthUri, deviceAuth);
+    const authorizationUrl = withQwenChatTracking(
+      deviceAuth.verification_uri_complete,
+      'cli',
+    );
+    qwenOAuth2Events.emit(QwenOAuth2Event.AuthUri, {
+      ...deviceAuth,
+      verification_uri: withQwenChatTracking(
+        deviceAuth.verification_uri,
+        'cli',
+      ),
+      verification_uri_complete: authorizationUrl,
+    });
 
     if (config.isBrowserLaunchSuppressed() || !config.isInteractive()) {
-      showFallbackMessage(deviceAuth.verification_uri_complete);
+      showFallbackMessage(authorizationUrl);
     }
 
     // Try to open browser if not suppressed
     if (!config.isBrowserLaunchSuppressed()) {
-      await launchBrowser(deviceAuth.verification_uri_complete);
+      await launchBrowser(authorizationUrl);
     }
 
     emitAuthProgress('polling', 'Waiting for authorization...');

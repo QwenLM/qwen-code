@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   useStreamingState,
   useTranscriptBlocks,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 
 interface LoadingMetrics {
   estimatedOutputTokens: number;
@@ -18,7 +18,7 @@ interface BlocksScan {
 /**
  * CLI-aligned streaming loading metrics derived from transcript blocks.
  *
- * CLI source (useGeminiStream.ts + LoadingIndicator.tsx):
+ * CLI source (use-llm-stream.ts + LoadingIndicator.tsx):
  * - streamingChars: accumulated from text_delta (+text.length) and
  *   ToolCallRequest (+JSON.stringify(args).length). Reset only on new
  *   user queries, NOT on tool-result continuations.
@@ -178,8 +178,9 @@ function getTaskExecutionTokenCount(rawOutput: unknown): number | undefined {
   if (typeof tokenCount === 'number' && tokenCount > 0) return tokenCount;
   const summary = obj['executionSummary'];
   if (typeof summary === 'object' && summary !== null) {
-    const totalTokens = (summary as Record<string, unknown>)['totalTokens'];
-    if (typeof totalTokens === 'number' && totalTokens > 0) return totalTokens;
+    const outputTokens = (summary as Record<string, unknown>)['outputTokens'];
+    if (typeof outputTokens === 'number' && outputTokens > 0)
+      return outputTokens;
   }
   return undefined;
 }

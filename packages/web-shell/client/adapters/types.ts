@@ -16,8 +16,8 @@ import type {
   DaemonToolGroupMessage,
   DaemonUserMessage,
   DaemonUserShellMessage,
-} from './messageTypes';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+} from './messageTypes.js';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 
 export type Message = DaemonMessage;
 export type ACPToolCall = DaemonMessageToolCall;
@@ -61,9 +61,9 @@ export interface TurnCollapseHead {
    */
   elapsedMs?: number;
   /**
-   * Per-turn token usage, summed from the turn's assistant messages. Both fields
-   * are present together or the pair is undefined (older sessions stamp no
-   * usage). Sub-agent tokens are included (see the SDK reducer).
+   * Per-turn token usage, summed from the main assistant messages and root
+   * subagent execution summaries. Both fields are present together or the pair
+   * is undefined (older sessions stamp no usage).
    */
   inputTokens?: number;
   outputTokens?: number;
@@ -83,8 +83,11 @@ export interface TurnCollapseHead {
 }
 
 export interface ContentBlock {
-  type: 'text' | 'image';
+  type: 'text' | 'image' | 'diff';
   text?: string;
+  path?: string;
+  oldText?: string;
+  newText?: string;
   source?: { type: string; media_type: string; data: string };
 }
 
@@ -108,8 +111,15 @@ export interface PermissionRequest {
   toolKind?: string;
   /** Canonical tool name (from the ACP frame's `_meta.toolName`). */
   toolName?: string;
+  /** Whether this permission includes a diff the host can preview. */
+  hasDiffPreview?: boolean;
+  todoPlan?: {
+    planId: string;
+    sourceCallId: string;
+  };
   content: ContentBlock[];
   options: PermissionOption[];
+  contentIsInput?: boolean;
   rawInput?: Record<string, unknown>;
   kind?: string;
 }
@@ -117,10 +127,14 @@ export interface PermissionRequest {
 export interface CommandInfo {
   name: string;
   description: string;
+  completionLabel?: string;
+  completionSection?: string;
+  completionPriority?: number;
   argumentHint?: string;
   subcommands?: string[];
   source?: string;
   displayCategory?: 'custom' | 'skill' | 'system';
+  autoSubmit?: boolean;
 }
 
 export interface ModelInfo {

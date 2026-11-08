@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import type { DiffRenderModel, DiffRenderRow } from '../../types.js';
 import { computeDiffColumnWidths } from '../../commands/diffCommand.js';
+import { sanitizeFilenameForDisplay } from '../../utils/textUtils.js';
 import { t } from '../../../i18n/index.js';
 
 interface DiffStatsDisplayProps {
@@ -81,6 +82,13 @@ const DiffRow: React.FC<DiffRowProps> = ({
   remWidth,
   statColumnWidth,
 }) => {
+  // Sanitize hostile filenames (control chars / ANSI) the same way the
+  // plain-text renderer does, so the interactive view can't be injected via a
+  // crafted path.
+  const safeName = sanitizeFilenameForDisplay(row.filename);
+  const safeOldPath = row.oldPath
+    ? sanitizeFilenameForDisplay(row.oldPath)
+    : null;
   if (row.isBinary) {
     const marker = padRight('~', statColumnWidth);
     const suffix = row.isUntracked
@@ -94,7 +102,10 @@ const DiffRow: React.FC<DiffRowProps> = ({
           <Text color={theme.text.primary}>{'  '}</Text>
           <Text color={theme.text.secondary}>{marker}</Text>
           <Text color={theme.text.primary}>{'  '}</Text>
-          <Text color={theme.text.primary}>{row.filename}</Text>
+          {safeOldPath ? (
+            <Text color={theme.text.secondary}>{safeOldPath} → </Text>
+          ) : null}
+          <Text color={theme.text.primary}>{safeName}</Text>
           <Text color={theme.text.secondary}> {suffix}</Text>
         </Text>
       </Box>
@@ -116,7 +127,10 @@ const DiffRow: React.FC<DiffRowProps> = ({
         <Text color={theme.text.primary}> </Text>
         <Text color={theme.status.error}>-{removed}</Text>
         <Text color={theme.text.primary}>{'  '}</Text>
-        <Text color={theme.text.primary}>{row.filename}</Text>
+        {safeOldPath ? (
+          <Text color={theme.text.secondary}>{safeOldPath} → </Text>
+        ) : null}
+        <Text color={theme.text.primary}>{safeName}</Text>
         {suffix && <Text color={theme.text.secondary}> {suffix}</Text>}
       </Text>
     </Box>

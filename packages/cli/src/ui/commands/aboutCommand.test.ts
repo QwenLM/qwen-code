@@ -9,10 +9,11 @@ import { aboutCommand } from './aboutCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
-import * as systemInfoUtils from '../../utils/systemInfo.js';
+import * as systemInfoUtils from '../systemInfo.js';
 import * as sessionPathsUtils from '../../utils/sessionPaths.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
-vi.mock('../../utils/systemInfo.js');
+vi.mock('../systemInfo.js');
 vi.mock('../../utils/sessionPaths.js');
 
 describe('aboutCommand', () => {
@@ -65,7 +66,8 @@ describe('aboutCommand', () => {
     );
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await setLanguageAsync('en');
     vi.unstubAllEnvs();
     process.env = originalEnv;
     vi.clearAllMocks();
@@ -75,6 +77,8 @@ describe('aboutCommand', () => {
     expect(aboutCommand.name).toBe('status');
     expect(aboutCommand.altNames).toEqual(['about']);
     expect(aboutCommand.description).toBe('show version info');
+    expect(aboutCommand.canRunDuringStreaming).toBe(true);
+    expect(aboutCommand.subCommands?.[0]?.canRunDuringStreaming).toBe(true);
   });
 
   it('should call addItem with all version info', async () => {
@@ -315,6 +319,34 @@ describe('aboutCommand', () => {
   });
 
   describe('non-interactive mode', () => {
+    it.each([
+      ['en', 'acp'],
+      ['zh', 'acp'],
+      ['en', 'non_interactive'],
+      ['zh', 'non_interactive'],
+    ] as const)(
+      'shows Qwen Subscription in %s for %s status output',
+      async (language, executionMode) => {
+        await setLanguageAsync(language);
+        const info = await systemInfoUtils.getExtendedSystemInfo(mockContext);
+        vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+          ...info,
+          selectedAuthType: 'qwen-subscription',
+        });
+
+        const result = await aboutCommand.action!(
+          { ...mockContext, executionMode },
+          '',
+        );
+
+        expect(result).toMatchObject({
+          type: 'message',
+          content: expect.stringContaining('\nAuth: Qwen Subscription\n'),
+        });
+        expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+      },
+    );
+
     it('should return text summary without calling addItem', async () => {
       if (!aboutCommand.action) {
         throw new Error('The about command must have an action.');

@@ -8,6 +8,10 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+// The #13003 experiment flag is read through its single definition, kept in a
+// no-import leaf module so telemetry can share it with `memory/recall.ts`
+// (which owns the flag but already imports this file) without a module cycle.
+import { isSkipSelectorOnUniqueStrongHitEnabled } from '../memory/recall-experiment.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
@@ -20,6 +24,7 @@ import {
   EVENT_EXTENSION_ENABLE,
   EVENT_IDE_CONNECTION,
   EVENT_TOOL_CALL,
+  EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
   EVENT_USER_RETRY,
   EVENT_FLASH_FALLBACK,
@@ -30,13 +35,16 @@ import {
   EVENT_CHAT_COMPRESSION,
   EVENT_CONTENT_RETRY,
   EVENT_CONTENT_RETRY_FAILURE,
+  EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_API_RETRY,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
+  EVENT_RIPGREP_RUNTIME_RECOVERY,
   EVENT_EXTENSION_INSTALL,
   EVENT_MODEL_SLASH_COMMAND,
   EVENT_EXTENSION_DISABLE,
   EVENT_SUBAGENT_EXECUTION,
+  EVENT_GOAL_STATE,
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_INVALID_CHUNK,
   EVENT_AUTH,
@@ -50,9 +58,15 @@ import {
   EVENT_SPECULATION,
   EVENT_WORKFLOW_KEYWORD,
   EVENT_WORKFLOW_RUN,
+  EVENT_WORKFLOW_SIZE_WARNING,
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
+  EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_MEMORY_SEARCH,
+  EVENT_MEMORY_MIGRATION,
+  EVENT_MEMORY_RECALL_MODE_TRANSITION,
+  EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -65,14 +79,19 @@ import {
   recordInvalidChunk,
   recordModelSlashCommand,
   recordSubagentExecutionMetrics,
+  recordGoalStateMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
+  recordToolResultSizeMetrics,
+  recordToolExecutionMetrics,
+  recordRepeatedToolFailureGuardMetrics,
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
   recordMemoryRecallMetrics,
+  recordMemoryRecallDeliveryMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -85,11 +104,15 @@ import type {
   IdeConnectionEvent,
   StartSessionEvent,
   ToolCallEvent,
+  ToolResultSizeEvent,
+  ToolResultPersistedEvent,
   UserPromptEvent,
   UserRetryEvent,
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
+  LoopProtectionEvent,
+  RepeatedToolFailureGuardEvent,
   LoopDetectionDisabledEvent,
   SlashCommandEvent,
   ConversationFinishedEvent,
@@ -97,8 +120,10 @@ import type {
   ChatCompressionEvent,
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   ToolOutputTruncatedEvent,
   ExtensionDisableEvent,
   ExtensionEnableEvent,
@@ -107,6 +132,7 @@ import type {
   ExtensionInstallEvent,
   ModelSlashCommandEvent,
   SubagentExecutionEvent,
+  GoalStateEvent,
   MalformedJsonResponseEvent,
   InvalidChunkEvent,
   AuthEvent,
@@ -119,14 +145,24 @@ import type {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
+  MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
-import type { UiEvent } from './uiTelemetry.js';
+import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { apiActivityTracker } from './api-activity-tracker.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
+import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
+import { ToolErrorType } from '../tools/tool-error.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -137,11 +173,58 @@ function getCommonAttributes(config: Config): LogAttributes {
   };
 }
 
+function recordUiTelemetryEventToChat(config: Config, uiEvent: UiEvent): void {
+  if (isChatRecordingSuppressed()) return;
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+}
+
 export { getCommonAttributes };
+
+type NormalizedToolCallEvent = ToolCallEvent & {
+  execution_status: NonNullable<ToolCallEvent['execution_status']>;
+};
+
+/**
+ * Normalizes a tool call event for telemetry sinks. Error fields are
+ * deleted (not set to undefined) on success so downstream consumers
+ * see key-absent rather than key-present-with-undefined.
+ */
+export function normalizeToolCallEvent(
+  event: ToolCallEvent,
+): NormalizedToolCallEvent {
+  const functionName = event.function_name ?? '';
+  const normalized: NormalizedToolCallEvent = {
+    ...event,
+    function_name:
+      functionName.trim().length > 0 ? functionName : 'unknown_tool',
+    success: event.status === 'success',
+    execution_status: event.execution_status ?? 'unknown',
+  };
+
+  if (event.status === 'error') {
+    normalized.error_type = event.error_type?.trim() || ToolErrorType.UNKNOWN;
+  } else {
+    delete normalized.error;
+    delete normalized.error_type;
+  }
+
+  return normalized;
+}
+
+const debugLogger = createDebugLogger('TELEMETRY_SINK');
+
+function runToolTelemetrySink(sink: () => void): void {
+  try {
+    sink();
+  } catch (e) {
+    debugLogger.debug('Telemetry sink failed (best-effort):', e);
+  }
+}
 
 export function logStartSession(
   config: Config,
   event: StartSessionEvent,
+  previousSessionId?: string,
 ): void {
   QwenLogger.getInstance(config)?.logStartSessionEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -176,6 +259,12 @@ export function logStartSession(
     attributes,
   };
   logger.emit(logRecord);
+  emitSessionStart(config.getSessionId(), previousSessionId);
+}
+
+export function logSessionEnd(config: Config): void {
+  if (!isTelemetrySdkInitialized()) return;
+  emitSessionEnd(config.getSessionId());
 }
 
 export function logUserPrompt(config: Config, event: UserPromptEvent): void {
@@ -192,6 +281,10 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
 
   if (event.auth_type) {
     attributes['auth_type'] = event.auth_type;
+  }
+
+  if (event.model) {
+    attributes['model'] = event.model;
   }
 
   if (shouldLogUserPrompts(config)) {
@@ -226,43 +319,109 @@ export function logUserRetry(config: Config, event: UserRetryEvent): void {
 }
 
 export function logToolCall(config: Config, event: ToolCallEvent): void {
+  const normalizedEvent = normalizeToolCallEvent(event);
   const uiEvent = {
-    ...event,
+    ...normalizedEvent,
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  if (!isInternalPromptId(event.prompt_id)) {
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
-  }
-  QwenLogger.getInstance(config)?.logToolCallEvent(event);
+  runToolTelemetrySink(() => {
+    uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  });
+  runToolTelemetrySink(() => {
+    if (!isInternalPromptId(normalizedEvent.prompt_id)) {
+      recordUiTelemetryEventToChat(config, uiEvent);
+    }
+  });
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolCallEvent(normalizedEvent);
+  });
   if (!isTelemetrySdkInitialized()) return;
 
-  const attributes: LogAttributes = {
-    ...getCommonAttributes(config),
-    ...event,
-    'event.name': EVENT_TOOL_CALL,
-    'event.timestamp': new Date().toISOString(),
-    function_args: safeJsonStringify(event.function_args, 2),
-  };
-  if (event.error) {
-    attributes['error.message'] = event.error;
-    if (event.error_type) {
-      attributes['error.type'] = event.error_type;
+  runToolTelemetrySink(() => {
+    const attributes: LogAttributes = {
+      ...getCommonAttributes(config),
+      ...normalizedEvent,
+      'event.name': EVENT_TOOL_CALL,
+      'event.timestamp': new Date().toISOString(),
+      function_args: safeJsonStringify(normalizedEvent.function_args, 2),
+    };
+    if (normalizedEvent.error) {
+      attributes['error.message'] = normalizedEvent.error;
     }
-  }
+    if (normalizedEvent.error_type) {
+      attributes['error.type'] = normalizedEvent.error_type;
+    }
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `Tool call: ${event.function_name}${event.decision ? `. Decision: ${event.decision}` : ''}. Success: ${event.success}. Duration: ${event.duration_ms}ms.`,
-    attributes,
-  };
-  logger.emit(logRecord);
-  recordToolCallMetrics(config, event.duration_ms, {
-    function_name: event.function_name,
-    success: event.success,
-    decision: event.decision,
-    tool_type: event.tool_type,
+    const logger = logs.getLogger(SERVICE_NAME);
+    const logRecord: LogRecord = {
+      body: `Tool call: ${normalizedEvent.function_name}${normalizedEvent.decision ? `. Decision: ${normalizedEvent.decision}` : ''}. Success: ${normalizedEvent.success}. Duration: ${normalizedEvent.duration_ms}ms.`,
+      attributes,
+    };
+    logger.emit(logRecord);
+  });
+  runToolTelemetrySink(() => {
+    recordToolCallMetrics(config, normalizedEvent.duration_ms, {
+      function_name: normalizedEvent.function_name,
+      status: normalizedEvent.status,
+      success: normalizedEvent.success,
+      decision: normalizedEvent.decision,
+      tool_type: normalizedEvent.tool_type,
+    });
+  });
+  runToolTelemetrySink(() => {
+    recordToolExecutionMetrics(config, {
+      execution_status: normalizedEvent.execution_status,
+      tool_type: normalizedEvent.tool_type,
+    });
+  });
+}
+
+export function logToolResultSize(
+  config: Config,
+  event: ToolResultSizeEvent,
+): void {
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolResultSizeEvent(event);
+  });
+  if (!isTelemetrySdkInitialized()) return;
+  runToolTelemetrySink(() => {
+    logs.getLogger(SERVICE_NAME).emit({
+      body: `Tool result size: ${event.function_name} (${event.layer}).`,
+      attributes: {
+        ...getCommonAttributes(config),
+        ...event,
+        'event.name': `${SERVICE_NAME}.${event['event.name']}`,
+      },
+    });
+  });
+  if (event.layer === 'injection')
+    runToolTelemetrySink(() => {
+      recordToolResultSizeMetrics(config, event);
+    });
+}
+
+export function logToolResultPersisted(
+  config: Config,
+  event: ToolResultPersistedEvent,
+): void {
+  // Output paths stay local; this event's public sinks carry numbers only.
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolResultPersistedEvent(event);
+  });
+  if (!isTelemetrySdkInitialized()) return;
+  runToolTelemetrySink(() => {
+    logs.getLogger(SERVICE_NAME).emit({
+      body: `Tool result persisted: ${event.tool_name}.`,
+      attributes: {
+        ...getCommonAttributes(config),
+        'event.name': `${SERVICE_NAME}.tool_result_persisted`,
+        'event.timestamp': event['event.timestamp'],
+        tool_name: event.tool_name,
+        bytes_written: event.bytes_written,
+        prompt_id: event.prompt_id,
+      },
+    });
   });
 }
 
@@ -276,7 +435,9 @@ export function logToolOutputTruncated(
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
-    'event.name': 'tool_output_truncated',
+    // event class's `eventName` (short, no prefix) leaks via spread — override with
+    // full namespaced constant for OTel compliance. Same pattern as other event loggers.
+    'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
     'event.timestamp': new Date().toISOString(),
   };
 
@@ -332,13 +493,18 @@ export function logFileOperation(
   });
 }
 
-export function logApiRequest(config: Config, event: ApiRequestEvent): void {
+export function logApiRequest(
+  config: Config,
+  event: ApiRequestEvent,
+  sessionId?: string,
+): void {
   // QwenLogger.getInstance(config)?.logApiRequestEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_REQUEST,
     'event.timestamp': new Date().toISOString(),
   };
@@ -395,15 +561,54 @@ export function logRipgrepFallback(
   logger.emit(logRecord);
 }
 
-export function logApiError(config: Config, event: ApiErrorEvent): void {
+export function logRipgrepRuntimeRecovery(
+  config: Config,
+  event: RipgrepRuntimeRecoveryEvent,
+): void {
+  // Runtime recovery is separate from startup fallback; it describes a selected
+  // ripgrep binary that started but did not complete normally.
+  QwenLogger.getInstance(config)?.logRipgrepRuntimeRecoveryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_RIPGREP_RUNTIME_RECOVERY,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Ripgrep runtime recovery: ${event.failure_kind}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logApiError(
+  config: Config,
+  event: ApiErrorEvent,
+  sessionId?: string,
+  uiSubagentIdentity?: UiSubagentIdentity,
+): void {
   const uiEvent = {
     ...event,
+    ...(uiSubagentIdentity
+      ? {
+          subagent_id: uiSubagentIdentity.id,
+          subagent_type: uiSubagentIdentity.type,
+          subagent_task_name: uiSubagentIdentity.taskName,
+        }
+      : {}),
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  // Feed the daemon-status model-API-health charts: one model API error per
+  // failed attempt, drained per live model round by the ACP MessageEmitter.
+  apiActivityTracker.recordError();
   if (!isInternalPromptId(event.prompt_id)) {
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiErrorEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -411,6 +616,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
     ['error.message']: event.error_message,
@@ -464,9 +670,21 @@ export function logApiCancel(config: Config, event: ApiCancelEvent): void {
   logger.emit(logRecord);
 }
 
-export function logApiResponse(config: Config, event: ApiResponseEvent): void {
+export function logApiResponse(
+  config: Config,
+  event: ApiResponseEvent,
+  sessionId?: string,
+  uiSubagentIdentity?: UiSubagentIdentity,
+): void {
   const uiEvent = {
     ...event,
+    ...(uiSubagentIdentity
+      ? {
+          subagent_id: uiSubagentIdentity.id,
+          subagent_type: uiSubagentIdentity.type,
+          subagent_task_name: uiSubagentIdentity.taskName,
+        }
+      : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
@@ -475,13 +693,14 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     if (config.getUsageStatisticsEnabled()) {
       recordTokenUsageFromApiResponseBestEffort(config, event);
     }
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   };
@@ -525,8 +744,11 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
 export function logLoopDetected(
   config: Config,
   event: LoopDetectedEvent,
+  options: { recordToQwenLogger?: boolean } = {},
 ): void {
-  QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
+  if (options.recordToQwenLogger !== false) {
+    QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
+  }
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -540,6 +762,60 @@ export function logLoopDetected(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+export function logLoopProtection(
+  config: Config,
+  event: LoopProtectionEvent,
+): void {
+  QwenLogger.getInstance(config)?.logLoopProtectionEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Loop protection ${event.decision}. Type: ${event.loop_type}.`,
+    attributes: { ...getCommonAttributes(config), ...event },
+  });
+}
+
+export function logRepeatedToolFailureGuard(
+  event: RepeatedToolFailureGuardEvent,
+): void {
+  // Deployment cohort and service version come from the OpenTelemetry
+  // Resource, which is attached to both the logger and meter providers.
+  runToolTelemetrySink(() => {
+    if (isTelemetrySdkInitialized()) {
+      const logger = logs.getLogger(SERVICE_NAME);
+      logger.emit({
+        body: `Repeated tool failure guard decision: ${event.decision}.`,
+        attributes: {
+          ...event,
+          'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
+        },
+      });
+    }
+  });
+  runToolTelemetrySink(() => {
+    recordRepeatedToolFailureGuardMetrics({
+      route: event.route,
+      mode: event.mode,
+      phase_before: event.phase_before,
+      phase_after: event.phase_after,
+      decision: event.decision,
+      failure_count_bucket: event.failure_count_bucket,
+      batch_count_bucket: event.batch_count_bucket,
+      ...(event.reset_reason !== undefined
+        ? { reset_reason: event.reset_reason }
+        : {}),
+      ...(event.terminal_status !== undefined
+        ? { terminal_status: event.terminal_status }
+        : {}),
+      ...(event.execution_status !== undefined
+        ? { execution_status: event.execution_status }
+        : {}),
+      ...(event.tool_type !== undefined ? { tool_type: event.tool_type } : {}),
+    });
+  });
 }
 
 export function logLoopDetectionDisabled(
@@ -745,6 +1021,25 @@ export function logContentRetry(
   recordContentRetry(config);
 }
 
+export function logProtocolTagSanitized(
+  config: Config,
+  event: ProtocolTagSanitizedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logProtocolTagSanitizedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_PROTOCOL_TAG_SANITIZED,
+  };
+
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Suppressed a standalone closing ${event.tag_name} tag and preserved ${event.tool_call_count} tool call(s).`,
+    attributes,
+  });
+}
+
 export function logContentRetryFailure(
   config: Config,
   event: ContentRetryFailureEvent,
@@ -770,9 +1065,12 @@ export function logContentRetryFailure(
 /**
  * Phase 4b — Emits an HTTP-status retry event fired from `retryWithBackoff`
  * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
- * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
+ * `logContentRetry`, which is fired by `llmChat`'s content-recovery loop.
  *
- * Three-sink fan-out, matching the `logContentRetry` shape exactly:
+ * Fan-out (sink 0 fires first, before the SDK guard, so retries are counted
+ * even with telemetry off; sinks 1–3 match the `logContentRetry` shape):
+ *   0. `apiActivityTracker` increment — daemon-status model-API-health charts
+ *      (drained per live model round by the ACP MessageEmitter).
  *   1. QwenLogger RUM ingestion (Aliyun internal stats)
  *   2. OTel log signal via `logger.emit()` — picked up by LogToSpanProcessor
  *      and bridged to a span sibling under the caller's active span (typically
@@ -781,6 +1079,7 @@ export function logContentRetryFailure(
  *   3. `recordApiRetry` Counter increment for per-model retry-rate dashboards.
  */
 export function logApiRetry(config: Config, event: ApiRetryEvent): void {
+  apiActivityTracker.recordRetry(); // sink 0 — see fan-out above
   QwenLogger.getInstance(config)?.logApiRetryEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -825,6 +1124,26 @@ export function logSubagentExecution(
     event.status,
     event.terminate_reason,
   );
+}
+
+export function logGoalState(config: Config, event: GoalStateEvent): void {
+  QwenLogger.getInstance(config)?.logGoalStateEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_GOAL_STATE,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Goal ${event.cause}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordGoalStateMetrics(config, event);
 }
 
 export function logModelSlashCommand(
@@ -1017,6 +1336,17 @@ export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
   logger.emit(logRecord);
 }
 
+export function recordSkillInvocation(
+  config: Config,
+  event: { skillName: string; success: boolean },
+): void {
+  uiTelemetryService.recordSkillInvocation(
+    event.skillName,
+    event.success,
+    config.getSessionId(),
+  );
+}
+
 export function logUserFeedback(
   config: Config,
   event: UserFeedbackEvent,
@@ -1027,7 +1357,7 @@ export function logUserFeedback(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  recordUiTelemetryEventToChat(config, uiEvent);
   QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -1233,12 +1563,39 @@ export function logWorkflowRun(config: Config, event: WorkflowRunEvent): void {
     status: event.status,
     agents_dispatched: event.agents_dispatched,
     agents_completed: event.agents_completed,
+    agents_failed: event.agents_failed,
+    agents_cached: event.agents_cached,
+    agents_respawned: event.agents_respawned,
     phase_count: event.phase_count,
     tokens_spent: event.tokens_spent,
     duration_ms: event.duration_ms,
   };
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({ body: `Workflow run ${event.status}.`, attributes });
+}
+
+export function logWorkflowSizeWarning(
+  config: Config,
+  event: WorkflowSizeWarningEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_SIZE_WARNING,
+    'event.timestamp': event['event.timestamp'],
+    axis: event.axis,
+    scheduled_agents: event.scheduled_agents,
+    total_tokens: event.total_tokens,
+    projected_tokens: event.projected_tokens,
+    agent_cap: event.agent_cap,
+    token_cap: event.token_cap,
+    cap_from_guideline: event.cap_from_guideline,
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Workflow run flagged as large (${event.axis}).`,
+    attributes,
+  });
 }
 
 // ─── Auto-Memory Log Functions ───────────────────────────────────────────────
@@ -1283,8 +1640,16 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
     'event.name': EVENT_MEMORY_DREAM,
     'event.timestamp': event['event.timestamp'],
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
+    created_entries: event.created_entries,
+    updated_entries: event.updated_entries,
+    deleted_entries: event.deleted_entries,
     deduped_entries: event.deduped_entries,
+    split_entries: event.split_entries,
+    keyword_backfilled: event.keyword_backfilled,
+    dirty_mutations: event.dirty_mutations,
+    scheduling_reason: event.scheduling_reason,
     touched_topics_count: event.touched_topics_count,
     touched_topics: event.touched_topics,
     duration_ms: event.duration_ms,
@@ -1297,6 +1662,7 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
   });
   recordMemoryDreamMetrics(config, event.duration_ms, {
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
     deduped_entries: event.deduped_entries,
   });
@@ -1317,7 +1683,13 @@ export function logMemoryRecall(
     docs_selected: event.docs_selected,
     strategy: event.strategy,
     duration_ms: event.duration_ms,
+    scan_duration_ms: event.scan_duration_ms,
+    fast_duration_ms: event.fast_duration_ms,
+    selector_duration_ms: event.selector_duration_ms,
   };
+  if (event.selector_skipped !== undefined) {
+    attributes['selector_skipped'] = event.selector_skipped;
+  }
 
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({
@@ -1327,5 +1699,101 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+    // The selector_skipped metric dimension belongs to the #13003
+    // skip-selector experiment: attach it only while the experiment is
+    // enabled AND the recall mode had a skip decision to make (structured;
+    // legacy recalls leave the event field undefined), so deployments
+    // without the flag keep the pre-existing attribute space on these
+    // series and legacy-mode recalls do not mix a constant `false` into the
+    // experiment's control series. Logs keep any explicit decision,
+    // regardless of the experiment flag.
+    ...(isSkipSelectorOnUniqueStrongHitEnabled() &&
+    typeof event.selector_skipped === 'boolean'
+      ? { selector_skipped: event.selector_skipped }
+      : {}),
+  });
+}
+
+export function logMemoryRecallDelivery(
+  config: Config,
+  event: MemoryRecallDeliveryEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_RECALL_DELIVERY,
+    'event.timestamp': event['event.timestamp'],
+    phase: event.phase,
+    delivery_point: event.delivery_point,
+    strategy: event.strategy,
+    docs_selected: event.docs_selected,
+    latency_ms: event.latency_ms,
+    router_delivered: event.router_delivered,
+  };
+  if (event.discard_reason) {
+    attributes['discard_reason'] = event.discard_reason;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory recall delivery: phase=${event.phase}. delivery_point=${event.delivery_point}. Selected ${event.docs_selected} doc(s).`,
+    attributes,
+  });
+  recordMemoryRecallDeliveryMetrics(config, event.latency_ms, {
+    phase: event.phase,
+    delivery_point: event.delivery_point,
+    ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
+    strategy: event.strategy,
+  });
+}
+
+export function logMemorySearch(
+  config: Config,
+  event: MemorySearchEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_SEARCH,
+    'event.timestamp': event['event.timestamp'],
+    mode: event.mode,
+    docs_scanned: event.docs_scanned,
+    results_returned: event.results_returned,
+    duration_ms: event.duration_ms,
+  };
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory search: mode=${event.mode}. Returned ${event.results_returned}/${event.docs_scanned} docs.`,
+    attributes,
+  });
+}
+
+export function logMemoryMigration(
+  config: Config,
+  event: MemoryMigrationEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory metadata migration: scope=${event.scope}. status=${event.status}. Committed ${event.committed}/${event.batch_files}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_MIGRATION,
+    },
+  });
+}
+
+export function logMemoryRecallModeTransition(
+  config: Config,
+  event: MemoryRecallModeTransitionEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory recall mode transition: ${event.from_mode} -> ${event.to_mode}. status=${event.status}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_RECALL_MODE_TRANSITION,
+    },
   });
 }

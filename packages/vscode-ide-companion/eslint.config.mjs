@@ -66,7 +66,7 @@ export default [
         },
       ],
 
-      curly: 'warn',
+      curly: ['warn', 'multi-line'],
       eqeqeq: ['warn', 'always', { null: 'ignore' }],
       'no-throw-literal': 'warn',
       semi: 'warn',

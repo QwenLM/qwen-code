@@ -19,6 +19,7 @@ Add things you'd otherwise have to repeat every session:
 - Coding conventions your team follows ("all new files must have JSDoc comments")
 - Architectural decisions ("we use the repository pattern, never call the database directly from controllers")
 - Personal preferences ("always use pnpm, not npm")
+- A verification policy for high-stakes work — for example "verify against the database before concluding" (see [Enforce evidence-based conclusions](../common-workflow.md#enforce-evidence-based-conclusions) for a ready-made template)
 
 Don't include things Qwen can figure out by reading your code. QWEN.md works best when it's short and specific — the longer it gets, the less reliably Qwen follows it.
 
@@ -76,6 +77,8 @@ Auto-memory runs in the background. After each of your conversations, Qwen quiet
 
 This is different from QWEN.md: you don't write it, Qwen does.
 
+When a turn that answers a message relayed by a [channel](./channels/overview) — GitHub, Telegram, DingTalk and the others — ends, Qwen runs no extraction and schedules no [periodic cleanup](#periodic-cleanup): the sender is often not you, and extracting after every relayed message would add model calls to each one. In a session that also takes your own prompts, such as one bound to a pull request, extraction after your next prompt still reads the recent conversation, so relayed messages still in it can be learned from. Memory recall is unaffected: a reply to a channel message can draw on what is already saved. A channel chat keeps durable context in [channel memory](./channels/overview#channel-memory) instead.
+
 ### What Qwen saves
 
 Qwen looks for four kinds of things worth remembering:
@@ -91,15 +94,52 @@ Qwen doesn't save everything — only things that would actually be useful next 
 
 ### Where it's stored
 
-Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches and worktrees of the same repository share the same memory folder, so what Qwen learns in one branch is available in others.
+Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of the same checkout share the same memory folder, so what Qwen learns in one branch is available in others. Each linked git worktree gets its own memory folder, matching the per-worktree isolation of chats and other session state — repository-wide conventions you want in every worktree belong in [team memory](#team-memory-shared-with-collaborators).
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
+
+`MEMORY.md` is a compact index, rather than the full memory store. Its generated body and the portion loaded into prompts share a limit of 200 lines and 25,000 UTF-16 code units; truncation notices are added separately. Line endings are normalized before prompt budgeting. Under size pressure, complete ordinary entries (up to 150 code units) get space before longer entries, and retained entries keep their original order. An entry that cannot fit is skipped whole, so its Markdown link is never cut in the middle. Keep detail in the linked topic files.
+
+When rebuilding omits entries, the saved warning reports the dropped count and up to three names for each limit: the topic-file scan cap and the index-body budget. The counts stay separate because one grouped team entry can represent several files. The warning remains visible when the index is loaded into a prompt while it is the file's last paragraph. Insert new index pointers above the trailing warning to preserve it. Omission from the index does not delete the linked topic files. For index-body pressure, merge topic files or remove obsolete ones, or shorten their frontmatter names and descriptions. An overlong link already has no description: shorten its topic-file path or frontmatter name instead. Editing only the generated index does not survive the next rebuild. For the file-count scan cap, merge topic files or remove obsolete ones; editing only the generated index does not reduce the number of files scanned.
+
+The warning for a partially loaded index distinguishes the line and character budgets. Shortening descriptions can help with the total character budget even when no entry exceeds the ordinary line length. For entries matching the generated format, that advice accounts for names and links, including grouped links; prune or merge entries when those links alone consume the budget. Hand-edited formats or grouped suffixes that could instead be description text receive possible remedies without a promise that shortening will fit. If the entry-count limit is exceeded, entries must still be pruned or merged: shortening a description does not reduce the number of entries. When both budgets are exceeded, reducing the index to 200 entries may still require shorter descriptions or fewer entries to meet the character budget; the warning reports the actual candidate count. Shortening to 150 units per entry is not always enough to meet the 25,000-unit total.
+
+A bounded, single-paragraph trailing writer notice is excluded from prompt budgeting. When all saved entries fit, Qwen preserves that notice without claiming that more entries were omitted while loading. Regenerating a saturated index can refill space freed by shorter descriptions, so the size of the saved file need not shrink immediately. For project, user, and team memory, edit the topic files' `description` frontmatter and check the regenerated index. An empty description can fall back to the memory type, so shortening frontmatter does not guarantee that every entry will fit. Direct index-line edits can be replaced by the next managed write. Keep full link targets intact even when a link exceeds 150 units; shorten display metadata or prune or merge topic files instead of cutting links.
+
+#### Pinned memory
+
+Put hand-curated documents that automatic memory maintenance should preserve
+under `pinned/` in a managed-memory directory, for example
+`~/.qwen/projects/<project>/memory/pinned/architecture.md` or
+`~/.qwen/memories/pinned/preferences.md`. Use the same frontmatter as other
+memory documents. Valid pinned files are readable by Qwen and are included the
+next time `MEMORY.md` is rebuilt, under the same size and file-count limits as
+other memory documents.
+
+Only the top-level `pinned/` directory directly inside a managed-memory root is
+protected; nested directories such as `memory/project/pinned/` are ordinary
+writable memory. Automatic extraction and Dream workers match the reserved
+directory name case-insensitively.
+
+Automatic extraction is instructed to leave pinned records and their valid
+index entries unchanged, while Dream is instructed to skip `pinned/` during
+consolidation. Both automatic extraction and forked Dream workers, including
+background cleanup, enforce the pinned-file boundary on their write and edit
+tools, including paths that resolve through a symlink into `pinned/`.
+Command-line deletion is closed off too: only the project Dream worker holds a
+shell, and its policy is read-only, while automatic extraction and the
+user-memory Dream worker hold no shell at all. You still control
+these files directly and can remove them with an explicit `/forget` request.
+
+> **Note:** The visible `/dream` slash command runs on the main Agent. It
+> receives the same skip instruction, but does not yet receive the forked
+> worker's deterministic per-turn tool gate.
 
 ### Periodic cleanup
 
 Qwen periodically goes through its saved memories to remove duplicates and clean up outdated entries. This runs automatically in the background once a day after enough sessions have accumulated. You can trigger it manually with `/dream` if you want it to run now.
 
-While cleanup is running, **✦ dreaming** appears in the corner of the screen. Your session continues normally.
+Your session continues normally while cleanup runs in the background.
 
 ### Turning it on or off
 
@@ -116,6 +156,76 @@ You can also set them in `~/.qwen/settings.json` (applies to all projects) or `.
 }
 ```
 
+### Structured recall (opt-in)
+
+By default Qwen reads memory as a flat `MEMORY.md` index. The structured protocol replaces that with a hierarchical memory tree, injects only the subtree relevant to your current request, and gives Qwen a `search_memory` tool to pull full entries on demand — which costs fewer tokens once a memory collection grows past a handful of files.
+
+It is off by default. Turn it on in `settings.json` (restart required):
+
+```json
+{
+  "memory": {
+    "enableStructuredRecall": true
+  }
+}
+```
+
+or for a single run with `QWEN_CODE_MEMORY_STRUCTURED_RECALL=1`.
+
+Turning it on starts a background metadata migration: each memory file gains the frontmatter (category, keywords, usage scenarios) that recall needs. It runs in small batches of at most 10 files per turn and only rewrites frontmatter, never the body of a note. While the setting is off the migration is never scheduled, so nothing is rewritten and no background model calls are made.
+
+### Team memory (shared with collaborators)
+
+By default, auto-memory is **private to you** — it lives under your home directory and is never shared. Team memory is an opt-in tier that the whole team shares **through git**.
+
+When enabled, Qwen gains a third memory directory at `.qwen/team-memory/` **inside the repository**. It uses the same one-file-per-memory layout and `MEMORY.md` index as the private tiers. Because it is committed to the repo, it is shared with every collaborator the normal way: you `git pull` to receive teammates' memories and commit/push to share yours. Qwen routes durable, project-wide knowledge here — conventions every contributor must follow, shared reference pointers (trackers, dashboards) — while personal and fast-decaying notes stay private.
+
+Enable it per project (or globally) in `settings.json`:
+
+```json
+{
+  "memory": {
+    "enableTeamMemory": true
+  }
+}
+```
+
+It is **off by default**. Keep these caveats in mind:
+
+- **It is source-controlled and visible to everyone with repo access.** Treat a team memory like committing to the repo.
+- **Secrets are blocked.** Writes to `.qwen/team-memory/` are scanned for credentials (API keys, tokens, private keys); a detected secret is rejected, never written. The scan is a backstop, not a guarantee — don't put sensitive data there.
+- **Changes are reviewable.** Team memory writes appear in `git status` / the PR diff like any other file, so they can be reviewed before they're committed. In the default approval mode Qwen also asks before each team write; in `AUTO_EDIT`/YOLO mode (where you've opted into auto-approval) they are applied without a prompt but still surface in the diff.
+- **The directory must be git-tracked.** If your project's `.gitignore` excludes `.qwen/*`, re-include the path so it can be shared:
+
+  ```gitignore
+  !.qwen/team-memory/
+  !.qwen/team-memory/**
+  ```
+
+  Caveat: use the file-glob ignore form (`.qwen/*`), not a directory form with a trailing slash (`.qwen/`). A directory-form ignore makes git skip the folder entirely, so a `!`-reinclude below it is a no-op and the team tier stays silently empty in git. Qwen warns once at startup when the tier is enabled but its directory is git-ignored or outside any git repository, so this misconfiguration does not pass unnoticed.
+
+`QWEN_CODE_MEMORY_TEAM=1` / `=0` overrides the setting for a single run.
+
+### Automatic git sync (optional)
+
+By default you share team memory with the normal git workflow (`pull` to receive, `commit`/`push` to share). To have Qwen do it for you, enable sync:
+
+```json
+{
+  "memory": {
+    "enableTeamMemory": true,
+    "enableTeamMemorySync": true
+  }
+}
+```
+
+When on, at session start Qwen best-effort syncs the `.qwen/team-memory/` directory: it rebuilds the shared `MEMORY.md` index, fast-forward-pulls collaborators' updates **first**, then commits your team-memory changes on top, and pushes **only that sync commit** (via an explicit single-branch refspec) — so the index you load reflects the latest. It only **stages** the team directory (your other working changes are never committed), and never blocks the session on a git failure. Off by default. `QWEN_CODE_MEMORY_TEAM_SYNC=1` / `=0` overrides the setting for a single run.
+
+Two things to know before enabling it:
+
+- **The fast-forward pull acts on your whole current branch, not just `.qwen/team-memory/`** (git has no path-scoped pull). So sync will fast-forward your branch to the remote tip. The push, by contrast, is scoped: it publishes **only the commit this sync just created**, so it never pushes other unpushed commits you have — if your branch is already ahead of upstream, sync commits locally and skips the push. Enable it on branches where the fast-forward pull is fine — or run it on a dedicated checkout.
+- **A diverged branch is left untouched** (`--ff-only` never merges). When that happens sync simply does nothing that session; resolve the divergence (`git pull`) and it resumes. A branch with no upstream (no tracking configuration) still commits locally but skips the push — there is nowhere to push to.
+
 ---
 
 ## Commands
@@ -129,6 +239,10 @@ Opens the Memory panel. From here you can:
 - Open your personal QWEN.md (`~/.qwen/QWEN.md`)
 - Open the project QWEN.md
 - Browse the auto-memory folder
+
+### `/memory migrate-team`
+
+Migrates the **team memory** tier (`.qwen/team-memory/`) to the structured metadata format: each file gains the frontmatter (name, description, category, keywords, usage scenarios) that memory recall needs. Personal and project memory are migrated automatically in the background once [structured recall](#structured-recall-opt-in) is enabled; team memory is shared through git, so the rewrite runs only on explicit request and shows up as a reviewable commit. Run it once per repository in a trusted workspace with team memory enabled.
 
 ### `/init`
 

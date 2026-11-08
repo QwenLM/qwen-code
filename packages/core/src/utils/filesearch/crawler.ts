@@ -594,7 +594,10 @@ function runCommand(
       flushRemainder();
 
       const ok = code === 0;
-      if (!ok && !options?.silentOnFailure) {
+      // `!settled` skips a failure the `error` handler already reported: when a
+      // spawn fails, libuv surfaces UV_ENOENT as the close code (-2 on Linux),
+      // so without this the same single failure is logged twice (#14537).
+      if (!ok && !options?.silentOnFailure && !settled) {
         logCommandProblem('command failed', command, args, {
           code,
           stderr: stderrBuf,
@@ -766,21 +769,59 @@ function applyFilters(
   });
 }
 
+/**
+ * Ancestor-directory ignore decisions, memoised per crawl.
+ *
+ * `isUnderIgnoredDirectory` runs once per listed file and re-tests every ancestor
+ * prefix, so sibling files re-ask the same question about the same directories:
+ * on this repository a single crawl asks it 39,139 times about 955 distinct
+ * directories. Each call site builds its own `dirFilter` closure for one crawl,
+ * so keying the memo on that closure scopes it to that crawl and lets it be
+ * collected together with it — no cross-crawl staleness, no invalidation to get
+ * wrong when ignore rules change.
+ */
+const ancestorIgnoreMemo = new WeakMap<
+  (dirPath: string) => boolean,
+  Map<string, boolean>
+>();
+
+function isDirectoryTreeIgnored(
+  dirPath: string,
+  dirFilter: (dirPath: string) => boolean,
+  memo: Map<string, boolean>,
+): boolean {
+  const cached = memo.get(dirPath);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const separator = dirPath.lastIndexOf('/');
+  const ignored =
+    (separator > 0 &&
+      isDirectoryTreeIgnored(dirPath.slice(0, separator), dirFilter, memo)) ||
+    dirFilter(`${dirPath}/`);
+
+  memo.set(dirPath, ignored);
+  return ignored;
+}
+
 function isUnderIgnoredDirectory(
   filePath: string,
   dirFilter: (dirPath: string) => boolean,
 ): boolean {
-  const parts = filePath.split('/');
-  let current = '';
-
-  for (let i = 0; i < parts.length - 1; i++) {
-    current = current ? `${current}/${parts[i]}` : parts[i];
-    if (dirFilter(`${current}/`)) {
-      return true;
-    }
+  const separator = filePath.lastIndexOf('/');
+  // Callers reject absolute and out-of-root paths via isValidIgnorePath().
+  if (separator <= 0) {
+    return false;
   }
 
-  return false;
+  let memo = ancestorIgnoreMemo.get(dirFilter);
+  if (memo === undefined) {
+    memo = new Map();
+    ancestorIgnoreMemo.set(dirFilter, memo);
+  }
+
+  return isDirectoryTreeIgnored(filePath.slice(0, separator), dirFilter, memo);
 }
 
 const YIELD_INTERVAL = 1000;
@@ -1313,6 +1354,10 @@ async function crawlWithRipgrep(
   const rgResult = await commandRunner('rg', rgArgs, crawlDirectory, 20_000, {
     collectLines: false,
     onLine: processRgFile,
+    // An optional-capability probe: its failure is already narrated by the
+    // "falling back to fdir (ripgrep unavailable)" warn below, so the raw
+    // spawn diagnostics would only be noise (#14537).
+    silentOnFailure: true,
   });
 
   if (!rgResult.success) {

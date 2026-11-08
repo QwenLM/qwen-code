@@ -16,7 +16,7 @@
  * per-UserQuery extract notifies that have no dialog surface.
  *
  * Surfaces that only care about live work (the footer pill, the
- * composer's Down-arrow route) filter for `running` themselves.
+ * composer's Down-arrow route) filter for active states themselves.
  *
  * Intentionally ignores activity updates (appendActivity). Tool-call
  * traffic from a running background agent would otherwise churn the
@@ -35,6 +35,7 @@ import {
   type TaskState,
   type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import { reorderChildrenUnderParents } from '../components/background-view/agent-forest.js';
 
 // Cap on retained terminal dream entries surfaced via the dialog.
 // `MemoryManager.tasks` has no eviction; without this cap the list
@@ -108,6 +109,44 @@ export interface UseBackgroundTaskViewResult {
   entries: readonly DialogEntry[];
 }
 
+/**
+ * Two-bucket roster ordering so "new OR running tasks should appear at the
+ * top" (the literal phrasing of the issue this view-model serves). A pure
+ * startTime DESC sort surfaces the newest LAUNCH but lets an older
+ * long-running / paused entry fall below a batch of newer terminal entries
+ * — the user opens the dialog wanting to check the running work, and finds
+ * it buried under noise.
+ *
+ *   bucket 1 — active (running + pausing + paused), sorted by startTime DESC so the
+ *              most recent launch sits at the very top.
+ *   bucket 2 — terminal (completed / failed / cancelled), sorted by
+ *              endTime DESC so the most recently FINISHED entry is the
+ *              first terminal row (matches "what changed while I wasn't
+ *              looking" intuition; startTime would put a long-running task
+ *              that just settled below an old quick task that finished
+ *              hours ago).
+ *
+ * Shared by the dialog snapshot and the detail view's Sub-agents roster so
+ * a capped child list can't hide a running child behind older completed
+ * siblings.
+ */
+export function compareActiveThenTerminal(
+  a: { status: string; startTime: number; endTime?: number },
+  b: { status: string; startTime: number; endTime?: number },
+): number {
+  const aActive =
+    a.status === 'running' || a.status === 'pausing' || a.status === 'paused';
+  const bActive =
+    b.status === 'running' || b.status === 'pausing' || b.status === 'paused';
+  if (aActive !== bActive) return aActive ? -1 : 1;
+  if (aActive) return b.startTime - a.startTime;
+  // Terminal bucket: fall back to startTime when an entry has no endTime
+  // (defensive — the registries stamp endTime on every running → terminal
+  // transition, so this only matters for synthetic / partially-restored
+  // entries).
+  return (b.endTime ?? b.startTime) - (a.endTime ?? a.startTime);
+}
+
 /** Stable id of an entry regardless of kind — used as React key + lookup. */
 export function entryId(entry: DialogEntry): string {
   switch (entry.kind) {
@@ -155,6 +194,14 @@ export function useBackgroundTaskView(
     // call to refresh between the two `const` bindings.
     const computeDreamSig = (dreams: readonly MemoryTaskRecord[]): string =>
       dreams.map((t) => `${t.id}:${t.status}:${t.updatedAt}`).join('|');
+    const listVisibleDreams = (): MemoryTaskRecord[] =>
+      memoryManager
+        .listTasksByType('dream')
+        .filter(
+          (task) =>
+            task.projectRoot === projectRoot ||
+            task.metadata?.['scope'] === 'user',
+        );
 
     // refresh accepts a pre-fetched dream snapshot so the memory
     // listener can reuse the same array it computed for its dedup
@@ -176,7 +223,7 @@ export function useBackgroundTaskView(
       // touching the task map.) Extract tasks also intentionally
       // stay out of this view — they fire on every UserQuery and
       // their completion is already covered by the `memory_saved`
-      // toast in useGeminiStream.
+      // toast in useLlmStream.
       //
       // Cap retained terminal entries — MemoryManager.tasks Map has no
       // eviction path, so completed/failed dreams accumulate forever
@@ -184,8 +231,7 @@ export function useBackgroundTaskView(
       // cap the dialog would grow unbounded; with it the user sees all
       // running dreams plus the most recent few terminal results
       // (mirrors MonitorRegistry.MAX_RETAINED_TERMINAL_MONITORS).
-      const allDreams =
-        dreamSnapshot ?? memoryManager.listTasksByType('dream', projectRoot);
+      const allDreams = dreamSnapshot ?? listVisibleDreams();
       const runningDreams = allDreams.filter((t) => t.status === 'running');
       const terminalDreams = allDreams
         .filter(
@@ -225,45 +271,18 @@ export function useBackgroundTaskView(
               : undefined,
         };
       });
-      // Two-bucket merge so "new OR running tasks should appear at the
-      // top" (the literal phrasing of the issue this view-model serves).
-      // A pure startTime DESC sort surfaces the newest LAUNCH but lets
-      // an older long-running / paused entry fall below a batch of
-      // newer terminal entries — the user opens the dialog wanting to
-      // check the running work, and finds it buried under noise.
-      //
-      //   bucket 1 — active (running + paused), sorted by startTime DESC
-      //              so the most recent launch sits at the very top.
-      //   bucket 2 — terminal (completed / failed / cancelled), sorted
-      //              by endTime DESC so the most recently FINISHED entry
-      //              is the first terminal row (matches "what changed
-      //              while I wasn't looking" intuition; startTime would
-      //              put a long-running task that just settled below an
-      //              old quick task that finished hours ago).
-      //
-      // Entries falling out the bottom of bucket 2 are eventually
-      // pruned by each registry's terminal-entry cap (see
+      // Two-bucket merge — see compareActiveThenTerminal for the full
+      // rationale. Entries falling out the bottom of the terminal bucket
+      // are eventually pruned by each registry's terminal-entry cap (see
       // `MAX_RETAINED_TERMINAL_AGENTS` / `MAX_RETAINED_TERMINAL_SHELLS`
       // / `MAX_RETAINED_TERMINAL_MONITORS`).
-      const isActive = (entry: DialogEntry): boolean =>
-        entry.status === 'running' || entry.status === 'paused';
       const merged = [
         ...agentEntries,
         ...shellEntries,
         ...monitorEntries,
         ...workflowEntries,
         ...dreamEntries,
-      ].sort((a, b) => {
-        const aActive = isActive(a);
-        const bActive = isActive(b);
-        if (aActive !== bActive) return aActive ? -1 : 1;
-        if (aActive) return b.startTime - a.startTime;
-        // Terminal bucket: fall back to startTime when an entry has no
-        // endTime yet (defensive — the registries stamp endTime on
-        // every running → terminal transition, so this only matters
-        // for synthetic / partially-restored entries).
-        return (b.endTime ?? b.startTime) - (a.endTime ?? a.startTime);
-      });
+      ].sort(compareActiveThenTerminal);
       // Cache the dream signature derived from the freshly-built
       // entries — the memory listener uses this to skip redundant
       // setEntries calls when an extract notify fires (extract has no
@@ -271,7 +290,12 @@ export function useBackgroundTaskView(
       // from the same `allDreams` snapshot used to build dreamEntries
       // so the gate value can never desync from what's on screen.
       lastDreamSig = computeDreamSig(allDreams);
-      setEntries(merged);
+      // Nested sub-agents: group each agent under its parent (depth-first)
+      // while non-agent entries and root agents keep the bucket positions
+      // assigned above. A tree can legitimately span the two buckets (a
+      // running parent with a just-completed child), so grouping must be a
+      // post-pass on the sorted list rather than part of the comparator.
+      setEntries(reorderChildrenUnderParents(merged));
     };
 
     // Wrap registry callbacks in a thunk so React's setStatusChange
@@ -293,6 +317,15 @@ export function useBackgroundTaskView(
     // purpose to avoid per-tool-call churn), approval changes are rare and
     // user-actionable, so refreshing the snapshot on them is worthwhile.
     agentRegistry.setApprovalChangeCallback(refreshFromRegistry);
+    workflowRegistry.setApprovalChangeCallback(refreshFromRegistry);
+
+    // The change callback above only repaints the "needs approval" badge; it
+    // cannot answer a request, and the registry now fails closed without a
+    // real responder. Register the TUI's snapshot refresh as the host
+    // channel: it makes the parked approval part of `entries`, which the
+    // background-tasks dialog renders and settles through
+    // `resolvePendingApproval`.
+    workflowRegistry.setApprovalRequestCallback(refreshFromRegistry);
 
     // Memory listener fires only on dream-task transitions —
     // `subscribe({ taskType: 'dream' })` skips the per-extract notify
@@ -304,7 +337,7 @@ export function useBackgroundTaskView(
     // same status). The fetched snapshot is forwarded to refresh so
     // both the gate and the rendered dreamEntries come from one read.
     const memoryListener = () => {
-      const dreams = memoryManager.listTasksByType('dream', projectRoot);
+      const dreams = listVisibleDreams();
       const sig = computeDreamSig(dreams);
       if (sig === lastDreamSig) return;
       refresh(dreams);
@@ -319,6 +352,8 @@ export function useBackgroundTaskView(
       monitorRegistry.setStatusChangeCallback(undefined);
       workflowRegistry.setStatusChangeCallback(undefined);
       agentRegistry.setApprovalChangeCallback(undefined);
+      workflowRegistry.setApprovalChangeCallback(undefined);
+      workflowRegistry.setApprovalRequestCallback(undefined);
       unsubscribeMemory();
     };
   }, [config]);

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { join } from 'node:path';
 
 const { mockReadFileSync, mockWriteFileSync, mockExistsSync, mockMkdirSync } =
   vi.hoisted(() => ({
@@ -26,7 +27,7 @@ const { getCredsFilePath, loadCredentials, saveCredentials } = await import(
 describe('getCredsFilePath', () => {
   it('returns path under channels dir with credentials suffix', () => {
     expect(getCredsFilePath('mybot')).toBe(
-      '/tmp/test-qwen/channels/mybot-credentials.json',
+      join('/tmp/test-qwen', 'channels', 'mybot-credentials.json'),
     );
   });
 
@@ -78,9 +79,10 @@ describe('saveCredentials', () => {
   it('creates dir and writes file with 0o600 permissions', () => {
     saveCredentials('/path/to/creds.json', 'app-id', 'app-secret');
 
-    expect(mockMkdirSync).toHaveBeenCalledWith('/tmp/test-qwen/channels', {
-      recursive: true,
-    });
+    expect(mockMkdirSync).toHaveBeenCalledWith(
+      join('/tmp/test-qwen', 'channels'),
+      { recursive: true },
+    );
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       '/path/to/creds.json',
       JSON.stringify({ appId: 'app-id', appSecret: 'app-secret' }),

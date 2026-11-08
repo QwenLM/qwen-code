@@ -13,15 +13,28 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
-import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
+import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+// Type-only, so it is erased before the serve fast-path bundle closure check
+// ever sees it. Reused only for the child-heap knob: `memoryPressureMode`
+// happens to share the same two values today but is an independent switch, and
+// aliasing them would couple whichever one gains `enforce` first to the other.
+import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
+import type {
+  AuthType,
+  ModelWireApi,
+  InputModalities,
+  MemoryProjectScope,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): one `qwen --acp` child per daemon (the
- *   daemon binds to ONE workspace at boot). Multiple
- *   sessions multiplex onto that child via the agent's native
- *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
+ * `http-bridge` (Stage 1): production attempts to preheat the primary
+ *   `qwen --acp` child and retries on first use after failure; trusted
+ *   secondaries start one on demand, while untrusted secondaries do not.
+ *   Multiple sessions in one runtime multiplex onto its child via the
+ *   agent's native `connection.newSession()` (see
+ *   `acp-integration/acpAgent.ts:194`),
  *   sharing the child's process / OAuth / file-cache / hierarchy-memory
  *   parse. The daemon pipes ACP NDJSON over HTTP/SSE. Same-session
  *   multi-client requests serialize through the bridge's per-session
@@ -31,28 +44,81 @@ import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
  *   implemented.
  */
 export type ServeMode = 'http-bridge' | 'native';
+export type ServeProfile = 'default' | 'hosted-harness';
+
+export type ServeChannelSelection =
+  | { mode: 'all' }
+  | { mode: 'names'; names: string[] };
+
+export interface ChannelWebhookConfigSource {
+  workspaceCwd: string;
+  channelNames?: readonly string[];
+  env?: Readonly<Record<string, string | undefined>>;
+}
 
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Launcher-owned Conversations working root, fixed until daemon restart. */
+  conversationsDir?: string;
+  /** Deployment boundary for provider selection and exposed surfaces. */
+  profile?: ServeProfile;
   /**
    * Bearer token required on every request. Optional when bound to loopback
-   * (developer convenience); required when bound beyond loopback (boot fails
-   * without one — see runQwenServe).
+   * (developer convenience). On a non-loopback bind with neither this option
+   * nor QWEN_SERVER_TOKEN set, runQwenServe generates an ephemeral bearer and
+   * prints it once instead of refusing; read it back from
+   * `RunHandle.resolvedToken` — the only programmatic channel: the generated
+   * value is never written back into `QWEN_SERVER_TOKEN` in the daemon's own
+   * environment (spawned channel workers receive it as `QWEN_DAEMON_TOKEN`).
+   * An explicitly empty value is a supplied source, not an absent one, and
+   * still fails the remote-bind check.
    */
   token?: string;
-  mode: ServeMode;
   /**
-   * Cap on concurrent live sessions. Once `bridge.sessionCount` reaches
+   * Print the token-bearing QR even when it would be withheld —
+   * an operator-supplied (stable) token on captured (non-TTY) stdout. The
+   * default suppression keeps stable credentials out of collected logs; this
+   * opt-in declares the log pipeline as trusted as the daemon host. An
+   * explicit value (either polarity) wins over the `serve.tokenQr` setting;
+   * `undefined` means the flag was omitted and the setting applies. `true`
+   * has no effect for generated tokens or interactive terminals, where the QR
+   * already prints; `false` suppresses it on every path, including those two
+   * — a generated bearer still reaches the operator as its own plain-text
+   * line, so the veto costs access to nothing.
+   */
+  tokenQr?: boolean;
+  mode: ServeMode;
+  /** Registration capacity, including primary and user scratch workspaces.
+   * Defaults to QWEN_SERVE_MAX_WORKSPACES or 256; accepts integers 1..256.
+   */
+  maxRegisteredWorkspaces?: number;
+  /**
+   * Per-workspace cap on concurrent live sessions. Once a runtime's
+   * `bridge.sessionCount` reaches
    * this, new `POST /session` requests that would spawn fresh sessions
    * return 503. Attaching to an existing session (same workspace under
    * `sessionScope: 'single'`) still works — so an idle daemon doesn't
-   * block reconnects from existing users. Defaults to 20: comfortably
+   * block reconnects from existing users. Defaults to 32: comfortably
    * above single-user usage, well below the design's N≈50 cliff where
    * per-session RSS (~30–50 MB) and FD pressure start to bite. Set to
    * `0` or `Infinity` to disable.
+   *
+   * This is a fairness and FD lever rather than a memory lever. Sessions
+   * multiplex onto their workspace's single ACP child, so per-session RSS is
+   * spent inside that child's heap, which nothing currently bounds beyond
+   * V8's own ceiling.
    */
   maxSessions?: number;
+  /**
+   * Non-negative integer cap on concurrent live sessions across all workspace
+   * runtimes. `runQwenServe` defaults to 800 when registration capacity exceeds
+   * 25; otherwise it derives the default from the per-workspace cap and startup
+   * workspace count when several startup/restored workspaces are present.
+   * Direct embeds may leave it unlimited. Dynamic registration does not
+   * recompute it. `0` or `Infinity` disables the cap.
+   */
+  maxTotalSessions?: number;
   /**
    * Per-session cap on accepted prompts that have not settled yet.
    * Defaults to 5. `0` or `Infinity` disables the cap.
@@ -78,30 +144,71 @@ export interface ServeOptions {
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
    * construction site. Defaults to 8000. Must be a positive
    * finite integer — `0` / `NaN` / negative fail at boot. Larger
-   * rings let clients with longer reconnect gaps replay more history
-   * at the cost of a few hundred KB extra RAM per session.
+   * rings let clients with longer reconnect gaps replay more history only
+   * while the separate `eventRingMaxBytes` budget has room.
    */
   eventRingSize?: number;
   /**
-   * Absolute workspace path this daemon binds to. The daemon is
-   * **1 daemon = 1 workspace × N sessions**: one bound
-   * workspace at boot, sessions multiplexed on the single
-   * `qwen --acp` child via `connection.newSession()`.
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Threaded into `BridgeOptions.eventRingMaxBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer up to 256 MiB, never unlimited.
+   */
+  eventRingMaxBytes?: number;
+  /**
+   * Per-session in-memory compacted replay snapshot byte cap. Threaded into
+   * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
+  /**
+   * Per-session BASELINE cap on replay entries retained in the in-flight
+   * live journal. Compatible text/thought chunks share bounded entries.
+   * Threaded into `BridgeOptions.maxJournalEvents`. Defaults to 10 000.
+   * Must be a positive safe integer.
+   *
+   * Growth semantics: leaving BOTH this and `maxJournalBytes` unset enables
+   * adaptive growth — the daemon raises a breaching session's caps within a
+   * pool derived from the memory budget. Pinning either one fixes both
+   * dimensions at the configured baselines and disables growth entirely.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session BASELINE source-event byte cap on the in-flight live
+   * journal. Truncation drops whole entries, so the retained tail can be
+   * much smaller than the cap. Threaded into `BridgeOptions.maxJournalBytes`.
+   * Defaults to 8 MiB. Must be a positive safe integer.
+   *
+   * Growth semantics: leaving BOTH this and `maxJournalEvents` unset
+   * enables adaptive growth — the daemon raises a breaching session's caps
+   * within a pool derived from the memory budget. Pinning either one fixes
+   * both dimensions at the configured baselines and disables growth
+   * entirely.
+   */
+  maxJournalBytes?: number;
+  /**
+   * Absolute workspace path this daemon binds as its primary workspace.
+   * The CLI parser accepts repeated `--workspace` values to register isolated
+   * runtimes, but this public option remains the primary workspace string so
+   * existing embeds do not need to understand the internal runtime registry.
    *
    * `POST /session` calls whose `cwd` doesn't canonicalize to this
-   * path are rejected with `400 workspace_mismatch`. Clients may
-   * also omit `cwd` — the route falls back to this bound path.
-   *
-   * Multi-workspace deployments use **multiple daemon processes**
-   * (one per workspace, each on its own port), supervised by
-   * systemd / docker-compose / k8s / `qwen-coordinator` reference
-   * orchestrator. There is no intra-daemon multi-workspace mode
-   * (the previous Stage 1 `byWorkspaceChannel` routing layer was
-   * removed in the design revision).
+   * path, or to another registered runtime's canonical workspace, are
+   * rejected with `400 workspace_mismatch`. Clients may also omit `cwd` —
+   * the route falls back to this primary path.
    *
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
+  /**
+   * Project-memory partitioning for every runtime owned by `runQwenServe`.
+   * `workspace` keys memory by the exact registered workspace; `git-root`
+   * preserves the legacy behavior that shares memory among workspaces
+   * resolved to the same Git root. When omitted,
+   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment before
+   * defaulting to `workspace`. Direct `createServeApp` callers must instead
+   * provide the scope through `deps.daemonEnv`.
+   */
+  memoryProjectScope?: MemoryProjectScope;
   /**
    * When true, refuses to boot without a bearer
    * token — even on loopback. Loopback's no-token developer default
@@ -119,9 +226,26 @@ export interface ServeOptions {
   requireAuth?: boolean;
   /**
    * Opt in to direct session shell execution. The effective policy also
-   * requires a configured bearer token and a session-bound client id.
+   * requires either a configured bearer token or trusted-loopback mode, plus
+   * a session-bound client id.
    */
   enableSessionShell?: boolean;
+  /**
+   * Path to a PEM certificate file. When both `tlsCert` and `tlsKey`
+   * are set, the daemon serves over HTTPS (`https.createServer`) instead
+   * of plain HTTP. Both must be provided together. The main motivation is
+   * mobile/cross-device access: browsers only expose secure-context APIs
+   * (`getUserMedia` for voice input, WebRTC) over HTTPS or `localhost`, so
+   * a LAN IP like `192.168.x.x` needs TLS. Scope is TLS termination only —
+   * no auto-generation, no ACME. TLS is orthogonal to the bearer-token
+   * auth layer; both still apply on non-loopback binds.
+   */
+  tlsCert?: string;
+  /**
+   * Path to a PEM private key file. See `tlsCert` — both must be set
+   * together to enable HTTPS.
+   */
+  tlsKey?: string;
   /**
    * Serve the built Web Shell SPA at the daemon root (default true). Set
    * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
@@ -158,7 +282,59 @@ export interface ServeOptions {
    */
   mcpPoolActive?: boolean;
   /**
-   * Cross-origin allowlist for browser webui
+   * Total memory budget in MB for the whole daemon process tree — the root
+   * plus every `qwen --acp` child it spawns. When unset, derived as half of
+   * the cgroup-constrained or host memory.
+   *
+   * `childHeapMode: 'admit'` limits child starts using the modeled slot count;
+   * `observe` only reports the partition. Experimental `enforce` also applies
+   * the fixed modeled old-space ceiling to each managed child. It does not
+   * bound total process RSS.
+   */
+  memoryBudgetMb?: number;
+  /**
+   * Whether the daemon derives and acts on a memory-pressure level.
+   *
+   * `observe` (default) reports the level alongside the raw figures and raises
+   * a status issue when it leaves `normal`. `off` still reports the figures —
+   * the point of this phase is to gather data, including from deployments that
+   * do not want the signal acting on them yet — but raises no issue, so the
+   * daemon's overall `status` rollup is unchanged.
+   *
+   * There is deliberately no `enforce`: nothing here remediates, and a value a
+   * caller can pass but never use is a dead switch. It arrives with the
+   * enforcement.
+   */
+  memoryPressureMode?: 'off' | 'observe';
+  /**
+   * Whether the daemon models a per-child heap partition of the budget.
+   *
+   * `observe` (default) computes the partition and counts the spawns it would
+   * have refused; nothing is applied. `admit` enforces only the child count,
+   * retaining the legacy heap arguments. Experimental `enforce` also applies
+   * the fixed modeled old-space ceiling to each managed child. A zero refusal
+   * count does not prove the workload fits that ceiling. `off` models nothing.
+   */
+  childHeapMode?: ChildHeapMode;
+  /**
+   * Resolved once at boot by `runQwenServe` for journal growth and the child
+   * policy, and reported under `limits.memory` on `GET /daemon/status`.
+   * Not an operator input.
+   */
+  daemonMemoryBudget?: DaemonMemoryBudget;
+  /**
+   * Required external pre-execution policy for managed ACP tools. Omitted
+   * means fully off. The token remains daemon-local and is never forwarded to
+   * the ACP child or any executor environment.
+   */
+  externalToolGuard?: {
+    mode: 'required';
+    endpoint: string;
+    token: string;
+    timeoutMs?: number;
+  };
+  /**
+   * Cross-origin allowlist for browser clients
    * deployments.
    */
   allowOrigins?: string[];
@@ -175,19 +351,62 @@ export interface ServeOptions {
    */
   promptDeadlineMs?: number;
   /**
+   * Build every ordinary workspace runtime's Bridge with paired Legacy and
+   * Managed engines. No Managed engine exists for these hosts yet, so new
+   * sessions run on Legacy with a durable owner and Managed owners are
+   * refused on restore.
+   */
+  experimentalPairedEngines?: boolean;
+  /** Mount the experimental resident Managed Gateway and Tool Runtime path. */
+  experimentalManagedAgents?: boolean;
+  /** Expose the private authenticated Tool-only Runtime worker protocol. */
+  experimentalManagedRuntimeWorker?: boolean;
+  experimentalManagedRuntimeAutoLocal?: boolean;
+  /** Use a remote Runtime worker origin instead of the local provider. */
+  experimentalManagedRuntimeUrl?: string;
+  /** Bearer credential used only for the remote Runtime worker. */
+  experimentalManagedRuntimeToken?: string;
+  /** Java Runtime Broker origin used only by the Hosted Harness profile. */
+  managedRuntimeBrokerUrl?: string;
+  /** Service credential used only for Harness-to-Broker calls. */
+  managedRuntimeBrokerToken?: string;
+  /** Deployment-generated digest for the Hosted Harness private contract. */
+  hostedHarnessCapabilityDigest?: string;
+  /** Trusted startup URL for the operator-only original CSI attachment. */
+  hostedCsiSessionStoreUrl?: string;
+  /**
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  /** ACP child auto-reap delay. Keepalive windows may extend it. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
   /**
-   * Wall-clock timeout in ms for a single human permission /
-   * ask_user_question response in daemon (ACP) mode. 0 = disabled
-   * (wait forever). Default: 300000 (5 min).
+   * Grace period after a prompt settles before an otherwise-idle session may
+   * be auto-closed, in ms. 0 = disabled (original behavior). Set to a value
+   * greater than the client's max SSE poll interval to prevent session rebuilds
+   * for poll-based clients. Default: 0.
+   */
+  sessionPromptSettledCloseGraceMs?: number;
+  /**
+   * ACP child request timeout, including the `initialize` handshake,
+   * in ms. Must be a positive
+   * integer. Default: 10000 (10 s).
+   */
+  initializeTimeoutMs?: number;
+  /**
+   * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
+   * to an explicitly set initialize timeout when that value is larger. An
+   * explicit value here wins outright, including below the default.
+   */
+  sessionRestoreTimeoutMs?: number;
+  /**
+   * Wall-clock timeout in ms for a human permission or `ask_user_question`
+   * response in daemon mode. 0 = disabled. Default: 0 (wait until an explicit
+   * decision or session lifecycle cancellation).
    */
   permissionResponseTimeoutMs?: number;
   /**
@@ -203,8 +422,35 @@ export interface ServeOptions {
   rateLimitRead?: number;
   /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
   rateLimitWindowMs?: number;
+  /**
+   * Accept client-hosted MCP servers over the daemon WS (issue #5626,
+   * Phase 2 "reverse tool channel"). When enabled, a connected WS client may
+   * send `mcp_register` / `mcp_message` / `mcp_unregister` frames so the
+   * daemon's agent can call tools that execute in the client (e.g. the Chrome
+   * extension's browser tools). `runQwenServe` only enables this when a caller
+   * or environment variable opts in.
+   */
+  clientMcpOverWs?: boolean;
+  /**
+   * Tunnel raw CDP to a real browser tab over the reverse `/acp` WS
+   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback CDP client can
+   * connect to a new `/cdp` WebSocket and drive ONE real tab via the extension's
+   * `chrome.debugger`, reusing browser automation tools. `runQwenServe` enables this for
+   * Chrome extension origins or explicit env opt-in; callers may pass `false`.
+   */
+  cdpTunnelOverWs?: boolean;
   /** Forward the experimental LSP opt-in to spawned ACP children. */
   experimentalLsp?: boolean;
+  /**
+   * When true, load/resume re-hangs a trailing unanswered ask_user_question.
+   * Default false. Forwarded to spawned ACP children.
+   */
+  restoreAskUserQuestion?: boolean;
+  /**
+   * Experimental: channels to host in a daemon-managed worker process.
+   * Omitted means plain daemon mode with no channel worker.
+   */
+  channelSelection?: ServeChannelSelection;
 }
 
 /**
@@ -213,8 +459,24 @@ export interface ServeOptions {
  *
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
+export interface HostedHarnessCapabilities {
+  readonly instanceId?: string;
+  readonly features?: readonly string[];
+  readonly lifecycleProtocolVersion?: 1;
+  readonly lifecycleV2Profiles?: readonly string[];
+  readonly titleProtocolVersion?: 1;
+  readonly protocolVersions: {
+    readonly current: 1;
+    readonly supported: readonly [1];
+  };
+  readonly bootId: string;
+  readonly capabilityDigest: string;
+}
+
 export interface CapabilitiesEnvelope {
   v: 1;
+  /** Private process generation and protocol for the Hosted Harness client. */
+  hostedHarness?: HostedHarnessCapabilities;
   /**
    * Serve protocol versions supported by this daemon. Optional because this is
    * additive to v=1; older v=1 daemons omit it.
@@ -225,6 +487,8 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   qwenCodeVersion?: string;
+  /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
+  sessionLiveStatePollIntervalMs?: number;
   mode: ServeMode;
   features: string[];
   /**
@@ -237,12 +501,14 @@ export interface CapabilitiesEnvelope {
    */
   modelServices: string[];
   /**
-   * Absolute workspace path this daemon is bound to
-   * (`1 daemon = 1 workspace`). Clients use this to:
-   *   - Detect mismatch before posting `/session` (vs. waiting for
-   *     400 workspace_mismatch from the bridge).
+   * Absolute primary workspace path. Clients use this to:
+   *   - Preserve single-workspace compatibility.
    *   - Omit `cwd` on `POST /session` — the route falls back to this
    *     path when the body has no `cwd` field.
+   *
+   * Newer daemons list every registered runtime in `workspaces[]`, including
+   * the primary runtime when `multi_workspace_sessions` is absent.
+   * `workspaceCwd` remains the primary entry for old clients.
    *
    * Optional at the type level (matches the SDK's `DaemonCapabilities`
    * type) because the field is an additive extension of the v=1
@@ -251,6 +517,20 @@ export interface CapabilitiesEnvelope {
    * current server code always populates it.
    */
   workspaceCwd?: string;
+  /** Registered workspace runtimes. Older single-workspace daemons may omit it. */
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    displayName?: string;
+    ssh?: { host: string; port?: number; directory: string };
+    primary: boolean;
+    trusted: boolean;
+    /** Whether persistent Agent collaboration is enabled for this workspace. */
+    agentCollaborationEnabled?: boolean;
+    workflowsEnabled?: boolean;
+    removable?: boolean;
+    kind?: 'live';
+  }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
    * future builds may add `'acp-http'` and/or `'acp-ws'`. SDK clients
@@ -281,7 +561,19 @@ export interface CapabilitiesEnvelope {
    * `null` means the operator explicitly disabled that cap.
    */
   limits?: {
+    maxRegisteredWorkspaces?: number;
+    maxChannelControlWorkspaces?: number;
     maxPendingPromptsPerSession?: number | null;
+    maxSessionsPerWorkspace?: number | null;
+    maxTotalSessions?: number | null;
+    sessionRestoreTimeoutMs?: number;
+    /** Present when `workspace_file_upload` is advertised. */
+    maxWorkspaceFileUploadBytes?: number;
+    /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+    maxSkillArchiveBytes?: number;
+    maxSkillArchiveExpandedBytes?: number;
+    maxSkillArchiveEntries?: number;
+    maxSkillArchiveManifestBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.
@@ -325,7 +617,9 @@ export interface ServeAuthProviderDescriptor {
     flowTitle?: string;
     baseUrlStepTitle?: string;
   };
-  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+  steps: Array<
+    'protocol' | 'wireApi' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
+  >;
 }
 
 export interface ServeAuthProviderCatalog {
@@ -333,7 +627,7 @@ export interface ServeAuthProviderCatalog {
   workspaceCwd: string;
   providers: ServeAuthProviderDescriptor[];
   groups: Array<{
-    id: 'alibaba' | 'third-party' | 'custom';
+    id: 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
     label: string;
     description: string;
     providerIds: string[];
@@ -343,10 +637,14 @@ export interface ServeAuthProviderCatalog {
 export interface ServeAuthProviderInstallRequest {
   providerId: string;
   protocol?: AuthType;
+  wireApi?: ModelWireApi;
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];
   advancedConfig?: {
+    /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
+    replaceExisting?: boolean;
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;
     contextWindowSize?: number;
@@ -362,6 +660,11 @@ export interface ServeAuthProviderInstallResult {
   modelId?: string;
   baseUrl?: string;
   message: string;
+  runtimeSync?: ServeModelProviderRuntimeSyncResult;
+}
+
+export interface ServeModelProviderRuntimeSyncResult {
+  status: 'applied' | 'deferred' | 'failed';
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

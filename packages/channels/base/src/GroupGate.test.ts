@@ -1,6 +1,23 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { GroupGate } from './GroupGate.js';
+import { PairingStore } from './PairingStore.js';
 import type { Envelope } from './types.js';
+
+function withQwenHome<T>(fn: () => T): T {
+  const previous = process.env['QWEN_HOME'];
+  const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-gate-'));
+  process.env['QWEN_HOME'] = qwenHome;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = previous;
+    rmSync(qwenHome, { recursive: true, force: true });
+  }
+}
 
 function envelope(overrides: Partial<Envelope> = {}): Envelope {
   return {
@@ -17,9 +34,50 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
 }
 
 describe('GroupGate', () => {
+  it('matches group IDs verbatim unless the platform normalizes them', () => {
+    const gate = new GroupGate('allowlist', { 'QwenLM/qwen-code': {} });
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'qwenlm/qwen-code' }))
+        .reason,
+    ).toBe('not_allowlisted');
+  });
+
+  it('admits a differently-cased group ID through the platform normalizer', () => {
+    const gate = new GroupGate(
+      'allowlist',
+      { 'qwenlm/qwen-code': { requireMention: false } },
+      undefined,
+      (groupId) => groupId.toLowerCase(),
+    );
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'QwenLM/qwen-code' }))
+        .allowed,
+    ).toBe(true);
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'other/repo' })).reason,
+    ).toBe('not_allowlisted');
+  });
+
+  it('inherits requireMention by field even when the group has another override', () => {
+    const gate = new GroupGate('allowlist', {
+      '*': { requireMention: false },
+      chat1: { senders: 'allowlist' },
+      chat2: { requireMention: true },
+    });
+    expect(gate.check(envelope({ isGroup: true })).allowed).toBe(true);
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'chat2' })).reason,
+    ).toBe('mention_required');
+  });
+
   describe('non-group messages', () => {
     it('always allows DM messages regardless of policy', () => {
-      for (const policy of ['disabled', 'allowlist', 'open'] as const) {
+      for (const policy of [
+        'disabled',
+        'allowlist',
+        'open',
+        'pairing',
+      ] as const) {
         const gate = new GroupGate(policy);
         expect(gate.check(envelope()).allowed).toBe(true);
       }
@@ -105,11 +163,93 @@ describe('GroupGate', () => {
     });
   });
 
+  describe('pairing policy', () => {
+    it('does not create a pairing request for ambient group messages', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true }));
+      expect(result).toEqual({
+        allowed: false,
+        reason: 'pairing_trigger_required',
+      });
+    });
+
+    it('requests pairing after an explicit mention', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true, isMentioned: true }));
+      expect(result).toEqual({
+        allowed: false,
+        reason: 'pairing_required',
+        pairing: { rejected: 'cap_reached' },
+      });
+    });
+
+    it('returns a cap_reached rejection when constructed without a store', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true, isMentioned: true }));
+      expect(result.pairing).toEqual({ rejected: 'cap_reached' });
+    });
+
+    it('requests pairing after a reply to the bot', () => {
+      withQwenHome(() => {
+        const store = new PairingStore('test-chan', '/tmp');
+        const gate = new GroupGate('pairing', {}, store);
+
+        const result = gate.check(
+          envelope({ isGroup: true, isReplyToBot: true }),
+        );
+
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toBe('pairing_required');
+        expect(result.pairing).toEqual({ code: expect.any(String) });
+        expect(store.listPending()).toHaveLength(1);
+      });
+    });
+
+    it('does not create requests for ambient messages even with requireMention=false', () => {
+      withQwenHome(() => {
+        const store = new PairingStore('test-chan', '/tmp');
+        const gate = new GroupGate(
+          'pairing',
+          { '*': { requireMention: false } },
+          store,
+        );
+
+        const result = gate.check(envelope({ isGroup: true }));
+
+        expect(result).toEqual({
+          allowed: false,
+          reason: 'pairing_trigger_required',
+        });
+        expect(store.listPending()).toEqual([]);
+      });
+    });
+  });
+
   describe('defaults', () => {
     it('defaults to disabled policy', () => {
       const gate = new GroupGate();
       const result = gate.check(envelope({ isGroup: true }));
       expect(result).toEqual({ allowed: false, reason: 'disabled' });
+    });
+  });
+
+  describe('admits', () => {
+    it('follows the policy, allowlist and pairing steps without the mention step', () => {
+      withQwenHome(() => {
+        const store = new PairingStore('test');
+        const pairing = new GroupGate('pairing', {}, store);
+        expect(new GroupGate('disabled').admits('g1')).toBe(false);
+        expect(new GroupGate('open').admits('g1')).toBe(true);
+        expect(new GroupGate('allowlist', { g1: {} }).admits('g1')).toBe(true);
+        expect(new GroupGate('allowlist', { g2: {} }).admits('g1')).toBe(false);
+        expect(pairing.admits('g1')).toBe(false);
+        // No side effect: asking never opens a pairing request.
+        expect(store.listPending()).toEqual([]);
+        const created = store.createGroupRequest('g1', 'g1', 'user1', 'User');
+        if (!('code' in created)) throw new Error('expected a pairing code');
+        store.approve(created.code);
+        expect(pairing.admits('g1')).toBe(true);
+      });
     });
   });
 });

@@ -7,6 +7,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import fsPromises from 'node:fs/promises';
 import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
@@ -20,7 +22,21 @@ const RIPGREP_TEST_TIMEOUT_MS = 5_000;
 const RIPGREP_RUN_TIMEOUT_MS = 10_000;
 const RIPGREP_WSL_TIMEOUT_MS = 60_000;
 
-type RipgrepMode = 'builtin' | 'system';
+export type RipgrepMode = 'builtin' | 'system';
+
+export type RipgrepFailureKind =
+  | 'eagain'
+  | 'timeout'
+  | 'max_buffer'
+  | 'exit'
+  | 'spawn';
+
+export interface RipgrepRecoveryMetadata {
+  selectionMode: RipgrepMode;
+  retryTriggered: boolean;
+  retrySucceeded?: boolean;
+  failureKind?: RipgrepFailureKind;
+}
 
 interface RipgrepSelection {
   mode: RipgrepMode;
@@ -39,14 +55,29 @@ export interface RipgrepRunResult {
    */
   stdout: string;
   /**
-   * Whether the results were truncated due to buffer overflow or signal termination
+   * Whether ripgrep produced only partial results because execution did not
+   * complete.
    */
-  truncated: boolean;
+  incomplete: boolean;
   /**
    * Any error that occurred during execution (non-fatal errors like no matches won't populate this)
    */
   error?: Error;
+  recovery: RipgrepRecoveryMetadata;
 }
+
+interface RipgrepAttemptResult {
+  stdout: string;
+  incomplete: boolean;
+  canceled: boolean;
+  error?: Error;
+  failureKind?: RipgrepFailureKind;
+}
+
+type RipgrepProcessError = Error & {
+  code?: string | number | undefined | null;
+  signal?: string | null;
+};
 
 const cachedSelections = new Map<boolean, RipgrepSelection>();
 let cachedHealth: RipgrepHealth | null = null;
@@ -142,6 +173,41 @@ export function getBuiltinRipgrep(): string | null {
 }
 
 /**
+ * Restores the exec bit on the bundled ripgrep binary when it is missing.
+ *
+ * Packing preserves the exec bit only for `bin` entries, so every published
+ * `vendor/ripgrep/*\/rg` ships as 0644 (#12679). The managed-update activation
+ * path heals its own install (#12673), but a fresh `npm i -g` never runs it,
+ * and an activation performed by a launcher that predates that fix heals
+ * nothing either — the bundled binary then fails to spawn with EACCES and
+ * search silently degrades to system rg or the JS grep tool.
+ *
+ * Best-effort and metadata-only: an install that cannot be chmod'ed (read-only
+ * or permission-restricted) keeps the existing fallback behaviour. Callers go
+ * through `resolveRipgrep`, which caches its selection, so this stats the
+ * binary once per process and never on the search hot path.
+ */
+async function ensureBundledRipgrepExecutable(
+  binaryPath: string,
+): Promise<void> {
+  // Windows synthesizes mode bits and always reports the binary as executable.
+  if (process.platform === 'win32') return;
+
+  try {
+    const stats = await fsPromises.stat(binaryPath);
+    if ((stats.mode & 0o111) !== 0) return;
+    await fsPromises.chmod(binaryPath, 0o755);
+    debugLogger.info(
+      `Restored the missing exec bit on bundled ripgrep at ${binaryPath}.`,
+    );
+  } catch (error) {
+    debugLogger.warn(
+      `Could not restore the exec bit on bundled ripgrep at ${binaryPath}: ${error}`,
+    );
+  }
+}
+
+/**
  * Checks if ripgrep binary exists and returns its path
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
@@ -158,6 +224,7 @@ export async function resolveRipgrep(
     // Try bundled ripgrep first
     const rgPath = getBuiltinRipgrep();
     if (rgPath && (await fileExists(rgPath))) {
+      await ensureBundledRipgrepExecutable(rgPath);
       const selection = { mode: 'builtin' as const, command: rgPath };
       cachedSelections.set(useBuiltin, selection);
       return selection;
@@ -194,6 +261,9 @@ export async function ensureRipgrepHealthy(
   )
     return;
 
+  let working = false;
+  let probeOutput = '';
+  let probeCode = -1;
   try {
     const { stdout, code } = await execCommand(
       selection.command,
@@ -202,11 +272,22 @@ export async function ensureRipgrepHealthy(
         timeout: RIPGREP_TEST_TIMEOUT_MS,
       },
     );
-    const working = code === 0 && stdout.startsWith('ripgrep');
+    probeOutput = stdout;
+    probeCode = code;
+    working = code === 0 && stdout.startsWith('ripgrep');
     cachedHealth = { working, lastTested: Date.now(), selection };
   } catch (error) {
     cachedHealth = { working: false, lastTested: Date.now(), selection };
     throw error;
+  }
+
+  // Callers only tell healthy from unhealthy by the throw, so a probe that
+  // returns without identifying itself as ripgrep must not read as success.
+  // Carry what it printed, so a wrapper or wrong tool is identifiable.
+  if (!working) {
+    throw new Error(
+      `${selection.command} is not a working ripgrep binary (exit ${probeCode}): ${probeOutput.trim() || '(no output)'}`,
+    );
   }
 }
 
@@ -240,6 +321,53 @@ export async function ensureMacBinarySigned(
 }
 
 /**
+ * Resolves ripgrep and verifies it actually runs.
+ *
+ * The bundled binary is selected by file existence alone, so a binary that
+ * exists but cannot execute — e.g. arm64 kernels with 64K pages (#2676) —
+ * would otherwise fail the whole session instead of using system rg.
+ */
+async function resolveHealthyRipgrep(
+  useBuiltin: boolean,
+): Promise<RipgrepSelection | null> {
+  const selection = await resolveRipgrep(useBuiltin);
+  if (!selection) {
+    return null;
+  }
+
+  try {
+    await ensureRipgrepHealthy(selection);
+    return selection;
+  } catch (error) {
+    if (selection.mode !== 'builtin') {
+      throw error;
+    }
+    debugLogger.warn(
+      `Bundled ripgrep at ${selection.command} is unusable (${error}); trying system rg.`,
+    );
+
+    let fallback: RipgrepSelection | null = null;
+    try {
+      fallback = await resolveRipgrep(false);
+      if (fallback) {
+        await ensureRipgrepHealthy(fallback);
+      }
+    } catch (fallbackError) {
+      // System rg is unusable too. The bundled failure is the root cause, but
+      // keep the system reason visible or it is lost entirely.
+      debugLogger.warn(`System rg is unusable as well: ${fallbackError}`);
+      throw error;
+    }
+    if (!fallback) {
+      throw error;
+    }
+
+    cachedSelections.set(true, fallback);
+    return fallback;
+  }
+}
+
+/**
  * Checks if ripgrep binary is available
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
@@ -249,12 +377,244 @@ export async function ensureMacBinarySigned(
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
 ): Promise<boolean> {
-  const selection = await resolveRipgrep(useBuiltin);
-  if (!selection) {
-    return false;
+  const selection = await resolveHealthyRipgrep(useBuiltin);
+  return selection !== null;
+}
+
+function errorCodeOf(
+  error: RipgrepProcessError,
+): string | number | undefined | null {
+  return error.code;
+}
+
+function isCanceledRipgrepExecution(
+  error: RipgrepProcessError,
+  signal?: AbortSignal,
+): boolean {
+  return (
+    signal?.aborted === true ||
+    error.name === 'AbortError' ||
+    errorCodeOf(error) === 'ABORT_ERR'
+  );
+}
+
+function isRipgrepThreadEagain(stderr: string): boolean {
+  const lower = stderr.toLowerCase();
+  // `os error 11` is the stable errno marker from ripgrep's worker creation
+  // path; generic resource-unavailable text still needs thread context.
+  if (lower.includes('os error 11')) {
+    return true;
   }
-  await ensureRipgrepHealthy(selection);
-  return true;
+
+  const mentionsThread = lower.includes('thread') || lower.includes('worker');
+  const mentionsEagain =
+    lower.includes('resource temporarily unavailable') ||
+    lower.includes('eagain');
+  return mentionsThread && mentionsEagain;
+}
+
+function withSingleRipgrepThread(args: string[]): string[] | null {
+  // Only rewrite the exact pair generated by RipGrepTool so retry stays local
+  // to this narrow recovery path and never mutates the caller's argument list.
+  const threadsIndex = args.findIndex(
+    (arg, index) => arg === '--threads' && args[index + 1] === '4',
+  );
+  if (threadsIndex === -1) {
+    return null;
+  }
+
+  const retryArgs = [...args];
+  retryArgs[threadsIndex + 1] = '1';
+  return retryArgs;
+}
+
+function dropPossiblyIncompleteLastLine(stdout: string): string {
+  // Timeout and maxBuffer termination can leave the final buffered line
+  // incomplete; keep only lines ripgrep had fully written.
+  if (stdout.length === 0) return stdout;
+  const lines = stdout.split('\n');
+  lines.pop();
+  return lines.join('\n');
+}
+
+function classifyRipgrepError(
+  error: RipgrepProcessError,
+  stderr: string,
+  signal?: AbortSignal,
+): { failureKind?: RipgrepFailureKind; canceled: boolean } {
+  const canceled = isCanceledRipgrepExecution(error, signal);
+  if (canceled) {
+    return { canceled };
+  }
+
+  const errorCode = errorCodeOf(error);
+  // Stderr-confirmed worker failures are recoverable; plain numeric exits are
+  // not, even if ripgrep uses the same non-zero exit code.
+  if (isRipgrepThreadEagain(stderr)) {
+    return { failureKind: 'eagain', canceled: false };
+  }
+  if (errorCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+    return { failureKind: 'max_buffer', canceled: false };
+  }
+  if (error.signal === 'SIGTERM') {
+    return { failureKind: 'timeout', canceled: false };
+  }
+  if (typeof errorCode === 'string') {
+    return { failureKind: 'spawn', canceled: false };
+  }
+
+  return { failureKind: 'exit', canceled: false };
+}
+
+function shouldDropLastLine(
+  failureKind: RipgrepFailureKind | undefined,
+  canceled: boolean,
+): boolean {
+  return canceled || failureKind === 'timeout' || failureKind === 'max_buffer';
+}
+
+function createRecoveryMetadata(
+  selection: RipgrepSelection,
+  options: {
+    retryTriggered: boolean;
+    retrySucceeded?: boolean;
+    failureKind?: RipgrepFailureKind;
+  },
+): RipgrepRecoveryMetadata {
+  const recovery: RipgrepRecoveryMetadata = {
+    selectionMode: selection.mode,
+    retryTriggered: options.retryTriggered,
+  };
+  if (options.retrySucceeded !== undefined) {
+    recovery.retrySucceeded = options.retrySucceeded;
+  }
+  if (options.failureKind !== undefined) {
+    recovery.failureKind = options.failureKind;
+  }
+  return recovery;
+}
+
+function toRunResult(
+  attempt: RipgrepAttemptResult,
+  recovery: RipgrepRecoveryMetadata,
+): RipgrepRunResult {
+  const result: RipgrepRunResult = {
+    stdout: attempt.stdout,
+    incomplete: attempt.incomplete,
+    recovery,
+  };
+  if (attempt.error !== undefined) {
+    result.error = attempt.error;
+  }
+  return result;
+}
+
+async function runRipgrepOnce(
+  selection: RipgrepSelection,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<RipgrepAttemptResult> {
+  return new Promise<RipgrepAttemptResult>((resolve) => {
+    let settled = false;
+    // execFile can report the same failure through both the callback and the
+    // child "error" event; recovery decisions must see exactly one result.
+    const settle = (result: RipgrepAttemptResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    let child: ChildProcess;
+    try {
+      child = execFile(
+        selection.command,
+        args,
+        {
+          maxBuffer: RIPGREP_BUFFER_LIMIT,
+          timeout: wslTimeout(),
+          signal,
+        },
+        (error, stdout = '', stderr = '') => {
+          const stdoutText = stdout.toString();
+          const stderrText = stderr.toString();
+          if (!error) {
+            settle({
+              stdout: stdoutText,
+              incomplete: false,
+              canceled: false,
+            });
+            return;
+          }
+
+          const errorCode = errorCodeOf(error);
+          // ripgrep's contract: exit 1 means "no matches AND no error". It
+          // never carries matches, but under --json it still emits a trailing
+          // summary event on stdout, so stdout emptiness cannot gate this.
+          if (errorCode === 1 && stderrText.trim() === '') {
+            settle({
+              stdout: stdoutText,
+              incomplete: false,
+              canceled: false,
+            });
+            return;
+          }
+
+          const { failureKind, canceled } = classifyRipgrepError(
+            error,
+            stderrText,
+            signal,
+          );
+          const incomplete =
+            (shouldDropLastLine(failureKind, canceled) ||
+              failureKind === 'eagain' ||
+              failureKind === 'exit') &&
+            stdoutText.trim().length > 0;
+          const partialOutput = shouldDropLastLine(failureKind, canceled)
+            ? dropPossiblyIncompleteLastLine(stdoutText)
+            : stdoutText;
+
+          if (failureKind === 'timeout' || failureKind === 'max_buffer') {
+            debugLogger.warn(
+              `ripgrep exited abnormally (signal=${error.signal} code=${error.code}) with stderr:\n${stderrText.trim() || '(empty)'}`,
+            );
+          }
+
+          settle({
+            stdout: partialOutput,
+            incomplete,
+            canceled,
+            error,
+            ...(failureKind !== undefined ? { failureKind } : {}),
+          });
+        },
+      );
+    } catch (error) {
+      const normalizedError =
+        error instanceof Error ? error : new Error(String(error));
+      settle({
+        stdout: '',
+        incomplete: false,
+        canceled: false,
+        error: normalizedError,
+        failureKind: 'spawn',
+      });
+      return;
+    }
+
+    child.on('error', (error) => {
+      const canceled = isCanceledRipgrepExecution(error, signal);
+      const result: RipgrepAttemptResult = {
+        stdout: '',
+        incomplete: false,
+        canceled,
+        error,
+      };
+      if (!canceled) {
+        result.failureKind = 'spawn';
+      }
+      settle(result);
+    });
+  });
 }
 
 /**
@@ -270,77 +630,53 @@ export async function runRipgrep(
   signal?: AbortSignal,
   useBuiltin: boolean = true,
 ): Promise<RipgrepRunResult> {
-  const selection = await resolveRipgrep(useBuiltin);
+  const selection = await resolveHealthyRipgrep(useBuiltin);
   if (!selection) {
     throw new Error('ripgrep not found.');
   }
-  await ensureRipgrepHealthy(selection);
 
-  return new Promise<RipgrepRunResult>((resolve) => {
-    const child = execFile(
-      selection.command,
-      args,
-      {
-        maxBuffer: RIPGREP_BUFFER_LIMIT,
-        timeout: wslTimeout(),
-        signal,
-      },
-      (error, stdout = '', stderr = '') => {
-        if (!error) {
-          // Success case
-          resolve({
-            stdout,
-            truncated: false,
-          });
-          return;
-        }
+  const firstAttempt = await runRipgrepOnce(selection, args, signal);
+  if (
+    firstAttempt.failureKind === 'eagain' &&
+    !firstAttempt.canceled &&
+    signal?.aborted !== true
+  ) {
+    const retryArgs = withSingleRipgrepThread(args);
+    if (retryArgs !== null) {
+      // A thread creation failure is scoped to this invocation, so retry once
+      // without lowering concurrency for later searches.
+      const retryAttempt = await runRipgrepOnce(selection, retryArgs, signal);
+      const retryRecoveryOptions: {
+        retryTriggered: boolean;
+        retrySucceeded: boolean;
+        failureKind?: RipgrepFailureKind;
+      } = {
+        retryTriggered: true,
+        retrySucceeded: retryAttempt.error === undefined,
+      };
+      const retryFailureKind =
+        retryAttempt.error === undefined ? 'eagain' : retryAttempt.failureKind;
+      if (retryFailureKind !== undefined) {
+        retryRecoveryOptions.failureKind = retryFailureKind;
+      }
+      return toRunResult(
+        retryAttempt,
+        createRecoveryMetadata(selection, retryRecoveryOptions),
+      );
+    }
+  }
 
-        // Exit code 1 = no matches found (not an error)
-        // The error.code from execFile can be string | number | undefined | null
-        const errorCode = (
-          error as Error & { code?: string | number | undefined | null }
-        ).code;
-        if (errorCode === 1) {
-          resolve({ stdout: '', truncated: false });
-          return;
-        }
-
-        // Detect various error conditions
-        const wasKilled =
-          error.signal === 'SIGTERM' || error.name === 'AbortError';
-        const overflow = errorCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
-        const syntaxError = errorCode === 2;
-
-        const truncated = wasKilled || overflow;
-        let partialOutput = stdout;
-
-        // If killed or overflow with partial output, remove the last potentially incomplete line
-        if (truncated && partialOutput.length > 0) {
-          const lines = partialOutput.split('\n');
-          if (lines.length > 0) {
-            lines.pop();
-            partialOutput = lines.join('\n');
-          }
-        }
-
-        // Log warnings for abnormal exits (except syntax errors)
-        if (!syntaxError && truncated) {
-          debugLogger.warn(
-            `ripgrep exited abnormally (signal=${error.signal} code=${error.code}) with stderr:\n${stderr.trim() || '(empty)'}`,
-          );
-        }
-
-        resolve({
-          stdout: partialOutput,
-          truncated,
-          error: error instanceof Error ? error : undefined,
-        });
-      },
-    );
-
-    // Handle spawn errors
-    child.on('error', (err) =>
-      resolve({ stdout: '', truncated: false, error: err }),
-    );
-  });
+  const recoveryOptions: {
+    retryTriggered: boolean;
+    failureKind?: RipgrepFailureKind;
+  } = {
+    retryTriggered: false,
+  };
+  if (firstAttempt.failureKind !== undefined) {
+    recoveryOptions.failureKind = firstAttempt.failureKind;
+  }
+  return toRunResult(
+    firstAttempt,
+    createRecoveryMetadata(selection, recoveryOptions),
+  );
 }

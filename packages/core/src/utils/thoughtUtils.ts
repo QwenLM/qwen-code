@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentResponse } from '@google/genai';
+import type { GenerateContentResponse, Part } from '@google/genai';
 
 export type ThoughtSummary = {
   subject: string;
@@ -13,6 +13,64 @@ export type ThoughtSummary = {
 
 const START_DELIMITER = '**';
 const END_DELIMITER = '**';
+const OPENAI_REASONING_THOUGHT_MARKER = Symbol('openaiReasoningThought');
+
+type OpenAIReasoningThoughtPart = Part & {
+  [OPENAI_REASONING_THOUGHT_MARKER]?: true;
+};
+
+export function createOpenAIReasoningThoughtPart(text: string): Part {
+  const part: OpenAIReasoningThoughtPart = { text, thought: true };
+  Object.defineProperty(part, OPENAI_REASONING_THOUGHT_MARKER, {
+    value: true,
+  });
+  return part;
+}
+
+/**
+ * @remarks The marker is stored on the original Part object and does not
+ * survive cloning, spreading, or JSON serialization.
+ */
+export function isOpenAIReasoningThoughtPart(part: Part): boolean {
+  return Boolean(
+    (part as OpenAIReasoningThoughtPart)[OPENAI_REASONING_THOUGHT_MARKER],
+  );
+}
+
+/**
+ * Recognizes the OpenAI Responses reasoning-replay payload that
+ * `openaiResponsesContentGenerator` stashes in the shared
+ * `Part.thoughtSignature` field (`JSON.stringify({ id, encrypted_content })`).
+ *
+ * `thoughtSignature` carries no origin marker, so every wire that reads it has
+ * to decide for itself whether the value is one of its own. A native Anthropic
+ * `thinking.signature` or Gemini `thoughtSignature` is an opaque token that
+ * never takes this JSON shape, so recognizing the payload is enough to keep it
+ * off a foreign wire without putting a legitimate native signature at risk.
+ *
+ * Mirrors `decodeReasoningSignature` in `responses-converter.ts`, which also
+ * tolerates leading whitespace. `llm-chat.ts`'s
+ * `isCompleteResponsesReasoningSignature` is the same check without that
+ * tolerance.
+ * See https://github.com/QwenLM/qwen-code/issues/9453
+ */
+export function isResponsesReasoningSignature(signature: unknown): boolean {
+  if (typeof signature !== 'string') return false;
+  if (!signature.trimStart().startsWith('{')) return false;
+  try {
+    const payload: unknown = JSON.parse(signature);
+    return (
+      payload !== null &&
+      typeof payload === 'object' &&
+      'id' in payload &&
+      typeof payload.id === 'string' &&
+      'encrypted_content' in payload &&
+      typeof payload.encrypted_content === 'string'
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Parses a raw thought string into a structured ThoughtSummary object.
@@ -55,22 +113,29 @@ export function parseThought(rawText: string): ThoughtSummary {
   return { subject, description };
 }
 
-export function getThoughtText(
-  response: GenerateContentResponse,
-): string | null {
-  if (response.candidates && response.candidates.length > 0) {
-    const candidate = response.candidates[0];
+/** The text of a response's thought parts, joined as the model sent it. */
+export function getThoughtText(response: GenerateContentResponse): string {
+  return (response.candidates?.[0]?.content?.parts ?? [])
+    .filter((part) => part.thought)
+    .map((part) => part.text ?? '')
+    .join('');
+}
 
-    if (
-      candidate.content &&
-      candidate.content.parts &&
-      candidate.content.parts.length > 0
-    ) {
-      return candidate.content.parts
-        .filter((part) => part.thought)
-        .map((part) => part.text ?? '')
-        .join('');
-    }
+/** `thoughtText` is the response's `getThoughtText`, when already read. */
+export function getThoughtSummary(
+  response: GenerateContentResponse,
+  thoughtText = getThoughtText(response),
+): ThoughtSummary | null {
+  if (!thoughtText) {
+    return null;
   }
-  return null;
+
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  if (
+    parts.some((part) => part.thought && isOpenAIReasoningThoughtPart(part))
+  ) {
+    return { subject: '', description: thoughtText };
+  }
+
+  return parseThought(thoughtText);
 }

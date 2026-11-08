@@ -5,8 +5,11 @@
  */
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { keepManifestLayout } from './keep-manifest-layout.js';
+import { INDEPENDENT_PACKAGES } from './release-packages.mjs';
+import { getWorkspacePackageJsonPaths } from './workspaces.js';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -33,57 +36,49 @@ if (!versionType) {
   process.exit(1);
 }
 
-// 2. Bump the version in the root and all workspace package.json files.
-run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
-
-// 3. Get all workspaces and filter out the one we don't want to version.
-// We intend to maintain sdk version independently.
-const workspacesToExclude = ['@qwen-code/sdk'];
-let lsOutput;
-try {
-  lsOutput = JSON.parse(
-    execSync('npm ls --workspaces --json --depth=0').toString(),
-  );
-} catch (e) {
-  // `npm ls` can exit with a non-zero status code if there are issues
-  // with dependencies, but it will still produce the JSON output we need.
-  // We'll try to parse the stdout from the error object.
-  if (e.stdout) {
-    console.warn(
-      'Warning: `npm ls` exited with a non-zero status code. Attempting to proceed with the output.',
-    );
-    try {
-      lsOutput = JSON.parse(e.stdout.toString());
-    } catch (parseError) {
-      console.error(
-        'Error: Failed to parse JSON from `npm ls` output even after `npm ls` failed.',
-      );
-      console.error('npm ls stderr:', e.stderr.toString());
-      console.error('Parse error:', parseError);
-      process.exit(1);
-    }
-  } else {
-    console.error('Error: `npm ls` failed with no output.');
-    console.error(e.stderr?.toString() || e);
-    process.exit(1);
-  }
-}
-const allWorkspaces = Object.keys(lsOutput.dependencies || {});
-const workspacesToVersion = allWorkspaces.filter(
-  (wsName) => !workspacesToExclude.includes(wsName),
+// `pnpm version` re-sorts every manifest it rewrites; snapshot them so the
+// bump below can be reduced to a version change (see keep-manifest-layout.js).
+// Enumerate with the workspace globs rather than `git ls-files`: like the
+// `--no-git-checks` flags below, this script must not require a git work tree.
+const { workspaces } = readJson('package.json');
+const snapshotPaths = [
+  'package.json',
+  ...getWorkspacePackageJsonPaths(process.cwd(), workspaces),
+];
+const originalManifests = new Map(
+  snapshotPaths.map((file) => [file, readFileSync(file, 'utf-8')]),
 );
 
-for (const workspaceName of workspacesToVersion) {
-  run(
-    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
-  );
-}
-
-// 4. Get the new version number from the root package.json
+// Resolve patch/minor/etc. once, then align all release workspaces to it.
+run(
+  `corepack pnpm version ${versionType} --no-git-tag-version --allow-same-version --no-git-checks`,
+);
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
+run(
+  `corepack pnpm -r ${INDEPENDENT_PACKAGES.map((name) => `--filter="!${name}"`).join(' ')} version ${newVersion} --no-git-tag-version --allow-same-version --no-git-checks`,
+);
 
-// 5. Update the sandboxImageUri in the root package.json
+for (const [file, original] of originalManifests) {
+  const updated = readFileSync(file, 'utf-8');
+  if (updated !== original) {
+    writeFileSync(file, keepManifestLayout(original, updated));
+  }
+}
+
+// 5. Keep the published Mem0 Extension manifest aligned with its package.
+const mem0ManifestPath = resolve(
+  process.cwd(),
+  'integrations/external-context-mem0/qwen-extension.json',
+);
+const mem0Manifest = readJson(mem0ManifestPath);
+mem0Manifest.version = newVersion;
+writeJson(mem0ManifestPath, mem0Manifest);
+run(
+  'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json',
+);
+
+// 6. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);
 if (rootPackageJson.config?.sandboxImageUri) {
   rootPackageJson.config.sandboxImageUri =
@@ -92,7 +87,7 @@ if (rootPackageJson.config?.sandboxImageUri) {
   writeJson(rootPackageJsonPath, rootPackageJson);
 }
 
-// 6. Update the sandboxImageUri in the cli package.json
+// 7. Update the sandboxImageUri in the cli package.json
 const cliPackageJsonPath = resolve(process.cwd(), 'packages/cli/package.json');
 const cliPackageJson = readJson(cliPackageJsonPath);
 if (cliPackageJson.config?.sandboxImageUri) {
@@ -104,12 +99,24 @@ if (cliPackageJson.config?.sandboxImageUri) {
   writeJson(cliPackageJsonPath, cliPackageJson);
 }
 
-// 7. Run `npm install` to update package-lock.json.
-// --ignore-scripts prevents the root `prepare` lifecycle from triggering a
-// redundant full build that fails with TS5055 when dist/ already exists from
-// the initial `npm ci` install.
-run(
-  'npm install --workspace packages/cli --workspace packages/core --workspace packages/channels/base --workspace packages/channels/plugin-example --package-lock-only --ignore-scripts',
-);
+// 8. Pin channel adapters' semver dependency on @qwen-code/channel-base to
+// the exact new version. A caret range like ^0.21.0 does not match a
+// prerelease bump (e.g. 0.21.1-preview.0), so npm would replace the workspace
+// link with the stale registry package and the release build would compile
+// against outdated types.
+const channelsDir = resolve(process.cwd(), 'packages/channels');
+for (const entry of readdirSync(channelsDir)) {
+  const pkgPath = join(channelsDir, entry, 'package.json');
+  if (!existsSync(pkgPath)) continue;
+  const pkg = readJson(pkgPath);
+  const dep = pkg.dependencies?.['@qwen-code/channel-base'];
+  if (dep && !dep.startsWith('file:')) {
+    pkg.dependencies['@qwen-code/channel-base'] = newVersion;
+    writeJson(pkgPath, pkg);
+    console.log(
+      `Pinned @qwen-code/channel-base to ${newVersion} in ${pkg.name}`,
+    );
+  }
+}
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

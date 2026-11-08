@@ -13,10 +13,13 @@ import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  ZaiOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
+  CerebrasOpenAICompatibleProvider,
+  FireworksOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -32,6 +35,8 @@ export {
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
+  CerebrasOpenAICompatibleProvider,
+  FireworksOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -76,6 +81,10 @@ export function determineProvider(
     );
   }
 
+  if (ZaiOpenAICompatibleProvider.isZaiProvider(config)) {
+    return new ZaiOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
+  }
+
   if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {
     return new MiMoOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
   }
@@ -99,6 +108,22 @@ export function determineProvider(
   // Check for Mistral provider
   if (MistralOpenAICompatibleProvider.isMistralProvider(config)) {
     return new MistralOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Cerebras provider
+  if (CerebrasOpenAICompatibleProvider.isCerebrasProvider(config)) {
+    return new CerebrasOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Fireworks provider
+  if (FireworksOpenAICompatibleProvider.isFireworksProvider(config)) {
+    return new FireworksOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );

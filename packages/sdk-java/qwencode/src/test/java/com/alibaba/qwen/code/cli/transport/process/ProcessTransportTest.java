@@ -4,7 +4,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
@@ -20,6 +21,10 @@ import com.alibaba.qwen.code.cli.transport.Transport;
 import com.alibaba.qwen.code.cli.transport.TransportOptions;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +41,7 @@ class ProcessTransportTest {
     Path tempDir;
 
     @Test
+    @Tag("integration")
     void shouldStartAndCloseSuccessfully() throws IOException {
         TransportOptions transportOptions = new TransportOptions();
         Transport transport = new ProcessTransport(transportOptions);
@@ -43,11 +49,14 @@ class ProcessTransportTest {
     }
 
     @Test
+    @DisabledOnOs(OS.WINDOWS)
     void shouldPassCustomEnvToProcess() throws IOException {
         Path executable = createEnvPrinter();
+        Map<String, String> environment = new HashMap<>(System.getenv());
+        environment.put(CUSTOM_ENV_NAME, CUSTOM_ENV_VALUE);
         TransportOptions transportOptions = new TransportOptions()
                 .setPathToQwenExecutable(executable.toString())
-                .setEnv(Collections.singletonMap(CUSTOM_ENV_NAME, CUSTOM_ENV_VALUE));
+                .setEnv(environment);
 
         ProcessTransport transport = new ProcessTransport(transportOptions);
         try {
@@ -58,6 +67,16 @@ class ProcessTransportTest {
     }
 
     @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void shouldStartAndCloseNativeWindowsProcess() throws IOException {
+        TransportOptions transportOptions = new TransportOptions()
+                .setPathToQwenExecutable("where.exe");
+        Transport transport = new ProcessTransport(transportOptions);
+        transport.close();
+    }
+
+    @Test
+    @Tag("integration")
     void shouldInputWaitForOneLineSuccessfully() throws IOException, ExecutionException, InterruptedException, TimeoutException {
         TransportOptions transportOptions = new TransportOptions();
         Transport transport = new ProcessTransport(transportOptions);
@@ -67,6 +86,7 @@ class ProcessTransportTest {
     }
 
     @Test
+    @Tag("integration")
     void shouldInitializeSuccessfully() throws IOException, ExecutionException, InterruptedException, TimeoutException {
         Transport transport = new ProcessTransport();
 
@@ -79,6 +99,7 @@ class ProcessTransportTest {
     }
 
     @Test
+    @Tag("integration")
     void shouldSdkMessageSuccessfully() throws IOException, ExecutionException, InterruptedException, TimeoutException {
         Transport transport = new ProcessTransport();
         String message = CLIControlRequest.create(new CLIControlInitializeRequest()).toString();

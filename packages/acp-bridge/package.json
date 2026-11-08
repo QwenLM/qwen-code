@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/acp-bridge",
-  "version": "0.19.1",
+  "private": true,
+  "version": "0.27.0",
   "description": "Shared ACP bridge core (createHttpAcpBridge factory, BridgeClient, defaultSpawnChannelFactory, BridgeFileSystem injection seam) + primitives (EventBus, AcpChannel, in-memory channel, PermissionMediator interface) used by qwen serve, channels, IDE, TUI, and remote-control adapters.",
   "repository": {
     "type": "git",
@@ -35,6 +36,10 @@
       "types": "./dist/status.d.ts",
       "import": "./dist/status.js"
     },
+    "./externalToolGuard": {
+      "types": "./dist/externalToolGuard.d.ts",
+      "import": "./dist/externalToolGuard.js"
+    },
     "./workspacePaths": {
       "types": "./dist/workspacePaths.d.ts",
       "import": "./dist/workspacePaths.js"
@@ -47,6 +52,22 @@
       "types": "./dist/bridgeTypes.d.ts",
       "import": "./dist/bridgeTypes.js"
     },
+    "./sessionArtifacts": {
+      "types": "./dist/sessionArtifacts.d.ts",
+      "import": "./dist/sessionArtifacts.js"
+    },
+    "./sessionAttachments": {
+      "types": "./dist/sessionAttachments.d.ts",
+      "import": "./dist/sessionAttachments.js"
+    },
+    "./sessionStartupConfig": {
+      "types": "./dist/session-startup-config.d.ts",
+      "import": "./dist/session-startup-config.js"
+    },
+    "./sessionSource": {
+      "types": "./dist/session-source.d.ts",
+      "import": "./dist/session-source.js"
+    },
     "./daemonEventTypes": {
       "types": "./dist/daemonEventTypes.d.ts",
       "import": "./dist/daemonEventTypes.js"
@@ -55,9 +76,37 @@
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
     },
+    "./workflowAncestorTrust": {
+      "types": "./dist/workflow-ancestor-trust.d.ts",
+      "import": "./dist/workflow-ancestor-trust.js"
+    },
+    "./promptLedger": {
+      "types": "./dist/prompt-ledger.d.ts",
+      "import": "./dist/prompt-ledger.js"
+    },
+    "./sessionRestoreTimeout": {
+      "types": "./dist/session-restore-timeout.d.ts",
+      "import": "./dist/session-restore-timeout.js"
+    },
+    "./replayWindowLimits": {
+      "types": "./dist/replayWindowLimits.d.ts",
+      "import": "./dist/replayWindowLimits.js"
+    },
     "./spawnChannel": {
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
+    },
+    "./processRegistry": {
+      "types": "./dist/process-registry.d.ts",
+      "import": "./dist/process-registry.js"
+    },
+    "./ndJsonStream": {
+      "types": "./dist/ndJsonStream.d.ts",
+      "import": "./dist/ndJsonStream.js"
+    },
+    "./logRedaction": {
+      "types": "./dist/logRedaction.d.ts",
+      "import": "./dist/logRedaction.js"
     },
     "./bridgeClient": {
       "types": "./dist/bridgeClient.d.ts",
@@ -75,6 +124,18 @@
       "types": "./dist/mcpTimeouts.d.ts",
       "import": "./dist/mcpTimeouts.js"
     },
+    "./daemonMemoryBudget": {
+      "types": "./dist/daemon-memory-budget.d.ts",
+      "import": "./dist/daemon-memory-budget.js"
+    },
+    "./childHeapPolicy": {
+      "types": "./dist/child-heap-policy.d.ts",
+      "import": "./dist/child-heap-policy.js"
+    },
+    "./channelControlTimeouts": {
+      "types": "./dist/channel-control-timeouts.d.ts",
+      "import": "./dist/channel-control-timeouts.js"
+    },
     "./internal/testUtils": {
       "types": "./dist/internal/testUtils.d.ts",
       "import": "./dist/internal/testUtils.js"
@@ -82,6 +143,10 @@
     "./compactionEngine": {
       "types": "./dist/compactionEngine.d.ts",
       "import": "./dist/compactionEngine.js"
+    },
+    "./transcriptReplay": {
+      "types": "./dist/transcript-replay.d.ts",
+      "import": "./dist/transcript-replay.js"
     },
     "./package.json": "./package.json"
   },
@@ -103,6 +168,7 @@
     "@qwen-code/qwen-code-core": "file:../core"
   },
   "devDependencies": {
+    "@types/node": "20.19.1",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"
   },

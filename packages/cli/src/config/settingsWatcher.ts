@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings, SettingScope } from './settings.js';
-import { getFlattenedSchema } from '../utils/settingsUtils.js';
+import { getFlattenedSchema } from './settingsUtils.js';
 
 const debugLogger = createDebugLogger('SETTINGS_WATCHER');
 
@@ -272,7 +273,7 @@ export class SettingsWatcher {
     this.watchStage.delete(scope);
     if (watcher) {
       try {
-        await watcher.close();
+        await closeFileWatcher(watcher);
       } catch (err) {
         debugLogger.warn('Settings watcher close error:', err);
       }
@@ -289,7 +290,7 @@ export class SettingsWatcher {
     if (!this.started) return;
     this.started = false;
     for (const [, watcher] of this.watchers) {
-      watcher.close().catch((err) => {
+      closeFileWatcher(watcher).catch((err) => {
         debugLogger.warn('Settings watcher close error:', err);
       });
     }

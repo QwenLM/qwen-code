@@ -1,0 +1,1434 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+// Type-only: QQChannel.js is imported dynamically below, after `realChannelBase`
+// is initialized, so the mocked `@qwen-code/channel-base` factory never runs
+// against an uninitialized binding. A value import here would evaluate
+// QQChannel.js (and thus the mock factory) before that top-level await.
+import type { QQChannel as QQChannelClass } from './QQChannel.js';
+
+const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
+  mockSendQQMessage: vi.fn(),
+  mockFetchAccessToken: vi.fn(),
+}));
+
+vi.mock('node:fs', () => ({
+  mkdirSync: vi.fn(),
+  readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  existsSync: vi.fn(() => false),
+  renameSync: vi.fn(),
+}));
+
+vi.mock('./api.js', () => ({
+  sendQQMessage: mockSendQQMessage,
+  getApiBase: () => 'https://api.sgroup.qq.com',
+  fetchAccessToken: mockFetchAccessToken,
+  fetchGatewayUrl: vi.fn(),
+}));
+
+vi.mock('./accounts.js', () => ({
+  getCredsFilePath: () => '/tmp/test-creds.json',
+  loadCredentials: () => null,
+  saveCredentials: vi.fn(),
+}));
+
+vi.mock('./login.js', () => ({
+  qrCodeLogin: vi.fn(),
+}));
+
+// The pure channel-base helpers stay the shipped implementations rather than
+// hand-written mirrors, so a test that drives one cannot diverge from what
+// production imports. Every helper QQChannel imports from
+// `@qwen-code/channel-base` is aliased here and pinned to the real module by
+// the test double suite at the bottom of this file.
+const realChannelBase = await vi.importActual<
+  typeof import('@qwen-code/channel-base')
+>('@qwen-code/channel-base');
+
+vi.mock('@qwen-code/channel-base', () => ({
+  ChannelBase: class {
+    protected config: Record<string, unknown> = {};
+    protected bridge: Record<string, unknown> = {};
+    protected router: Record<string, unknown> = {};
+    protected name: string = '';
+    constructor(
+      name: string,
+      config: Record<string, unknown>,
+      bridge: Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ) {
+      this.name = name;
+      this.config = config;
+      this.bridge = bridge;
+      this.router = (options?.['router'] ?? {}) as Record<string, unknown>;
+    }
+    protected handleInbound(_env: unknown): Promise<void> {
+      return Promise.resolve();
+    }
+    protected getResponseMessageId(_sessionId: string): string | undefined {
+      return undefined;
+    }
+    protected getResponseSourceLabel(_sessionId: string): undefined {
+      return undefined;
+    }
+    protected isProactivePromptTurn(_sessionId: string): boolean {
+      return false;
+    }
+    protected formatMarkdownAttributedText(
+      text: string,
+      sourceLabel?: string,
+    ): string {
+      const label = sourceLabel?.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+      return label ? `${label}\n${text}` : text;
+    }
+    protected formatAttributedText(text: string, sourceLabel?: string): string {
+      return sourceLabel ? `${sourceLabel} ${text}` : text;
+    }
+    protected onSessionDied(_sessionId: string): void {}
+  },
+  SessionRouter: class {
+    restoreSessions(): Promise<void> {
+      return Promise.resolve();
+    }
+  },
+  sanitizeSenderName: realChannelBase.sanitizeSenderName,
+  sanitizePromptText: realChannelBase.sanitizePromptText,
+  sanitizeLogText: realChannelBase.sanitizeLogText,
+  singleScopeRoutingKey: realChannelBase.singleScopeRoutingKey,
+  truncateCodePoints: realChannelBase.truncateCodePoints,
+  truncateUtf16Units: realChannelBase.truncateUtf16Units,
+  unwrapMessageRoutingKey: realChannelBase.unwrapMessageRoutingKey,
+  getGlobalQwenDir: () => '/tmp/test-qwen',
+}));
+
+const { QQChannel, DeliveryError } = await import('./QQChannel.js');
+
+/** Shared array holding textChunk handler references captured by the bridge. */
+const textChunkHandlers: Array<(sessionId: string, text: string) => void> = [];
+
+function mockResponse(
+  ok: boolean,
+  status = 200,
+): { ok: boolean; status: number; text: () => Promise<string> } {
+  return { ok, status, text: async () => '' };
+}
+
+function makeChannel(
+  configOverrides?: Record<string, unknown>,
+): QQChannelClass {
+  textChunkHandlers.length = 0;
+
+  const router = {
+    getTarget: vi.fn().mockReturnValue({ chatId: 'test-chat' }),
+  };
+
+  const bridge = {
+    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      if (event === 'textChunk') {
+        textChunkHandlers.push(
+          handler as (sessionId: string, text: string) => void,
+        );
+      }
+    }),
+    off: vi.fn(),
+  };
+
+  const ch = new QQChannel(
+    'test-bot',
+    {
+      type: 'qq',
+      token: '',
+      senderPolicy: 'open' as const,
+      allowedUsers: [],
+      sessionScope: 'user' as const,
+      cwd: '/tmp',
+      groupPolicy: 'disabled' as const,
+      groups: {},
+      appID: 'test-app-id',
+      appSecret: 'test-secret',
+      'cron-msg-experimental': true,
+      ...configOverrides,
+    },
+    bridge as unknown as import('@qwen-code/channel-base').AcpBridge,
+    { router } as unknown as Record<string, unknown>,
+  );
+
+  const chp = ch as unknown as Record<string, unknown>;
+  chp['accessToken'] = 'test-token';
+  chp['tokenExpiresAt'] = Date.now() + 3600_000;
+  (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+
+  return ch;
+}
+
+function triggerTextChunk(sessionId: string, text: string): void {
+  for (const handler of textChunkHandlers) {
+    handler(sessionId, text);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// cronTextHandler
+// ---------------------------------------------------------------------------
+describe('cronTextHandler', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    textChunkHandlers.length = 0;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function flushSetImmediate(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it('accumulates chunks and flushes after 2s idle timer', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    triggerTextChunk('sess-1', 'hello ');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    expect(cronBuffer.has('sess-1')).toBe(true);
+    expect(cronBuffer.get('sess-1')!.buffer).toBe('hello ');
+
+    triggerTextChunk('sess-1', 'world');
+    await flushSetImmediate();
+
+    expect(cronBuffer.get('sess-1')!.buffer).toBe('hello world');
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'hello world' } },
+    );
+
+    expect(cronBuffer.has('sess-1')).toBe(false);
+  });
+
+  it('skips chunks when _ready is false', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+
+    triggerTextChunk('sess-1', 'should be ignored');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-1')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('ignores chunks when _inCronFlow is 0 (gate)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 0;
+
+    triggerTextChunk('sess-gate', 'should be ignored');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-gate')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('maintains separate buffers for different sessionIds', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    triggerTextChunk('sess-a', 'buffer-a ');
+    triggerTextChunk('sess-b', 'buffer-b ');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    expect(cronBuffer.get('sess-a')!.buffer).toBe('buffer-a ');
+    expect(cronBuffer.get('sess-b')!.buffer).toBe('buffer-b ');
+    expect(cronBuffer.size).toBe(2);
+  });
+
+  it('resolves target via router.getTarget and sends accumulated text', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    pvt['_inCronFlow'] = 1;
+    const router = (ch as unknown as Record<string, unknown>)['router'] as {
+      getTarget: ReturnType<typeof vi.fn>;
+    };
+
+    triggerTextChunk('sess-route', 'routed text');
+    await flushSetImmediate();
+
+    vi.advanceTimersByTime(2000);
+    await Promise.resolve();
+
+    expect(router.getTarget).toHaveBeenCalledWith('sess-route');
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'routed text' } },
+    );
+  });
+
+  it('sends accumulated text and cleans up buffer after flush', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    pvt['_inCronFlow'] = 1;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+
+    triggerTextChunk('sess-cleanup', 'cleanup text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    expect(cronBuffer.has('sess-cleanup')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(cronBuffer.has('sess-cleanup')).toBe(false);
+  });
+
+  // A2: sendMessage failure → log + cleanup (no retry)
+  it('logs error and cleans up cronBuffer on sendMessage rejection (no retry)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    mockSendQQMessage.mockRejectedValue(
+      new DeliveryError('RETRY_EXHAUSTED', 'network error'),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-fail', 'will fail');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    expect(cronBuffer.has('sess-fail')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Verify error was logged
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('Cron flush send error'))).toBe(true);
+
+    // Verify buffer was cleaned up — no retry, no lingering entry
+    // RETRY_EXHAUSTED errors clean up immediately (permanent failure)
+    expect(cronBuffer.has('sess-fail')).toBe(false);
+    // RETRY_EXHAUSTED errors clean up immediately (permanent failure)
+
+    stderrSpy.mockRestore();
+  });
+
+  // A6: prompt-path isolation — cron handler skips sessions with an active
+  // prompt turn. (Discriminator is activePromptSessions, keyed by
+  // onPromptStart/onPromptEnd — see #6094. A bare streamState entry no
+  // longer blocks cron; covered by the #6094 item 2 test below.)
+  it('prompt-path isolation: cron handler skips sessions with an active prompt turn', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // ChannelBase brackets the prompt turn with onPromptStart/onPromptEnd.
+    (
+      ch as unknown as {
+        onPromptStart: (chatId: string, sessionId: string) => void;
+      }
+    ).onPromptStart('test-chat', 'sess-stream');
+
+    triggerTextChunk('sess-stream', 'should be ignored by cron');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-stream')).toBe(false);
+  });
+
+  it('RATE_LIMITED triggers re-schedule, retry succeeds', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // First call fails with RATE_LIMITED
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+    // Retry succeeds
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(true));
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-rate', 'rate limited text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown; pendingRetry?: string }
+    >;
+    expect(cronBuffer.has('sess-rate')).toBe(true);
+
+    // Advance past the initial 2s flush to trigger send
+    await vi.advanceTimersByTimeAsync(2000);
+    // Buffer should still exist after transient failure (retry scheduled)
+    expect(cronBuffer.has('sess-rate')).toBe(true);
+
+    // Advance past the 5s retry delay
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // Retry should have succeeded and cleaned up
+    expect(cronBuffer.has('sess-rate')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('transient failure, retry target is null → buffer cleaned up', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    const router = (ch as unknown as Record<string, unknown>)['router'] as {
+      getTarget: ReturnType<typeof vi.fn>;
+    };
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // First call fails with RATE_LIMITED
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-null-target', 'text with no target');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Reset router.getTarget to return null for retry
+    router.getTarget.mockReturnValueOnce(null);
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-null-target')).toBe(false);
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some((c) =>
+        c.includes('Cron flush dropped after retry: no target'),
+      ),
+    ).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('retry send also fails → error logged, buffer cleaned up', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // First call fails with RATE_LIMITED
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+    // Retry also fails with a permanent error
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RETRY_EXHAUSTED', 'retries exhausted'),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-retry-fail', 'text that will fail twice');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-retry-fail')).toBe(false);
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('Cron flush retry failed'))).toBe(true);
+    stderrSpy.mockRestore();
+  });
+
+  it('re-buffers a route-blocked cron flush instead of silently dropping it (transient)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // A failed token refresh resolves as 'transient' (resolveRoute does not
+    // throw); the retry attempt then resolves a usable route.
+    const realResolveRoute = pvt['resolveRoute'] as (
+      chatId: string,
+    ) => Promise<unknown>;
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      if (routeCalls === 1) return { block: 'transient' };
+      return realResolveRoute.call(ch, chatId);
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-blocked', 'blocked cron text');
+    await flushSetImmediate();
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      {
+        buffer: string;
+        timer: unknown;
+        pendingRetry?: string;
+        retryCount?: number;
+      }
+    >;
+    expect(cronBuffer.has('sess-blocked')).toBe(true);
+
+    // The flush timer fires; the blocked send must not delete the entry (the
+    // success body would, because the buffer was already cleared) — the
+    // payload must be parked for retry.
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(cronBuffer.has('sess-blocked')).toBe(true);
+    expect(cronBuffer.get('sess-blocked')!.pendingRetry).toBe(
+      'blocked cron text',
+    );
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'Cron flush send error',
+    );
+
+    // 5s retry delay; the retry's route resolves and the text reaches the wire.
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(cronBuffer.has('sess-blocked')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'blocked cron text' } },
+    );
+    stderrSpy.mockRestore();
+  });
+
+  // Regression: a chunk that arrives while a send is genuinely in flight must
+  // not be stranded when that attempt fails and its retry succeeds. The retry
+  // scheduling clears the in-flight chunk's own flush timer, so the successful
+  // attempt has to re-arm it instead of leaving the buffer with no timer.
+  it('re-arms the flush for a chunk that arrived while the cron send was in flight', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // Attempt 1 hangs in resolveRoute so chunk B can arrive mid-send; the
+    // retry then resolves a usable route.
+    const realResolveRoute = pvt['resolveRoute'] as (
+      chatId: string,
+    ) => Promise<unknown>;
+    let releaseFirstRoute: (() => void) | null = null;
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      if (routeCalls === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirstRoute = resolve;
+        });
+        return { block: 'transient' };
+      }
+      return realResolveRoute.call(ch, chatId);
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-midflight', 'A');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown; pendingRetry?: string }
+    >;
+
+    // The 2s flush fires and attempt 1 stays in flight.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(routeCalls).toBe(1);
+    expect(cronBuffer.get('sess-midflight')!.buffer).toBe('');
+
+    // Chunk B arrives while attempt 1 is in flight, arming its own flush.
+    triggerTextChunk('sess-midflight', 'B');
+    await flushSetImmediate();
+    expect(cronBuffer.get('sess-midflight')!.buffer).toBe('B');
+    expect(cronBuffer.get('sess-midflight')!.timer).not.toBeNull();
+
+    // Attempt 1 resolves route-blocked (transient): A is parked for the retry
+    // and B's flush timer is cleared by the retry scheduling.
+    releaseFirstRoute!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cronBuffer.get('sess-midflight')!.pendingRetry).toBe('A');
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    // Retry 1 resolves a route and A reaches the wire.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenLastCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'A' } },
+    );
+    // The residual must already be owned by a fresh flush timer.
+    expect(cronBuffer.has('sess-midflight')).toBe(true);
+    expect(cronBuffer.get('sess-midflight')!.buffer).toBe('B');
+    expect(cronBuffer.get('sess-midflight')!.timer).not.toBeNull();
+
+    // No further chunk arrives: B must still be delivered by that timer.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenLastCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'B' } },
+    );
+    expect(cronBuffer.has('sess-midflight')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('drops a route-blocked cron flush with a loss log, not silently (permanent)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+    pvt['resolveRoute'] = async () => ({ block: 'permanent' });
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-perm', 'permanent blocked text');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    // Permanent: the entry is dropped, but through the .catch() arm that names
+    // the loss instead of the success body's silent delete.
+    expect(cronBuffer.has('sess-perm')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush send error');
+    expect(logged).toContain('FALLBACK_FAILED');
+    expect(logged).toContain(
+      'outgoing route permanently blocked for test-chat',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a route-blocked cron retry 1 re-schedules instead of dropping the text', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // The initial flush and retry 1 are blocked; retry 2 resolves a usable
+    // route, so the text must survive retry 1 and reach the wire.
+    const realResolveRoute = pvt['resolveRoute'] as (
+      chatId: string,
+    ) => Promise<unknown>;
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      if (routeCalls <= 2) return { block: 'transient' };
+      return realResolveRoute.call(ch, chatId);
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-retry-blocked', 'retry blocked text');
+    await flushSetImmediate();
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      {
+        buffer: string;
+        timer: unknown;
+        pendingRetry?: string;
+        retryCount?: number;
+      }
+    >;
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(cronBuffer.get('sess-retry-blocked')!.pendingRetry).toBe(
+      'retry blocked text',
+    );
+
+    // Retry 1 is blocked too: the retry's success body would drop the parked
+    // text silently, so it must be parked again for retry 2 instead.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(cronBuffer.has('sess-retry-blocked')).toBe(true);
+    expect(cronBuffer.get('sess-retry-blocked')!.pendingRetry).toBe(
+      'retry blocked text',
+    );
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'Cron flush retry failed',
+    );
+
+    // Retry 2's 10s backoff: its route resolves and the text reaches the wire.
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(cronBuffer.has('sess-retry-blocked')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'retry blocked text' } },
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a permanently blocked cron retry 1 drops the text with a loss log', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async () => {
+      routeCalls++;
+      return { block: routeCalls === 1 ? 'transient' : 'permanent' };
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-retry-perm', 'permanently blocked retry');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-retry-perm')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush retry failed');
+    expect(logged).toContain('FALLBACK_FAILED');
+    expect(logged).toContain(
+      'outgoing route permanently blocked for test-chat',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a route-blocked cron re-retry drops the text with an exhaustion log', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // Every attempt is blocked transiently, so the final one is the re-retry.
+    pvt['resolveRoute'] = async () => ({ block: 'transient' });
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-exhausted', 'exhaust me');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-exhausted')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush re-retry failed');
+    expect(logged).toContain(
+      'Cron flush retries exhausted, dropped 10 chars for session sess-exhausted',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a permanently blocked cron re-retry drops the text with a loss log', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async () => {
+      routeCalls++;
+      return { block: routeCalls === 3 ? 'permanent' : 'transient' };
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-reretry-perm', 're-retry permanently blocked');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-reretry-perm')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush re-retry failed');
+    expect(logged).toContain('FALLBACK_FAILED');
+    expect(logged).toContain(
+      'outgoing route permanently blocked for test-chat',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  // Review finding on #13882: the terminal exits of the retry ladder deleted
+  // the whole entry, including text that arrived while the failed send was in
+  // flight and was never attempted.
+  it('keeps text that arrived during an in-flight cron send when the retries are exhausted', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // Attempt 1 and retry 1 fail transiently.
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-late', 'first');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // The re-retry is in flight when new text arrives; it fails too, so the
+    // ladder is exhausted while that text has never been attempted.
+    let rejectLast!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectLast = reject;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(10000);
+    triggerTextChunk('sess-late', 'late');
+    await flushSetImmediate();
+    rejectLast(new DeliveryError('RATE_LIMITED', 'rate limited'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    // Exhaustion must keep the never-attempted residual and name it.
+    expect(cronBuffer.get('sess-late')?.buffer).toBe('late');
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'kept 4 chars that arrived during the retries for a later flush',
+    );
+
+    // ...and the re-armed flush must still deliver it.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(4);
+    const body = mockSendQQMessage.mock.calls[3][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe('late');
+    expect(cronBuffer.has('sess-late')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  // The three permanent-failure exits of the ladder (first send, retry 1,
+  // re-retry) must each abandon the payload without taking text that arrived
+  // while that attempt was in flight.
+  const terminalExitRows: Array<[string, number]> = [
+    ['the first send', 0],
+    ['retry 1', 1],
+    ['the re-retry', 2],
+  ];
+  it.each(terminalExitRows)(
+    'keeps text that arrived during an in-flight cron send when %s fails permanently',
+    async (_attempt, priorTransientFailures) => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as Record<string, unknown>;
+      pvt['_ready'] = true;
+      pvt['_inCronFlow'] = 1;
+
+      for (let i = 0; i < priorTransientFailures; i++) {
+        mockSendQQMessage.mockRejectedValueOnce(
+          new DeliveryError('RATE_LIMITED', 'rate limited'),
+        );
+      }
+      let rejectAttempt!: (e: unknown) => void;
+      mockSendQQMessage.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectAttempt = reject;
+          }),
+      );
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      triggerTextChunk('sess-terminal', 'first');
+      await flushSetImmediate();
+      await vi.advanceTimersByTimeAsync(2000);
+      if (priorTransientFailures >= 1) {
+        await vi.advanceTimersByTimeAsync(5000);
+      }
+      if (priorTransientFailures >= 2) {
+        await vi.advanceTimersByTimeAsync(10000);
+      }
+
+      // New text arrives while the doomed attempt is in flight; the permanent
+      // failure then abandons the payload but must not take the residual.
+      triggerTextChunk('sess-terminal', 'late');
+      await flushSetImmediate();
+      rejectAttempt(new DeliveryError('RETRY_EXHAUSTED', 'network error'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const cronBuffer = pvt['cronBuffer'] as Map<
+        string,
+        { buffer: string; timer: unknown }
+      >;
+      expect(cronBuffer.get('sess-terminal')?.buffer).toBe('late');
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(
+        priorTransientFailures + 2,
+      );
+      const body = mockSendQQMessage.mock.calls[
+        priorTransientFailures + 1
+      ][3] as Record<string, unknown> | undefined;
+      expect((body?.markdown as Record<string, string>).content).toBe('late');
+      expect(cronBuffer.has('sess-terminal')).toBe(false);
+
+      stderrSpy.mockRestore();
+    },
+  );
+
+  // Both no-target exits of the ladder (retry 1 and the re-retry) must keep a
+  // residual that arrived while the failed attempt was in flight.
+  const noTargetExitRows: Array<[string, number]> = [
+    ['retry 1', 0],
+    ['the re-retry', 1],
+  ];
+  it.each(noTargetExitRows)(
+    're-arms text that arrived during an in-flight cron send when %s finds no target',
+    async (_attempt, priorTransientFailures) => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as Record<string, unknown>;
+      const router = (ch as unknown as Record<string, unknown>)['router'] as {
+        getTarget: ReturnType<typeof vi.fn>;
+      };
+      pvt['_ready'] = true;
+      pvt['_inCronFlow'] = 1;
+
+      let rejectFirst!: (e: unknown) => void;
+      mockSendQQMessage.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      );
+      if (priorTransientFailures === 1) {
+        mockSendQQMessage.mockRejectedValueOnce(
+          new DeliveryError('RATE_LIMITED', 'rate limited'),
+        );
+      }
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      triggerTextChunk('sess-no-target', 'A');
+      await flushSetImmediate();
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // B arrives while attempt 1 is in flight; the exit that follows finds no
+      // route, so B was never attempted.
+      triggerTextChunk('sess-no-target', 'B');
+      await flushSetImmediate();
+      if (priorTransientFailures === 0) {
+        router.getTarget.mockReturnValueOnce(null);
+      }
+      rejectFirst(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5000);
+      if (priorTransientFailures === 1) {
+        router.getTarget.mockReturnValueOnce(null);
+        await vi.advanceTimersByTimeAsync(10000);
+      }
+
+      const cronBuffer = pvt['cronBuffer'] as Map<
+        string,
+        { buffer: string; timer: unknown }
+      >;
+      expect(cronBuffer.get('sess-no-target')?.buffer).toBe('B');
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+        'Cron flush dropped after retry: no target',
+      );
+
+      // The re-armed flush delivers the residual once the route resolves.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(
+        priorTransientFailures + 2,
+      );
+      const body = mockSendQQMessage.mock.calls[
+        priorTransientFailures + 1
+      ][3] as Record<string, unknown> | undefined;
+      expect((body?.markdown as Record<string, string>).content).toBe('B');
+      expect(cronBuffer.has('sess-no-target')).toBe(false);
+
+      stderrSpy.mockRestore();
+    },
+  );
+
+  it('keeps a successor entry created while a failed cron flush is being handled', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // The first flush's send stays in flight while a successor entry takes
+    // over the session (the old entry was dropped, then new text arrived).
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-overlap', 'first');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    cronBuffer.delete('sess-overlap');
+    triggerTextChunk('sess-overlap', 'D');
+    await flushSetImmediate();
+    expect(cronBuffer.get('sess-overlap')!.buffer).toBe('D');
+
+    // The old chain gives up permanently: it must not delete the successor.
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'network error'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(cronBuffer.get('sess-overlap')?.buffer).toBe('D');
+
+    stderrSpy.mockRestore();
+  });
+
+  // The re-armed flush must not spin when the route never comes back: it runs
+  // the normal flush once, which drops the residual through the existing
+  // no-target loss log and deletes the entry.
+  it('drops the re-armed residual with a loss log when the route never returns', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    const router = (ch as unknown as Record<string, unknown>)['router'] as {
+      getTarget: ReturnType<typeof vi.fn>;
+    };
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    let rejectFirst!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFirst = reject;
+        }),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-no-route', 'A');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    triggerTextChunk('sess-no-route', 'B');
+    await flushSetImmediate();
+
+    // The route never comes back, so every later lookup returns null.
+    router.getTarget.mockReturnValue(null);
+    rejectFirst(new DeliveryError('RATE_LIMITED', 'rate limited'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    expect(cronBuffer.get('sess-no-route')?.buffer).toBe('B');
+
+    // One re-armed flush, then the entry is gone with the loss named.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(cronBuffer.has('sess-no-route')).toBe(false);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'Cron flush dropped: no target for session sess-no-route, lost 1 chars',
+    );
+
+    // Nothing is re-armed behind it: no further attempts over the next minute.
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(cronBuffer.has('sess-no-route')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// _inCronFlow depth counter
+// ---------------------------------------------------------------------------
+describe('_inCronFlow depth counter', () => {
+  it('supports concurrent runCronFlow without stomping depth', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+
+    let resolve1!: () => void;
+    let resolve2!: () => void;
+    const p1 = new Promise<void>((r) => {
+      resolve1 = r;
+    });
+    const p2 = new Promise<void>((r) => {
+      resolve2 = r;
+    });
+
+    const runCronFlow = (
+      ch as unknown as {
+        runCronFlow: (fn: () => Promise<void>) => Promise<void>;
+      }
+    ).runCronFlow.bind(ch);
+
+    const flow1 = runCronFlow(async () => {
+      await p1;
+    });
+    expect(pvt['_inCronFlow']).toBe(1);
+
+    const flow2 = runCronFlow(async () => {
+      await p2;
+    });
+    expect(pvt['_inCronFlow']).toBe(2);
+
+    resolve1();
+    await flow1;
+    expect(pvt['_inCronFlow']).toBe(1);
+
+    resolve2();
+    await flow2;
+    expect(pvt['_inCronFlow']).toBe(0);
+  });
+
+  it('runCronFlow finally decrements even when fn throws', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+
+    const runCronFlow = (
+      ch as unknown as {
+        runCronFlow: (fn: () => Promise<void>) => Promise<void>;
+      }
+    ).runCronFlow.bind(ch);
+
+    expect(pvt['_inCronFlow']).toBe(0);
+
+    await expect(
+      runCronFlow(async () => {
+        throw new Error('cron task failed');
+      }),
+    ).rejects.toThrow('cron task failed');
+
+    // Depth must be 0 even after the function threw
+    expect(pvt['_inCronFlow']).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// disconnect cron cleanup
+// ---------------------------------------------------------------------------
+describe('disconnect cron cleanup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    textChunkHandlers.length = 0;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('clears cronBuffer entries and cancels their timers on disconnect', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    triggerTextChunk('sess-disc', 'pending cron text');
+    vi.advanceTimersByTime(0); // let setImmediate fire
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: ReturnType<typeof setTimeout> | null }
+    >;
+    expect(cronBuffer.has('sess-disc')).toBe(true);
+    const entry = cronBuffer.get('sess-disc')!;
+    expect(entry.timer).not.toBeNull();
+
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    (ch as unknown as { disconnect: () => void }).disconnect();
+
+    // Timer was cancelled
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    // Buffer was cleared
+    expect(cronBuffer.size).toBe(0);
+
+    clearTimeoutSpy.mockRestore();
+  });
+
+  it('disconnect resets _inCronFlow depth to zero', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_inCronFlow'] = 3;
+
+    (ch as unknown as { disconnect: () => void }).disconnect();
+
+    expect(pvt['_inCronFlow']).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prompt/cron discriminator (issue #6094)
+// ---------------------------------------------------------------------------
+describe('prompt/cron textChunk discriminator (#6094)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    textChunkHandlers.length = 0;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function flushSetImmediate(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  function promptHooks(ch: QQChannelClass): {
+    onPromptStart: (chatId: string, sessionId: string) => void;
+    onPromptEnd: (chatId: string, sessionId: string) => void;
+  } {
+    return ch as unknown as {
+      onPromptStart: (chatId: string, sessionId: string) => void;
+      onPromptEnd: (chatId: string, sessionId: string) => void;
+    };
+  }
+
+  it('prompt chunks during a cron flow are not duplicated into cronBuffer', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    // ChannelBase brackets every prompt turn with onPromptStart/onPromptEnd.
+    promptHooks(ch).onPromptStart('test-chat', 'sess-prompt');
+
+    // A cron flow is active concurrently (scheduled-message flow in flight).
+    pvt['_inCronFlow'] = 1;
+
+    triggerTextChunk('sess-prompt', 'prompt response text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    // The prompt text belongs to an active prompt — it must not be captured
+    // by the cron buffer.
+    expect(cronBuffer.has('sess-prompt')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    promptHooks(ch).onPromptEnd('test-chat', 'sess-prompt');
+  });
+
+  it('cron chunks without an active prompt are still delivered', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    triggerTextChunk('sess-cron', 'cron text');
+    await flushSetImmediate();
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'cron text' } },
+    );
+  });
+
+  // #6094 item 2: a lingering streamState entry from an earlier prompt (e.g.
+  // cancelled/errored turn whose cleanup has not settled) silently drops all
+  // subsequent cron textChunks for the same sessionId because the guard keys
+  // on streamState. The guard must key on whether a prompt turn is actually
+  // active, not on residual streaming state.
+  it('item 2: lingering streamState entry after prompt end does not block cron delivery', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    // A prompt turn streams a partial answer, then ends (ChannelBase always
+    // runs onPromptEnd in its finally, even on error/cancel).
+    promptHooks(ch).onPromptStart('test-chat', 'sess-leak');
+    (
+      ch as unknown as {
+        onResponseChunk: (
+          chatId: string,
+          chunk: string,
+          sessionId: string,
+        ) => void;
+      }
+    ).onResponseChunk('test-chat', 'partial answer', 'sess-leak');
+    promptHooks(ch).onPromptEnd('test-chat', 'sess-leak');
+
+    // The streamState entry lingers until its idle flush settles.
+    const ss = pvt['streamState'] as Map<string, unknown>;
+    expect(ss.has('sess-leak')).toBe(true);
+
+    // A cron flow now emits output for the same session.
+    pvt['_inCronFlow'] = 1;
+    triggerTextChunk('sess-leak', 'cron text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    expect(cronBuffer.get('sess-leak')?.buffer).toBe('cron text');
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // The cron text must be delivered despite the lingering streamState.
+    const sentBodies = mockSendQQMessage.mock.calls.map(
+      (call) => call[3] as { markdown?: { content?: string } },
+    );
+    expect(
+      sentBodies.some((body) => body.markdown?.content === 'cron text'),
+    ).toBe(true);
+  });
+
+  // After the prompt turn ends, cron chunks for the session flow again.
+  it('resumes cron capture after the prompt turn ends', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    promptHooks(ch).onPromptStart('test-chat', 'sess-resume');
+    promptHooks(ch).onPromptEnd('test-chat', 'sess-resume');
+
+    triggerTextChunk('sess-resume', 'cron after prompt');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    expect(cronBuffer.get('sess-resume')?.buffer).toBe('cron after prompt');
+  });
+
+  // Session-death cleanup: a dead session must not stay marked as an active
+  // prompt (mirrors streamState cleanup in onSessionDied).
+  it('onSessionDied clears the active-prompt marker', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    promptHooks(ch).onPromptStart('test-chat', 'sess-died');
+    (
+      ch as unknown as { onSessionDied: (sessionId: string) => void }
+    ).onSessionDied('sess-died');
+
+    triggerTextChunk('sess-died', 'cron after death');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    expect(cronBuffer.get('sess-died')?.buffer).toBe('cron after death');
+  });
+});
+
+// Pin the mock's pure channel-base helpers to the shipped module: dropping an
+// export from the factory (as happened to `truncateUtf16Units`) reddens here
+// instead of leaving a latent "No export is defined on the mock" error for the
+// next test that drives QQChannel's call sites. This covers every helper
+// QQChannel imports from `@qwen-code/channel-base`.
+describe('channel-base test double', () => {
+  it('exposes the shipped channel-base helpers by identity', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const mocked = await import('@qwen-code/channel-base');
+    expect(mocked.sanitizeSenderName).toBe(actual.sanitizeSenderName);
+    expect(mocked.sanitizePromptText).toBe(actual.sanitizePromptText);
+    expect(mocked.sanitizeLogText).toBe(actual.sanitizeLogText);
+    expect(mocked.singleScopeRoutingKey).toBe(actual.singleScopeRoutingKey);
+    expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
+    expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
+    expect(mocked.unwrapMessageRoutingKey).toBe(actual.unwrapMessageRoutingKey);
+  });
+});

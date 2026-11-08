@@ -48,6 +48,8 @@ export interface AtomicWriteFileOptions extends AtomicWriteOptions {
    * semantics. Default: false (follow symlinks). See PR #4333 review.
    */
   noFollow?: boolean;
+  /** Reject the write immediately before its irreversible commit step. */
+  assertCanCommit?: () => void;
 }
 
 /**
@@ -178,12 +180,15 @@ export async function atomicWriteFile(
         throw annotateWriteError(err, filePath);
       });
 
-  // Stat the target to preserve existing permissions and detect
+  // Inspect the target to preserve existing permissions and detect
   // ownership-changing renames (see the ownership-preservation note in
-  // the function doc).
+  // the function doc). noFollow must inspect the directory entry itself:
+  // following a symlink here can select the in-place write fallback below.
   let existingStat: Stats | undefined;
   try {
-    existingStat = await fs.stat(targetPath);
+    existingStat = options?.noFollow
+      ? await fs.lstat(targetPath)
+      : await fs.stat(targetPath);
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;
@@ -196,7 +201,10 @@ export async function atomicWriteFile(
   let existingMode: number | undefined;
   if (!options?.forceMode || options?.mode === undefined) {
     existingMode =
-      existingStat !== undefined ? existingStat.mode & 0o7777 : undefined;
+      existingStat !== undefined &&
+      (!options?.noFollow || existingStat.isFile())
+        ? existingStat.mode & 0o7777
+        : undefined;
   }
   const desiredMode = existingMode ?? options?.mode;
 
@@ -251,6 +259,7 @@ export async function atomicWriteFile(
     existingStat.isFile() &&
     ownershipWouldChange()
   ) {
+    options?.assertCanCommit?.();
     await fs.writeFile(targetPath, data, writeOptions);
     await tryChmod(targetPath);
     return;
@@ -261,7 +270,16 @@ export async function atomicWriteFile(
   try {
     await writeFileImpl(tmpPath, data, writeOptions);
     await tryChmod(tmpPath);
-    await renameWithRetry(tmpPath, targetPath, retries, delayMs, renameImpl);
+    await renameWithRetry(
+      tmpPath,
+      targetPath,
+      retries,
+      delayMs,
+      async (src, dest) => {
+        options?.assertCanCommit?.();
+        await renameImpl(src, dest);
+      },
+    );
   } catch (error) {
     // Clean up temp file. Routed through unlinkImpl so the test
     // seam covers every fs.unlink call site in this function (pre-open,
@@ -277,6 +295,7 @@ export async function atomicWriteFile(
     // EXDEV: cross-device rename not supported — fall back to direct write.
     if (isNodeError(error) && error.code === 'EXDEV') {
       try {
+        options?.assertCanCommit?.();
         if (options?.noFollow) {
           // Naive fallback `writeFile(targetPath)` follows symlinks,
           // defeating the entire purpose of noFollow on credential
@@ -561,7 +580,10 @@ export function atomicWriteFileSync(
   try {
     writeFileImpl(tmpPath, data, writeOptions);
     tryChmodSync(tmpPath);
-    renameWithRetrySync(tmpPath, targetPath, retries, delayMs, renameImpl);
+    renameWithRetrySync(tmpPath, targetPath, retries, delayMs, (src, dest) => {
+      options?.assertCanCommit?.();
+      renameImpl(src, dest);
+    });
   } catch (error) {
     // See atomicWriteFile for the unlinkImpl-seam routing rationale.
     try {
@@ -572,6 +594,7 @@ export function atomicWriteFileSync(
 
     if (isNodeError(error) && error.code === 'EXDEV') {
       try {
+        options?.assertCanCommit?.();
         if (options?.noFollow) {
           // See atomicWriteFile for the rationale — noFollow must not
           // be silently dropped on the cross-device fallback path.

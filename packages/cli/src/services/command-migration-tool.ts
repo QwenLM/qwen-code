@@ -11,7 +11,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { glob } from 'glob';
-import { convertTomlToMarkdown } from '@qwen-code/qwen-code-core';
+import { convertTomlToMarkdown } from '@qwen-code/qwen-code-core/utils/toml-to-markdown-converter.js';
 import { t } from '../i18n/index.js';
 
 export interface MigrationResult {
@@ -148,7 +148,7 @@ export function generateMigrationPrompt(tomlFiles: string[]): string {
       : `  - ${tomlFiles.slice(0, 3).join('\n  - ')}\n  - ${t('... and {{count}} more', { count: String(moreCount) })}`;
 
   return `
-⚠️  ${t('TOML Command Format Deprecation Notice')}
+⚠  ${t('TOML Command Format Deprecation Notice')}
 
 ${t('Found {{count}} command file(s) in TOML format:', { count: String(count) })}
 ${fileList}

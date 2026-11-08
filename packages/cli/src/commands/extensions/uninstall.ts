@@ -7,7 +7,11 @@
 import type { CommandModule } from 'yargs';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { ExtensionManager } from '@qwen-code/qwen-code-core';
+import {
+  ExtensionManager,
+  resolveExtensionTelemetryProxy,
+  resolveUsageStatisticsEnabled,
+} from '@qwen-code/qwen-code-core';
 import {
   requestConsentNonInteractive,
   requestConsentOrFail,
@@ -23,6 +27,7 @@ interface UninstallArgs {
 export async function handleUninstall(args: UninstallArgs) {
   try {
     const workspaceDir = process.cwd();
+    const settings = loadSettings(workspaceDir).merged;
     const extensionManager = new ExtensionManager({
       workspaceDir,
       locale: getCurrentLanguage(),
@@ -30,14 +35,20 @@ export async function handleUninstall(args: UninstallArgs) {
         null,
         requestConsentNonInteractive,
       ),
-      isWorkspaceTrusted:
-        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+      isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
+      usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+        settings.privacy?.usageStatisticsEnabled,
+      ),
+      proxy: resolveExtensionTelemetryProxy(settings.proxy),
     });
     await extensionManager.refreshCache();
-    await extensionManager.uninstallExtension(args.name, false);
+    const result = await extensionManager.uninstallExtension(args.name, false);
     writeStdoutLine(
       t('Extension "{{name}}" successfully uninstalled.', { name: args.name }),
     );
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
+    }
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
     process.exit(1);

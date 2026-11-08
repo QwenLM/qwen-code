@@ -1,14 +1,14 @@
 import {
   ViewPlugin,
   Decoration,
-  DecorationSet,
   EditorView,
-  ViewUpdate,
   WidgetType,
 } from '@codemirror/view';
+import type { DecorationSet, ViewUpdate } from '@codemirror/view';
 import { RangeSetBuilder } from '@codemirror/state';
 import type { CommandInfo } from '../adapters/types';
 import { getSlashCommandArgumentHint } from '../completions/slashCompletion';
+import type { SkillInfo } from '../completions/slashCompletion';
 import type { WebShellLanguage } from '../i18n';
 
 const slashDeco = Decoration.mark({ class: 'cm-input-slash' });
@@ -36,63 +36,79 @@ class SlashArgumentHintWidget extends WidgetType {
   }
 }
 
-function buildDecorations(
+export function buildInputHighlightDecorations(
   view: EditorView,
   getCommands: () => CommandInfo[],
   getLanguage: () => WebShellLanguage,
+  getSkills: () => readonly SkillInfo[] = () => [],
 ): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const doc = view.state.doc;
   const ranges: Array<{ from: number; to: number; deco: Decoration }> = [];
+  let lastProcessedLine = 0;
+  let commands: CommandInfo[] | null = null;
+  let language: WebShellLanguage | null = null;
+  let skillNames: ReadonlySet<string> | null = null;
 
-  for (let i = 1; i <= doc.lines; i++) {
-    const line = doc.line(i);
-    const text = line.text;
-    const offset = line.from;
+  for (const visibleRange of view.visibleRanges) {
+    const firstLine = doc.lineAt(visibleRange.from).number;
+    const lastLine = doc.lineAt(visibleRange.to).number;
+    for (let i = firstLine; i <= lastLine; i++) {
+      if (i <= lastProcessedLine) continue;
+      lastProcessedLine = i;
+      const line = doc.line(i);
+      const text = line.text;
+      const offset = line.from;
 
-    // /command at start of line
-    if (text.startsWith('/')) {
-      const end = text.indexOf(' ');
-      const slashEnd = end === -1 ? text.length : end;
-      ranges.push({ from: offset, to: offset + slashEnd, deco: slashDeco });
-    }
+      // /command at start of line
+      if (text.startsWith('/')) {
+        const end = text.indexOf(' ');
+        const slashEnd = end === -1 ? text.length : end;
+        ranges.push({ from: offset, to: offset + slashEnd, deco: slashDeco });
+        commands ??= getCommands();
+        language ??= getLanguage();
+        skillNames ??= new Set(
+          getSkills().map((skill) => skill.name.toLowerCase()),
+        );
+        const argumentHint = getSlashCommandArgumentHint(
+          text,
+          commands,
+          language,
+          skillNames,
+        );
+        if (argumentHint) {
+          const prefix = text.endsWith(' ') ? '' : ' ';
+          ranges.push({
+            from: offset + text.length,
+            to: offset + text.length,
+            deco: Decoration.widget({
+              widget: new SlashArgumentHintWidget(`${prefix}${argumentHint}`),
+              side: 1,
+            }),
+          });
+        }
+      }
 
-    const argumentHint = getSlashCommandArgumentHint(
-      text,
-      getCommands(),
-      getLanguage(),
-    );
-    if (argumentHint) {
-      const prefix = text.endsWith(' ') ? '' : ' ';
-      ranges.push({
-        from: offset + text.length,
-        to: offset + text.length,
-        deco: Decoration.widget({
-          widget: new SlashArgumentHintWidget(`${prefix}${argumentHint}`),
-          side: 1,
-        }),
-      });
-    }
+      // @path tokens
+      const atRe = /@[^\s]+/g;
+      let m: RegExpExecArray | null;
+      while ((m = atRe.exec(text)) !== null) {
+        ranges.push({
+          from: offset + m.index,
+          to: offset + m.index + m[0].length,
+          deco: atDeco,
+        });
+      }
 
-    // @path tokens
-    const atRe = /@[^\s]+/g;
-    let m: RegExpExecArray | null;
-    while ((m = atRe.exec(text)) !== null) {
-      ranges.push({
-        from: offset + m.index,
-        to: offset + m.index + m[0].length,
-        deco: atDeco,
-      });
-    }
-
-    // `inline code`
-    const codeRe = /`[^`]+`/g;
-    while ((m = codeRe.exec(text)) !== null) {
-      ranges.push({
-        from: offset + m.index,
-        to: offset + m.index + m[0].length,
-        deco: backtickDeco,
-      });
+      // `inline code`
+      const codeRe = /`[^`]+`/g;
+      while ((m = codeRe.exec(text)) !== null) {
+        ranges.push({
+          from: offset + m.index,
+          to: offset + m.index + m[0].length,
+          deco: backtickDeco,
+        });
+      }
     }
   }
 
@@ -107,19 +123,26 @@ function buildDecorations(
 export function inputHighlight(
   getCommands: () => CommandInfo[] = () => [],
   getLanguage: () => WebShellLanguage = () => 'en',
+  getSkills: () => readonly SkillInfo[] = () => [],
 ) {
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
-        this.decorations = buildDecorations(view, getCommands, getLanguage);
+        this.decorations = buildInputHighlightDecorations(
+          view,
+          getCommands,
+          getLanguage,
+          getSkills,
+        );
       }
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged) {
-          this.decorations = buildDecorations(
+          this.decorations = buildInputHighlightDecorations(
             update.view,
             getCommands,
             getLanguage,
+            getSkills,
           );
         }
       }
@@ -132,7 +155,7 @@ export function inputHighlight(
 
 export const inputHighlightTheme = EditorView.baseTheme({
   '.cm-input-slash': {
-    color: 'var(--accent-color, #4a9eff)',
+    color: 'var(--agent-blue-500, #4a9eff)',
     fontWeight: 'bold',
   },
   '.cm-input-at': {
@@ -141,10 +164,10 @@ export const inputHighlightTheme = EditorView.baseTheme({
   '.cm-input-code': {
     background: 'rgba(255, 255, 255, 0.06)',
     borderRadius: '3px',
-    color: 'var(--text-secondary, #a0aec0)',
+    color: 'var(--muted-foreground, #a0aec0)',
   },
   '.cm-input-slash-argument-hint': {
-    color: 'var(--text-tertiary, rgba(160, 174, 192, 0.55))',
+    color: 'color-mix(in srgb, var(--muted-foreground) 70%, transparent)',
     pointerEvents: 'none',
   },
 });

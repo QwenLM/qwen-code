@@ -1,0 +1,660 @@
+#!/usr/bin/env node
+/**
+ * Analyze failed CI logs and render failure details.
+ *
+ * main-ci-failure-issue.yml consumes only `analyze` and `comment`: extracted
+ * tests populate the failure summary, and the workflow routes on them — a run
+ * that names failing tests files or reuses a per-signature issue (matched by
+ * the `title` and `searchMarkers` emitted here), while a run without any test
+ * identity shares the workflow's aggregate issue.
+ *
+ * The legacy `plan`/title/body-renderer pipeline has no shipped caller and is
+ * retained for revertability. It places a `qwen-main-ci-failure-test:<key>`
+ * marker for each test in the body, allowing overlapping failure sets such as
+ * `[A]` then `[A, B]` to share an issue; unknown tests fall back to a commit key.
+ */
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+export const TEST_MARKER_PREFIX = 'qwen-main-ci-failure-test:';
+/** Pre-dedupe marker, still used for runs whose failing tests are unknown. */
+export const LEGACY_MARKER_PREFIX = 'qwen-main-ci-failure:';
+export const SIGNATURE_MARKER_PREFIX = 'qwen-main-ci-failure-sig:';
+export const OCCURRENCE_MARKER = '<!-- qwen-main-ci-failure-occurrences -->';
+export const MAX_OCCURRENCES = 10;
+
+/** Markers to search issues by. GitHub search is a cost per query, and a run
+ * with dozens of failures is an infra break, not a per-test regression. */
+export const MAX_SEARCH_MARKERS = 5;
+
+/** Failing tests listed in the issue body. A total-suite failure (expired
+ * provider key, model outage) can fail every test at once; the body must stay
+ * under GitHub's 65,536-character limit or `gh issue create` hard-fails. */
+export const MAX_BODY_TESTS = 20;
+
+// Vitest and pytest colourise their output and Actions stores the escapes
+// verbatim, so failure lines arrive wrapped in SGR sequences.
+// eslint-disable-next-line no-control-regex -- matches the ESC that opens one
+const ANSI_PATTERN = /\u001B\[[0-9;?]*[A-Za-z]/g;
+// Actions prefixes every log line with an RFC3339 timestamp.
+const LOG_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?/;
+const VITEST_FAIL_PATTERN = /^FAIL\s+(.+)$/;
+// Anchoring on ` - ` rather than the first space keeps parametrized node ids
+// whose parameters contain spaces (`test_x[case one]`).
+const PYTEST_FAIL_PATTERN = /^FAILED\s+(.+?)(?:\s+-\s.*)?$/;
+// Maven Surefire prints one line per failed test as its class finishes:
+// `[ERROR] com.example.FooTest.caseName -- Time elapsed: 0.569 s <<< ERROR!`
+// (`<<< FAILURE!` for a failed assertion). The elapsed time varies run to
+// run, so the identifier is the class-and-method id ahead of it. The
+// class-level `Tests run: N ... <<< FAILURE! -- in <class>` line names no
+// method and is not a test.
+const MAVEN_FAIL_PATTERN =
+  /^\[ERROR\] (.+?) -- Time elapsed: [\d.]+ s <<< (?:ERROR|FAILURE)!$/;
+// The Flyway version guard (scripts/check-flyway-migrations.js) fails with a
+// ::error:: line, not a test report. Key it on the module and version —
+// stable across every merge stacked on a standing red, so the recurrences
+// land on one issue instead of one per commit. The runner consumes the
+// ::error:: command and writes ##[error] into the downloadable log (stderr is
+// wired to the same interceptor), so the anchor accepts both forms; the raw
+// form is what the guard prints and keeps the unit fixtures readable.
+const FLYWAY_FAIL_PATTERN =
+  /^(?:##\[error\]|::error::)(.+?): \d+ migrations claim version ([\d.]+):/;
+// The guard's two other failure modes — a migration location that moved and
+// a module directory that does not exist — are standing reds too, so they get
+// their own stable identity keyed on the module and the mode; without one
+// they fall back to the sha-keyed per-commit issue and each stacked merge
+// opens a fresh one. The location half is tightened to its real charset (the
+// guard emits its LOCATIONS constant joined with `/`): a runner-decoded
+// annotation is the runner's own rendering, and an unbounded [^;]+ would let
+// a filename-borne payload smuggle spaces and backticks into an id that is
+// rendered inside a code span in the issue body.
+const FLYWAY_CONFIG_PATTERN =
+  /^(?:##\[error\]|::error::)(.+?): (no such Maven module directory|found no migration under [\w./-]+|found migration files outside [\w./-]+)/;
+const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
+// A Surefire id is a dotted `Class.method`, optionally with the parameter
+// types and invocation index of a parameterized case.
+const JAVA_ID_PATTERN = /^(?:[\w$]+\.)+[\w$]+(?:\([^)]*\))?(?:\[\d+])?$/;
+// The module half of a guard id is untrusted: the line it is parsed from may
+// be a runner-decoded continuation of a migration PATH (git carries LF, `:`
+// and `\` in names, and a directory component puts the forged text after a
+// real `/`). The timestamp gate in `extractFailingTests` rejects those
+// continuations outright; this shape is the second layer for every other
+// channel. The genuine value always comes from the invocation's repo-relative
+// paths — the producer job and the analyze job both run on ubuntu-latest, and
+// this suite's fixtures normalize their argument the same way — so it is
+// slash-bearing with no whitespace or backslashes, and anything else,
+// including a forged Windows drive prefix, is a payload. Backticks are
+// rejected outright because the id is rendered inside a code span in the
+// issue body.
+const GUARD_MODULE_UNSAFE = /[\s`\\]/;
+
+function guardModule(raw) {
+  return !GUARD_MODULE_UNSAFE.test(raw) && raw.includes('/') ? raw : undefined;
+}
+
+function cleanLine(line) {
+  return line
+    .replace(ANSI_PATTERN, '')
+    .replace(LOG_TIMESTAMP_PATTERN, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * The Surefire id is the dedupe identity — the `seen` key, the
+ * `qwen-main-ci-failure-test:` marker, the bullet the body lists — so it is
+ * kept whole: two modules can carry the same simple `Class.method` (sdk-java
+ * already has three such simple-name pairs), and reducing to `Class.method`
+ * would merge them into one issue. The JAVA_ID_PATTERN shape is this lane's
+ * own guard against the phrase appearing in a test's captured stdout.
+ * Cosmetic shortening for the title lives in `shortenForTitle`.
+ */
+function javaTestId(raw) {
+  return JAVA_ID_PATTERN.test(raw) ? raw : undefined;
+}
+
+/**
+ * Collect the failing test identifiers a runner reported, first-seen order.
+ * Every runner prints its failures more than once (inline plus summary), and a
+ * matrix leg repeats them per job, so identifiers are deduped.
+ */
+export function extractFailingTests(logText) {
+  const seen = new Set();
+  for (const rawLine of String(logText ?? '').split('\n')) {
+    // A flyway id is built from untrusted path text, so it is accepted only
+    // from a line the runner itself emitted — one carrying its timestamp.
+    // The guard prints file PATHS, so a LF inside a directory component
+    // leaves the forged text after a real `/` and past the module shape
+    // below; but a decoded annotation continuation is written without the
+    // runner's timestamp, which closes that door for both flyway arms.
+    const runnerLine = LOG_TIMESTAMP_PATTERN.test(
+      rawLine.replace(ANSI_PATTERN, ''),
+    );
+    const line = cleanLine(rawLine);
+    const vitest = VITEST_FAIL_PATTERN.exec(line);
+    const pytest = PYTEST_FAIL_PATTERN.exec(line);
+    const maven = MAVEN_FAIL_PATTERN.exec(line);
+    const flyway = FLYWAY_FAIL_PATTERN.exec(line);
+    const flywayConfig = FLYWAY_CONFIG_PATTERN.exec(line);
+    if (!vitest && !pytest && !maven && !flyway && !flywayConfig) continue;
+
+    // The flyway id doubles as the issue title and body bullet, so it is
+    // written to be read, not only to be hashed — and both captures are
+    // validated before they become a dedupe identity, the way the Surefire
+    // id is validated below.
+    if (flyway) {
+      if (!runnerLine) continue;
+      const module = guardModule(flyway[1]);
+      if (module) {
+        seen.add(`flyway duplicate version ${flyway[2]} in ${module}`);
+        continue;
+      }
+      // A rejected capture must not discard a genuine config-mode identity
+      // on the same line — fall through to the flywayConfig arm below
+      // instead of returning. The suppression payload needs no newline at
+      // all: spaces on the timestamped line run the lazy module capture all
+      // the way to the payload, and an unconditional continue here would
+      // drop the line's real diagnosis with it.
+    }
+
+    if (flywayConfig) {
+      if (!runnerLine) continue;
+      const module = guardModule(flywayConfig[1]);
+      if (module) seen.add(`flyway ${flywayConfig[2]} in ${module}`);
+      continue;
+    }
+
+    // A line either flyway pattern matched is fully handled above, whether
+    // it yielded an identity or was dropped — the shared tail below reads
+    // vitest/pytest captures unconditionally and is only safe past it.
+    if (flyway || flywayConfig) continue;
+
+    if (maven) {
+      const id = javaTestId(maven[1]);
+      if (id) seen.add(id);
+      continue;
+    }
+
+    // pytest -q appends ` - <error message>`; the message varies run to run and
+    // would defeat deduping, so keep only the `file::test` node id.
+    const id = vitest ? vitest[1].trim() : pytest[1].trim();
+
+    // Guard against the phrase appearing in a test's own captured stdout: a
+    // real failure line names a test file, or a vitest `file > suite > case`.
+    if (!TEST_FILE_PATTERN.test(id) && !id.includes(' > ')) continue;
+    seen.add(id);
+  }
+  return [...seen];
+}
+
+export function testKey(testId) {
+  return createHash('sha256')
+    .update(String(testId).replace(/\s+/g, ' ').trim())
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/**
+ * Parse the `name<TAB>step<TAB>step` lines the workflow writes from the run's
+ * failed-job list. A lane that dies before printing any test result still
+ * reports which job and which step failed — the only identity left for the
+ * per-commit issue to carry. One field per step, because step names contain
+ * commas — `Extract metadata (tags, labels) for Docker` — that a comma-joined
+ * wire shreds.
+ */
+export function parseFailedJobs(tsv) {
+  const jobs = [];
+  for (const rawLine of tsv.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const [name, ...steps] = line.split('\t');
+    jobs.push({ name, steps });
+  }
+  return jobs;
+}
+
+/**
+ * A signature over the whole failure set, recorded in the body for humans
+ * comparing two issues. Matching is done with the per-test markers, which
+ * tolerate a failure set that grows or shrinks between runs.
+ */
+export function failureSignature(workflowName, testIds) {
+  const keys = testIds.map(testKey).sort();
+  return createHash('sha256')
+    .update(`${workflowName}\n${keys.join('\n')}`)
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/**
+ * Titles are read in issue lists, so keep the two parts that identify the
+ * failure — the file and the test case — and collapse the suite chain between
+ * them (`file > Suite > nested > case` is routinely over 140 characters).
+ */
+export function shortenForTitle(testId, limit = 110) {
+  const text = testId.replace(/\s+/g, ' ').trim();
+  // A Surefire id's package prefix adds no signal next to the class name and
+  // pushes the method out of the title budget, and package segments are
+  // lowercase by convention. Only a Java-shaped id is stripped — a vitest
+  // `file > case` id opens with a path that must survive intact.
+  const display = JAVA_ID_PATTERN.test(text)
+    ? text.replace(/^(?:[a-z_$][\w$]*\.)+/, '')
+    : text;
+  const segments = display.split(' > ');
+  const collapsed =
+    segments.length > 2
+      ? [segments[0], '…', segments.at(-1)].join(' > ')
+      : segments.join(' > ');
+  return collapsed.length <= limit
+    ? collapsed
+    : `${collapsed.slice(0, limit - 1)}…`;
+}
+
+export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
+  const tests = [];
+  for (const logText of logTexts) {
+    for (const id of extractFailingTests(logText)) {
+      if (!tests.some((test) => test.id === id))
+        tests.push({ id, key: testKey(id) });
+    }
+  }
+
+  // Packaging and Cargo failures may report no test ID. Keep a standing
+  // Desktop failure on one issue while preserving its platform and step.
+  if (workflowName === 'Desktop Checks' && tests.length === 0) {
+    const ids = new Set();
+    for (const job of failedJobs) {
+      for (const step of job.steps.length ? job.steps : ['']) {
+        ids.add(`Desktop Checks > ${job.name}${step ? ` > ${step}` : ''}`);
+      }
+    }
+    for (const id of ids) tests.push({ id, key: testKey(id) });
+  }
+
+  // Guard-derived ids are the only run-level diagnoses in the set: the
+  // collision they name is stable across every merge stacked on a standing
+  // red, so they title the issue and are searched first. First-seen order
+  // would let a mass failure in another lane crowd them past the search and
+  // body caps — nothing guarantees the guard's log is globbed first. The
+  // sort is stable, so each group keeps its first-seen order and the cap
+  // counts are unchanged.
+  tests.sort(
+    (a, b) =>
+      Number(b.id.startsWith('flyway ')) - Number(a.id.startsWith('flyway ')),
+  );
+
+  const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
+  return {
+    workflow: workflowName,
+    tests,
+    failedJobs,
+    signature: tests.length
+      ? failureSignature(
+          workflowName,
+          tests.map((t) => t.id),
+        )
+      : '',
+    markers: tests.map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
+    searchMarkers: tests
+      .slice(0, MAX_SEARCH_MARKERS)
+      .map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
+    title: tests.length
+      ? `Main CI failed: ${workflowName} — ${shortenForTitle(tests[0].id)}${extra}`
+      : '',
+  };
+}
+
+function occurrenceLine({ sha, runUrl, runId, at }) {
+  const shortSha = String(sha ?? '').slice(0, 12);
+  return `- \`${shortSha}\` · ${at} · [run ${runId}](${runUrl})`;
+}
+
+const TRIMMED_NOTE = '_Older recurrences trimmed._';
+const RECURRENCE_HEADING = '## Recurrences';
+const ALSO_FAILING_HEADING = '## Also failing';
+// The "## Also failing" list is machine-owned and rebuilt from the current
+// failure set on every merge, so the previous one is stripped first. The block
+// is the heading plus its contiguous bullet list — nothing else is ever written
+// under it.
+const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
+// The "- Failed jobs:" block is machine-owned the same way: on merge it is
+// stripped and re-emitted from the CURRENT run's failed jobs, so the lane the
+// body points at never freezes at filing time. The bullets it owns are the
+// two-space ones failedJobLines emits — the strip stops at the first line
+// that is not one, never consuming a human bullet that starts with `- `.
+const FAILED_JOBS_BLOCK = /\n*- Failed jobs:\n(?: {2}- [^\n]*\n?)+/;
+
+// The same split/merge contract — head / recorded occurrences / tail around
+// the marker, human text kept verbatim, occurrences newest-first and capped —
+// is re-implemented in bash/awk by .github/scripts/image-build-failure-issue.sh
+// for the build-and-publish-image workflow; a fix to one must reach the other.
+function splitOccurrenceBlock(body) {
+  const index = body.indexOf(OCCURRENCE_MARKER);
+  if (index === -1) return { head: body.trimEnd(), lines: [], tail: '' };
+
+  const head = body.slice(0, index).trimEnd();
+  const rest = body.slice(index + OCCURRENCE_MARKER.length).split('\n');
+
+  // Occurrence lines always open with the short SHA in backticks, so the
+  // trimmed-note line never re-enters the list and accumulates. Anything else
+  // was written by a human or the autofix agent below the block: it is kept
+  // verbatim as `tail` and re-emitted above the refreshed block.
+  const lines = [];
+  let cursor = 0;
+  for (; cursor < rest.length; cursor += 1) {
+    const line = rest[cursor].trim();
+    if (!line || line === TRIMMED_NOTE) continue;
+    if (!line.startsWith('- `')) break;
+    lines.push(line);
+  }
+
+  return { head, lines, tail: rest.slice(cursor).join('\n').trim() };
+}
+
+function failedJobLines(failedJobs) {
+  return failedJobs.map((job) => {
+    if (!job.steps.length) return `  - \`${job.name}\``;
+    const steps = job.steps.map((step) => `\`${step}\``).join(', ');
+    return `  - \`${job.name}\` — failed in ${job.steps.length === 1 ? 'step' : 'steps'} ${steps}`;
+  });
+}
+
+/**
+ * A run that failed before any test result was reported — an install or build
+ * break — has nothing to dedupe on, so it keeps the original per-commit marker
+ * and title. The failed job and step still go in the body: they are what tells
+ * a reader which lane broke when no test name survived to say so.
+ */
+function renderPerCommitBody({ analysis, occurrence }) {
+  return [
+    `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
+    '',
+    'A CI run failed before any test result was reported, so this issue is',
+    'tracked per commit.',
+    '',
+    `- Workflow: ${analysis.workflow}`,
+    ...(analysis.failedJobs.length
+      ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
+      : []),
+    `- Run: ${occurrence.runUrl}`,
+    `- Run ID: ${occurrence.runId}`,
+    `- Commit: ${occurrence.sha}`,
+    '',
+    'This issue is labeled for autofix so the existing agent can create a repair PR.',
+    '',
+  ].join('\n');
+}
+
+export function renderIssueTitle({ analysis, occurrence }) {
+  if (!analysis.tests.length) {
+    return `Main CI failed: ${analysis.workflow} on ${String(occurrence.sha).slice(0, 12)}`;
+  }
+  return analysis.title;
+}
+
+function cappedTestLines(tests) {
+  const lines = tests
+    .slice(0, MAX_BODY_TESTS)
+    .map((test) => `- \`${test.id}\``);
+  if (tests.length > MAX_BODY_TESTS)
+    lines.push(`- …and ${tests.length - MAX_BODY_TESTS} more`);
+  return lines;
+}
+
+export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
+  const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  return [
+    `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
+    `### ${code(analysis.workflow)} failed`,
+    '',
+    `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
+    '',
+    ...jobs
+      // A job that hit its execution cap concludes `cancelled`, not `failure`;
+      // keep it so a timed-out leg is named in the report (#16272). The step
+      // filter below already accepts cancelled, so the two levels agree.
+      .filter((job) => ['failure', 'cancelled'].includes(job.conclusion))
+      .map((job) => {
+        const steps = (job.steps ?? [])
+          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+          .map((step) => code(step.name));
+        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+      }),
+    '',
+    ...(analysis.tests.length
+      ? [
+          '**Failing tests**',
+          '',
+          ...analysis.tests
+            .slice(0, MAX_BODY_TESTS)
+            .map((test) => `- ${code(test.id)}`),
+          ...(analysis.tests.length > MAX_BODY_TESTS
+            ? [`- …and ${analysis.tests.length - MAX_BODY_TESTS} more`]
+            : []),
+        ]
+      : [
+          'No test identifier was available; follow the run link for job logs and annotations.',
+        ]),
+    '',
+  ].join('\n');
+}
+
+/**
+ * Build the issue body: the create path when `existingBody` is empty, otherwise
+ * a merge that keeps the existing prose (an agent's or a human's notes live
+ * there) and only refreshes the machine-owned trailer.
+ */
+export function renderIssueBody({
+  analysis,
+  occurrence,
+  maxOccurrences = MAX_OCCURRENCES,
+  existingBody = '',
+}) {
+  if (!analysis.tests.length) {
+    // Nothing to merge into: the per-commit path opens one issue per commit and
+    // an existing body means the same commit was already filed.
+    return existingBody.trim()
+      ? existingBody
+      : renderPerCommitBody({ analysis, occurrence });
+  }
+
+  // Search only ever uses the first MAX_SEARCH_MARKERS markers, so the body
+  // need not carry more — a total-suite failure can fail every test at once and
+  // an unbounded body crosses GitHub's 65,536-character limit.
+  const bodyMarkers = analysis.markers.slice(0, MAX_SEARCH_MARKERS);
+  const testLines = cappedTestLines(analysis.tests);
+
+  if (!existingBody.trim()) {
+    const head = [
+      `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
+      ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
+      '',
+      `A \`${analysis.workflow}\` run failed.`,
+      // The failing tests name what broke; the failed jobs name which lane
+      // broke — a guard's diagnosis (the colliding files) lives only in its
+      // job log.
+      ...(analysis.failedJobs.length
+        ? ['', '- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
+        : []),
+      '',
+      '## Failing tests',
+      '',
+      ...testLines,
+      '',
+      'This issue is labeled for autofix so the existing agent can create a repair PR.',
+      'It is deduped by failing test, so every later commit that hits the same',
+      'failure is appended below instead of opening another issue.',
+    ].join('\n');
+    return [
+      head,
+      '',
+      RECURRENCE_HEADING,
+      '',
+      OCCURRENCE_MARKER,
+      occurrenceLine(occurrence),
+      '',
+    ].join('\n');
+  }
+
+  const { head, lines, tail } = splitOccurrenceBlock(existingBody);
+  // The heading belongs to the machine block and is re-emitted with it, so kept
+  // prose can never end up between the heading and its list.
+  const withoutHeading = head.replace(/\n*##\s+Recurrences\s*$/, '');
+  const prose = tail ? `${withoutHeading}\n\n${tail}` : withoutHeading;
+
+  // The "## Also failing" list is rebuilt from the current failure set below,
+  // so strip the previous one first: a test that has since been fixed must
+  // disappear instead of being listed forever. The "- Failed jobs:" block is
+  // rebuilt from the current run the same way; the '\n' replacement keeps the
+  // blank line that separated a mid-prose block from what followed it.
+  const strippedProse = prose
+    .replace(ALSO_FAILING_BLOCK, '')
+    .replace(FAILED_JOBS_BLOCK, '\n')
+    .trimEnd();
+
+  // Record markers for tests that joined the failure set after the issue was
+  // opened, so the next run still matches this issue on either test.
+  const missingMarkers = bodyMarkers.filter(
+    (marker) => !strippedProse.includes(marker),
+  );
+  const missingTests = testLines.filter(
+    (line) => line.startsWith('- `') && !strippedProse.includes(line),
+  );
+  const withMarkers = missingMarkers.length
+    ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
+    : strippedProse;
+  // A run whose failed-job list came back empty drops the block entirely
+  // rather than freezing the lanes an earlier run happened to report.
+  const withJobs = analysis.failedJobs.length
+    ? `${withMarkers}\n\n- Failed jobs:\n${failedJobLines(analysis.failedJobs).join('\n')}`
+    : withMarkers;
+  const withTests = missingTests.length
+    ? `${withJobs}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
+    : withJobs;
+
+  // A re-run of the same run must not add a second line for it. Match the
+  // `[run <id>]` link text, not the run URL: `/301` is a substring of `/3010`,
+  // so a URL match would silently delete an unrelated run's line.
+  const kept = lines.filter(
+    (line) => !line.includes(`[run ${occurrence.runId}]`),
+  );
+  const combined = [occurrenceLine(occurrence), ...kept];
+  const nextLines = combined.slice(0, maxOccurrences);
+  const footer = combined.length > nextLines.length ? ['', TRIMMED_NOTE] : [];
+
+  return [
+    withTests,
+    '',
+    RECURRENCE_HEADING,
+    '',
+    OCCURRENCE_MARKER,
+    ...nextLines,
+    ...footer,
+    '',
+  ].join('\n');
+}
+
+function parseArgs(argv) {
+  const options = {};
+  const positional = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg.startsWith('--')) {
+      options[arg.slice(2)] = argv[index + 1];
+      index += 1;
+    } else {
+      positional.push(arg);
+    }
+  }
+  return { options, positional };
+}
+
+function readFailedJobs(path) {
+  if (!path) return [];
+  try {
+    return parseFailedJobs(readFileSync(path, 'utf8'));
+  } catch {
+    // A missing jobs file costs the same precision a missing log does: the
+    // per-commit body falls back to naming nothing but the run.
+    return [];
+  }
+}
+/**
+ * The workflow's jobs listing can be missing or truncated (the redirect
+ * empties it when `gh api` dies before writing), and the comment must degrade
+ * the same way the issue path does — name no job — instead of failing the
+ * analyze job and losing both reports.
+ */
+function readJobs(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')).jobs ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export function runCli(argv) {
+  const [command, ...rest] = argv;
+  const { options, positional } = parseArgs(rest);
+
+  if (command === 'comment') {
+    process.stdout.write(
+      renderFailureComment({
+        analysis: JSON.parse(readFileSync(options.analysis, 'utf8')),
+        occurrence: {
+          sha: options.sha,
+          runId: options['run-id'],
+          runUrl: options['run-url'],
+        },
+        jobs: readJobs(options['jobs-json']),
+      }),
+    );
+    return;
+  }
+
+  if (command === 'analyze') {
+    const logTexts = positional.map((file) => readFileSync(file, 'utf8'));
+    process.stdout.write(
+      `${JSON.stringify(
+        analyzeLogs(
+          options.workflow ?? '',
+          logTexts,
+          readFailedJobs(options.jobs),
+        ),
+      )}\n`,
+    );
+    return;
+  }
+
+  // The title and body are emitted together so the privileged job that writes
+  // the issue needs nothing but these two strings — it never reads the repo.
+  if (command === 'plan') {
+    const analysis = JSON.parse(readFileSync(options.analysis, 'utf8'));
+    const existingBody = options.existing
+      ? readFileSync(options.existing, 'utf8')
+      : '';
+    const occurrence = {
+      sha: options.sha,
+      runUrl: options['run-url'],
+      runId: options['run-id'],
+      at: options.at,
+    };
+    process.stdout.write(
+      `${JSON.stringify({
+        title: renderIssueTitle({ analysis, occurrence }),
+        body: renderIssueBody({ analysis, existingBody, occurrence }),
+        searchMarkers: analysis.tests.length
+          ? analysis.searchMarkers
+          : [`${LEGACY_MARKER_PREFIX}${occurrence.sha}`],
+      })}\n`,
+    );
+    return;
+  }
+
+  throw new Error(`Unknown command: ${command ?? '(none)'}`);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runCli(process.argv.slice(2));
+}

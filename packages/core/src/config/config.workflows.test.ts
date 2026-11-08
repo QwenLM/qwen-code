@@ -18,6 +18,8 @@ vi.mock('../telemetry/index.js', () => ({
   })),
   DEFAULT_TELEMETRY_TARGET: 'none',
   DEFAULT_OTLP_ENDPOINT: '',
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
   refreshSessionContext: vi.fn(),
@@ -73,11 +75,13 @@ vi.mock('../ide/ide-client.js', () => ({
     }),
   },
 }));
-vi.mock('../memory/const.js', () => ({
-  setGeminiMdFilename: vi.fn(),
+vi.mock('../utils/memory-constants.js', () => ({
+  setMemoryFilename: vi.fn(),
 }));
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { getTrustedWorkflowAncestors } from '../agents/runtime/workflow-ancestors.js';
 import type { ConfigParameters } from './config.js';
 import { Config } from './config.js';
 
@@ -146,6 +150,49 @@ describe('Config workflows feature gate', () => {
     const cfg = new Config({ ...baseParams });
     cfg.setWorkflowsEnabled(true);
     expect(cfg.isWorkflowsEnabled()).toBe(false);
+  });
+
+  it('forwards actual Config provider state to ancestor decisions for its current target', async () => {
+    const target = path.resolve('/tmp', 'dw01-config', 'pkg');
+    const root = path.dirname(target);
+    const provider = vi.fn(async (dirs: readonly string[]) =>
+      dirs.map(() => true),
+    );
+    vi.mocked(fs.promises.lstat).mockImplementation((async (file) => {
+      if (String(file) === path.join(root, '.git'))
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => true,
+          isFile: () => false,
+        };
+      throw Object.assign(new Error('fixture missing'), { code: 'ENOENT' });
+    }) as typeof fs.promises.lstat);
+    const cfg = new Config({
+      ...baseParams,
+      targetDir: target,
+      cwd: target,
+      workflowAncestorTrustProvider: provider,
+    });
+    expect(
+      await getTrustedWorkflowAncestors(
+        cfg.getTargetDir(),
+        cfg.getWorkflowAncestorTrustProvider(),
+      ),
+    ).toEqual([root]);
+    expect(provider).toHaveBeenCalledExactlyOnceWith([root], target);
+    const ordinary = new Config({
+      ...baseParams,
+      targetDir: target,
+      cwd: target,
+    });
+    provider.mockClear();
+    expect(
+      await getTrustedWorkflowAncestors(
+        ordinary.getTargetDir(),
+        ordinary.getWorkflowAncestorTrustProvider(),
+      ),
+    ).toEqual([]);
+    expect(provider).not.toHaveBeenCalled();
   });
 
   it('honors workflowsEnabled passed via ConfigParameters', () => {

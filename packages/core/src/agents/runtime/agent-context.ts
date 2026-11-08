@@ -19,10 +19,14 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { runOutsideHookExecutionOwner } from '../../hooks/hook-execution-context.js';
+import type { LlmChat } from '../../core/llm-chat.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import { isTeammate } from '../team/identity.js';
+import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 
 export interface RuntimeContentGeneratorView {
   readonly contentGenerator: ContentGenerator;
@@ -30,12 +34,34 @@ export interface RuntimeContentGeneratorView {
 }
 
 interface AgentContext {
+  readonly chat?: LlmChat;
   readonly agentId?: string;
   readonly runtimeView?: RuntimeContentGeneratorView;
   /**
+   * The owning agent's effective positive `toolConfig.tools` allowlist.
+   * `undefined` means the configured surface is intentionally unrestricted
+   * (absent, empty, or wildcard), or that a separate execution allowlist owns
+   * the policy (forks use `tools` only as a cache-parity declaration
+   * snapshot). Published so a fork cannot widen its parent's configured
+   * surface by unioning the live registry into its execution allowlist.
+   */
+  readonly configuredToolAllowlist?: readonly string[];
+  /**
+   * The owning agent's per-agent `toolConfig.disallowedTools` blocklist.
+   * Published by `AgentCore.runInAgentFrames` so a tool that reshapes a
+   * child agent's tool surface — AgentTool's fork — keeps the blocklist one
+   * level down instead of the fork's execution allowlist re-admitting a
+   * tool the parent was configured never to reach. Re-set (even to
+   * `undefined`) on every agent frame: a nested agent without a blocklist
+   * must not see its parent's.
+   */
+  readonly disallowedTools?: readonly string[];
+  /**
    * Nesting depth — 0 for a top-level subagent (called from a user's
    * top-level interaction), +1 per nested `runWithAgentContext` frame.
-   * Auto-incremented; callers do not pass it. Read via
+   * Auto-incremented by default; resume paths (background resume,
+   * AgentInteractive, deferred approvals) pass `depthOverride` to restore
+   * the original launch depth instead. Read via
    * {@link getCurrentAgentDepth} for telemetry (#3731 Phase 3).
    */
   readonly depth?: number;
@@ -46,12 +72,16 @@ const storage = new AsyncLocalStorage<AgentContext>();
 export function runWithAgentContext<T>(
   agentId: string,
   fn: () => Promise<T>,
+  depthOverride?: number,
 ): Promise<T> {
   const current = storage.getStore() ?? {};
   // Auto-increment depth: top-level = 0, nested = parent+1. No caller has
   // to know about it; telemetry reads it back via getCurrentAgentDepth
-  // (#3731 Phase 3 subagent spans).
-  const depth = (current.depth ?? -1) + 1;
+  // (#3731 Phase 3 subagent spans). depthOverride restores the original
+  // launch depth on background/foreground resume — otherwise the frame
+  // recomputes from a top-level (depth 0) parent and a resumed nested agent
+  // would regain spawn capacity it should not have.
+  const depth = depthOverride ?? (current.depth ?? -1) + 1;
   return storage.run({ ...current, agentId, depth }, fn);
 }
 
@@ -61,6 +91,57 @@ export function runWithRuntimeContentGenerator<T>(
 ): Promise<T> {
   const current = storage.getStore() ?? {};
   return storage.run({ ...current, runtimeView: view }, fn);
+}
+
+/**
+ * Sets the owning agent's `disallowedTools` blocklist for the duration of
+ * `fn`. Always establishes the field — including as `undefined` — so a
+ * nested agent's frame shadows the parent's blocklist rather than
+ * inheriting it.
+ */
+export function runWithAgentDisallowedTools<T>(
+  disallowedTools: readonly string[] | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = storage.getStore() ?? {};
+  return storage.run({ ...current, disallowedTools }, fn);
+}
+
+/**
+ * Sets the owning agent's effective configured tool allowlist for `fn`.
+ * Always establishes the field so nested agents shadow their parent frame.
+ */
+export function runWithAgentConfiguredToolAllowlist<T>(
+  configuredToolAllowlist: readonly string[] | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = storage.getStore() ?? {};
+  return storage.run({ ...current, configuredToolAllowlist }, fn);
+}
+
+/** The owning agent's effective positive configured tool allowlist. */
+export function getCurrentAgentConfiguredToolAllowlist():
+  | readonly string[]
+  | undefined {
+  return storage.getStore()?.configuredToolAllowlist;
+}
+
+/** The owning agent's `disallowedTools` blocklist, if its frame set one. */
+export function getCurrentAgentDisallowedTools():
+  | readonly string[]
+  | undefined {
+  return storage.getStore()?.disallowedTools;
+}
+
+export function runWithAgentChat<T>(
+  chat: LlmChat | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return storage.run({ ...storage.getStore(), chat }, fn);
+}
+
+export function getCurrentAgentChat(): LlmChat | undefined {
+  return storage.getStore()?.chat;
 }
 
 export function getCurrentAgentId(): string | null {
@@ -88,4 +169,86 @@ export function getRuntimeContentGenerator():
   | RuntimeContentGeneratorView
   | undefined {
   return storage.getStore()?.runtimeView;
+}
+
+/**
+ * Runs `fn` with NO agent frame on the async-local stack, so
+ * `Config.getModel()` / `getContentGeneratorConfig()` resolve to the main
+ * session's configuration and `getCurrentAgentId()` returns null.
+ *
+ * AsyncLocalStorage context propagates through every async continuation
+ * started inside `fn` — React state updates, queued microtasks, timers —
+ * which is exactly how a background agent's runtime view leaked into the
+ * notification drain and switched the main session onto the subagent's
+ * model (#7156). Wrap main-session-owned work that can be triggered from
+ * inside an agent frame (notification emission, completion bookkeeping)
+ * with this helper.
+ */
+export function runOutsideAgentContext<T>(fn: () => T): T {
+  return storage.exit(() => runOutsideHookExecutionOwner(fn));
+}
+
+/**
+ * True when there is no active agent frame — i.e. we are in the top-level
+ * user session, not inside a sub-agent. The canonical "top-level only"
+ * predicate for gating capabilities (teammate spawning, forking) that must
+ * not be reachable from a nested sub-agent.
+ */
+export function isTopLevelSession(): boolean {
+  return getCurrentAgentId() === null;
+}
+
+/**
+ * The 0-based depth a child spawned by the current invoker would have:
+ * 0 when spawning from the top-level session (no agent frame), parent
+ * depth + 1 inside a sub-agent frame. Single source of the launch-depth
+ * formula — used for subagent telemetry spans, persisted in AgentMeta so
+ * background/foreground resume can restore the original nesting level (via
+ * the runWithAgentContext depthOverride), and underlying
+ * {@link canSpawnNestedAgent}.
+ */
+export function childLaunchDepth(): number {
+  return getCurrentAgentId() !== null ? getCurrentAgentDepth() + 1 : 0;
+}
+
+/**
+ * Whether the current invoker may spawn a nested sub-agent given the
+ * configured maximum nesting depth (1-based levels; a top-level sub-agent is
+ * level 1). Single source of truth for the depth relationship, shared by
+ * AgentCore.prepareTools() (schema gating) and AgentTool.execute() (runtime
+ * guard) so the two cannot drift apart.
+ *
+ * The would-be child sits at level `childLaunchDepth() + 1` (levels are
+ * 1-based, depths 0-based), which must not exceed `maxDepth`.
+ */
+export function canSpawnNestedAgent(maxDepth: number): boolean {
+  return childLaunchDepth() + 1 <= maxDepth;
+}
+
+/**
+ * Single source of the sub-agent spawn exclusion policy, shared by
+ * `AgentCore.prepareTools()` (schema gating) and `AgentTool.execute()`
+ * (runtime guards) so the two layers cannot drift: a rule missed on the
+ * runtime side is a silent spawn bypass, missed on the schema side it burns
+ * model turns on guaranteed-rejected calls.
+ *
+ * Returns the first blocking reason — evaluated in `execute()`'s guard
+ * order, so the winning reason (and its user-facing message) is stable for
+ * contexts that trip several rules (e.g. a teammate at leaf depth) — or
+ * null when a spawn is permitted. All four inputs are pure
+ * AsyncLocalStorage reads, so the composition is order-insensitive for the
+ * schema side's boolean use.
+ *
+ * Callers gate on different frame requirements on top of this:
+ * `prepareTools()` adds `!isTopLevelSession()` to fail closed on a missing
+ * agent frame (it only ever serves agents), while `execute()` must allow
+ * the top-level session — that is the normal spawn path.
+ */
+export function spawnBlockReason(
+  maxDepth: number,
+): 'depth' | 'teammate' | 'fork' | null {
+  if (!canSpawnNestedAgent(maxDepth)) return 'depth';
+  if (isTeammate()) return 'teammate';
+  if (isInForkExecution()) return 'fork';
+  return null;
 }

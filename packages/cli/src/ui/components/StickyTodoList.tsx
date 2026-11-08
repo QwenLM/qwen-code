@@ -9,6 +9,7 @@ import { memo, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { t } from '../../i18n/index.js';
 import { Colors } from '../colors.js';
+import { ICON } from '../constants.js';
 import { theme } from '../semantic-colors.js';
 import {
   getOrderedStickyTodos,
@@ -24,9 +25,9 @@ interface StickyTodoListProps {
 }
 
 const STATUS_ICONS = {
-  pending: '○',
-  in_progress: '◐',
-  completed: '●',
+  pending: ICON.CIRCLE_EMPTY,
+  in_progress: ICON.CIRCLE_LEFT_HALF,
+  completed: ICON.CIRCLE_FILLED,
 } as const;
 
 function clampVisibleTodoCount(value: number): number {

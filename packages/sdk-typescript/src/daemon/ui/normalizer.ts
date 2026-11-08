@@ -9,9 +9,13 @@ import type {
   DaemonAuthProviderId,
   DaemonErrorKind,
   DaemonEvent,
+  DaemonSessionArtifactChange,
 } from '../types.js';
-import { DAEMON_ERROR_KINDS } from '../types.js';
+import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
+import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
 import type {
+  DaemonAgentIdentity,
+  DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
@@ -19,17 +23,22 @@ import type {
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import { createDaemonToolResultTextPreview } from './toolPreview.js';
 import {
+  capDetails,
   getFirstString,
   getOutputText,
   getString,
   getTextContent,
   extractContentPart,
+  getFiniteNumber,
   isRecord,
   redactSensitiveFields,
+  sanitizeTerminalText,
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
+import { extractToolLifecycle } from './tool-lifecycle.js';
 
 /**
  * Common base fields stamped on every normalized UI event. Centralized as a
@@ -38,7 +47,15 @@ import {
  */
 type NormalizedEventBase = Pick<
   DaemonUiEvent,
-  'eventId' | 'serverTimestamp' | 'originatorClientId' | 'rawEvent'
+  | 'eventId'
+  | 'serverTimestamp'
+  | 'sourceRecordIds'
+  | 'segmentId'
+  | 'promptId'
+  | 'backgroundTurn'
+  | 'branchRecordId'
+  | 'originatorClientId'
+  | 'rawEvent'
 >;
 
 const DAEMON_ERROR_KIND_SET = new Set<string>(DAEMON_ERROR_KINDS);
@@ -47,9 +64,22 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  'authentication_required',
 ]);
 
-const MAX_DETAILS_LENGTH = 4096;
+const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
+const SESSION_RECORDING_DEGRADED_MESSAGE =
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
+
+const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
+
+// Wire close-reason tokens are internal identifiers; render known ones as
+// copy and never echo an unknown token into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -81,6 +111,8 @@ export function normalizeDaemonEvent(
     case 'permission_already_resolved':
       return normalizePermissionResolved(event, base);
     case 'model_switched':
+      if (isRecord(event.data) && event.data['subscriptionSignedOut'] === true)
+        return [];
       return [
         {
           ...base,
@@ -116,13 +148,70 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'session_closed':
+      if (
+        isRecord(event.data) &&
+        event.data['persistenceUnconfirmed'] === true
+      ) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: false,
+            text: 'Workspace runtime stopped; session persistence is unconfirmed.',
+          },
+        ];
+      }
       return [
         {
           ...base,
           type: 'status',
-          text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
+          text:
+            getString(event.data, 'cause') === 'workspace_runtime_stop'
+              ? 'Workspace runtime stopped.'
+              : (SESSION_CLOSED_REASON_COPY[
+                  getString(event.data, 'reason') ?? ''
+                ] ?? 'Session closed'),
         },
       ];
+    case 'session_recording_degraded': {
+      const sessionId = getString(event.data, 'sessionId');
+      if (!sessionId || getString(event.data, 'reason') !== 'write_failed') {
+        return fallbackDebug(event, base, 'malformed recording state');
+      }
+      return [
+        {
+          ...base,
+          type: 'error',
+          recoverable: true,
+          code: 'session_recording_degraded',
+          text: SESSION_RECORDING_DEGRADED_MESSAGE,
+        },
+      ];
+    }
+    case 'session_snapshot': {
+      if (!isRecord(event.data) || !getString(event.data, 'sessionId')) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      const recordingDegraded = event.data['recordingDegraded'];
+      if (
+        recordingDegraded !== undefined &&
+        typeof recordingDegraded !== 'boolean'
+      ) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      if (recordingDegraded === true) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: true,
+            code: 'session_recording_degraded',
+            text: SESSION_RECORDING_DEGRADED_MESSAGE,
+          },
+        ];
+      }
+      return [];
+    }
     case 'client_evicted':
       return [
         {
@@ -135,13 +224,20 @@ export function normalizeDaemonEvent(
         },
       ];
     case 'slow_client_warning':
-      return [
-        {
-          ...base,
-          type: 'status',
-          text: 'SSE stream is lagging',
-        },
-      ];
+      // The daemon reports this SSE subscriber's queue backing up — a
+      // transport diagnostic, not a user-facing failure. Surfacing it as a
+      // transcript status reads as a broken connection mid-turn, so log the
+      // queue watermarks to the console instead; `client_evicted` remains the
+      // real disconnect signal and flows through its own error path. Fires at
+      // most once per overflow episode (daemon-side hysteresis).
+      if (typeof console !== 'undefined') {
+        // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
+        console.warn?.(
+          '[daemon-ui] SSE stream is lagging',
+          sanitizeTerminalText(stringifyJson(event.data)),
+        );
+      }
+      return [];
     case 'stream_error': {
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
@@ -157,16 +253,29 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'turn_error': {
+      const subscriptionQuota = isRecord(event.data)
+        ? event.data['subscriptionQuota']
+        : undefined;
       const code = getString(event.data, 'code');
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
+      const loop =
+        errorKind === 'loop_detected'
+          ? parseDaemonLoopStop(event.data)
+          : undefined;
       return [
         {
           ...base,
           type: 'error',
           source: 'turn_error',
+          ...(subscriptionQuota !== undefined
+            ? { data: { subscriptionQuota } }
+            : {}),
           recoverable: true,
           ...(code ? { code } : {}),
+          ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
+          ...(loop ? { loop } : {}),
           text:
             getString(event.data, 'message') ??
             'Prompt failed (no details available)',
@@ -176,8 +285,14 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
+    case 'history_truncated':
+      return normalizeHistoryTruncated(event, base);
+
+    case 'session_messages_deleted':
+      return [];
+
     case 'session_rewound':
-      return normalizeSessionRewound(event, base);
+      return normalizeSessionRewound(event, base, opts);
 
     case 'session_branched':
       return normalizeSessionBranched(event, base);
@@ -192,11 +307,24 @@ export function normalizeDaemonEvent(
       ];
     }
 
+    case 'turn_complete':
+      return getString(event.data, 'stopReason') === 'cancelled'
+        ? normalizePromptCancellation(
+            isRecord(event.data) ? event.data['promptCancelled'] : undefined,
+            base,
+          )
+        : [];
+
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
 
     case 'mid_turn_message_injected':
       return normalizeMidTurnMessageInjected(event, base);
+
+    case 'pending_prompt_added':
+    case 'pending_prompt_started':
+    case 'pending_prompt_completed':
+      return [];
 
     case 'user_shell_command': {
       const command = getString(event.data, 'command');
@@ -249,6 +377,12 @@ export function normalizeDaemonEvent(
       return normalizeApprovalModeChanged(event, base);
 
     // ── Workspace events ──────────────────────────────────────
+    case 'git_branch_changed':
+      return [];
+
+    case 'git_status_changed':
+      return [];
+
     case 'memory_changed':
       return normalizeMemoryChanged(event, base);
 
@@ -261,8 +395,17 @@ export function normalizeDaemonEvent(
     case 'settings_changed':
       return normalizeSettingsChanged(event, base);
 
+    case 'settings_reloaded':
+      return normalizeSettingsReloaded(event, base);
+
+    case 'trust_change_requested':
+      return normalizeTrustChangeRequested(event, base);
+
     case 'workspace_initialized':
       return normalizeWorkspaceInitialized(event, base);
+
+    case 'github_setup_completed':
+      return normalizeGithubSetupCompleted(event, base);
 
     case 'mcp_budget_warning':
       return normalizeMcpBudgetWarning(event, base);
@@ -276,8 +419,33 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
+    case 'mcp_server_added':
+      return normalizeMcpServerChanged(event, base, 'added');
+
+    case 'mcp_server_removed':
+      return normalizeMcpServerChanged(event, base, 'removed');
+
+    case 'mcp_server_changed':
+      return normalizeMcpServerChanged(event, base);
+
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
+
+    case 'source_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      const revision = isRecord(event.data)
+        ? event.data['revision']
+        : undefined;
+      return sessionId &&
+        typeof revision === 'number' &&
+        Number.isInteger(revision) &&
+        revision >= 0
+        ? [{ ...base, type: 'session.source.changed', sessionId, revision }]
+        : [];
+    }
+
+    case 'artifact_changed':
+      return normalizeArtifactChanged(event, base);
 
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
@@ -301,17 +469,28 @@ export function normalizeDaemonEvent(
       // unknown event types, the doubled block-consumption rate
       // accelerated `maxBlocks` trimming of real content. The `debug`
       // shape already carries the event-type as a prefix, so the
-      // status block was redundant. Adapters that want a user-visible
-      // banner can pattern-match on `event.type === 'debug'` and the
-      // text prefix.
-      return [
-        {
-          ...base,
-          type: 'debug',
-          text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
-        },
-      ];
+      // status block was redundant. Adapters deciding how to present a
+      // debug block must branch on `debugReason` — the text prefix is
+      // diagnostic wording and changes without notice.
+      return normalizeUnrecognizedEvent(event, base);
   }
+}
+
+function normalizeUnrecognizedEvent(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  return [
+    {
+      ...base,
+      type: 'debug',
+      debugReason: 'unrecognized_event',
+      text: debugBlockText(
+        `${event.type} (unrecognized daemon event)`,
+        event.data,
+      ),
+    },
+  ];
 }
 
 function normalizeStateResyncRequired(
@@ -343,9 +522,77 @@ function normalizeStateResyncRequired(
   ];
 }
 
+function normalizeHistoryTruncated(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const reason = getString(event.data, 'reason');
+  const truncatedEvents = numberField(event.data, 'truncatedEvents');
+  const retainedEvents = numberField(event.data, 'retainedEvents');
+  const maxBytes = numberField(event.data, 'maxBytes');
+  const maxEvents = numberField(event.data, 'maxEvents');
+  if (
+    reason !== 'replay_window_exceeded' ||
+    truncatedEvents === undefined ||
+    retainedEvents === undefined ||
+    maxBytes === undefined ||
+    !isRecord(event.data) ||
+    typeof event.data['fullTranscriptAvailable'] !== 'boolean'
+  ) {
+    return fallbackDebug(event, base, 'malformed history_truncated payload');
+  }
+  const scope = getString(event.data, 'scope');
+  if (
+    (event.data['scope'] !== undefined && !scope) ||
+    (event.data['maxEvents'] !== undefined &&
+      (maxEvents === undefined ||
+        !Number.isInteger(maxEvents) ||
+        maxEvents < 0))
+  ) {
+    return fallbackDebug(event, base, 'malformed history_truncated payload');
+  }
+  const fullTranscriptAvailable = event.data['fullTranscriptAvailable'];
+  const limits = [
+    maxEvents === undefined
+      ? undefined
+      : `${maxEvents} ${scope === 'live_journal' ? 'replay entries' : 'events'}`,
+    `${maxBytes} bytes`,
+  ]
+    .filter((limit): limit is string => limit !== undefined)
+    .join(' / ');
+  const text =
+    scope === 'live_journal'
+      ? `History truncated for live turn replay: kept the latest ${retainedEvents} source events and dropped ${truncatedEvents} older source events (limits: ${limits}). ${
+          fullTranscriptAvailable
+            ? 'Complete content remains available after the turn finishes.'
+            : 'Complete content is not available for automatic recovery.'
+        }`
+      : scope === undefined
+        ? `History truncated in replay history: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+            fullTranscriptAvailable
+              ? 'Older content remains available from the full transcript.'
+              : 'Older content is not available from a full transcript.'
+          }`
+        : `History truncated: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+            fullTranscriptAvailable
+              ? 'Full transcript content remains available.'
+              : 'Full transcript content is not available.'
+          }`;
+  return [
+    {
+      ...base,
+      type: 'status',
+      text,
+      source: 'history_truncated',
+      data: event.data,
+    },
+  ];
+}
+
 function normalizeSessionRewound(
   event: DaemonEvent,
   base: NormalizedEventBase,
+  opts: NormalizeDaemonEventOptions,
 ): DaemonUiEvent[] {
   const promptId = getString(event.data, 'promptId');
   const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
@@ -353,11 +600,25 @@ function normalizeSessionRewound(
     return fallbackDebug(event, base, 'malformed session_rewound payload');
   }
   const sessionId = getString(event.data, 'sessionId');
+  const daemonPromptId = getString(event.data, 'daemonPromptId');
+  let replay: DaemonUiEvent[] | undefined;
+  if (isRecord(event.data) && event.data['replay'] !== undefined) {
+    const known = asKnownDaemonEvent(event);
+    if (known?.type !== 'session_rewound') {
+      return fallbackDebug(event, base, 'malformed session_rewound replay');
+    }
+    // Replacement includes our own formerly optimistic user rows too.
+    replay = known.data.replay?.flatMap((frame) =>
+      normalizeDaemonEvent(frame, { ...opts, suppressOwnUserEcho: false }),
+    );
+  }
   return [
     {
       ...base,
       type: 'session.rewound',
+      ...(replay !== undefined ? { replay } : {}),
       promptId,
+      ...(daemonPromptId ? { daemonPromptId } : {}),
       targetTurnIndex,
       ...(sessionId ? { sessionId } : {}),
     },
@@ -413,24 +674,68 @@ function normalizeMidTurnMessageInjected(
   if (!isRecord(event.data)) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  const messages = Array.isArray(event.data['messages'])
-    ? event.data['messages'].filter(
-        (message): message is string =>
-          typeof message === 'string' && message.length > 0,
-      )
-    : [];
-  if (messages.length === 0) {
+  const data = event.data;
+  const rawMessages = data['messages'];
+  const messages =
+    Array.isArray(rawMessages) &&
+    rawMessages.every(
+      (message): message is string => typeof message === 'string',
+    )
+      ? rawMessages
+      : [];
+  const items = data['items'];
+  // An injected message is renderable when its text is non-empty OR its
+  // content carries an image, resource, or non-empty text block. The drain's
+  // degraded-media path publishes `messages: ['']` whose items hold only the
+  // '[Attachment is no longer available]' text block — dropping that
+  // frame as malformed would erase the echo of the user's message.
+  const hasRenderableItemContent =
+    Array.isArray(items) &&
+    items.some(
+      (item) =>
+        isRecord(item) &&
+        Array.isArray(item['content']) &&
+        item['content'].some(
+          (block) =>
+            isRecord(block) &&
+            (block['type'] === 'image' ||
+              block['type'] === 'resource' ||
+              (block['type'] === 'text' &&
+                typeof block['text'] === 'string' &&
+                (block['text'] as string).length > 0)),
+        ),
+    );
+  if (
+    messages.length === 0 ||
+    (!messages.some(Boolean) && !hasRenderableItemContent)
+  ) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  return [
-    {
+  const messageIds = Array.isArray(data['messageIds'])
+    ? data['messageIds']
+    : [];
+  return messages.map((text, index) => {
+    const item = Array.isArray(items) ? items[index] : undefined;
+    const messageId = messageIds[index];
+    return {
       ...base,
       type: 'status',
-      text: `Inserted message: ${messages.join('\n')}`,
+      text,
       source: 'mid_turn_message_injected',
-      data: event.data,
-    },
-  ];
+      data: {
+        ...data,
+        messages: [text],
+        ...(Array.isArray(items)
+          ? { items: item !== undefined ? [item] : [] }
+          : {}),
+        ...(typeof messageId === 'string'
+          ? { messageIds: [messageId] }
+          : Array.isArray(data['messageIds'])
+            ? { messageIds: [] }
+            : {}),
+      },
+    };
+  });
 }
 
 function createBase(
@@ -438,9 +743,28 @@ function createBase(
   opts: NormalizeDaemonEventOptions,
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
+  const sourceRecordIds = extractSourceRecordIds(event);
+  const segmentId = extractTranscriptSegmentId(event);
+  const branchRecordId = extractBranchRecordId(event);
+  const update = getSessionUpdatePayload(event.data);
+  const backgroundTurn = parseDaemonBackgroundTurn(
+    (update && isRecord(update['_meta'])
+      ? update['_meta']['backgroundTurn']
+      : undefined) ??
+      (isRecord(event.data) ? event.data['backgroundTurn'] : undefined),
+  );
+  const promptId =
+    event.promptId ??
+    getString(update?.['_meta'], 'promptId') ??
+    backgroundTurn?.turnId;
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(segmentId ? { segmentId } : {}),
+    ...(promptId ? { promptId } : {}),
+    ...(backgroundTurn ? { backgroundTurn } : {}),
+    ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -450,22 +774,45 @@ function createBase(
   };
 }
 
+function extractTranscriptSegmentId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const segmentId = getString(transcript, 'segmentId');
+  return segmentId && segmentId.length <= 512 ? segmentId : undefined;
+}
+
+function extractBranchRecordId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  return transcript ? getString(transcript, 'branchRecordId') : undefined;
+}
+
 /**
  * Extract daemon-authoritative timestamp from envelope. Looks at known
  * candidate locations in order:
  *
  *   1. `event.serverTimestamp` — top-level, preferred when daemon adds it
  *   2. `event._meta.serverTimestamp` — Anthropic-style metadata convention
- *   3. `event.data._meta.serverTimestamp` — sessionUpdate nested location
- *   4. `event.data.update._meta.serverTimestamp|timestamp` — ACP update meta
+ *   3. nested `serverTimestamp` metadata
+ *   4. `timestamp` on direct transcript-page or nested ACP updates
  *
  * Returns undefined when none of them are present or all are non-finite.
  * Forward-compat: SDK reads whichever location the daemon eventually emits
  * without requiring a coordinated SDK release.
  */
-export function extractServerTimestamp(
-  event: DaemonEvent,
-): number | undefined {
+export function extractServerTimestamp(event: DaemonEvent): number | undefined {
   const direct = (event as { serverTimestamp?: unknown }).serverTimestamp;
   if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
   const envelopeMeta = (event as { _meta?: unknown })._meta;
@@ -474,25 +821,62 @@ export function extractServerTimestamp(
     if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
   }
   if (isRecord(event.data)) {
-    const dataMeta = (event.data as Record<string, unknown>)['_meta'];
+    const dataMeta = event.data['_meta'];
+    const update = event.data['update'];
+    const updateMeta = isRecord(update) ? update['_meta'] : undefined;
     if (isRecord(dataMeta)) {
       const ts = dataMeta['serverTimestamp'];
       if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
     }
-    const update = (event.data as Record<string, unknown>)['update'];
-    if (isRecord(update)) {
-      const updateMeta = update['_meta'];
-      if (isRecord(updateMeta)) {
-        const serverTs = updateMeta['serverTimestamp'];
-        if (typeof serverTs === 'number' && Number.isFinite(serverTs)) {
-          return serverTs;
-        }
-        const ts = updateMeta['timestamp'];
-        if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    if (isRecord(updateMeta)) {
+      const serverTs = updateMeta['serverTimestamp'];
+      if (typeof serverTs === 'number' && Number.isFinite(serverTs)) {
+        return serverTs;
       }
+    }
+    const timestampCandidates = [
+      isRecord(updateMeta) ? updateMeta['timestamp'] : undefined,
+      isRecord(update) ? update['timestamp'] : undefined,
+      isRecord(dataMeta) ? dataMeta['timestamp'] : undefined,
+      event.data['timestamp'],
+    ];
+    for (const candidate of timestampCandidates) {
+      const timestamp = parseTimestamp(candidate);
+      if (timestamp !== undefined) return timestamp;
     }
   }
   return undefined;
+}
+
+function parseTimestamp(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  // Date.parse misreads bare-integer strings ("2000" becomes year 2000 and a
+  // stringified epoch becomes NaN), so treat all-digit strings as epoch ms.
+  if (/^\d+$/.test(value)) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * True for the session-attachment reference shape (`attachmentId` instead of inline
+ * data/url/source) that replay producers persist for uploaded attachments.
+ * `extractContentPart` cannot render it; see the `user_message_chunk` case
+ * below for how it degrades instead of vanishing.
+ */
+function isAttachmentReferenceContent(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value['type'] === 'image' || value['type'] === 'resource') &&
+    typeof value['attachmentId'] === 'string' &&
+    (value['attachmentId'] as string).length > 0 &&
+    value['data'] === undefined &&
+    value['url'] === undefined &&
+    value['source'] === undefined
+  );
 }
 
 function normalizeSessionUpdate(
@@ -506,7 +890,8 @@ function normalizeSessionUpdate(
       {
         ...base,
         type: 'debug',
-        text: `session_update: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText('session_update', event.data),
       },
     ];
   }
@@ -521,7 +906,29 @@ function normalizeSessionUpdate(
       ) {
         return [];
       }
+      const meta = extractUpdateMeta(update);
       const content = update['content'];
+      if (
+        isRecord(content) &&
+        content['type'] === 'resource_link' &&
+        typeof content['uri'] === 'string' &&
+        content['uri'].length > 0 &&
+        typeof content['name'] === 'string'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'user.resource_link.delta',
+            resourceLink: {
+              ...content,
+              type: 'resource_link',
+              uri: content['uri'],
+              name: content['name'],
+            },
+            ...(meta ? { meta } : {}),
+          },
+        ];
+      }
       const part = extractContentPart(content);
       if (part) {
         if (part.kind === 'image') {
@@ -539,31 +946,112 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
-            return [{ ...base, type: 'user.image.delta', data, mimeType }];
+            const contentRecord = isRecord(content) ? content : undefined;
+            const attachmentId =
+              typeof contentRecord?.['attachmentId'] === 'string'
+                ? (contentRecord['attachmentId'] as string)
+                : undefined;
+            return [
+              {
+                ...base,
+                type: 'user.image.delta',
+                data,
+                mimeType,
+                ...(attachmentId ? { attachmentId } : {}),
+                ...(meta ? { meta } : {}),
+              },
+            ];
           }
           return [];
         }
         if (part.kind === 'text') {
           return part.text
-            ? [{ ...base, type: 'user.text.delta', text: part.text }]
+            ? [
+                {
+                  ...base,
+                  type: 'user.text.delta',
+                  text: part.text,
+                  ...(meta ? { meta } : {}),
+                },
+              ]
             : [];
         }
         return [];
       }
+      // Live consumers hydrate reference blocks before normalization; a path
+      // that reaches this point with one (offline record projection, failed
+      // hydrate) keeps the user's message visible via the placeholder.
+      if (isAttachmentReferenceContent(content)) {
+        if ((content as Record<string, unknown>)['type'] === 'resource') {
+          const attachmentId = (content as Record<string, unknown>)[
+            'attachmentId'
+          ] as string;
+          const mimeType = (content as Record<string, unknown>)['mimeType'];
+          return [
+            {
+              ...base,
+              type: 'user.file.delta',
+              name: attachmentId,
+              attachmentId,
+              mimeType: typeof mimeType === 'string' ? mimeType : '',
+              ...(meta ? { meta } : {}),
+            },
+          ];
+        }
+        return [
+          {
+            ...base,
+            type: 'user.text.delta',
+            text: ATTACHMENT_UNAVAILABLE_TEXT,
+            ...(meta ? { meta } : {}),
+          },
+        ];
+      }
       const text = getTextContent(content);
-      return text ? [{ ...base, type: 'user.text.delta', text }] : [];
+      return text
+        ? [
+            {
+              ...base,
+              type: 'user.text.delta',
+              text,
+              ...(meta ? { meta } : {}),
+            },
+          ]
+        : [];
     }
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
+      if (
+        meta?.['source'] === 'background_task_completed' ||
+        meta?.['source'] === 'background_notification_turn_started'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'status',
+            source: meta['source'],
+            text: text ?? '',
+            data:
+              meta['source'] === 'background_task_completed'
+                ? meta['backgroundTask']
+                : meta['backgroundTurn'],
+          },
+        ];
+      }
       const events: DaemonUiEvent[] = [];
+      if (!parentToolCallId && meta?.['promptCancelled'] !== undefined) {
+        return normalizePromptCancellation(meta['promptCancelled'], base);
+      }
       if (text) {
         events.push({
           ...base,
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
           ...(meta ? { meta } : {}),
         });
       }
@@ -585,18 +1073,61 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
+      const meta = extractUpdateMeta(update);
       return [
         {
           ...base,
           type: 'thought.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
+          ...(meta ? { meta } : {}),
         },
       ];
     }
     case 'tool_call':
-    case 'tool_call_update':
+    case 'tool_call_update': {
+      // A metadata-only lifecycle frame (no status/kind/title/content) is
+      // forwarded as a name-only event: it may name an existing block by
+      // `toolCallId` and must never create one. The name is deliberately not
+      // folded into the block's human-readable `title`.
+      const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+      if (
+        meta &&
+        Object.hasOwn(meta, 'toolLifecycle') &&
+        update['status'] === undefined &&
+        update['content'] === undefined &&
+        update['title'] === undefined &&
+        update['kind'] === undefined
+      ) {
+        // Lifecycle frames are the only name carrier for a subagent's tool
+        // call, so forward the name alone: the reducer names an existing
+        // block by `toolCallId` and never creates a card from it.
+        const lifecycle = extractToolLifecycle(update);
+        const lifecycleCallId =
+          getString(update, 'toolCallId') ?? lifecycle?.callId;
+        if (!lifecycle?.toolName || !lifecycleCallId) return [];
+        return [
+          {
+            ...base,
+            type: 'tool.update' as const,
+            toolCallId: lifecycleCallId,
+            toolName: lifecycle.toolName,
+            nameOnly: true,
+          },
+        ];
+      }
+      if (
+        getString(update, 'status') === 'in_progress' &&
+        getString(update, 'kind') === undefined &&
+        (meta?.['shellProgress'] !== undefined ||
+          meta?.subagentProgress === true)
+      ) {
+        return [];
+      }
       return [normalizeToolUpdate(update, base)];
+    }
     case 'shell_output':
     case 'tool_output': {
       const text = getOutputText(update);
@@ -632,14 +1163,27 @@ function normalizeSessionUpdate(
     }
     case 'plan':
       return [normalizePlanUpdate(update, base)];
+    case 'config_option_update':
     case 'current_mode_update':
+    case 'session_info_update':
+    case 'usage_update':
       return [];
     default:
       return [
         {
           ...base,
           type: 'debug',
-          text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
+          // `getSessionUpdatePayload` accepts any record, so `kind` is
+          // `undefined` for a payload whose discriminator is missing, empty or
+          // not a string. That is a broken frame, not a kind from a newer
+          // daemon — classifying it as unrecognized would hide the only
+          // diagnostic a malformed `session_update` produces. A whitespace-only
+          // discriminator is truthy but no more usable than an empty one, so
+          // apply the same `trim()` convention `getFirstString` uses.
+          debugReason: kind?.trim()
+            ? 'unrecognized_session_update'
+            : 'malformed_payload',
+          text: debugBlockText(kind ?? 'session_update', update),
         },
       ];
   }
@@ -652,11 +1196,62 @@ function extractParentToolCallId(
   return meta ? getString(meta, 'parentToolCallId') : undefined;
 }
 
+/**
+ * Reads the producer identity the daemon stamps as `_meta.agent`.
+ *
+ * Rejects partial or malformed shapes rather than half-populating them: a
+ * client that keys rendering or policy on `agentName` must never see an
+ * identity whose `depth`/`kind` disagree with it. Absent means the frame came
+ * from the session's root agent, which callers render unattributed.
+ */
+function extractAgentIdentity(
+  update: Record<string, unknown>,
+): DaemonAgentIdentity | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const agent = meta && isRecord(meta['agent']) ? meta['agent'] : undefined;
+  if (!agent) return undefined;
+  const agentName = getString(agent, 'agentName');
+  const kind = getString(agent, 'kind');
+  const depth = numberField(agent, 'depth');
+  if (
+    !agentName ||
+    (kind !== 'root' && kind !== 'subagent' && kind !== 'teammate') ||
+    depth === undefined ||
+    depth < 0
+  ) {
+    return undefined;
+  }
+  return { agentName, depth, kind };
+}
+
 function extractUpdateMeta(
   update: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
-  return meta ? { ...meta } : undefined;
+  if (!meta) return undefined;
+  const { qwenTranscript: _qwenTranscript, ...displayMeta } = meta;
+  return Object.keys(displayMeta).length > 0 ? displayMeta : undefined;
+}
+
+function extractSourceRecordIds(
+  event: DaemonEvent,
+): readonly string[] | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const values = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(values)) return undefined;
+  const ids = [
+    ...new Set(
+      values.filter((value): value is string => typeof value === 'string'),
+    ),
+  ];
+  return ids.length > 0 ? ids : undefined;
 }
 
 /**
@@ -689,13 +1284,32 @@ function normalizeToolUpdate(
   base: NormalizedEventBase,
 ): DaemonUiEvent {
   const metadata = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    metadata && isRecord(metadata['qwenTranscript'])
+      ? metadata['qwenTranscript']
+      : undefined;
+  const resultPreview = createDaemonToolResultTextPreview(
+    getString(transcript, 'resultPreviewText') ?? '',
+  );
   const toolName =
     getString(update, 'toolName') ??
     getString(update, 'name') ??
     (metadata ? getString(metadata, 'toolName') : undefined) ??
-    (metadata ? getString(metadata, 'name') : undefined);
+    (metadata ? getString(metadata, 'name') : undefined) ??
+    // Lifecycle frames name the tool only under `_meta.toolLifecycle` (see
+    // transcript-replay's `createTranscriptToolLifecycleUpdate`), so a
+    // subagent tool call whose surviving frame carries no explicit title or
+    // toolName would otherwise project as the generic "Tool". Explicit names
+    // above still win. Read it through the same validator as the metadata-only
+    // arm so one payload gets one trust decision. #16301
+    extractToolLifecycle(update)?.toolName;
   const toolKind = getString(update, 'kind');
-  const title = getString(update, 'title') ?? toolName ?? toolKind;
+  const explicitTitle = getString(update, 'title');
+  const title =
+    explicitTitle ??
+    (getString(update, 'sessionUpdate') === 'tool_call'
+      ? (toolName ?? toolKind)
+      : undefined);
   const rawInputSource =
     update['rawInput'] ?? update['input'] ?? update['args'];
   const rawOutputSource =
@@ -730,6 +1344,11 @@ function normalizeToolUpdate(
       text: `Tool update missing toolCallId${title ? ` (${title})` : ''}`,
     };
   }
+  const subagentSessionReady =
+    isRecord(rawOutput) &&
+    typeof rawOutput['subagentSessionReady'] === 'boolean'
+      ? rawOutput['subagentSessionReady']
+      : metadata?.['subagentSessionReady'];
   const { provenance, serverId } = extractToolProvenance(update, toolName);
   // PR-K (post-rebase): daemon stamps `parentToolCallId` + `subagentType` in
   // `tool_call._meta` when the call was invoked inside a sub-agent
@@ -751,10 +1370,15 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const agent = extractAgentIdentity(update);
+  const startedAt = numberField(metadata, 'startedAt');
+  const durationMs = numberField(metadata, 'durationMs');
   return {
     ...base,
     type: 'tool.update',
     toolCallId,
+    ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
+    ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
     ...(status ? { status } : {}),
     ...(title ? { title } : {}),
     ...(toolName ? { toolName } : {}),
@@ -765,8 +1389,13 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(agent ? { agent } : {}),
+    ...(typeof subagentSessionReady === 'boolean'
+      ? { subagentSessionReady }
+      : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
+    ...(resultPreview ? { resultPreview } : {}),
     ...(rawInput !== undefined
       ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined
@@ -781,15 +1410,24 @@ function normalizePlanUpdate(
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
   const contentText = capDetails(formatPlanEntries(entries));
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
   const planCallId =
-    base.eventId !== undefined
+    getString(transcript, 'planToolCallId') ??
+    (base.eventId !== undefined
       ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
-      : DAEMON_PLAN_TOOL_CALL_ID;
+      : DAEMON_PLAN_TOOL_CALL_ID);
   // Carry the cumulative-usage snapshot the agent stamps on each plan update
   // (PlanEmitter) through to rawOutput, so the web-shell can diff consecutive
   // todo snapshots into per-task token/time detail.
-  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   const stats = meta && isRecord(meta['stats']) ? meta['stats'] : undefined;
+  const todoPlan =
+    meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
+  const planId = getString(todoPlan, 'id');
+  const sessionWorkflow = meta?.['qwenSessionWorkflow'] === true;
   return {
     ...base,
     type: 'tool.update',
@@ -804,7 +1442,12 @@ function normalizePlanUpdate(
         content: { type: 'text', text: contentText },
       },
     ],
-    rawOutput: stats ? { entries, stats } : { entries },
+    rawOutput: {
+      entries,
+      ...(stats ? { stats } : {}),
+      ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+      ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
+    },
   };
 }
 
@@ -865,6 +1508,21 @@ function extractToolProvenance(
   return {};
 }
 
+function parseDaemonLoopStop(data: unknown): DaemonLoopStop | undefined {
+  if (!isRecord(data)) return undefined;
+  const loopType = getString(data, 'loopType');
+  const loopReason = getString(data, 'loopReason');
+  const toolCallCount = getFiniteNumber(data, 'toolCallCount');
+  const toolCallLimit = getFiniteNumber(data, 'toolCallLimit');
+  if (!loopType && !loopReason) return undefined;
+  return {
+    ...(loopType ? { loopType } : {}),
+    ...(loopReason ? { loopReason } : {}),
+    ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+    ...(toolCallLimit !== undefined ? { toolCallLimit } : {}),
+  };
+}
+
 function asDaemonErrorKind(
   value: string | undefined,
 ): DaemonErrorKind | undefined {
@@ -874,9 +1532,15 @@ function asDaemonErrorKind(
     : undefined;
 }
 
-function capDetails(details: string): string {
-  if (details.length <= MAX_DETAILS_LENGTH) return details;
-  return `${details.slice(0, MAX_DETAILS_LENGTH)}... [truncated]`;
+/**
+ * Builds the `text` of a `debug` block that embeds an unrecognized or
+ * malformed payload, capped at the producer. One such block is appended per
+ * frame, so a high-frequency frame could otherwise accumulate 100KB blocks up
+ * to the transcript block cap; capping here means a future debug branch
+ * cannot drop the cap.
+ */
+function debugBlockText(prefix: string, data: unknown): string {
+  return capDetails(`${prefix}: ${stringifyRedactedJson(data)}`);
 }
 
 function normalizePermissionRequest(
@@ -888,7 +1552,8 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -899,7 +1564,8 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -932,7 +1598,8 @@ function normalizePermissionResolved(
       {
         ...base,
         type: 'debug',
-        text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText(event.type, event.data),
       },
     ];
   }
@@ -1041,6 +1708,7 @@ function fallbackDebug(
     {
       ...base,
       type: 'debug',
+      debugReason: 'malformed_payload',
       text: `${event.type}: ${reason}`,
     },
   ];
@@ -1059,6 +1727,30 @@ function normalizeSessionMetadataUpdated(
       type: 'session.metadata.changed',
       sessionId,
       ...(displayName !== undefined ? { displayName } : {}),
+    },
+  ];
+}
+
+function normalizeArtifactChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sessionId = getString(event.data, 'sessionId');
+  const change = isRecord(event.data) ? event.data['change'] : undefined;
+  if (!sessionId || !isRecord(change)) {
+    return fallbackDebug(event, base, 'malformed artifact_changed payload');
+  }
+  const action = getString(change, 'action');
+  const artifactId = getString(change, 'artifactId');
+  if (!action || !artifactId) {
+    return fallbackDebug(event, base, 'missing action or artifactId');
+  }
+  return [
+    {
+      ...base,
+      type: 'session.artifact.changed',
+      sessionId,
+      change: change as unknown as DaemonSessionArtifactChange,
     },
   ];
 }
@@ -1094,6 +1786,29 @@ function normalizeMemoryChanged(
   base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const scope = getString(event.data, 'scope');
+  if (scope === 'managed') {
+    const source = getString(event.data, 'source');
+    const taskId = getString(event.data, 'taskId');
+    const touchedScopes = (event.data as Record<string, unknown> | undefined)?.[
+      'touchedScopes'
+    ];
+    if (
+      !(source && taskId && Array.isArray(touchedScopes)) ||
+      touchedScopes.some((s) => s !== 'user' && s !== 'project')
+    ) {
+      return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
+    }
+    return [
+      {
+        ...base,
+        type: 'workspace.memory.changed',
+        scope,
+        source,
+        taskId,
+        touchedScopes: touchedScopes as Array<'user' | 'project'>,
+      },
+    ];
+  }
   const filePath = getString(event.data, 'filePath');
   const mode = getString(event.data, 'mode');
   // Use the `numberField` helper so NaN /
@@ -1110,7 +1825,7 @@ function normalizeMemoryChanged(
     (mode !== 'append' && mode !== 'replace') ||
     bytesWritten === undefined
   ) {
-    return fallbackDebug(event, base, 'malformed memory_changed payload');
+    return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
   }
   return [
     {
@@ -1180,6 +1895,7 @@ function normalizeSettingsChanged(
   if (!key) {
     return fallbackDebug(event, base, 'malformed settings_changed payload');
   }
+  const mutation = isSettingsChangedData(event.data) && event.data.mutation;
   return [
     {
       ...base,
@@ -1187,6 +1903,25 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+      ...(mutation ? { mutation } : {}),
+    },
+  ];
+}
+
+function normalizeSettingsReloaded(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'malformed settings_reloaded payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.settings.changed',
+      key: 'settings_reloaded',
+      scope: 'workspace',
+      value: event.data,
     },
   ];
 }
@@ -1208,6 +1943,65 @@ function normalizeWorkspaceInitialized(
     );
   }
   return [{ ...base, type: 'workspace.initialized', path, action }];
+}
+
+function normalizeTrustChangeRequested(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const workspaceCwd = getString(event.data, 'workspaceCwd');
+  const desiredState = getString(event.data, 'desiredState');
+  const reason = getString(event.data, 'reason');
+  if (
+    !workspaceCwd ||
+    (desiredState !== 'trusted' && desiredState !== 'untrusted')
+  ) {
+    return fallbackDebug(event, base, 'bad trust_change_requested payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.trust.change.requested',
+      workspaceCwd,
+      desiredState,
+      ...(reason !== undefined ? { reason } : {}),
+    },
+  ];
+}
+
+function normalizeGithubSetupCompleted(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const releaseTag = getString(event.data, 'releaseTag');
+  const readmeUrl = getString(event.data, 'readmeUrl');
+  if (!releaseTag || !readmeUrl || !isRecord(event.data)) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed github_setup_completed payload',
+    );
+  }
+  const workflows = event.data['workflows'];
+  const warnings = event.data['warnings'];
+  return [
+    {
+      ...base,
+      type: 'workspace.github.setup.completed',
+      releaseTag,
+      readmeUrl,
+      ...(typeof event.data['secretsUrl'] === 'string'
+        ? { secretsUrl: event.data['secretsUrl'] }
+        : {}),
+      workflows: Array.isArray(workflows) ? workflows : [],
+      gitignore: event.data['gitignore'],
+      warnings: Array.isArray(warnings)
+        ? warnings.filter(
+            (warning): warning is string => typeof warning === 'string',
+          )
+        : [],
+    },
+  ];
 }
 
 function normalizeMcpBudgetWarning(
@@ -1339,7 +2133,50 @@ function normalizeMcpServerRestartRefused(
       ...base,
       type: 'workspace.mcp.server_restart_refused',
       serverName,
-      reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+      reason: reason as
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required',
+    },
+  ];
+}
+
+function normalizeMcpServerChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+  fixedAction?: 'added' | 'removed',
+): DaemonUiEvent[] {
+  const serverName = getString(event.data, fixedAction ? 'name' : 'serverName');
+  const action = fixedAction ?? getString(event.data, 'action');
+  if (
+    !serverName ||
+    !action ||
+    ![
+      'added',
+      'removed',
+      'approve',
+      'enable',
+      'disable',
+      'authenticate',
+      'clear-auth',
+    ].includes(action)
+  ) {
+    return fallbackDebug(event, base, `malformed ${event.type} payload`);
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.server_changed',
+      serverName,
+      action: action as
+        | 'added'
+        | 'removed'
+        | 'approve'
+        | 'enable'
+        | 'disable'
+        | 'authenticate'
+        | 'clear-auth',
     },
   ];
 }
@@ -1542,6 +2379,31 @@ function normalizeAuthDeviceFlowCancelled(
     );
   }
   return [{ ...base, type: 'auth.device_flow.cancelled', deviceFlowId }];
+}
+
+function normalizePromptCancellation(
+  value: unknown,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const elapsedMs = numberField(value, 'elapsedMs');
+  const cancelledAt = numberField(value, 'cancelledAt');
+  const promptId = stringField(value, 'promptId') ?? base.promptId;
+  if (
+    !promptId ||
+    elapsedMs === undefined ||
+    elapsedMs < 0 ||
+    cancelledAt === undefined
+  )
+    return [];
+  return [
+    {
+      ...base,
+      type: 'prompt.cancelled',
+      promptId,
+      elapsedMs,
+      serverTimestamp: cancelledAt,
+    },
+  ];
 }
 
 function numberField(value: unknown, key: string): number | undefined {

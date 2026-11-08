@@ -1,0 +1,80 @@
+name: 'Assign PR owner'
+
+# Assign one area owner to a PR once it touches that area's paths. Routing is
+# a pure function of the changed file paths and .github/issue-owners.json —
+# no model runs here and the script never reads PR title, body, or comments.
+# Runs on pull_request_target so fork PRs are covered too; the checkout stays
+# on the trusted base ref and the script only reads the PR's file list from
+# the API, so PR content never executes here.
+
+on:
+  pull_request_target:
+    types: ['opened', 'synchronize', 'reopened', 'ready_for_review']
+  workflow_dispatch:
+    inputs:
+      number:
+        description: 'PR number to evaluate'
+        required: true
+        type: 'string'
+      dry_run:
+        description: 'Report the chosen assignee without assigning'
+        required: false
+        default: true
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'assign-pr-owner-${{ github.event.pull_request.number || inputs.number }}'
+  cancel-in-progress: false
+
+jobs:
+  assign:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    # In-repo heads, write-access authors and dispatches run on the ECS pool
+    # (#13245: this job sat 26 minutes in the hosted queue); runs triggered by
+    # other forks keep this token-bearing job on an ephemeral hosted runner.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request_target'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+      issues: 'read'
+      pull-requests: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Checkout owner map'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.pull_request.base.sha || github.sha }}'
+          # Cone mode takes directories: this entry brings both entry scripts,
+          # and cone mode adds the files directly under .github/, which holds
+          # issue-owners.json. Don't list the files themselves — on a reused
+          # ECS workspace cone mode rejects them ("is not a directory"), and
+          # non-cone mode leaves core.sparseCheckout set so the runner's next
+          # full checkout comes out sparse.
+          sparse-checkout: '.github/scripts'
+          persist-credentials: false
+
+      - name: 'Assign area owner'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number || inputs.number }}'
+          DRY_RUN: "${{ inputs.dry_run || 'false' }}"
+        run: |-
+          if [ ! -f .github/scripts/assign-pr-owner.mjs ]; then
+            echo 'Assignment: skipped — trusted base does not contain assign-pr-owner.mjs yet'
+            exit 0
+          fi
+          node .github/scripts/assign-pr-owner.mjs

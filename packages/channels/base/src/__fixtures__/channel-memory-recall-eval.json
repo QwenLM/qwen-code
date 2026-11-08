@@ -1,0 +1,621 @@
+[
+  {
+    "id": "en-deploy-staging",
+    "category": "english",
+    "message": "deploy staging",
+    "entries": [
+      {
+        "id": "deploy",
+        "text": "Deploy staging with the release runbook and verify the canary before promotion. This synthetic fact is deliberately longer than the short fallback limit so it must win through lexical overlap rather than fallback selection."
+      },
+      {
+        "id": "unrelated",
+        "text": "Quarterly accessibility review notes cover keyboard navigation and contrast checks. This synthetic distractor is deliberately longer than the short fallback limit and has no lexical overlap with the query."
+      }
+    ],
+    "relevantIds": ["deploy"],
+    "expectedTopId": "deploy"
+  },
+  {
+    "id": "en-incident-runbook",
+    "category": "english",
+    "message": "incident runbook",
+    "entries": [
+      {
+        "id": "runbook",
+        "text": "The incident runbook documents escalation contacts, mitigation steps, and recovery verification. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "The design system review tracks typography tokens and button spacing. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["runbook"],
+    "expectedTopId": "runbook"
+  },
+  {
+    "id": "en-nfkc-case",
+    "category": "english",
+    "message": "ＤＥＰＬＯＹ ＳＴＡＧＩＮＧ",
+    "entries": [
+      {
+        "id": "normalized",
+        "text": "deploy staging follows the verified canary rollout procedure. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "production rollback ownership is recorded in another operational guide. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["normalized"],
+    "expectedTopId": "normalized"
+  },
+  {
+    "id": "en-repeated-token",
+    "category": "english",
+    "message": "alpha alpha beta",
+    "entries": [
+      {
+        "id": "both",
+        "text": "alpha beta is the approved paired experiment cohort. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "one",
+        "text": "alpha alpha appears repeatedly in historical experiment notes. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["both", "one"],
+    "expectedTopId": "both"
+  },
+  {
+    "id": "en-number-42",
+    "category": "english",
+    "message": "case 42",
+    "entries": [
+      {
+        "id": "forty-two",
+        "text": "case 42 owns the release validation checklist. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "twenty-four",
+        "text": "case 24 owns the unrelated archive migration checklist. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["forty-two"],
+    "expectedTopId": "forty-two"
+  },
+  {
+    "id": "en-stable-tie",
+    "category": "english",
+    "message": "alpha beta",
+    "entries": [
+      {
+        "id": "first-tie",
+        "text": "alpha is recorded in the first source document. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "second-tie",
+        "text": "beta is recorded in the second source document. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["first-tie", "second-tie"],
+    "expectedTopId": "first-tie",
+    "expectedSelectedIds": ["first-tie", "second-tie"]
+  },
+  {
+    "id": "zh-data-governance",
+    "category": "chinese",
+    "message": "数据治理",
+    "entries": [
+      {
+        "id": "governance",
+        "text": "数据治理规范要求登记数据资产责任人并定期复核。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "项目治理会议讨论了季度资源排期和预算。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["governance"],
+    "expectedTopId": "governance"
+  },
+  {
+    "id": "zh-release-window",
+    "category": "chinese",
+    "message": "发布窗口",
+    "entries": [
+      {
+        "id": "window",
+        "text": "发布窗口安排在周三夜间并要求完成回滚演练。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "值班窗口用于处理日常咨询和权限申请。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["window"],
+    "expectedTopId": "window"
+  },
+  {
+    "id": "zh-role-preference",
+    "category": "chinese",
+    "message": "管理员偏好",
+    "entries": [
+      {
+        "id": "preference",
+        "text": "管理员偏好使用最小权限角色并保留审计记录。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "开发人员偏好在本地运行格式检查工具。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["preference"],
+    "expectedTopId": "preference"
+  },
+  {
+    "id": "zh-project-alias",
+    "category": "chinese",
+    "message": "数仓项目",
+    "entries": [
+      {
+        "id": "warehouse",
+        "text": "数仓项目的别名用于关联离线任务和质量规则。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "数据平台项目包含多个独立的实验环境。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["warehouse"],
+    "expectedTopId": "warehouse"
+  },
+  {
+    "id": "zh-incident-owner",
+    "category": "chinese",
+    "message": "故障负责人",
+    "entries": [
+      {
+        "id": "owner",
+        "text": "故障负责人负责更新事件状态并协调恢复验证。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "发布负责人负责确认变更审批和上线窗口。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["owner"],
+    "expectedTopId": "owner"
+  },
+  {
+    "id": "zh-longer-run",
+    "category": "chinese",
+    "message": "数据治理平台",
+    "entries": [
+      {
+        "id": "full-run",
+        "text": "数据治理平台提供资产目录、质量监控和责任人管理。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "partial-run",
+        "text": "数据治理规范定义了数据分类和保留周期。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["full-run", "partial-run"],
+    "expectedTopId": "full-run"
+  },
+  {
+    "id": "zh-nfkc",
+    "category": "chinese",
+    "message": "ＡＢＣ１２ 数据治理",
+    "entries": [
+      {
+        "id": "normalized",
+        "text": "abc12 数据治理登记需要关联审批记录。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "abc34 数据目录更新由平台管理员处理。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["normalized"],
+    "expectedTopId": "normalized"
+  },
+  {
+    "id": "zh-single-character-no-result",
+    "category": "chinese",
+    "message": "数",
+    "entries": [
+      {
+        "id": "long-fact",
+        "text": "数据治理规范包含资产分级和质量责任制度。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": [],
+    "expectedSelectedIds": []
+  },
+  {
+    "id": "ja-hiragana",
+    "category": "japanese",
+    "message": "たのしい",
+    "entries": [
+      {
+        "id": "hiragana",
+        "text": "たのしい作業計画には確認項目と担当者を記録する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "うれしい結果は週次報告で共有する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["hiragana"],
+    "expectedTopId": "hiragana"
+  },
+  {
+    "id": "ja-katakana",
+    "category": "japanese",
+    "message": "カタカナ",
+    "entries": [
+      {
+        "id": "katakana",
+        "text": "カタカナ表記のサービス名は運用台帳で管理する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "テスト計画は品質会議で確認する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["katakana"],
+    "expectedTopId": "katakana"
+  },
+  {
+    "id": "ja-prolonged-mark",
+    "category": "japanese",
+    "message": "コーヒー",
+    "entries": [
+      {
+        "id": "coffee",
+        "text": "コーヒー休憩の予定はチームカレンダーに登録する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "ケーキの注文は別の総務手順で管理する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["coffee"],
+    "expectedTopId": "coffee"
+  },
+  {
+    "id": "ja-mixed-script",
+    "category": "japanese",
+    "message": "東京カフェ",
+    "entries": [
+      {
+        "id": "tokyo-cafe",
+        "text": "東京カフェの出張予約は経費申請に添付する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "大阪ホテルの宿泊明細は月末に精算する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["tokyo-cafe"],
+    "expectedTopId": "tokyo-cafe"
+  },
+  {
+    "id": "ko-data-quality",
+    "category": "korean",
+    "message": "데이터품질",
+    "entries": [
+      {
+        "id": "quality",
+        "text": "데이터품질 기준은 검증 결과와 책임자를 함께 기록한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "서비스운영 회의는 주간 일정과 예산을 검토한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["quality"],
+    "expectedTopId": "quality"
+  },
+  {
+    "id": "ko-release-owner",
+    "category": "korean",
+    "message": "배포담당자",
+    "entries": [
+      {
+        "id": "release-owner",
+        "text": "배포담당자는 승인 상태와 롤백 준비를 확인한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "보안담당자는 권한 검토와 감사 기록을 관리한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["release-owner"],
+    "expectedTopId": "release-owner"
+  },
+  {
+    "id": "ko-incident-runbook",
+    "category": "korean",
+    "message": "장애절차서",
+    "entries": [
+      {
+        "id": "incident-runbook",
+        "text": "장애절차서는 연락망과 복구 검증 순서를 설명한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "교육절차서는 신규 구성원의 온보딩 일정을 설명한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["incident-runbook"],
+    "expectedTopId": "incident-runbook"
+  },
+  {
+    "id": "ko-mixed-number",
+    "category": "korean",
+    "message": "릴리스 42",
+    "entries": [
+      {
+        "id": "release-42",
+        "text": "릴리스 42 검증은 배포 전날 완료해야 한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "release-24",
+        "text": "릴리스 24 기록은 이전 분기의 보관 자료다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["release-42"],
+    "expectedTopId": "release-42"
+  },
+  {
+    "id": "mixed-zh-en",
+    "category": "mixed",
+    "message": "数据 warehouse",
+    "entries": [
+      {
+        "id": "warehouse",
+        "text": "数据 warehouse 迁移需要同步质量校验和血缘信息。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "项目 dashboard 用于展示团队的周度指标。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["warehouse"],
+    "expectedTopId": "warehouse"
+  },
+  {
+    "id": "mixed-ja-en",
+    "category": "mixed",
+    "message": "東京 release",
+    "entries": [
+      {
+        "id": "tokyo-release",
+        "text": "東京 release の承認は運用担当者が確認する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "大阪 deploy は別の変更記録で追跡する。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["tokyo-release"],
+    "expectedTopId": "tokyo-release"
+  },
+  {
+    "id": "mixed-ko-en",
+    "category": "mixed",
+    "message": "데이터 quality",
+    "entries": [
+      {
+        "id": "data-quality",
+        "text": "데이터 quality 보고서는 매주 책임자가 검토한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "서비스 release 계획은 별도 회의에서 확정한다. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["data-quality"],
+    "expectedTopId": "data-quality"
+  },
+  {
+    "id": "mixed-nfkc-number",
+    "category": "mixed",
+    "message": "ＲＥＬＥＡＳＥ ４２ 数据",
+    "entries": [
+      {
+        "id": "release-42-data",
+        "text": "release 42 数据验证需要在上线前完成。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "distractor",
+        "text": "release 24 项目记录属于历史归档。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["release-42-data"],
+    "expectedTopId": "release-42-data"
+  },
+  {
+    "id": "fallback-single",
+    "category": "fallback",
+    "message": "unmatched query",
+    "entries": [
+      {
+        "id": "short-fact",
+        "text": "brief preference note"
+      },
+      {
+        "id": "long-unrelated",
+        "text": "accessibility review material has no matching lexical terms. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["short-fact"],
+    "expectedTopId": "short-fact",
+    "expectedSelectedIds": ["short-fact"]
+  },
+  {
+    "id": "fallback-order",
+    "category": "fallback",
+    "message": "unmatched query",
+    "entries": [
+      {
+        "id": "first",
+        "text": "first short note"
+      },
+      {
+        "id": "second",
+        "text": "second short note"
+      },
+      {
+        "id": "third",
+        "text": "third short note"
+      },
+      {
+        "id": "fourth",
+        "text": "fourth short note"
+      }
+    ],
+    "relevantIds": ["first", "second", "third"],
+    "expectedTopId": "first",
+    "expectedSelectedIds": ["first", "second", "third"]
+  },
+  {
+    "id": "fallback-after-positive",
+    "category": "fallback",
+    "message": "deploy",
+    "entries": [
+      {
+        "id": "first-fallback",
+        "text": "first short note"
+      },
+      {
+        "id": "positive",
+        "text": "deploy follows the production change checklist. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "second-fallback",
+        "text": "second short note"
+      }
+    ],
+    "relevantIds": ["positive", "first-fallback", "second-fallback"],
+    "expectedTopId": "positive",
+    "expectedSelectedIds": ["positive", "first-fallback", "second-fallback"]
+  },
+  {
+    "id": "none-long-unrelated",
+    "category": "no-result",
+    "message": "deploy staging",
+    "entries": [
+      {
+        "id": "unrelated",
+        "text": "quarterly accessibility review covers keyboard navigation and contrast. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": [],
+    "expectedSelectedIds": []
+  },
+  {
+    "id": "none-single-cjk",
+    "category": "no-result",
+    "message": "数",
+    "entries": [
+      {
+        "id": "single",
+        "text": "数据治理规范要求资产责任人定期完成复核。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": [],
+    "expectedSelectedIds": []
+  },
+  {
+    "id": "none-short-latin",
+    "category": "no-result",
+    "message": "x",
+    "entries": [
+      {
+        "id": "single",
+        "text": "x is a deliberately isolated single character in this fact. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": [],
+    "expectedSelectedIds": []
+  },
+  {
+    "id": "none-unsafe-separators",
+    "category": "no-result",
+    "message": "deploy​target",
+    "entries": [
+      {
+        "id": "joined",
+        "text": "deploytarget is a single joined identifier with no separator. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": [],
+    "expectedSelectedIds": []
+  },
+  {
+    "id": "ranking-overlap-count",
+    "category": "ranking",
+    "message": "alpha beta gamma",
+    "entries": [
+      {
+        "id": "one-term",
+        "text": "alpha is documented in the first source. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "two-terms-first",
+        "text": "alpha beta are documented in the second source. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "two-terms-second",
+        "text": "beta gamma are documented in the third source. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["two-terms-first", "two-terms-second", "one-term"],
+    "expectedTopId": "two-terms-first",
+    "expectedSelectedIds": ["two-terms-first", "two-terms-second", "one-term"]
+  },
+  {
+    "id": "ranking-document-order",
+    "category": "ranking",
+    "message": "alpha beta",
+    "entries": [
+      {
+        "id": "first",
+        "text": "alpha appears in the first ranked source. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "id": "second",
+        "text": "beta appears in the second ranked source. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      }
+    ],
+    "relevantIds": ["first", "second"],
+    "expectedTopId": "first",
+    "expectedSelectedIds": ["first", "second"]
+  },
+  {
+    "id": "budget-skip-middle",
+    "category": "budget",
+    "message": "aa bb cc",
+    "entries": [
+      {
+        "id": "first",
+        "text": "aa 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      {
+        "id": "does-not-fit",
+        "text": "bb 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      {
+        "id": "later-fit",
+        "text": "cc 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      }
+    ],
+    "relevantIds": ["first", "later-fit"],
+    "expectedTopId": "first",
+    "expectedSelectedIds": ["first", "later-fit"]
+  }
+]

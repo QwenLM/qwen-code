@@ -1,0 +1,4794 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { undo } from '@codemirror/commands';
+import { EditorView } from '@codemirror/view';
+import { act, useLayoutEffect, type ReactNode } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { I18nProvider } from '../i18n';
+import { WebShellPortalRootContext } from '../portalRoot';
+import {
+  type ComposerSubmitCommit,
+  clearComposerDraftIfMatches,
+  captureComposerDraftGuard,
+  getInlineComposerTags,
+  useComposerCore,
+  type UseComposerCoreOptions,
+  type UseComposerCoreReturn,
+} from './useComposerCore';
+import { getPromptHistoryStorageKey } from './useInputHistory';
+import { createFakeIndexedDB } from '../test/fake-indexeddb';
+import type {
+  UserMessageContentParser,
+  WebShellComposerInput,
+} from '../customization';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+let container: HTMLDivElement | null = null;
+let root: Root | null = null;
+let latest: UseComposerCoreReturn | null = null;
+
+function Harness({
+  composerInput,
+  onSubmit,
+  renderComposerTag,
+  renderComposerTagTooltip,
+  onFileTagClick,
+  parseUserMessageContent,
+  followupState,
+  sessionId,
+  atWorkspaceCwd,
+  composerScopeKey,
+  disableLegacyHistoryFallback,
+  shellModeEnabled,
+  commands,
+  allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
+  onImageIngestionNotice,
+  workspaceUploadBusy,
+  fileDragEnabled,
+  attachmentsEnabled,
+  persistFileReferences,
+  disabled,
+}: {
+  composerInput?: WebShellComposerInput;
+  onSubmit: ReturnType<typeof vi.fn>;
+  renderComposerTag?: () => ReactNode;
+  renderComposerTagTooltip?: () => ReactNode;
+  onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
+  parseUserMessageContent?: UserMessageContentParser;
+  followupState?: {
+    isVisible: boolean;
+    shownAt: number;
+    suggestion: string | null;
+  };
+  sessionId?: string;
+  atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
+  commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
+  onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
+  fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
+  attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  persistFileReferences?: boolean;
+  disabled?: UseComposerCoreOptions['disabled'];
+}) {
+  const composer = useComposerCore({
+    onSubmit,
+    commands: commands ?? [],
+    allowEmptySlashMenu,
+    cycleModeOnTab,
+    onCycleMode,
+    onFocusFooter,
+    editorTheme: {},
+    renderComposerTag,
+    renderComposerTagTooltip,
+    onFileTagClick,
+    parseUserMessageContent,
+    followupState,
+    sessionId,
+    atWorkspaceCwd,
+    composerScopeKey,
+    disableLegacyHistoryFallback,
+    shellModeEnabled,
+    composerInput,
+    composerInputVersion: composerInput ? 1 : undefined,
+    onImageIngestionNotice,
+    workspaceUploadBusy,
+    fileDragEnabled,
+    attachmentsEnabled,
+    persistFileReferences,
+    disabled,
+  });
+  latest = composer;
+
+  return (
+    <div data-web-shell-composer-surface {...composer.imageTransferHandlers}>
+      <div ref={composer.containerRef} />
+      <input data-testid="composer-surface-input" />
+    </div>
+  );
+}
+
+async function mount({
+  composerInput,
+  onSubmit = vi.fn(),
+  renderComposerTag,
+  renderComposerTagTooltip,
+  onFileTagClick,
+  parseUserMessageContent,
+  followupState,
+  sessionId,
+  atWorkspaceCwd,
+  composerScopeKey,
+  disableLegacyHistoryFallback,
+  shellModeEnabled,
+  commands,
+  allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
+  onImageIngestionNotice,
+  workspaceUploadBusy,
+  fileDragEnabled,
+  attachmentsEnabled,
+  persistFileReferences,
+  disabled,
+}: {
+  composerInput?: WebShellComposerInput;
+  onSubmit?: ReturnType<typeof vi.fn>;
+  renderComposerTag?: () => ReactNode;
+  renderComposerTagTooltip?: () => ReactNode;
+  onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
+  parseUserMessageContent?: UserMessageContentParser;
+  followupState?: {
+    isVisible: boolean;
+    shownAt: number;
+    suggestion: string | null;
+  };
+  sessionId?: string;
+  atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
+  commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
+  onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
+  fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
+  attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  persistFileReferences?: boolean;
+  disabled?: UseComposerCoreOptions['disabled'];
+} = {}) {
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+
+  let currentPortalRoot: HTMLElement | null = null;
+  let currentSessionId = sessionId;
+  let currentCommands = commands;
+  let currentAllowEmptySlashMenu = allowEmptySlashMenu;
+  let currentWorkspaceCwd = atWorkspaceCwd;
+  let currentComposerScopeKey = composerScopeKey;
+  let currentAttachmentsEnabled = attachmentsEnabled;
+  const render = () => {
+    root!.render(
+      <WebShellPortalRootContext.Provider value={currentPortalRoot}>
+        <I18nProvider language="en">
+          <Harness
+            composerInput={composerInput}
+            onSubmit={onSubmit}
+            renderComposerTag={renderComposerTag}
+            renderComposerTagTooltip={renderComposerTagTooltip}
+            onFileTagClick={onFileTagClick}
+            parseUserMessageContent={parseUserMessageContent}
+            followupState={followupState}
+            sessionId={currentSessionId}
+            atWorkspaceCwd={currentWorkspaceCwd}
+            composerScopeKey={currentComposerScopeKey}
+            disableLegacyHistoryFallback={disableLegacyHistoryFallback}
+            shellModeEnabled={shellModeEnabled}
+            commands={currentCommands}
+            allowEmptySlashMenu={currentAllowEmptySlashMenu}
+            cycleModeOnTab={cycleModeOnTab}
+            onCycleMode={onCycleMode}
+            onFocusFooter={onFocusFooter}
+            onImageIngestionNotice={onImageIngestionNotice}
+            workspaceUploadBusy={workspaceUploadBusy}
+            fileDragEnabled={fileDragEnabled}
+            attachmentsEnabled={currentAttachmentsEnabled}
+            persistFileReferences={persistFileReferences}
+            disabled={disabled}
+          />
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
+    );
+  };
+
+  await act(async () => {
+    render();
+  });
+  return {
+    onSubmit,
+    setCommands(next: UseComposerCoreOptions['commands']) {
+      currentCommands = next;
+      act(() => render());
+    },
+    setAllowEmptySlashMenu(next: boolean) {
+      currentAllowEmptySlashMenu = next;
+      act(() => render());
+    },
+    setPortalRoot(portalRoot: HTMLElement | null) {
+      currentPortalRoot = portalRoot;
+      act(() => render());
+    },
+    switchSession(
+      nextSessionId: string | undefined,
+      nextWorkspaceCwd: string | undefined,
+      nextAttachmentsEnabled = currentAttachmentsEnabled,
+      nextComposerScopeKey = currentComposerScopeKey,
+    ) {
+      currentSessionId = nextSessionId;
+      currentWorkspaceCwd = nextWorkspaceCwd;
+      currentAttachmentsEnabled = nextAttachmentsEnabled;
+      currentComposerScopeKey = nextComposerScopeKey;
+      act(() => render());
+    },
+    rerender() {
+      act(() => render());
+    },
+    setAttachmentsEnabled(enabled: boolean) {
+      currentAttachmentsEnabled = enabled;
+      act(() => render());
+    },
+  };
+}
+
+async function waitForImageIngestion() {
+  await vi.waitFor(async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
+}
+
+async function flushDraftAttachments() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+const SESSION_A_DRAFT_KEY = getSessionDraftKey('session-a');
+
+afterEach(() => {
+  act(() => root?.unmount());
+  vi.useRealTimers();
+  container?.remove();
+  for (let index = localStorage.length - 1; index >= 0; index--) {
+    const key = localStorage.key(index);
+    if (
+      key === 'qwen-web-shell-command-history' ||
+      key?.startsWith('qwen-web-shell-history') ||
+      key?.startsWith('qwen-web-shell-session-draft:') ||
+      key?.startsWith('qwen-web-shell-pending-task-draft:')
+    ) {
+      localStorage.removeItem(key);
+    }
+  }
+  document.getElementById('web-shell-tooltip-styles')?.remove();
+  root = null;
+  container = null;
+  latest = null;
+  vi.unstubAllGlobals();
+});
+
+function pressHistoryKey(key: 'ArrowUp' | 'ArrowDown') {
+  const editor = container!.querySelector('.cm-content')!;
+  editor.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key,
+      code: key,
+      bubbles: true,
+    }),
+  );
+}
+
+function blurEditor() {
+  container!.querySelector('.cm-editor')!.dispatchEvent(new FocusEvent('blur'));
+}
+
+function getSessionDraftKey(sessionId: string): string {
+  return `qwen-web-shell-session-draft:${encodeURIComponent(sessionId)}`;
+}
+
+function getPendingTaskDraftKey(workspaceCwd: string): string {
+  return `qwen-web-shell-pending-task-draft:${encodeURIComponent(workspaceCwd)}`;
+}
+
+describe('useComposerCore tooltip portal', () => {
+  it('moves the CodeMirror tooltip portal and styles into the shared shadow root', async () => {
+    const { setPortalRoot } = await mount();
+    const tooltipPortal = document.querySelector(
+      '[data-web-shell-tooltip-portal]',
+    );
+    expect(tooltipPortal?.parentElement).toBe(document.body);
+
+    const host = document.createElement('div');
+    document.body.append(host);
+    const shadowRoot = host.attachShadow({ mode: 'open' });
+    const portalRoot = document.createElement('div');
+    shadowRoot.append(portalRoot);
+
+    setPortalRoot(portalRoot);
+
+    expect(tooltipPortal?.parentElement).toBe(portalRoot);
+    expect(
+      shadowRoot.getElementById('web-shell-tooltip-styles'),
+    ).not.toBeNull();
+    host.remove();
+  });
+});
+
+describe('useComposerCore history and drafts', () => {
+  it.each([
+    ['panel', 'ArrowUp', false],
+    ['panel', 'ArrowDown', false],
+    ['search', 'ArrowUp', false],
+    ['search', 'ArrowDown', false],
+    ['panel', 'ArrowUp', true],
+    ['panel', 'ArrowDown', true],
+    ['search', 'ArrowUp', true],
+    ['search', 'ArrowDown', true],
+  ] as const)(
+    'keeps caret control after a wrapped %s recall followed by %s (paged: %s)',
+    async (recall, key, paged) => {
+      const entry = 'line one line two line three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'middle prompt', 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.openHistorySearch());
+      if (recall === 'panel') {
+        act(() => latest!.searchState.restoreSearchMatch!(entry));
+        act(() => latest!.searchState.closeSearch(false));
+      } else {
+        act(() =>
+          latest!.searchState.handleSearchInput({
+            target: { value: 'line two' },
+            nativeEvent: { isComposing: false },
+          } as unknown as React.ChangeEvent<HTMLInputElement>),
+        );
+        act(() =>
+          latest!.searchState.handleSearchKeyDown({
+            key: 'Tab',
+            nativeEvent: { isComposing: false },
+            preventDefault: vi.fn(),
+          } as unknown as React.KeyboardEvent<HTMLInputElement>),
+        );
+      }
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      vi.spyOn(view, 'coordsAtPos').mockImplementation((position) => {
+        const top =
+          position === 0 ? 0 : position === view.state.doc.length ? 44 : 22;
+        return { left: 0, right: 1, top, bottom: top + 22 };
+      });
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps ArrowDown in a short panel recall until paging returns to its draft (paged: %s)',
+    async (paged) => {
+      const entry = 'short entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.restoreSearchMatch!(entry));
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe('newest prompt');
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(onFocusFooter).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps a selected history entry when pressing %s',
+    async (key) => {
+      const entry = 'recalled entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 2, head: 8 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps hard-newline history text while %s moves inside it',
+    async (key) => {
+      const entry = 'line one\nline two\nline three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => latest!.setText('unsent draft'));
+      act(() => pressHistoryKey('ArrowUp'));
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
+  it('places the caret after a draft restored on initial mount', async () => {
+    localStorage.setItem(
+      getSessionDraftKey('restored-session'),
+      'restored draft',
+    );
+
+    const mounted = await mount({
+      sessionId: 'restored-session',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    const view = latest!.viewRef.current!;
+    expect(view.state.doc.toString()).toBe('restored draft');
+    expect(view.state.selection.main.head).toBe(view.state.doc.length);
+    expect(document.activeElement).toBe(view.contentDOM);
+
+    act(() => view.dispatch({ selection: { anchor: 3 } }));
+    mounted.rerender();
+    expect(view.state.selection.main.head).toBe(3);
+  });
+
+  it('keeps a pasted unknown slash query open until its catalog arrives', async () => {
+    const commands: UseComposerCoreOptions['commands'] = [];
+    const mounted = await mount({ commands, allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu).toMatchObject({ query: 'review', items: [] });
+    mounted.setCommands([
+      { name: 'review', description: 'Review', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu?.items[0]?.label).toBe('/review');
+    act(() => latest!.closeSlashMenu());
+    mounted.setCommands([
+      { name: 'review-all', description: 'Review all', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it.each(['/skills ', '/skills rev'])(
+    'opens an unloaded skill catalog for pasted %s',
+    async (text) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText(text));
+      expect(latest!.slashMenu).toMatchObject({
+        kind: 'subcommand',
+        items: [],
+      });
+    },
+  );
+
+  it.each([
+    ['Escape', false],
+    ['Tab', true],
+  ] as const)(
+    'empty menu retains prior %s default behavior',
+    async (key, prevented) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(prevented);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'empty menu owns %s instead of recalling history',
+    async (key) => {
+      const workspaceCwd = '/workspace/empty-menu-arrows';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(workspaceCwd),
+        JSON.stringify(['previous prompt']),
+      );
+      // ArrowDown's no-menu fall-through is the footer focus handoff.
+      const onFocusFooter = vi.fn(() => true);
+      await mount({
+        allowEmptySlashMenu: true,
+        atWorkspaceCwd: workspaceCwd,
+        onFocusFooter,
+      });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+      expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it('empty menu owns Tab on a cycle-mode host', async () => {
+    const onCycleMode = vi.fn();
+    await mount({
+      allowEmptySlashMenu: true,
+      cycleModeOnTab: true,
+      onCycleMode,
+    });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(onCycleMode).not.toHaveBeenCalled();
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+  });
+
+  it('closes an unmatched menu when catalog loading completes without new commands', async () => {
+    const mounted = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    mounted.setAllowEmptySlashMenu(false);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('submits a typed command even when its lazy catalog has no matches', async () => {
+    const { onSubmit } = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    await act(async () => {
+      container!.querySelector('.cm-content')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      '/review',
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('does not serialize the whole document again for a slash menu refresh', async () => {
+    await mount();
+    const doc = latest!.viewRef.current!.state.doc;
+    const textPrototype = Object.getPrototypeOf(
+      Object.getPrototypeOf(doc),
+    ) as typeof doc;
+    const toString = vi.spyOn(textPrototype, 'toString');
+
+    act(() =>
+      latest!.setText(
+        `${Array.from({ length: 10_000 }, () => 'draft').join('\n')}\n/`,
+      ),
+    );
+
+    expect(toString).toHaveBeenCalledOnce();
+  });
+
+  it('keeps slash completion replacement coordinates absolute', async () => {
+    await mount({
+      commands: [
+        {
+          name: 'help',
+          description: 'Show help',
+          source: 'builtin-command',
+        },
+      ],
+    });
+
+    act(() => latest!.setText('context\n/he'));
+
+    expect(latest!.slashMenu).toMatchObject({ from: 8, to: 11 });
+    act(() => latest!.acceptSlashCompletion());
+    expect(latest!.getText()).toBe('context\n/help ');
+  });
+
+  it('does not reread history storage on unrelated rerenders', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem');
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    const readsAfterMount = getItem.mock.calls.length;
+
+    mounted.rerender();
+
+    expect(getItem).toHaveBeenCalledTimes(readsAfterMount);
+  });
+
+  it('blocks submission while an external ingestion lane is busy', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit, workspaceUploadBusy: true });
+
+    act(() => {
+      latest!.setText('review the upload');
+      latest!.submitText();
+    });
+
+    expect(latest!.canSubmit).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('blocks history retry and search-match submit while an upload is busy', async () => {
+    const workspaceCwd = '/workspace/upload-busy';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['previous prompt']),
+    );
+    const onSubmit = vi.fn();
+    await mount({
+      onSubmit,
+      sessionId: 'session-upload-busy',
+      atWorkspaceCwd: workspaceCwd,
+      workspaceUploadBusy: true,
+    });
+
+    act(() => latest!.retryLast());
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMatches).toEqual(['previous prompt']);
+    act(() => latest!.searchState.submitSearchMatch('previous prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('falls back to legacy prompt history until the workspace has its own history', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('legacy prompt');
+
+    act(() => latest!.submitText());
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['legacy prompt']);
+
+    act(() => {
+      latest!.setText('workspace prompt');
+      latest!.submitText();
+    });
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['legacy prompt', 'workspace prompt']);
+  });
+
+  it('isolates prompt history by workspace and reloads it when the workspace changes', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    act(() => {
+      latest!.setText('prompt from a');
+      latest!.submitText();
+    });
+
+    mounted.switchSession('session-b', '/workspace/b');
+    act(() => {
+      latest!.setText('prompt from b');
+      latest!.submitText();
+      pressHistoryKey('ArrowUp');
+    });
+    expect(latest!.getText()).toBe('prompt from b');
+
+    mounted.switchSession('session-a', '/workspace/a');
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('prompt from a');
+
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['prompt from a']);
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/b')) ??
+          '[]',
+      ),
+    ).toEqual(['prompt from b']);
+  });
+
+  it('isolates standalone history without falling back to legacy workspace prompts', async () => {
+    const scope = 'standalone';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy workspace prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      composerScopeKey: scope,
+      disableLegacyHistoryFallback: true,
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('');
+
+    act(() => {
+      latest!.setText('standalone prompt');
+      latest!.submitText();
+      pressHistoryKey('ArrowUp');
+    });
+    expect(latest!.getText()).toBe('standalone prompt');
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey(scope)) ?? '[]',
+      ),
+    ).toEqual(['standalone prompt']);
+  });
+
+  it('keeps legacy prompt history available in the Live scope', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy Live prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      composerScopeKey: 'live',
+      disableLegacyHistoryFallback: false,
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('legacy Live prompt');
+  });
+
+  it('resets history navigation when the session changes', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    act(() => {
+      latest!.setText('oldest');
+      latest!.submitText();
+      latest!.setText('newest');
+      latest!.submitText();
+      latest!.setText('draft a');
+      pressHistoryKey('ArrowUp');
+    });
+    expect(latest!.getText()).toBe('newest');
+
+    mounted.switchSession('session-b', '/workspace/shared');
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('newest');
+
+    mounted.switchSession('session-a', '/workspace/shared');
+    expect(latest!.getText()).toBe('draft a');
+  });
+
+  it('restores unsent text for each session and clears accepted drafts', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    act(() => latest!.setText('draft a'));
+    mounted.switchSession('session-b', '/workspace/shared');
+    expect(latest!.getText()).toBe('');
+
+    act(() => latest!.setText('draft b'));
+    mounted.switchSession('session-a', '/workspace/shared');
+    expect(latest!.getText()).toBe('draft a');
+
+    mounted.switchSession('session-b', '/workspace/shared');
+    expect(latest!.getText()).toBe('draft b');
+
+    act(() => latest!.submitText());
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBeNull();
+  });
+
+  it.each(['inline', 'top'] as const)(
+    'persists complete selected-file metadata through a real %s draft remount',
+    async (placement) => {
+      const tag = {
+        id: 'file:a.ts',
+        kind: 'file' as const,
+        value: 'a.ts',
+        serialized: '@a.ts',
+        metadata: {
+          managedFile: {
+            text: '\uFEFF你好\r\noriginal bytes',
+            sha256: 'frozen',
+            source: 'session-a',
+          },
+        },
+      };
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      act(() => {
+        latest!.setText('explain');
+        latest!.addTags([tag], { placement, position: 'end' });
+        window.dispatchEvent(new Event('pagehide'));
+      });
+      act(() => root!.unmount());
+      root = null;
+      container?.remove();
+      container = null;
+      const { onSubmit } = await mount({
+        sessionId: 'session-a',
+        persistFileReferences: true,
+      });
+      if (placement === 'inline')
+        expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+      else expect(latest!.composerTags).toEqual([tag]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+        inputAnnotations: [
+          expect.objectContaining({
+            reference: expect.objectContaining({ metadata: tag.metadata }),
+          }),
+        ],
+      });
+      expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBeNull();
+    },
+  );
+
+  it.each(['submit', 'clear', 'clearTags'] as const)(
+    'does not resurrect selected-file metadata after %s and immediate unmount',
+    async (action) => {
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      act(() => {
+        latest!.setText('explain');
+        latest!.addTags(
+          [
+            {
+              id: 'file:a',
+              kind: 'file',
+              serialized: '@a',
+              metadata: { managedFile: { text: 'selected bytes' } },
+            },
+          ],
+          { placement: 'top' },
+        );
+      });
+      act(() => window.dispatchEvent(new Event('pagehide')));
+      act(() => {
+        if (action === 'submit') latest!.submitText();
+        else
+          latest!.clear(
+            action === 'clearTags' ? { text: false, tags: true } : undefined,
+          );
+        root!.unmount();
+        root = null;
+      });
+      expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+        action === 'clearTags' ? 'explain' : null,
+      );
+    },
+  );
+
+  it('clears a reloaded snapshot draft after an accepted pending replay', async () => {
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    act(() => {
+      latest!.setText('explain');
+      latest!.addTags(
+        [
+          {
+            id: 'file:a',
+            kind: 'file',
+            serialized: '@a',
+            metadata: { managedFile: { text: 'frozen bytes' } },
+          },
+        ],
+        { placement: 'top' },
+      );
+    });
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    expect(latest!.composerTags).toHaveLength(1);
+    act(() => {
+      latest!.handle.clear();
+      root!.unmount();
+      root = null;
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBeNull();
+  });
+
+  it('restores an unsent new-task draft after leaving and returning', async () => {
+    vi.useFakeTimers();
+    const workspaceCwd = '/workspace/shared';
+    const mounted = await mount({ atWorkspaceCwd: workspaceCwd });
+
+    act(() => latest!.setText('new task draft still typing'));
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey(workspaceCwd)),
+    ).toBeNull();
+    act(() => vi.advanceTimersByTime(1999));
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey(workspaceCwd)),
+    ).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'new task draft still typing',
+    );
+
+    act(() => latest!.setText('draft flushed on switch'));
+    mounted.switchSession('session-a', workspaceCwd);
+    expect(latest!.getText()).toBe('');
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'draft flushed on switch',
+    );
+
+    mounted.switchSession(undefined, '/workspace/other');
+    expect(latest!.getText()).toBe('');
+
+    mounted.switchSession(undefined, workspaceCwd);
+    expect(latest!.getText()).toBe('draft flushed on switch');
+
+    act(() => latest!.setText('draft flushed on unmount'));
+    act(() => root?.unmount());
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'draft flushed on unmount',
+    );
+    container?.remove();
+    root = null;
+    container = null;
+    latest = null;
+
+    await mount({ atWorkspaceCwd: workspaceCwd });
+    expect(latest!.getText()).toBe('draft flushed on unmount');
+  });
+
+  it('keeps an unscoped new-task draft in memory until its workspace resolves', async () => {
+    localStorage.setItem(
+      'qwen-web-shell-pending-task-draft:',
+      'draft from another workspace',
+    );
+    const mounted = await mount();
+
+    expect(latest!.getText()).toBe('');
+    act(() => latest!.setText('current pending draft'));
+
+    mounted.switchSession(undefined, '/workspace/current');
+
+    expect(latest!.getText()).toBe('current pending draft');
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey('/workspace/current')),
+    ).toBe('current pending draft');
+    expect(localStorage.getItem('qwen-web-shell-pending-task-draft:')).toBe(
+      'draft from another workspace',
+    );
+  });
+
+  it('keeps newer unscoped input when the resolved workspace has an older draft', async () => {
+    const workspaceCwd = '/workspace/current';
+    localStorage.setItem(
+      getPendingTaskDraftKey(workspaceCwd),
+      'older persisted draft',
+    );
+    const mounted = await mount();
+
+    act(() => latest!.setText('newer in-memory draft'));
+    mounted.switchSession(undefined, workspaceCwd);
+
+    expect(latest!.getText()).toBe('newer in-memory draft');
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'newer in-memory draft',
+    );
+  });
+
+  it('restores an older workspace draft after a programmatic unscoped reset', async () => {
+    const workspaceCwd = '/workspace/current';
+    localStorage.setItem(
+      getPendingTaskDraftKey(workspaceCwd),
+      'persisted workspace draft',
+    );
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    mounted.switchSession(undefined, undefined);
+    mounted.switchSession(undefined, workspaceCwd);
+
+    expect(latest!.getText()).toBe('persisted workspace draft');
+  });
+
+  it('commits a new-task prompt after its session is allocated', async () => {
+    let commitPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, _files, commitAccepted) => {
+        commitPrompt = commitAccepted;
+        return false;
+      },
+    );
+    const workspaceCwd = '/workspace/new-task';
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: workspaceCwd });
+
+    act(() => {
+      latest!.setText('first prompt');
+      latest!.submitText();
+    });
+    mounted.switchSession('session-created', workspaceCwd);
+    expect(latest!.getText()).toBe('');
+
+    act(() => commitPrompt?.());
+
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey(workspaceCwd)) ?? '[]',
+      ),
+    ).toEqual(['first prompt']);
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey(workspaceCwd)),
+    ).toBeNull();
+  });
+
+  it('commits a delayed queued prompt to history exactly once', async () => {
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, _files, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    await mount({
+      onSubmit,
+      sessionId: 'queued-session',
+      atWorkspaceCwd: '/workspace/queue',
+    });
+
+    act(() => latest!.setText('stale saved draft'));
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('queued-session'))).toBe(
+      'stale saved draft',
+    );
+
+    act(() => {
+      latest!.setText('queued prompt');
+      latest!.submitText();
+    });
+    expect(latest!.getText()).toBe('queued prompt');
+    expect(
+      localStorage.getItem(getPromptHistoryStorageKey('/workspace/queue')),
+    ).toBeNull();
+
+    act(() => {
+      commitQueuedPrompt?.();
+      commitQueuedPrompt?.();
+    });
+    expect(latest!.getText()).toBe('');
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/queue')) ??
+          '[]',
+      ),
+    ).toEqual(['queued prompt']);
+    expect(
+      localStorage.getItem(getSessionDraftKey('queued-session')),
+    ).toBeNull();
+  });
+
+  it('does not clear newer input when a prompt is accepted in the same session', async () => {
+    vi.useFakeTimers();
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, _files, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    await mount({
+      onSubmit,
+      sessionId: 'queued-session',
+      atWorkspaceCwd: '/workspace/queue',
+    });
+
+    act(() => {
+      latest!.setText('queued prompt');
+      latest!.submitText();
+      latest!.setText('newer draft');
+      latest!.addTags([
+        {
+          id: 'newer-tag',
+          value: 'newer tag',
+          serialized: '@newer-tag',
+        },
+      ]);
+    });
+    act(() => commitQueuedPrompt?.());
+
+    expect(latest!.getText()).toBe('newer draft');
+    expect(latest!.composerTags).toEqual([
+      expect.objectContaining({ id: 'newer-tag' }),
+    ]);
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/queue')) ??
+          '[]',
+      ),
+    ).toEqual(['queued prompt']);
+
+    act(() => vi.advanceTimersByTime(2000));
+    expect(localStorage.getItem(getSessionDraftKey('queued-session'))).toBe(
+      'newer draft',
+    );
+  });
+
+  it('does not clear retyped identical input after delayed acceptance', async () => {
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, _files, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    await mount({
+      onSubmit,
+      sessionId: 'queued-session',
+      atWorkspaceCwd: '/workspace/queue',
+    });
+
+    act(() => {
+      latest!.setText('same text');
+      latest!.submitText();
+      latest!.setText('');
+      latest!.setText('same text');
+    });
+    act(() => commitQueuedPrompt?.());
+
+    expect(latest!.getText()).toBe('same text');
+  });
+
+  it('does not clear the next session when a delayed prompt is accepted', async () => {
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, _files, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    const mounted = await mount({
+      onSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    act(() => {
+      latest!.setText('queued in a');
+      latest!.submitText();
+    });
+    mounted.switchSession('session-b', '/workspace/b');
+    act(() => latest!.setText('draft b'));
+    act(() => commitQueuedPrompt?.());
+
+    expect(latest!.getText()).toBe('draft b');
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBeNull();
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBe(
+      'draft b',
+    );
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['queued in a']);
+    expect(
+      localStorage.getItem(getPromptHistoryStorageKey('/workspace/b')),
+    ).toBeNull();
+  });
+
+  it('updates in-memory history for a delayed prompt in the same workspace', async () => {
+    vi.useFakeTimers();
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, _files, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    const mounted = await mount({
+      onSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    act(() => {
+      latest!.setText('queued in a');
+      latest!.submitText();
+    });
+    mounted.switchSession('session-b', '/workspace/shared');
+    act(() => latest!.setText('draft b'));
+    act(() => commitQueuedPrompt?.());
+    act(() => pressHistoryKey('ArrowUp'));
+
+    expect(latest!.getText()).toBe('queued in a');
+    act(() => vi.advanceTimersByTime(2000));
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBe(
+      'draft b',
+    );
+  });
+
+  it('closes history search when the session or workspace changes', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => {
+      latest!.setText('prompt from a');
+      latest!.submitText();
+      latest!.searchState.openHistorySearch();
+    });
+    expect(latest!.searchState.searchMode).toBe(true);
+    expect(latest!.searchState.searchMatches).toEqual(['prompt from a']);
+
+    mounted.switchSession('session-b', '/workspace/b');
+    expect(latest!.searchState.searchMode).toBe(false);
+    expect(latest!.searchState.searchMatches).toEqual([]);
+  });
+
+  it('keeps submitted slash commands out of desktop history search matches', async () => {
+    const workspaceCwd = '/workspace/desktop-slash-filter';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['/theme dark', 'plain prompt']),
+    );
+    await mount({
+      sessionId: 'session-desktop-slash',
+      atWorkspaceCwd: workspaceCwd,
+    });
+
+    act(() => latest!.searchState.openHistorySearch());
+    // The desktop panel hides slash entries because the slash completion
+    // menu re-offers them; only the touch backend lists them (pinned by the
+    // mobile suite).
+    expect(latest!.searchState.searchMatches).toEqual(['plain prompt']);
+  });
+
+  it('keeps the stored draft when a history panel recall is followed by a session switch', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/panel-recall',
+    });
+    act(() => {
+      latest!.setText('older saved input');
+      latest!.submitText();
+      latest!.setText('my draft');
+    });
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    expect(latest!.getText()).toBe('older saved input');
+    // The panel click flow closes without restoring the pre-search draft.
+    act(() => latest!.searchState.closeSearch(false));
+
+    mounted.switchSession('session-b', '/workspace/panel-recall');
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', '/workspace/panel-recall');
+    expect(latest!.getText()).toBe('my draft');
+  });
+
+  it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {
+    vi.useFakeTimers();
+    await mount({
+      sessionId: 'vis-session',
+      atWorkspaceCwd: '/workspace/vis',
+    });
+
+    act(() => latest!.setText('draft before hide'));
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBeNull();
+
+    const originalVisibility = document.visibilityState;
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'hidden',
+      configurable: true,
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBe(
+      'draft before hide',
+    );
+
+    act(() => latest!.setText('draft before pagehide'));
+    act(() => {
+      window.dispatchEvent(new PageTransitionEvent('pagehide'));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBe(
+      'draft before pagehide',
+    );
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: originalVisibility,
+      configurable: true,
+    });
+  });
+});
+
+describe('useComposerCore paste', () => {
+  it.each([
+    { text: 'https://example.com/image.png', images: 1, attach: true },
+    { text: ' http://example.com/image.png ', images: 1, attach: true },
+    {
+      text: 'PPT text with https://example.com/image.png',
+      images: 1,
+      attach: false,
+    },
+    {
+      text: 'https://example.com/image.png\ncaption',
+      images: 1,
+      attach: false,
+    },
+    { text: 'https://example.com/image.png', images: 0, attach: false },
+    { text: 'https://example.com/image.png', images: 2, attach: false },
+  ])(
+    'distinguishes image URLs from editable text: $text / $images images',
+    async ({ text, images, attach }) => {
+      const onImageIngestionNotice = vi.fn();
+      await mount({ onImageIngestionNotice });
+      const files = Array.from(
+        { length: images },
+        () => new File(['png'], 'image.png', { type: 'image/png' }),
+      );
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files,
+          items: [],
+          types: images ? ['Files', 'text/plain'] : ['text/plain'],
+          getData: (type: string) => (type === 'text/plain' ? text : ''),
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+
+      expect(latest!.getText()).toBe(attach ? '' : text);
+      expect(latest!.pastedImages).toHaveLength(attach ? 1 : 0);
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/fork ', '  /extensions install ', '!curl '])(
+    'keeps image URL arguments inline in command drafts: %s',
+    async (draft) => {
+      const { onSubmit } = await mount();
+      act(() => {
+        latest!.setText(draft);
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: draft.length },
+        });
+      });
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.getText()).toBe(draft + text);
+      expect(latest!.pastedImages).toEqual([]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]![0]).toBe((draft + text).trim());
+      expect(onSubmit.mock.calls[0]![1]).toBeUndefined();
+    },
+  );
+
+  it.each(['disabled', 'shell', 'attachments-disabled', 'other-control'])(
+    'keeps URL text editable for %s',
+    async (mode) => {
+      await mount({
+        disabled: mode === 'disabled',
+        attachmentsEnabled: mode !== 'attachments-disabled',
+      });
+      if (mode === 'shell') act(() => latest!.toggleShellMode());
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      const target = container!.querySelector(
+        mode === 'other-control'
+          ? '[data-testid="composer-surface-input"]'
+          : '.cm-content',
+      )!;
+      act(() => target.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pendingImageBatchCount).toBe(0);
+      if (mode === 'shell' || mode === 'attachments-disabled') {
+        expect(latest!.getText()).toBe(text);
+      }
+      if (mode === 'other-control') expect(event.defaultPrevented).toBe(false);
+    },
+  );
+
+  it('warns when a paste advertises files without exposing any file', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ onImageIngestionNotice });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [], items: [], types: ['Files'], getData: () => '' },
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    await waitForImageIngestion();
+    expect(latest!.pastedImages).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledOnce();
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      '1 file(s) were unavailable and skipped.',
+    );
+  });
+
+  it('pastes editable text when PPT clipboard also includes an image', async () => {
+    const { onSubmit } = await mount();
+    const text = '第一季度收入增长 20%\n请改写这段文字。';
+    const image = new File(['png'], 'ppt-text.png', { type: 'image/png' });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [image],
+        items: [
+          { kind: 'file', type: 'image/png', getAsFile: () => image },
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+    await waitForImageIngestion();
+
+    expect.soft(latest!.getText()).toBe(text);
+    expect.soft(latest!.pastedImages).toEqual([]);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      text,
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('lets short plain text paste directly into the editor', async () => {
+    await mount();
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => 'line\n'.repeat(20),
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect(latest!.getText()).toBe('line\n'.repeat(20));
+    expect(latest!.pastedFiles).toEqual([]);
+  });
+
+  it.each([
+    { draft: 'old draft', from: 0, to: 9, paste: 'x'.repeat(8000) },
+    { draft: '', from: 0, to: 0, paste: '!echo ' + 'x'.repeat(8000) },
+    { draft: '', from: 0, to: 0, paste: '/fork ' + 'x'.repeat(8000) },
+    { draft: '/fork ', from: 6, to: 6, paste: 'x'.repeat(8000) },
+    { draft: '/clear', from: 0, to: 0, paste: 'x'.repeat(8000) },
+    { draft: '/fork do something', from: 0, to: 0, paste: 'x'.repeat(8000) },
+    { draft: '!echo hi', from: 0, to: 0, paste: 'x'.repeat(8000) },
+    { draft: '  !echo ', from: 8, to: 8, paste: 'x'.repeat(8000) },
+  ])(
+    'keeps replacement and command pastes inline: $draft',
+    async ({ draft, from, to, paste }) => {
+      const { onSubmit } = await mount();
+      act(() => {
+        latest!.setText(draft);
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: from, head: to },
+        });
+      });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: { getData: () => paste },
+      });
+      act(() => {
+        container!.querySelector('.cm-content')!.dispatchEvent(event);
+      });
+      const expected = draft.slice(0, from) + paste + draft.slice(to);
+      expect(latest!.getText()).toBe(expected);
+      expect(latest!.pastedFiles).toEqual([]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]![0]).toBe(expected.trim());
+      expect(onSubmit.mock.calls[0]![2]).toBeUndefined();
+    },
+  );
+
+  it('folds a long plain text paste into an attachment card', async () => {
+    await mount();
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect(latest!.getText()).toBe('');
+    expect(latest!.pastedFiles).toEqual([
+      {
+        name: 'line line line line line….txt',
+        media_type: 'text/plain',
+        text,
+        size: text.length,
+      },
+    ]);
+  });
+
+  it('folds a single minified line into a card', async () => {
+    await mount();
+    const text = 'x'.repeat(8_000);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect.soft(latest!.getText()).toBe('');
+    expect.soft(latest!.pastedFiles).toHaveLength(1);
+  });
+
+  it('keeps inline when attachments are unavailable', async () => {
+    await mount({ attachmentsEnabled: false });
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect.soft(latest!.getText()).toBe(text);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+  });
+
+  it('folds the text and skips the image when both are on the clipboard', async () => {
+    await mount();
+    const text = 'line\n'.repeat(200);
+    const image = new File(['png'], 'shot.png', { type: 'image/png' });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [image],
+        items: [
+          { kind: 'file', type: 'image/png', getAsFile: () => image },
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+    await waitForImageIngestion();
+
+    expect.soft(latest!.getText()).toBe('');
+    expect.soft(latest!.pastedImages).toEqual([]);
+    expect.soft(latest!.pastedFiles).toHaveLength(1);
+  });
+
+  it('submits a folded paste as an attachment alongside the typed text', async () => {
+    const { onSubmit } = await mount();
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    act(() => latest!.insertText('summarise this'));
+    act(() => latest!.submitText());
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      'summarise this',
+      undefined,
+      [
+        {
+          name: 'line line line line line….txt',
+          media_type: 'text/plain',
+          text,
+          size: text.length,
+        },
+      ],
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('submits the folded paste rather than a visible follow-up suggestion', async () => {
+    const { onSubmit } = await mount({
+      followupState: {
+        isVisible: true,
+        shownAt: Date.now(),
+        suggestion: 'inspect the orders table and summarize',
+      },
+    });
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    act(() => latest!.submitText());
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '',
+      undefined,
+      [
+        {
+          name: 'line line line line line….txt',
+          media_type: 'text/plain',
+          text,
+          size: text.length,
+        },
+      ],
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('leaves a paste aimed at another control on the surface alone', async () => {
+    await mount();
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-testid="composer-surface-input"]')!
+        .dispatchEvent(event);
+    });
+
+    expect.soft(event.defaultPrevented).toBe(false);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+    expect.soft(latest!.getText()).toBe('');
+  });
+
+  it('keeps "!" and "?" typed into a focused Managed composer literal', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    const view = EditorView.findFromDOM(
+      document.querySelector<HTMLElement>('.cm-content')!,
+    )!;
+    for (const key of ['!', '?']) {
+      const handled = view.state
+        .facet(EditorView.inputHandler)
+        .some((handler) =>
+          handler(view, 0, 0, key, () =>
+            view.state.update({ changes: { from: 0, insert: key } }),
+          ),
+        );
+      expect({ key, handled }).toEqual({ key, handled: false });
+      expect(latest!.shellMode).toBe(false);
+    }
+  });
+
+  it('keeps Managed bang input literal and cannot enter the global Shell history mode', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+    act(() => latest!.setShellMode(true));
+    expect(latest!.shellMode).toBe(false);
+    const event = new KeyboardEvent('keydown', {
+      key: '!',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      (document.activeElement as HTMLElement)?.blur();
+      document.body.dispatchEvent(event);
+    });
+    expect(latest!.shellMode).toBe(false);
+    expect(latest!.getText()).toBe('!');
+  });
+
+  it('leaves a long paste inline in shell mode', async () => {
+    await mount();
+    act(() => latest!.toggleShellMode());
+    expect.soft(latest!.shellMode).toBe(true);
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    // CodeMirror preventDefaults its own pastes, so the behaviour is the
+    // oracle here: the command text stays in the editor and no card appears.
+    expect.soft(latest!.pastedFiles).toEqual([]);
+    expect(latest!.getText()).toBe(text);
+  });
+
+  it('leaves a long paste inline in a disabled composer', async () => {
+    await mount({ disabled: true });
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    // A disabled composer has no prompt to attach to, so nothing is folded.
+    expect(latest!.pastedFiles).toEqual([]);
+  });
+
+  it('deduplicates the name of a second folded paste', async () => {
+    await mount();
+    const paste = (text: string) => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [],
+          items: [
+            { kind: 'string', type: 'text/plain', getAsFile: () => null },
+          ],
+          types: ['text/plain'],
+          getData: () => text,
+        },
+      });
+      act(() => {
+        container!.querySelector('.cm-content')!.dispatchEvent(event);
+      });
+    };
+
+    // Two pastes of the same content share a title, so the second one still
+    // needs a name of its own.
+    paste('line\n'.repeat(200));
+    paste('line\n'.repeat(200));
+
+    expect(latest!.pastedFiles.map((file) => file.name)).toEqual([
+      'line line line line line….txt',
+      'line line line line line… (1).txt',
+    ]);
+  });
+
+  it('moves a folded paste into the editor and undoes it in one step', async () => {
+    await mount();
+    act(() => latest!.insertText('prefix'));
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    act(() => latest!.expandPastedText(0));
+
+    expect.soft(latest!.getText()).toBe('prefix' + text);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+
+    act(() => {
+      undo(latest!.viewRef.current!);
+    });
+
+    expect(latest!.getText()).toBe('prefix');
+  });
+
+  it('ingests copied file references after a drop intent choice', async () => {
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    ];
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'notes.txt', data: files[1] },
+    ]);
+  });
+
+  it('drops held attachments with a notice when attachments become unavailable', async () => {
+    const onImageIngestionNotice = vi.fn();
+    const mounted = await mount({ onImageIngestionNotice });
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedFiles).toHaveLength(1);
+
+    mounted.setAttachmentsEnabled(false);
+
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.any(String),
+    );
+  });
+
+  it('rejects new attachment ingestion while attachments are unavailable', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ attachmentsEnabled: false, onImageIngestionNotice });
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await Promise.resolve();
+    });
+
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.any(String),
+    );
+  });
+
+  it('keeps draft images and pasted files across a session switch', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const mounted = await mount({ sessionId: 'session-a' });
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    ];
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const stagedImages = [...latest!.pastedImages];
+    const stagedFiles = [...latest!.pastedFiles];
+    expect(stagedImages).toHaveLength(1);
+    expect(stagedFiles).toHaveLength(1);
+    await flushDraftAttachments();
+
+    mounted.switchSession('session-b', undefined);
+    await flushDraftAttachments();
+    expect.soft(latest!.pastedImages).toEqual([]);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+    expect(
+      fake.stores.get('attachments')?.has(getSessionDraftKey('session-b')),
+    ).toBe(false);
+
+    mounted.switchSession('session-a', undefined);
+    await flushDraftAttachments();
+
+    expect(latest!.pastedImages).toEqual(stagedImages);
+    expect(latest!.pastedFiles).toEqual(stagedFiles);
+  });
+
+  it('restores draft attachments after the composer remounts', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const staged = [...latest!.pastedImages];
+    expect(staged).toHaveLength(1);
+
+    act(() => root?.unmount());
+    container?.remove();
+
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+
+    expect(latest!.pastedImages).toEqual(staged);
+  });
+
+  it('drops the stored attachments once the prompt is sent', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const onSubmit = vi.fn();
+    await mount({ sessionId: 'session-a', onSubmit });
+    act(() => latest!.insertText('hello'));
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => latest!.submitText());
+    await flushDraftAttachments();
+
+    expect(onSubmit).toHaveBeenCalled();
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
+  });
+
+  it('drops the stored attachments when the composer is cleared', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => latest!.handle.clear());
+    await flushDraftAttachments();
+
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
+  });
+
+  it('keeps the archive when attachments are unavailable on the first frame', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => root?.unmount());
+    container?.remove();
+
+    // The daemon has not advertised `session_attachments` yet: the composer
+    // must not delete a draft it has never read.
+    const remounted = await mount({
+      sessionId: 'session-a',
+      attachmentsEnabled: false,
+    });
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(true);
+    expect(latest!.pastedImages).toEqual([]);
+
+    remounted.setAttachmentsEnabled(true);
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('drops stored attachments as chips are removed', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['a'], 'a.png', { type: 'image/png' }),
+          new File(['b'], 'b.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(
+      (stored.get(SESSION_A_DRAFT_KEY) as { images: unknown[] }).images,
+    ).toHaveLength(2);
+
+    act(() => latest!.removeImage(0));
+    await flushDraftAttachments();
+    expect(
+      (stored.get(SESSION_A_DRAFT_KEY) as { images: unknown[] }).images,
+    ).toHaveLength(1);
+
+    act(() => latest!.removeImage(0));
+    await flushDraftAttachments();
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
+  });
+
+  it('moves draft attachments onto the session key when the draft materializes', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const onSubmit = vi.fn(() => false);
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const pendingKey = getPendingTaskDraftKey('/work/b');
+    expect(fake.stores.get('attachments')?.has(pendingKey)).toBe(true);
+
+    act(() => {
+      latest!.setText('original');
+      latest!.submitText();
+    });
+    // A rejected submit keeps the staged attachments as the live draft.
+    expect(latest!.pastedImages).toHaveLength(1);
+    const call = onSubmit.mock.calls[0] as unknown as [
+      string,
+      unknown,
+      unknown,
+      () => void,
+      import('./useComposerCore').ComposerSubmitMetadata,
+    ];
+    await call[4].retainDraftDuringSessionCreation!(
+      async (onSessionAllocated) => {
+        onSessionAllocated('created-session');
+        mounted.switchSession('created-session', '/work/b');
+        await act(async () => {});
+      },
+    );
+    await flushDraftAttachments();
+
+    expect(
+      fake.stores
+        .get('attachments')
+        ?.has(getSessionDraftKey('created-session')),
+    ).toBe(true);
+    expect(fake.stores.get('attachments')?.has(pendingKey)).toBe(false);
+  });
+
+  it('does not leak or delete an archive while its restore is still reading', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const keyA = getSessionDraftKey('session-a');
+    const stored = {
+      images: [{ data: 'c3RvcmVk', media_type: 'image/png' }],
+      files: [],
+    };
+    // Pre-create the store so the schema's upgrade does not replace the seed.
+    fake.db.createObjectStore('attachments');
+    fake.db.seed('attachments', keyA, stored);
+
+    const mounted = await mount({ sessionId: 'session-a' });
+    // A's read is held, so the composer is still empty when we leave for B.
+    mounted.switchSession('session-b', undefined);
+    await flushDraftAttachments();
+
+    fake.releaseLoads();
+    await flushDraftAttachments();
+
+    // A's late read must not land in B, and the empty outgoing snapshot must
+    // not have deleted A's archive.
+    expect(latest!.pastedImages).toEqual([]);
+    expect(fake.stores.get('attachments')?.get(keyA)).toEqual(stored);
+  });
+
+  it('drops the stored attachments when Backspace removes the last chip', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Backspace',
+          code: 'Backspace',
+          bubbles: true,
+        }),
+      );
+    });
+    await flushDraftAttachments();
+
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
+  });
+
+  it('claims image drops, blocks submit while reading, and submits image-only', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit });
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: [file], items: [], types: ['Files'], dropEffect: 'none' },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+      latest!.submitText();
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.pendingImageBatchCount).toBe(1);
+
+    await waitForImageIngestion();
+    expect(latest!.pendingImageBatchCount).toBe(0);
+    expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      '',
+      [expect.objectContaining({ media_type: 'image/png' })],
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('ingests dropped text files, sanitizes names, and submits them', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit });
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([
+        new File(['line1\nline2'], 'my app.log', { type: 'text/plain' }),
+        new File(['second'], 'my app.log', { type: '' }),
+      ]);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'my app.log', data: expect.any(File) },
+      { name: 'my app (1).log', data: expect.any(File) },
+    ]);
+    expect(latest!.hasAttachments).toBe(true);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      '',
+      undefined,
+      [
+        expect.objectContaining({ name: 'my app.log' }),
+        expect.objectContaining({ name: 'my app (1).log' }),
+      ],
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('removes a pasted file via its chip index', async () => {
+    await mount();
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([
+        new File(['one'], 'one.log', { type: 'text/plain' }),
+        new File(['two'], 'two.log', { type: 'text/plain' }),
+      ]);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedFiles).toHaveLength(2);
+
+    act(() => latest!.removeFile(0));
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'two.log' }]);
+  });
+
+  it('restores files with sanitized deduped names', async () => {
+    await mount();
+    act(() => {
+      latest!.handle.restoreFiles([
+        { name: 'app.log', media_type: 'text/plain', text: 'a' },
+        { name: 'app.log', media_type: 'text/plain', text: 'b' },
+      ]);
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'app.log', text: 'a' },
+      { name: 'app (1).log', text: 'b' },
+    ]);
+  });
+
+  it('keeps drag feedback across composer children and clears it globally', async () => {
+    await mount();
+    const surface = container!.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const editor = container!.querySelector('.cm-content')!;
+    const dataTransfer = {
+      files: [],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => null }],
+      types: ['Files'],
+      dropEffect: 'none',
+    };
+    const dispatchDrag = (
+      target: Element,
+      type: 'dragenter' | 'dragleave' | 'dragover',
+      relatedTarget: EventTarget | null = null,
+    ) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        dataTransfer: { value: dataTransfer },
+        relatedTarget: { value: relatedTarget },
+      });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    act(() => {
+      dispatchDrag(editor, 'dragenter');
+    });
+    expect(latest!.imageDragActive).toBe(true);
+
+    act(() => {
+      dispatchDrag(editor, 'dragleave', surface);
+      dispatchDrag(editor, 'dragover');
+    });
+    expect(latest!.imageDragActive).toBe(true);
+    expect(dataTransfer.dropEffect).toBe('copy');
+
+    act(() => {
+      window.dispatchEvent(new Event('dragend'));
+    });
+    expect(latest!.imageDragActive).toBe(false);
+  });
+
+  it('fileDragEnabled={false} leaves file drag-and-drop inert', async () => {
+    await mount({ fileDragEnabled: false });
+    const surface = container!.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const editor = container!.querySelector('.cm-content')!;
+    const dataTransfer = {
+      files: [],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => null }],
+      types: ['Files'],
+      dropEffect: 'none',
+    };
+    const dispatchDrag = (target: Element, type: string) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    act(() => {
+      dispatchDrag(editor, 'dragenter');
+      dispatchDrag(editor, 'dragover');
+    });
+    // No drag highlight, no drop-target feedback.
+    expect(latest!.imageDragActive).toBe(false);
+    expect(dataTransfer.dropEffect).toBe('none');
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: {
+        files: [new File(['png'], 'photo.png', { type: 'image/png' })],
+        items: [],
+        types: ['Files'],
+        dropEffect: 'none',
+      },
+    });
+    act(() => {
+      surface.dispatchEvent(drop);
+    });
+    await waitForImageIngestion();
+    // Nothing is ingested on the inline lane, and the drop itself is
+    // cancelled so the browser cannot navigate to the dropped file.
+    expect(drop.defaultPrevented).toBe(true);
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+  });
+
+  it('keeps batch order, normalizes BMP, and aggregates rejected drops', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ onImageIngestionNotice });
+    const first = new File(['first'], 'first.bmp', { type: 'image/x-bmp' });
+    const tooLarge = new File(['zip'], 'archive.zip', {
+      type: 'application/zip',
+    });
+    Object.defineProperty(tooLarge, 'size', { value: 8 * 1024 * 1024 + 1 });
+    const second = new File(['second'], 'second.png', { type: 'image/png' });
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([first, tooLarge]);
+      drop([second]);
+    });
+    await waitForImageIngestion();
+
+    expect(latest!.pastedImages.map((image) => image.media_type)).toEqual([
+      'image/bmp',
+      'image/png',
+    ]);
+    expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('1'),
+    );
+  });
+
+  it('continues later image batches when the notice consumer throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onImageIngestionNotice = vi.fn(() => {
+      throw new Error('host notice failed');
+    });
+    await mount({ onImageIngestionNotice });
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      const tooLarge = new File(['zip'], 'archive.zip', {
+        type: 'application/zip',
+      });
+      Object.defineProperty(tooLarge, 'size', {
+        value: 8 * 1024 * 1024 + 1,
+      });
+      drop([tooLarge]);
+      drop([new File(['png'], 'photo.png', { type: 'image/png' })]);
+    });
+    await waitForImageIngestion();
+
+    expect(onImageIngestionNotice).toHaveBeenCalledOnce();
+    expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
+
+  it('aborts and isolates readers when the composer owner changes', async () => {
+    class DeferredFileReader {
+      static instances: DeferredFileReader[] = [];
+      result: string | ArrayBuffer | null = null;
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      abort = vi.fn(() => this.onabort?.({} as ProgressEvent<FileReader>));
+
+      constructor() {
+        DeferredFileReader.instances.push(this);
+      }
+
+      readAsDataURL() {}
+    }
+    vi.stubGlobal('FileReader', DeferredFileReader);
+    const onImageIngestionNotice = vi.fn();
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+      onImageIngestionNotice,
+    });
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: [file], items: [], types: ['Files'], dropEffect: 'none' },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    });
+    await act(async () => Promise.resolve());
+    expect(latest!.pendingImageBatchCount).toBe(1);
+    expect(DeferredFileReader.instances).toHaveLength(1);
+
+    mounted.switchSession('session-b', '/workspace/b');
+    expect(DeferredFileReader.instances[0]!.abort).toHaveBeenCalledOnce();
+    expect(latest!.pendingImageBatchCount).toBe(0);
+    expect(latest!.pastedImages).toEqual([]);
+    expect(onImageIngestionNotice).not.toHaveBeenCalled();
+  });
+});
+
+describe('useComposerCore tags', () => {
+  it('makes only inline file tags previewable with the file click handler', async () => {
+    const onFileTagClick = vi.fn();
+    await mount({
+      composerInput: {
+        tags: [
+          { id: 'file:notes.txt', kind: 'file', value: 'notes.txt' },
+          { id: 'table:orders', kind: 'table', value: 'orders' },
+        ],
+        tagPlacement: 'inline',
+      },
+      onFileTagClick,
+    });
+
+    const chips = document.body.querySelectorAll('span[role="button"]');
+    expect(chips).toHaveLength(1);
+    act(() => (chips[0] as HTMLElement).click());
+    expect(onFileTagClick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: expect.objectContaining({ kind: 'file', value: 'notes.txt' }),
+        placement: 'composer',
+        readonly: false,
+      }),
+    );
+  });
+
+  it('uses file format icons while preserving explicit icons and directories', async () => {
+    await mount({
+      composerInput: {
+        tags: [
+          { id: 'html', kind: 'file', value: 'docs/page.html' },
+          {
+            id: 'custom',
+            kind: 'file',
+            value: 'other.html',
+            icon: '/custom.svg',
+          },
+          {
+            id: 'folder',
+            kind: 'file',
+            value: 'docs',
+            metadata: { fileKind: 'directory' },
+          },
+        ],
+        tagPlacement: 'inline',
+      },
+    });
+
+    expect(
+      document.body.querySelectorAll('[data-file-type-icon="html"]'),
+    ).toHaveLength(1);
+    expect(
+      document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(2);
+    expect(latest!.viewRef.current!.state.doc.toString()).toContain(
+      'docs/page.html',
+    );
+  });
+
+  it('resubmits restored input annotations with the draft', async () => {
+    const { onSubmit } = await mount();
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 8,
+        text: '@file.ts',
+        reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+      },
+    ];
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.(inputAnnotations);
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@file.ts\n\nfix it',
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        inputAnnotations,
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('keeps earlier annotations when another restored prompt is prepended', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@a old');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 2,
+          text: '@a',
+          reference: { id: 'file:a' },
+        },
+      ]);
+      latest!.handle.setText('@b new\n@a old');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 2,
+          text: '@b',
+          reference: { id: 'file:b' },
+        },
+      ]);
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@b new\n@a old',
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+        inputAnnotations: [
+          expect.objectContaining({ start: 0, end: 2, text: '@b' }),
+          expect.objectContaining({ start: 7, end: 9, text: '@a' }),
+        ],
+      },
+    );
+  });
+
+  it('maps restored annotations through edits before their range', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 8,
+          text: '@file.ts',
+          reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+        },
+      ]);
+      latest!.viewRef.current!.dispatch({
+        changes: { from: 0, insert: 'please ' },
+      });
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      'please @file.ts\n\nfix it',
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+        inputAnnotations: [
+          expect.objectContaining({
+            start: 7,
+            end: 15,
+            text: '@file.ts',
+          }),
+        ],
+      },
+    );
+  });
+
+  it('drops a restored annotation when its range is edited', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 8,
+          text: '@file.ts',
+          reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+        },
+      ]);
+      latest!.viewRef.current!.dispatch({
+        changes: { from: 1, to: 2, insert: 'X' },
+      });
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@Xile.ts\n\nfix it',
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('keeps the composer API stable across tag updates', async () => {
+    await mount();
+    const api = latest!.handle;
+
+    act(() => {
+      api.addTags([{ id: 'orders', value: 'orders' }]);
+    });
+
+    expect(latest!.handle).toBe(api);
+  });
+
+  it('does not rerender when removing a missing tag', async () => {
+    await mount();
+    const render = latest;
+    const dispatch = vi.spyOn(latest!.viewRef.current!, 'dispatch');
+
+    act(() => {
+      latest!.handle.removeTag('missing');
+    });
+
+    expect(latest).toBe(render);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('falls back when inline custom tag rendering throws', async () => {
+    const error = new Error('boom');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await mount({
+      composerInput: {
+        tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+        tagPlacement: 'inline',
+      },
+      renderComposerTag: () => {
+        throw error;
+      },
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] inline tag renderContent failed',
+      error,
+    );
+    expect(document.body.textContent).toContain('orders');
+
+    warn.mockRestore();
+  });
+
+  it('falls back when inline custom tag tooltip rendering throws', async () => {
+    const error = new Error('bad tooltip');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await mount({
+      composerInput: {
+        tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+        tagPlacement: 'inline',
+      },
+      renderComposerTagTooltip: () => {
+        throw error;
+      },
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] inline tag tooltip render failed',
+      error,
+    );
+    expect(document.body.textContent).toContain('orders');
+
+    warn.mockRestore();
+  });
+
+  it.each([undefined, 'file'] as const)(
+    'uses a custom inline tooltip without a native title for kind %s',
+    async (kind) => {
+      await mount({
+        composerInput: {
+          tags: [{ id: 'orders', kind, label: 'Table', value: 'orders' }],
+          tagPlacement: 'inline',
+        },
+        renderComposerTagTooltip: () => 'Details',
+      });
+
+      const tooltip = document.body.querySelector('[role="tooltip"]');
+      expect(tooltip?.textContent).toBe('Details');
+      expect(tooltip?.parentElement?.getAttribute('title')).toBeNull();
+      expect(tooltip?.id).toBeTruthy();
+      expect(tooltip?.parentElement?.getAttribute('aria-describedby')).toBe(
+        tooltip?.id,
+      );
+    },
+  );
+
+  it('falls back to a native title when attaching an inline tooltip fails', async () => {
+    const error = new Error('append failed');
+    const appendChild = HTMLElement.prototype.appendChild;
+    let failingTooltip: HTMLElement | null = null;
+    let readFailingChipTitle: (() => string) | null = null;
+    let dispatchOnFailingChip: ((event: Event) => boolean) | null = null;
+    const appendChildSpy = vi
+      .spyOn(HTMLElement.prototype, 'appendChild')
+      .mockImplementation(function (child) {
+        if (
+          child instanceof HTMLElement &&
+          child.getAttribute('role') === 'tooltip'
+        ) {
+          failingTooltip = child;
+          readFailingChipTitle = () => this.title;
+          dispatchOnFailingChip = (event) => this.dispatchEvent(event);
+          throw error;
+        }
+        return appendChild.call(this, child);
+      });
+    // The failed tooltip root's unmount is only observable from inside the
+    // catch: mount()'s act() drains the deferred microtask before returning.
+    const probeRoot = createRoot(document.createElement('span'));
+    const unmount = vi.spyOn(
+      Object.getPrototypeOf(probeRoot) as Root,
+      'unmount',
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {
+      expect(readFailingChipTitle?.()).toBe('Details');
+      // Root.unmount() flushes sync work across ALL roots, which would re-enter
+      // CodeMirror mid-update (#12826), so it must not run inside the catch.
+      expect(unmount).not.toHaveBeenCalled();
+    });
+
+    try {
+      await mount({
+        composerInput: {
+          tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+          tagPlacement: 'inline',
+        },
+        renderComposerTagTooltip: () => 'Details',
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        '[WebShell] inline tag tooltip render failed',
+        error,
+      );
+      // Deferred, not skipped: the failed root is still unmounted exactly once.
+      expect(unmount).toHaveBeenCalledTimes(1);
+      const chip = document.body.querySelector('[title="Details"]');
+      expect(chip).not.toBeNull();
+      expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
+      dispatchOnFailingChip?.(new MouseEvent('mouseenter'));
+      expect(failingTooltip?.style.display).toBe('none');
+    } finally {
+      warn.mockRestore();
+      unmount.mockRestore();
+      probeRoot.unmount();
+      appendChildSpy.mockRestore();
+    }
+  });
+
+  it('guards inline mask icon sources', async () => {
+    await mount({
+      composerInput: {
+        tags: [
+          {
+            id: 'orders',
+            label: 'Table',
+            value: 'orders',
+            icon: 'javascript:alert(1)',
+          },
+        ],
+        tagPlacement: 'inline',
+      },
+    });
+
+    expect(document.body.innerHTML).not.toContain('javascript:alert');
+    expect(
+      document.body.querySelector('[style*="--composer-tag-icon-url"]'),
+    ).toBeNull();
+  });
+
+  it('renders built-in icons for inline composer tags', async () => {
+    const kinds = ['extension', 'file', 'mcp', 'skill'] as const;
+    await mount({
+      composerInput: {
+        tags: kinds.map((kind) => ({
+          id: `${kind}:reference`,
+          kind,
+          value: kind,
+          serialized: `@${kind}:reference`,
+        })),
+        tagPlacement: 'inline',
+      },
+    });
+
+    expect(
+      document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(kinds.length - 1);
+    expect(
+      document.body.querySelector('[data-file-type-icon="file"]'),
+    ).not.toBeNull();
+  });
+
+  it('reports inline composer tags as attachments', async () => {
+    await mount();
+
+    expect(latest!.handle.hasAttachments()).toBe(false);
+    expect(latest!.hasAttachments).toBe(false);
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+    });
+    expect(latest!.handle.hasAttachments()).toBe(true);
+    expect(latest!.hasAttachments).toBe(true);
+
+    act(() => {
+      latest!.removeInlineTags();
+    });
+    expect(latest!.handle.hasAttachments()).toBe(false);
+    expect(latest!.hasAttachments).toBe(false);
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('');
+    expect(document.body.querySelector('.cm-placeholder')).not.toBeNull();
+  });
+
+  it('preserves surrounding text when an inline tag chip is removed', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('please review ');
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+      latest!.insertText(' now');
+    });
+    expect(latest!.hasAttachments).toBe(true);
+
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+
+    const text = latest!.viewRef.current!.state.doc.toString();
+    expect(text).toContain('please review');
+    expect(text).toContain('now');
+    // The chip's serialized text must be removed from the doc, not just its
+    // decoration — uncovered text would be submitted as plain prompt text.
+    expect(text).not.toContain('@orders');
+    expect(latest!.hasAttachments).toBe(false);
+  });
+
+  it('appends end-placed inline tags without stealing focus', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('draft text');
+    });
+    const view = latest!.viewRef.current!;
+    // Caret sits mid-text; an end-placement insert must still append.
+    act(() => {
+      view.dispatch({ selection: { anchor: 5 } });
+    });
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline', position: 'end' },
+      );
+    });
+
+    const doc = view.state.doc.toString();
+    // A boundary separates the appended reference from the preceding text,
+    // and the caret stays where the user left it (no teleport to doc end).
+    expect(doc).toBe('draft text @orders ');
+    expect(view.state.selection.main.from).toBe(5);
+    expect(document.activeElement).toBe(outside);
+
+    // The end-placed tag must become a real chip decoration: a wrong
+    // effect-range offset would leave the doc text correct but decorate the
+    // wrong span, breaking the remove button and atomic-range behavior.
+    expect(latest!.hasAttachments).toBe(true);
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+    // The remove button deletes the chip's serialized text (separator
+    // spacing aside), restoring the pre-upload content.
+    const removed = view.state.doc.toString();
+    expect(removed).not.toContain('@orders');
+    expect(removed.trim()).toBe('draft text');
+    expect(latest!.hasAttachments).toBe(false);
+    outside.remove();
+  });
+
+  it('updates inline tag state when a document change removes the last tag', async () => {
+    await mount();
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+    });
+    expect(latest!.hasAttachments).toBe(true);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: '' },
+      });
+    });
+
+    expect(latest!.hasAttachments).toBe(false);
+  });
+
+  it('keeps inline tags after trimming leading whitespace on submit', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.setText('  ');
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '<table />' }],
+        { placement: 'inline' },
+      );
+      latest!.insertText('explain');
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '<table /> explain',
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+        inputAnnotations: [
+          {
+            end: 9,
+            reference: {
+              id: 'orders',
+              serialized: '<table />',
+              value: 'orders',
+            },
+            start: 0,
+            text: '<table />',
+            type: 'reference',
+          },
+        ],
+      },
+    );
+  });
+
+  it('restores parsed inline tags when arrow keys browse prompt history', async () => {
+    const serialized = '<context id="orders">orders</context>';
+    const prompt = `inspect ${serialized} now`;
+    const parseUserMessageContent: UserMessageContentParser = (content) => {
+      if (content !== prompt) return undefined;
+      return [
+        { type: 'text', text: 'inspect ' },
+        {
+          type: 'tag',
+          tag: { id: 'orders', value: 'orders', serialized },
+        },
+        { type: 'text', text: ' now' },
+      ];
+    };
+    const { onSubmit } = await mount({ parseUserMessageContent });
+
+    act(() => {
+      latest!.setText(prompt);
+      latest!.submitText();
+      latest!.setText('draft');
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          code: 'ArrowUp',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(editor.textContent).toContain('inspect');
+    expect(editor.textContent).toContain('orders');
+    expect(editor.textContent).not.toContain(serialized);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      prompt,
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+        inputAnnotations: [
+          expect.objectContaining({
+            start: 8,
+            end: 8 + serialized.length,
+            text: serialized,
+            reference: expect.objectContaining({ id: 'orders', serialized }),
+          }),
+        ],
+      },
+    );
+
+    act(() => {
+      latest!.setText('draft');
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          code: 'ArrowUp',
+          bubbles: true,
+        }),
+      );
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          code: 'ArrowDown',
+          bubbles: true,
+        }),
+      );
+    });
+    expect(latest!.getText()).toBe('draft');
+    expect(editor.textContent).not.toContain('orders');
+  });
+
+  it('restores shell history as raw command text without parsing tags', async () => {
+    const serialized = '<context id="orders">orders</context>';
+    const command = `echo ${serialized}`;
+    const parseUserMessageContent = vi.fn<UserMessageContentParser>(
+      (content) =>
+        content === command
+          ? [
+              { type: 'text', text: 'echo ' },
+              {
+                type: 'tag',
+                tag: { id: 'orders', value: 'orders', serialized },
+              },
+            ]
+          : undefined,
+    );
+    await mount({ parseUserMessageContent });
+
+    act(() => {
+      latest!.setShellMode(true);
+    });
+    act(() => {
+      latest!.setText(command);
+      latest!.submitText();
+      latest!.setText('draft');
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          code: 'ArrowUp',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(latest!.getText()).toBe(command);
+    expect(editor.textContent).toBe(command);
+    expect(
+      editor.querySelectorAll('button[aria-label^="Remove "]'),
+    ).toHaveLength(0);
+    expect(parseUserMessageContent).not.toHaveBeenCalled();
+  });
+
+  it('restores draft top tags after ArrowDown exits prompt history', async () => {
+    const historyText = 'previous prompt';
+    const draftText = 'draft prompt';
+    const draftTag = {
+      id: 'file:draft.txt',
+      value: 'draft.txt',
+      serialized: '@draft.txt',
+    };
+    await mount();
+
+    act(() => {
+      latest!.setText(historyText);
+      latest!.submitText();
+      latest!.setText(draftText);
+      latest!.addTags([draftTag]);
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          code: 'ArrowUp',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(latest!.getText()).toBe(historyText);
+    expect(latest!.composerTags).toEqual([]);
+
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          code: 'ArrowDown',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(latest!.getText()).toBe(draftText);
+    expect(latest!.composerTags).toEqual([draftTag]);
+  });
+
+  it('does not restore old draft tags after paging from a panel recall', async () => {
+    await mount();
+    act(() => {
+      latest!.setText('previous prompt');
+      latest!.submitText();
+      latest!.setText('draft prompt');
+      latest!.addTags([
+        { id: 'file:draft.txt', value: 'draft.txt', serialized: '@draft.txt' },
+      ]);
+    });
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => latest!.searchState.restoreSearchMatch!('selected prompt'));
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => pressHistoryKey('ArrowDown'));
+    expect(latest!.getText()).toBe('selected prompt');
+    expect(latest!.composerTags).toEqual([]);
+  });
+
+  it('restores tags when Tab or a search-result selection recalls history', async () => {
+    const serialized = '<context id="search-orders">orders</context>';
+    const prompt = `inspect ${serialized} now`;
+    const parseUserMessageContent: UserMessageContentParser = (content) =>
+      content === prompt
+        ? [
+            { type: 'text', text: 'inspect ' },
+            {
+              type: 'tag',
+              tag: { id: 'orders', value: 'orders', serialized },
+            },
+            { type: 'text', text: ' now' },
+          ]
+        : undefined;
+    const { onSubmit } = await mount({ parseUserMessageContent });
+
+    act(() => {
+      latest!.setText(prompt);
+      latest!.submitText();
+      latest!.setText('draft');
+      latest!.searchState.openHistorySearch();
+    });
+
+    const preventDefault = vi.fn();
+    act(() => {
+      latest!.searchState.handleSearchKeyDown({
+        key: 'Tab',
+        nativeEvent: { isComposing: false },
+        preventDefault,
+      } as unknown as React.KeyboardEvent<HTMLInputElement>);
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    expect(preventDefault).toHaveBeenCalled();
+    expect(editor.textContent).toContain('orders');
+    expect(editor.textContent).not.toContain(serialized);
+
+    act(() => latest!.searchState.restoreSearchMatch?.(prompt));
+    expect(editor.textContent).toContain('orders');
+    expect(editor.textContent).not.toContain(serialized);
+
+    act(() => {
+      latest!.setText('draft');
+      latest!.searchState.openHistorySearch();
+    });
+    act(() => {
+      latest!.searchState.handleSearchKeyDown({
+        key: 'Enter',
+        nativeEvent: { isComposing: false },
+        preventDefault: vi.fn(),
+      } as unknown as React.KeyboardEvent<HTMLInputElement>);
+    });
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      prompt,
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+        inputAnnotations: [
+          expect.objectContaining({
+            start: 8,
+            end: 8 + serialized.length,
+            text: serialized,
+            reference: expect.objectContaining({ id: 'orders', serialized }),
+          }),
+        ],
+      },
+    );
+  });
+
+  it('does not prepend stale top tags when Ctrl-R submits a recalled inline tag', async () => {
+    const serialized = '<context id="search-stale-orders">orders</context>';
+    const prompt = `inspect ${serialized} now`;
+    const parseUserMessageContent: UserMessageContentParser = (content) =>
+      content === prompt
+        ? [
+            { type: 'text', text: 'inspect ' },
+            {
+              type: 'tag',
+              tag: { id: 'orders', value: 'orders', serialized },
+            },
+            { type: 'text', text: ' now' },
+          ]
+        : undefined;
+    const { onSubmit } = await mount({ parseUserMessageContent });
+
+    act(() => {
+      latest!.setText(prompt);
+      latest!.submitText();
+    });
+    act(() => {
+      latest!.addTags([
+        {
+          id: 'stale',
+          value: 'stale',
+          serialized: '<context id="stale">stale</context>',
+        },
+      ]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    act(() => {
+      latest!.setText('draft');
+      latest!.searchState.openHistorySearch();
+    });
+    act(() => {
+      latest!.searchState.handleSearchKeyDown({
+        key: 'Enter',
+        nativeEvent: { isComposing: false },
+        preventDefault: vi.fn(),
+      } as unknown as React.KeyboardEvent<HTMLInputElement>);
+    });
+
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      prompt,
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+        inputAnnotations: [
+          expect.objectContaining({
+            start: 8,
+            end: 8 + serialized.length,
+            text: serialized,
+            reference: expect.objectContaining({ id: 'orders', serialized }),
+          }),
+        ],
+      },
+    );
+  });
+
+  it('submits the selected plain Ctrl-R history text instead of a visible followup', async () => {
+    const historyText = 'inspect the orders';
+    localStorage.setItem(
+      'qwen-web-shell-history',
+      JSON.stringify([historyText]),
+    );
+    const { onSubmit } = await mount({
+      followupState: {
+        isVisible: true,
+        shownAt: Date.now(),
+        suggestion: 'inspect the orders table and summarize',
+      },
+    });
+
+    act(() => {
+      latest!.setText('draft');
+      latest!.searchState.openHistorySearch();
+      latest!.searchState.submitSearchMatch(historyText);
+    });
+
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      historyText,
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('keeps history source text and skips annotations for mismatched parser output', async () => {
+    const prompt = '<context id="orders">orders</context>';
+    const parseUserMessageContent: UserMessageContentParser = (content) =>
+      content === prompt
+        ? [
+            {
+              type: 'tag',
+              tag: {
+                id: 'orders',
+                value: 'orders',
+                serialized: '<context id="other">other</context>',
+              },
+            },
+          ]
+        : undefined;
+    const { onSubmit } = await mount({ parseUserMessageContent });
+
+    act(() => {
+      latest!.setText(prompt);
+      latest!.submitText();
+      latest!.setText('draft');
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          code: 'ArrowUp',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(editor.textContent).toContain(prompt);
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      prompt,
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('restores tags when a history search submission is rejected', async () => {
+    const serialized = '<context id="rejected-orders">orders</context>';
+    const prompt = `inspect ${serialized} now`;
+    const parseUserMessageContent: UserMessageContentParser = (content) =>
+      content === prompt
+        ? [
+            { type: 'text', text: 'inspect ' },
+            {
+              type: 'tag',
+              tag: { id: 'orders', value: 'orders', serialized },
+            },
+            { type: 'text', text: ' now' },
+          ]
+        : undefined;
+    const onSubmit = vi
+      .fn()
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(false);
+    await mount({ onSubmit, parseUserMessageContent });
+
+    act(() => {
+      latest!.setText(prompt);
+      latest!.submitText();
+      latest!.searchState.submitSearchMatch(prompt);
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      prompt,
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+        inputAnnotations: [
+          expect.objectContaining({
+            start: 8,
+            end: 8 + serialized.length,
+            text: serialized,
+            reference: expect.objectContaining({ id: 'orders', serialized }),
+          }),
+        ],
+      },
+    );
+    expect(editor.textContent).toContain('orders');
+    expect(editor.textContent).not.toContain(serialized);
+  });
+});
+
+it('invalidates a pending capacity continuation when the composer draft changes', async () => {
+  const onSubmit = vi.fn(() => false);
+  await mount({ onSubmit });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const metadata = onSubmit.mock.calls[0]?.[4] as unknown as {
+    isCurrentDraft(): boolean;
+  };
+  expect(metadata.isCurrentDraft()).toBe(true);
+  act(() => latest!.setText('new draft'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+  act(() => latest!.setText('original'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+});
+
+it('retains the guarded retry draft across its initial session allocation and clears it only on acceptance', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(
+    async (onSessionAllocated) => {
+      onSessionAllocated('created-session');
+      mounted.switchSession('created-session', '/work/b');
+      await act(async () => {});
+      expect(latest!.getText()).toBe('original');
+      expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+        true,
+      );
+      act(() => call[3]());
+    },
+  );
+  expect(latest!.getText()).toBe('');
+});
+
+it('unrelated existing session keeps its draft during retry creation', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+      false,
+    );
+    expect(latest!.getText()).toBe('B draft');
+    expect(localStorage.getItem(getSessionDraftKey('existing-b'))).toBe(
+      'B draft',
+    );
+  });
+});
+it('late acceptance does not clear unrelated existing session draft', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    act(() => call[3]());
+    expect(latest!.getText()).toBe('B draft');
+  });
+});
+
+describe('composer draft attachment races', () => {
+  function seed(
+    fake: ReturnType<typeof createFakeIndexedDB>,
+    session: string,
+    attachments: unknown,
+  ) {
+    if (!fake.stores.has('attachments'))
+      fake.db.createObjectStore('attachments');
+    fake.db.seed('attachments', getSessionDraftKey(session), attachments);
+  }
+
+  it('clears an attachment-only archive when a host accepts after unmount', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() =>
+      latest!.handle.restoreImages([{ data: 'sent', media_type: 'image/png' }]),
+    );
+    await flushDraftAttachments();
+    act(() => root!.unmount());
+    clearComposerDraftIfMatches(SESSION_A_DRAFT_KEY, '');
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+      false,
+    );
+    root = null;
+  });
+
+  it('invalidates a host cleanup guard when a newer attachment is staged', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() => latest!.setText('same text'));
+    const isDraftUnchanged = captureComposerDraftGuard(SESSION_A_DRAFT_KEY);
+    expect(isDraftUnchanged()).toBe(true);
+    act(() =>
+      latest!.handle.restoreFiles([
+        { name: 'new.txt', media_type: 'text/plain', text: 'unsent' },
+      ]),
+    );
+    expect(isDraftUnchanged()).toBe(false);
+  });
+
+  it.each([
+    'switch',
+    'new pending',
+    'unmount',
+    'attachments-only',
+    'text',
+    'file',
+    'edit before allocation',
+    'unscoped edit before allocation',
+  ])('handles migrated draft acceptance after %s', async (action) => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const cwd = action.startsWith('unscoped') ? undefined : '/work';
+    const onSubmit = vi.fn(() => false);
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: cwd });
+    await flushDraftAttachments();
+    const image = { data: 'migration-X', media_type: 'image/png' };
+    const file = { name: 'X.txt', media_type: 'text/plain', text: 'X bytes' };
+    const newer = { name: 'Y.txt', media_type: 'text/plain', text: 'Y bytes' };
+    const submittedText =
+      action === 'attachments-only' ? '' : 'submitted draft';
+    act(() => {
+      latest!.setText(submittedText);
+      latest!.handle.restoreImages([image]);
+      latest!.handle.restoreFiles([file]);
+      latest!.submitText();
+    });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const call = onSubmit.mock.calls[0] as unknown as [
+      string,
+      unknown,
+      unknown,
+      ComposerSubmitCommit,
+      import('./useComposerCore').ComposerSubmitMetadata,
+    ];
+    expect(call.slice(0, 3)).toEqual([submittedText, [image], [file]]);
+    const editedBefore = action.endsWith('edit before allocation');
+    if (editedBefore) act(() => latest!.setText('new unsent draft'));
+    await call[4].retainDraftDuringSessionCreation!(async (allocated) => {
+      allocated('created-session');
+      mounted.switchSession('created-session', cwd);
+      await flushDraftAttachments();
+      expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+        !editedBefore,
+      );
+      if (action === 'text') act(() => latest!.setText('new unsent draft'));
+      if (action === 'file') act(() => latest!.handle.restoreFiles([newer]));
+      if (action === 'unmount') act(() => root!.unmount());
+      else
+        mounted.switchSession(
+          action === 'new pending' ? undefined : 'session-b',
+          cwd,
+        );
+      act(() => call[3]());
+      await flushDraftAttachments();
+    });
+    const keepDraft = editedBefore || action === 'text' || action === 'file';
+    if (cwd)
+      expect(localStorage.getItem(getPendingTaskDraftKey(cwd))).toBeNull();
+    expect(
+      fake.stores
+        .get('attachments')
+        ?.get(getSessionDraftKey('created-session')),
+    ).toEqual(
+      keepDraft
+        ? { images: [image], files: action === 'file' ? [file, newer] : [file] }
+        : undefined,
+    );
+    if (action === 'unmount') {
+      container!.remove();
+      await mount({ sessionId: 'created-session', atWorkspaceCwd: cwd });
+    } else mounted.switchSession('created-session', cwd);
+    await flushDraftAttachments();
+    expect(latest!.getText()).toBe(
+      editedBefore || action === 'text'
+        ? 'new unsent draft'
+        : keepDraft
+          ? 'submitted draft'
+          : '',
+    );
+    expect(latest!.pastedImages).toEqual(keepDraft ? [image] : []);
+    expect(latest!.pastedFiles).toEqual(
+      keepDraft ? (action === 'file' ? [file, newer] : [file]) : [],
+    );
+  });
+
+  it.each(['active', 'leave', 'unmount', 'new text', 'edit undo', 'new file'])(
+    'handles allocation after removing a submitted image (%s)',
+    async (action) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      const onSubmit = vi.fn(() => false);
+      const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work' });
+      await flushDraftAttachments();
+      const image = { data: 'submitted image', media_type: 'image/png' };
+      const file = { name: 'sent.txt', media_type: 'text/plain', text: 'sent' };
+      const newer = { name: 'new.txt', media_type: 'text/plain', text: 'new' };
+      act(() => {
+        latest!.setText('original');
+        latest!.handle.restoreImages([image]);
+        latest!.handle.restoreFiles([file]);
+        latest!.submitText();
+      });
+      const call = onSubmit.mock.calls[0] as unknown as [
+        string,
+        unknown,
+        unknown,
+        ComposerSubmitCommit,
+        import('./useComposerCore').ComposerSubmitMetadata,
+      ];
+      await call[4].retainDraftDuringSessionCreation!(async (allocated) => {
+        act(() => {
+          latest!.removeImage(0);
+          if (action === 'new text' || action === 'edit undo')
+            latest!.setText('new draft');
+          if (action === 'edit undo') latest!.setText('original');
+          if (action === 'new file') latest!.handle.restoreFiles([newer]);
+        });
+        allocated('created-session');
+        mounted.switchSession('created-session', '/work');
+        await flushDraftAttachments();
+        expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+          false,
+        );
+        if (action === 'leave') mounted.switchSession('session-b', '/work');
+        if (action === 'unmount') act(() => root!.unmount());
+        act(() => call[3]());
+        await flushDraftAttachments();
+      });
+      const keepDraft = ['new text', 'edit undo', 'new file'].includes(action);
+      const text = action === 'new text' ? 'new draft' : 'original';
+      const key = getSessionDraftKey('created-session');
+      expect(localStorage.getItem(getPendingTaskDraftKey('/work'))).toBeNull();
+      expect(localStorage.getItem(key)).toBe(keepDraft ? text : null);
+      expect(fake.stores.get('attachments')?.get(key)).toEqual(
+        keepDraft
+          ? {
+              images: [],
+              files: action === 'new file' ? [file, newer] : [file],
+            }
+          : undefined,
+      );
+      if (action === 'unmount') {
+        container!.remove();
+        await mount({ sessionId: 'created-session', atWorkspaceCwd: '/work' });
+      } else mounted.switchSession('created-session', '/work');
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe(keepDraft ? text : '');
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pastedFiles).toEqual(
+        keepDraft ? (action === 'new file' ? [file, newer] : [file]) : [],
+      );
+    },
+  );
+
+  it('keeps a reader busy through allocation for every submission entry', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(() => false);
+    localStorage.setItem(
+      getPromptHistoryStorageKey('/work'),
+      JSON.stringify(['prior prompt']),
+    );
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work' });
+    await flushDraftAttachments();
+    act(() => {
+      latest!.setText('submitted');
+      latest!.submitText();
+    });
+    const metadata = onSubmit.mock.calls[0][4]!;
+    let release!: () => void;
+    const read = FileReader.prototype.readAsDataURL;
+    const held = vi
+      .spyOn(FileReader.prototype, 'readAsDataURL')
+      .mockImplementation(function (this: FileReader, blob: Blob) {
+        release = () => read.call(this, blob);
+      });
+    try {
+      act(() =>
+        latest!.ingestFiles([
+          new File(['png'], 'loading.png', { type: 'image/png' }),
+        ]),
+      );
+      await flushDraftAttachments();
+      await metadata.retainDraftDuringSessionCreation!(async (allocated) => {
+        allocated('created-session');
+        mounted.switchSession('created-session', '/work');
+        await flushDraftAttachments();
+        expect(latest!.pendingImageBatchCount).toBe(1);
+        expect(latest!.canSubmit).toBe(false);
+        act(() => {
+          latest!.submitText();
+          latest!.handle.retryLast();
+          latest!.searchState.submitSearchMatch('history');
+        });
+        expect(onSubmit).toHaveBeenCalledTimes(1);
+        release();
+        await waitForImageIngestion();
+        expect(latest!.canSubmit).toBe(true);
+        expect(latest!.pastedImages).toHaveLength(1);
+      });
+    } finally {
+      held.mockRestore();
+    }
+  });
+
+  it.each([false, true])(
+    'clears an accepted draft after removing its submitted image (leave: %s)',
+    async (leave) => {
+      vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+      let accepted: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, commit) => {
+          accepted = commit;
+          return false;
+        },
+      );
+      const mounted = await mount({ sessionId: 'session-a', onSubmit });
+      await flushDraftAttachments();
+      act(() => {
+        latest!.setText('sent text');
+        latest!.handle.restoreImages([
+          { data: 'sent-X', media_type: 'image/png' },
+        ]);
+        latest!.submitText();
+        latest!.removeImage(0);
+      });
+      if (leave) mounted.switchSession('session-b', undefined);
+      act(() => accepted!());
+      await flushDraftAttachments();
+      expect(localStorage.getItem(SESSION_A_DRAFT_KEY)).toBeNull();
+      if (leave) mounted.switchSession('session-a', undefined);
+      expect(latest!.getText()).toBe('');
+      expect(latest!.pastedImages).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'preserves host attachments restored during layout (storage available: %s)',
+    async (storageAvailable) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', storageAvailable ? fake.factory : undefined);
+      const archived = {
+        name: 'archived.txt',
+        media_type: 'text/plain',
+        text: 'old bytes',
+      };
+      seed(fake, 'session-a', { images: [], files: [archived] });
+      localStorage.setItem(SESSION_A_DRAFT_KEY, 'saved text');
+      const image = { data: 'host image', media_type: 'image/png' };
+      const file = { name: 'host.txt', media_type: 'text/plain', text: 'host' };
+      function Composer() {
+        const composer = useComposerCore({
+          sessionId: 'session-a',
+          onSubmit: vi.fn(),
+          commands: [],
+          editorTheme: {},
+        });
+        latest = composer;
+        useLayoutEffect(() => {
+          composer.handle.restoreImages([image]);
+          composer.handle.restoreFiles([file]);
+        }, [composer.handle]);
+        return <div ref={composer.containerRef} />;
+      }
+      container = document.createElement('div');
+      document.body.append(container);
+      root = createRoot(container);
+      act(() =>
+        root!.render(
+          <I18nProvider language="en">
+            <Composer />
+          </I18nProvider>,
+        ),
+      );
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe('saved text');
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.pastedFiles).toEqual(
+        storageAvailable ? [file, archived] : [file],
+      );
+    },
+  );
+
+  it.each([
+    'add',
+    'clear',
+    'submit',
+    'search submit',
+    'managed accept',
+  ] as const)(
+    'shares the session draft between retained main and split composers (%s)',
+    async (edit) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      const composers = {} as Record<'main' | 'pane', UseComposerCoreReturn>;
+      const submissions = { main: vi.fn(), pane: vi.fn() };
+      let acceptOldMain: ComposerSubmitCommit | undefined;
+      function Composer({
+        slot,
+        sessionId,
+      }: {
+        slot: 'main' | 'pane';
+        sessionId: string;
+      }) {
+        const composer = useComposerCore({
+          sessionId,
+          onSubmit: submissions[slot],
+          commands: [],
+          editorTheme: {},
+        });
+        composers[slot] = composer;
+        useLayoutEffect(() => {
+          if (slot === 'pane') composer.handle.restoreFiles([y]);
+        }, [composer.handle, slot]);
+        return <div ref={composer.containerRef} />;
+      }
+      container = document.createElement('div');
+      document.body.append(container);
+      root = createRoot(container);
+      const render = (mainSession: string, showPane: boolean) => {
+        act(() => {
+          root!.render(
+            <I18nProvider language="en">
+              <Composer key="main" slot="main" sessionId={mainSession} />
+              {showPane && (
+                <Composer key="pane" slot="pane" sessionId="session-a" />
+              )}
+            </I18nProvider>,
+          );
+        });
+      };
+      const x = { data: 'main-X', media_type: 'image/png' };
+      const y = { name: 'Y.txt', media_type: 'text/plain', text: 'pane-Y' };
+      const z = { name: 'Z.txt', media_type: 'text/plain', text: 'main-Z' };
+      render('session-a', false);
+      await flushDraftAttachments();
+      act(() => {
+        composers.main.setText('main text');
+        composers.main.handle.restoreImages([x]);
+      });
+      await flushDraftAttachments();
+      render('session-a', true);
+      await flushDraftAttachments();
+      expect(composers.pane.pastedImages).toEqual([x]);
+      expect(composers.pane.getText()).toBe('main text');
+      act(() => undo(composers.pane.viewRef.current!));
+      expect(composers.pane.getText()).toBe('main text');
+      expect(composers.main.getText()).toBe('main text');
+      expect(composers.main.pastedFiles).toEqual([y]);
+      act(() => composers.pane.removeFile(0));
+      expect(composers.main.pastedFiles).toEqual([]);
+      if (edit === 'add') {
+        submissions.main.mockImplementationOnce(
+          (_text, _images, _files, accepted) => {
+            acceptOldMain = accepted;
+            return false;
+          },
+        );
+        act(() => composers.main.submitText());
+        let release!: () => void;
+        const read = FileReader.prototype.readAsDataURL;
+        const held = vi
+          .spyOn(FileReader.prototype, 'readAsDataURL')
+          .mockImplementation(function (this: FileReader, blob: Blob) {
+            release = () => read.call(this, blob);
+          });
+        act(() =>
+          composers.pane.ingestFiles([
+            new File(['png'], 'loading.png', { type: 'image/png' }),
+          ]),
+        );
+        await flushDraftAttachments();
+        expect(composers.main.canSubmit).toBe(false);
+        expect(composers.pane.canSubmit).toBe(false);
+        act(() => composers.pane.submitText());
+        expect(submissions.pane).not.toHaveBeenCalled();
+        const abort = vi.spyOn(FileReader.prototype, 'abort');
+        act(() => acceptOldMain!());
+        expect(abort).not.toHaveBeenCalled();
+        release();
+        await vi.waitFor(async () => {
+          await flushDraftAttachments();
+          expect(composers.main.pendingImageBatchCount).toBe(0);
+          expect(composers.pane.pendingImageBatchCount).toBe(0);
+          expect(composers.main.canSubmit).toBe(true);
+          expect(composers.pane.canSubmit).toBe(true);
+          expect(composers.pane.pastedImages).toHaveLength(2);
+        });
+        abort.mockRestore();
+        held.mockRestore();
+        act(() => composers.main.removeImage(1));
+        expect(composers.pane.pastedImages).toEqual([x]);
+      }
+      const tag = {
+        id: 'shared-file',
+        kind: 'file' as const,
+        value: 'shared.txt',
+        serialized: '@shared.txt',
+      };
+      act(() => composers.main.addTags([tag], { placement: 'top' }));
+      expect(composers.pane.composerTags).toEqual([tag]);
+      act(() => composers.pane.removeTopTag(tag.id));
+      expect(composers.main.composerTags).toEqual([]);
+      act(() =>
+        composers.main.addTags([tag], { placement: 'inline', position: 'end' }),
+      );
+      expect(
+        getInlineComposerTags(composers.pane.viewRef.current!).map(
+          (entry) => entry.id,
+        ),
+      ).toEqual([tag.id]);
+      act(() =>
+        composers.main.searchState.restoreSearchMatch!('temporary history'),
+      );
+      expect(composers.pane.getText()).toContain('main text');
+      act(() => {
+        composers.pane.setText('pane text');
+        composers.pane.handle.restoreFiles([y]);
+      });
+      expect(composers.main.getText()).toBe('pane text');
+      act(() => {
+        composers.pane.viewRef.current!.dispatch({ selection: { anchor: 4 } });
+        composers.main.setText('pane text!');
+      });
+      expect(composers.pane.viewRef.current!.state.selection.main.anchor).toBe(
+        4,
+      );
+      act(() => composers.main.setText('pane text'));
+      expect(getInlineComposerTags(composers.main.viewRef.current!)).toEqual(
+        [],
+      );
+      expect(composers.main.pastedFiles).toEqual([y]);
+      act(() => composers.main.handle.restoreFiles([z]));
+      expect(composers.pane.pastedFiles).toEqual([y, z]);
+      act(() => composers.pane.removeFile(0));
+      expect(composers.main.pastedFiles).toEqual([z]);
+      const annotation = {
+        start: 0,
+        end: 4,
+        text: 'pane',
+        reference: {
+          id: 'file:shared',
+          kind: 'file' as const,
+          value: 'shared.txt',
+        },
+      };
+      act(() => composers.main.handle.restoreInputAnnotations([annotation]));
+      act(() => {
+        if (edit === 'add') {
+          composers.pane.handle.restoreFiles([y]);
+          expect(acceptOldMain).toBeTypeOf('function');
+          acceptOldMain!();
+        } else if (edit === 'managed accept') {
+          clearComposerDraftIfMatches(SESSION_A_DRAFT_KEY, 'pane text');
+        } else if (edit === 'submit') composers.pane.submitText();
+        else if (edit === 'search submit') {
+          composers.pane.searchState.openHistorySearch();
+          composers.pane.searchState.submitSearchMatch('from history');
+        } else {
+          composers.main.searchState.restoreSearchMatch!('old history');
+          composers.main.handle.clear();
+        }
+      });
+      if (edit === 'submit') {
+        expect(submissions.pane).toHaveBeenCalledWith(
+          'pane text',
+          [x],
+          [z],
+          expect.any(Function),
+          expect.objectContaining({ inputAnnotations: [annotation] }),
+        );
+      }
+      await flushDraftAttachments();
+      const expected =
+        edit === 'add' ? { images: [x], files: [z, y] } : undefined;
+      const archive = () =>
+        fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY);
+      expect(archive()).toEqual(expected);
+      render('session-a', false);
+      expect(composers.main.pastedImages).toEqual(edit === 'add' ? [x] : []);
+      expect(composers.main.getText()).toBe(edit === 'add' ? 'pane text' : '');
+      render('session-b', false);
+      await flushDraftAttachments();
+      expect(archive()).toEqual(expected);
+      render('session-a', false);
+      await flushDraftAttachments();
+      expect(composers.main.pastedImages).toEqual(edit === 'add' ? [x] : []);
+      expect(composers.main.pastedFiles).toEqual(edit === 'add' ? [z, y] : []);
+    },
+  );
+
+  it.each(
+    [true, false].flatMap((storageAvailable) =>
+      ['attachment', 'text', 'tag'].map((edit) => ({ storageAvailable, edit })),
+    ),
+  )(
+    'preserves a newer remounted draft when the old instance accepts ($edit edit, storage available: $storageAvailable)',
+    async ({ storageAvailable, edit }) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', storageAvailable ? fake.factory : undefined);
+      let commit: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, accepted) => {
+          commit = accepted;
+          return false;
+        },
+      );
+      const x = { data: 'submitted-X', media_type: 'image/png' };
+      const y = { name: 'Y.txt', media_type: 'text/plain', text: 'unsent-Y' };
+      const tag = {
+        id: 'file:new',
+        kind: 'file' as const,
+        value: 'new',
+        serialized: '@new',
+        metadata: { managedFile: { text: 'new bytes' } },
+      };
+      await mount({
+        sessionId: 'session-a',
+        onSubmit,
+        persistFileReferences: true,
+      });
+      await flushDraftAttachments();
+      act(() => {
+        latest!.handle.restoreImages([x]);
+        latest!.setText('same text');
+        latest!.submitText();
+      });
+      act(() => root!.unmount());
+      container!.remove();
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      await flushDraftAttachments();
+      act(() => {
+        if (edit === 'text') latest!.setText('new unsent text');
+        else if (edit === 'tag') latest!.addTags([tag], { placement: 'top' });
+        else latest!.handle.restoreFiles([y]);
+      });
+      await flushDraftAttachments();
+      expect(localStorage.getItem(SESSION_A_DRAFT_KEY)).toBe('same text');
+      act(() => commit!());
+      await flushDraftAttachments();
+      expect(localStorage.getItem(SESSION_A_DRAFT_KEY)).toBe('same text');
+      if (storageAvailable) {
+        expect(
+          fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY),
+        ).toEqual({
+          images: [x],
+          files: edit === 'attachment' ? [y] : [],
+        });
+      }
+      act(() => root!.unmount());
+      container!.remove();
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe(
+        edit === 'text' ? 'new unsent text' : 'same text',
+      );
+      expect(latest!.pastedImages).toEqual(storageAvailable ? [x] : []);
+      expect(latest!.pastedFiles).toEqual(
+        storageAvailable && edit === 'attachment' ? [y] : [],
+      );
+      expect(latest!.composerTags).toEqual(edit === 'tag' ? [tag] : []);
+    },
+  );
+
+  it.each([false, true])(
+    'preserves outgoing and unread destination archives during an atomic capability switch (read pending: %s)',
+    async (deferGets) => {
+      const fake = createFakeIndexedDB({ deferGets });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const image = { data: 'A image', media_type: 'image/png' };
+      const file = { name: 'A.txt', media_type: 'text/plain', text: 'A file' };
+      const bFile = { name: 'B.txt', media_type: 'text/plain', text: 'B file' };
+      seed(fake, 'session-a', { images: [image], files: [file] });
+      seed(fake, 'session-b', { images: [], files: [bFile] });
+      const mounted = await mount({
+        sessionId: 'session-a',
+        attachmentsEnabled: true,
+      });
+      await flushDraftAttachments();
+      mounted.switchSession('session-b', '/work/b', false);
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pastedFiles).toEqual([]);
+      expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+        images: [image],
+        files: [file],
+      });
+      expect(
+        fake.stores.get('attachments')?.get(getSessionDraftKey('session-b')),
+      ).toEqual({ images: [], files: [bFile] });
+      mounted.switchSession('session-a', undefined, true);
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.pastedFiles).toEqual([file]);
+    },
+  );
+
+  it('preserves the departing archive when target context changes before session ID', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'A image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/work',
+      composerScopeKey: '/work',
+      attachmentsEnabled: true,
+    });
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', undefined, false, 'live');
+    await flushDraftAttachments();
+    mounted.switchSession('session-b', undefined, false, 'live');
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', '/work', true, '/work');
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [],
+    });
+  });
+
+  it('restores on re-enabling while same-session workspace metadata resolves', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'A image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({
+      sessionId: 'session-a',
+      attachmentsEnabled: false,
+    });
+    mounted.switchSession('session-a', '/work', true);
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    mounted.setAttachmentsEnabled(false);
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([]);
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+      false,
+    );
+  });
+
+  it('restores a previously disabled archive when a pending context change is cancelled', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'A image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({
+      sessionId: 'session-a',
+      composerScopeKey: '/work',
+      attachmentsEnabled: false,
+    });
+    mounted.switchSession('session-a', undefined, false, 'live');
+    mounted.switchSession('session-a', '/work', true, '/work');
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+  });
+
+  it.each([false, true])(
+    'keeps same-session attachments when workspace resolves (read pending: %s)',
+    async (deferGets) => {
+      const fake = createFakeIndexedDB({ deferGets });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const image = { data: 'archived', media_type: 'image/png' };
+      seed(fake, 'session-a', { images: [image], files: [] });
+      const mounted = await mount({ sessionId: 'session-a' });
+      await flushDraftAttachments();
+      mounted.switchSession('session-a', '/work');
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.canSubmit).toBe(true);
+    },
+  );
+
+  it('keeps a waiting host submission when only workspace metadata resolves', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const onSubmit = vi.fn();
+    const mounted = await mount({
+      sessionId: 'session-a',
+      onSubmit,
+      composerInput: { text: 'host prompt', submit: true },
+    });
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', '/work');
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0].slice(0, 2)).toEqual([
+      'host prompt',
+      [image],
+    ]);
+  });
+
+  it.each([
+    [false, false],
+    [true, false],
+    [true, true],
+  ])(
+    'restores pending attachments when workspace resolves (new attachment: %s, stored text: %s)',
+    async (addAttachment, hasStoredText) => {
+      const fake = createFakeIndexedDB({ deferGets: true });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const image = { data: 'archived', media_type: 'image/png' };
+      const archived = {
+        name: 'old.txt',
+        media_type: 'text/plain',
+        text: 'old',
+      };
+      const added = { name: 'new.txt', media_type: 'text/plain', text: 'new' };
+      fake.db.createObjectStore('attachments');
+      const key = getPendingTaskDraftKey('/work');
+      fake.db.seed('attachments', key, { images: [image], files: [archived] });
+      if (hasStoredText) localStorage.setItem(key, 'older draft');
+      const mounted = await mount();
+      if (addAttachment) act(() => latest!.handle.restoreFiles([added]));
+      mounted.switchSession(undefined, '/work');
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.getText()).toBe(hasStoredText ? 'older draft' : '');
+      expect(latest!.pastedFiles).toEqual(
+        addAttachment ? [added, archived] : [archived],
+      );
+      expect(fake.stores.get('attachments')?.get(key)).toEqual({
+        images: [image],
+        files: addAttachment ? [added, archived] : [archived],
+      });
+    },
+  );
+
+  it('waits for archived attachments before enabling or accepting submission', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived-image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    localStorage.setItem(SESSION_A_DRAFT_KEY, 'please review image');
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['from history']),
+    );
+    const onSubmit = vi.fn();
+    await mount({ sessionId: 'session-a', onSubmit });
+    await flushDraftAttachments();
+    expect(latest!.getText()).toBe('please review image');
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.canSubmit).toBe(false);
+    act(() => latest!.submitText());
+    act(() => latest!.retryLast());
+    act(() => latest!.setShellMode(true));
+    act(() => latest!.searchState.submitSearchMatch('from history'));
+    act(() => latest!.setShellMode(false));
+    expect(onSubmit).not.toHaveBeenCalled();
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(latest!.canSubmit).toBe(true);
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0][0]).toBe('please review image');
+    expect(onSubmit.mock.calls[0][1]).toEqual([image]);
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+      false,
+    );
+  });
+
+  it('keeps both same-name files added before and during a restore', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const archived = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      text: 'old unique content',
+    };
+    const newer = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      text: 'new different content',
+    };
+    seed(fake, 'session-a', { images: [], files: [archived] });
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() => latest!.handle.restoreFiles([newer]));
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    const files = [newer, { ...archived, name: 'notes (1).txt' }];
+    expect(latest!.pastedFiles).toEqual(files);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [],
+      files,
+    });
+  });
+
+  it.each(['A prompt', ''])(
+    'finishes B restore when A is accepted (text: %s)',
+    async (text) => {
+      const fake = createFakeIndexedDB({ deferGets: true });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const bImage = { data: 'session-b-image', media_type: 'image/png' };
+      seed(fake, 'session-b', { images: [bImage], files: [] });
+      let commit: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, accepted) => {
+          commit = accepted;
+          return false;
+        },
+      );
+      const mounted = await mount({ sessionId: 'session-a', onSubmit });
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      act(() => {
+        latest!.handle.restoreImages([
+          { data: 'A image', media_type: 'image/png' },
+        ]);
+        latest!.setText(text);
+        latest!.submitText();
+      });
+      mounted.switchSession('session-b', undefined);
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([]);
+      act(() => commit!());
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([bImage]);
+      expect(latest!.canSubmit).toBe(true);
+      expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+        false,
+      );
+      expect(
+        fake.stores.get('attachments')?.get(getSessionDraftKey('session-b')),
+      ).toEqual({ images: [bImage], files: [] });
+      mounted.switchSession('session-c', undefined);
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      mounted.switchSession('session-b', undefined);
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([bImage]);
+    },
+  );
+  it.each([false, true])(
+    'keeps newer A attachments after late acceptance (text changed: %s)',
+    async (changeText) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      let commit: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, accepted) => {
+          commit = accepted;
+          return false;
+        },
+      );
+      const x = { data: 'submitted-X', media_type: 'image/png' };
+      const y = { data: 'new-unsent-Y', media_type: 'image/png' };
+      const mounted = await mount({ sessionId: 'session-a', onSubmit });
+      await flushDraftAttachments();
+      act(() => {
+        latest!.handle.restoreImages([x]);
+        latest!.setText('submitted A');
+        latest!.submitText();
+      });
+      expect(onSubmit.mock.calls[0][1]).toEqual([x]);
+      act(() => {
+        latest!.handle.restoreImages([y]);
+        if (changeText) latest!.setText('new unsent A draft');
+      });
+      await flushDraftAttachments();
+      mounted.switchSession('session-b', undefined);
+      await flushDraftAttachments();
+      expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+        images: [x, y],
+        files: [],
+      });
+      act(() => commit!());
+      await flushDraftAttachments();
+      expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+        images: [x, y],
+        files: [],
+      });
+      mounted.switchSession('session-a', undefined);
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe(
+        changeText ? 'new unsent A draft' : 'submitted A',
+      );
+      expect(latest!.pastedImages).toEqual([x, y]);
+    },
+  );
+  it('keeps both archives through A-B-A switches before either read finishes', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({ sessionId: 'session-a' });
+    const added = { name: 'new.txt', media_type: 'text/plain', text: 'new' };
+    act(() => latest!.handle.restoreFiles([added]));
+    mounted.switchSession('session-b', undefined);
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', undefined);
+    await flushDraftAttachments();
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(latest!.pastedFiles).toEqual([added]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [added],
+    });
+  });
+
+  it('does not revive cleared attachments when new ones arrive during the read', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    seed(fake, 'session-a', {
+      images: [{ data: 'old', media_type: 'image/png' }],
+      files: [],
+    });
+    await mount({ sessionId: 'session-a' });
+    const image = { data: 'new', media_type: 'image/png' };
+    act(() => {
+      latest!.handle.clear();
+      latest!.handle.restoreImages([image]);
+    });
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [],
+    });
+  });
+  it('allows submission after attachment storage fails', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB({ failOpen: true }).factory);
+    const onSubmit = vi.fn();
+    await mount({ sessionId: 'session-a', onSubmit });
+    await flushDraftAttachments();
+    act(() => latest!.setText('still usable'));
+    expect(latest!.canSubmit).toBe(true);
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      'still usable',
+      undefined,
+      undefined,
+      expect.any(Function),
+      expect.any(Object),
+    );
+  });
+  it('waits to auto-submit host input until its draft attachments restore', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived-image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const onSubmit = vi.fn();
+    await mount({
+      sessionId: 'session-a',
+      onSubmit,
+      composerInput: { text: 'host prompt', submit: true },
+    });
+    await flushDraftAttachments();
+    expect(onSubmit).not.toHaveBeenCalled();
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0].slice(0, 2)).toEqual([
+      'host prompt',
+      [image],
+    ]);
+  });
+  it.each(['switch', 'edit', 'unmount'])(
+    'cancels waiting host submission after %s',
+    async (action) => {
+      const fake = createFakeIndexedDB({ deferGets: true });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const onSubmit = vi.fn();
+      const mounted = await mount({
+        sessionId: 'session-a',
+        onSubmit,
+        composerInput: { text: 'host prompt', submit: true },
+      });
+      await flushDraftAttachments();
+      if (action === 'switch') mounted.switchSession('session-b', undefined);
+      else if (action === 'edit') act(() => latest!.setText('new draft'));
+      else act(() => root?.unmount());
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps unread archived attachments when a newly added chip is removed', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    await mount({ sessionId: 'session-a' });
+    act(() => {
+      latest!.handle.restoreFiles([
+        { name: 'temporary.txt', media_type: 'text/plain', text: 'temporary' },
+      ]);
+      latest!.removeFile(0);
+    });
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [],
+    });
+  });
+});

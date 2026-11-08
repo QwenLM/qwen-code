@@ -1,0 +1,101 @@
+.wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  --hm-cell: 13px;
+  --hm-gap: 3px;
+  --hm-radius: 3px;
+}
+
+.tooltip {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 8px));
+  z-index: 5;
+  pointer-events: none;
+  white-space: nowrap;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--foreground) 16%, transparent);
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.legendLabel {
+  margin: 0 4px;
+}
+
+.scroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.grid {
+  display: grid;
+  grid-template-rows: auto repeat(7, var(--hm-cell));
+  gap: var(--hm-gap);
+  width: max-content;
+}
+
+.month {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  align-self: end;
+  line-height: 1;
+}
+
+.weekday {
+  font-size: 10px;
+  color: var(--muted-foreground);
+  padding-right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  line-height: 1;
+}
+
+.cell {
+  width: var(--hm-cell);
+  height: var(--hm-cell);
+  border-radius: var(--hm-radius);
+}
+
+.legendCell {
+  width: 12px;
+  height: 12px;
+}
+
+/* Sequential ramp off the accent blue — theme-aware through the token, so it
+   tracks light/dark automatically. Level 0 is a faint neutral track. */
+.lvl0 {
+  background: color-mix(in srgb, var(--muted-foreground) 16%, transparent);
+}
+.lvl1 {
+  background: color-mix(in srgb, var(--agent-blue-400) 30%, transparent);
+}
+.lvl2 {
+  background: color-mix(in srgb, var(--agent-blue-400) 52%, transparent);
+}
+.lvl3 {
+  background: color-mix(in srgb, var(--agent-blue-400) 76%, transparent);
+}
+.lvl4 {
+  background: var(--agent-blue-400);
+}
+
+.today {
+  outline: 1.5px solid var(--agent-blue-400);
+  outline-offset: 1px;
+}

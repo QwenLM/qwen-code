@@ -37,13 +37,17 @@ concurrency:
 jobs:
   # First job: Determine version and run tests once
   prepare:
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # The release-event (sync-with-CLI) path can be paused by setting the
+    # repository variable RELEASE_VSCODE_SYNC_PUBLISH=false; manual
+    # workflow_dispatch releases keep working either way.
     if: |-
       ${{
         github.repository == 'QwenLM/qwen-code' &&
         (
           github.event_name != 'release' ||
           (
+            vars.RELEASE_VSCODE_SYNC_PUBLISH != 'false' &&
             startsWith(github.event.release.tag_name, 'v') &&
             github.event.release.prerelease == false
           )
@@ -59,8 +63,10 @@ jobs:
       is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
 
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -84,17 +90,55 @@ jobs:
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Setup Node.js'
+        if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
 
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          npm ci
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+
+      - name: 'Verify published export renderer'
+        # An exported transcript loads its renderer from unpkg, pinned to this
+        # exact version and guarded by an sha384 SRI digest computed from the
+        # bytes this build produced, so those bytes have to match what the
+        # registry serves before the VSIX ships. Both assets are pinned that
+        # way, so both are checked.
+        #
+        # The wait is not incidental. npm accepts a publish and queues it
+        # ("Your package is being processed and may take a few minutes to
+        # become available"), and unpkg trails the registry on top of that.
+        # Measured on 0.23.4, 0.23.5-preview.0 and 0.24.0: ~25m to the
+        # registry, ~30m to unpkg. Release-event runs therefore start well
+        # inside the window where these URLs still 404 — v0.24.0's run failed
+        # exactly there. --retry-all-errors is what makes a 404 retryable;
+        # without it --retry only covers connection errors and 408/429/5xx, so
+        # the retries never fired.
+        #
+        # --retry-max-time bounds one curl invocation, so the 40 minutes is
+        # spent against a deadline both fetches share rather than granted to
+        # each of them.
+        run: |-
+          renderer_version=$(node -p "require('./package.json').version")
+          published_renderer=$(mktemp)
+          trap 'rm -f "${published_renderer}"' EXIT
+          deadline=$(($(date +%s) + 2400))
+          for asset in js css; do
+            budget=$((deadline - $(date +%s)))
+            if [[ "${budget}" -lt 1 ]]; then
+              budget=1
+            fi
+            curl --fail --location --silent --show-error \
+              --retry 80 --retry-delay 30 --retry-all-errors --retry-max-time "${budget}" \
+              "https://unpkg.com/@qwen-code/qwen-code@${renderer_version}/export-transcript-document.${asset}" \
+              --output "${published_renderer}"
+            cmp "packages/web-templates/src/export-html/dist/export-transcript-document.${asset}" \
+              "${published_renderer}"
+          done
 
       - name: 'Get the version'
         id: 'version'
@@ -148,12 +192,6 @@ jobs:
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
 
-      - name: 'Build webui dependency'
-        if: |-
-          ${{ github.event.inputs.force_skip_tests != 'true' }}
-        run: |
-          npm run build --workspace=@qwen-code/webui
-
       - name: 'Run Tests'
         if: |-
           ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -194,29 +232,37 @@ jobs:
             target: ''
             universal: true
 
-    runs-on: '${{ matrix.os }}'
+    # Only the universal leg can leave the hosted pool: it packages with
+    # --omit=optional, so it carries no native node-pty and does not depend on
+    # the build host's architecture. The linux-x64 leg resolves native
+    # dependencies for the host it builds on and stays hosted until that
+    # selection is explicitly cross-target. The release-only runners are ARM64,
+    # so the label carries no architecture component.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'' && matrix.universal) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || matrix.os }}'
     permissions:
       contents: 'read'
 
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
       - name: 'Setup Node.js'
+        if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
 
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          npm ci
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Install VSCE'
         run: |-
@@ -227,6 +273,8 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         shell: 'bash'
         run: |-
+          # Keep the verified, prebuilt export renderer reference pinned to the
+          # published CLI version from the selected source ref.
           npm run release:version -- "${RELEASE_VERSION}"
 
       - name: 'Prepare VSCode Extension'
@@ -275,7 +323,7 @@ jobs:
     needs:
       - 'prepare'
       - 'build'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/vscode-companion-${{ needs.prepare.outputs.release_tag }}'
@@ -284,8 +332,10 @@ jobs:
       issues: 'write'
 
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
 
@@ -314,7 +364,17 @@ jobs:
           echo "Publishing to Microsoft Marketplace..."
           for vsix in vsix-artifacts/*.vsix; do
             echo "Publishing: ${vsix}"
-            vsce publish --packagePath "${vsix}" --pat "${VSCE_PAT}" --skip-duplicate
+            for attempt in 1 2 3; do
+              if vsce publish --packagePath "${vsix}" --pat "${VSCE_PAT}" --skip-duplicate; then
+                break
+              fi
+              if [[ ${attempt} -eq 3 ]]; then
+                echo "Failed to publish ${vsix} after 3 attempts"
+                exit 1
+              fi
+              echo "Attempt ${attempt} failed, retrying in 15s..."
+              sleep 15
+            done
           done
 
       - name: 'Publish to OpenVSX'
@@ -325,11 +385,22 @@ jobs:
           echo "Publishing to OpenVSX..."
           for vsix in vsix-artifacts/*.vsix; do
             echo "Publishing: ${vsix}"
-            if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
-              ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --pre-release
-            else
-              ovsx publish "${vsix}" --pat "${OVSX_TOKEN}"
-            fi
+            for attempt in 1 2 3; do
+              if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
+                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --pre-release --skip-duplicate)
+              else
+                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --skip-duplicate)
+              fi
+              if "${publish_cmd[@]}"; then
+                break
+              fi
+              if [[ ${attempt} -eq 3 ]]; then
+                echo "Failed to publish ${vsix} after 3 attempts"
+                exit 1
+              fi
+              echo "Attempt ${attempt} failed, retrying in 15s..."
+              sleep 15
+            done
           done
 
       - name: 'Upload all VSIXes as release artifacts (dry run)'
@@ -351,9 +422,7 @@ jobs:
         always() &&
         (
           needs.build.result == 'failure' ||
-          needs.build.result == 'cancelled' ||
-          needs.publish.result == 'failure' ||
-          needs.publish.result == 'cancelled'
+          needs.publish.result == 'failure'
         )
       }}
     runs-on: 'ubuntu-latest'
@@ -372,3 +441,47 @@ jobs:
             --repo "${GH_REPO}" \
             --title "VSCode IDE Companion Release Failed for ${RELEASE_VERSION} on $(date +'%Y-%m-%d')" \
             --body "The VSCode IDE Companion release workflow failed. See the full run for details: ${DETAILS_URL}"
+
+  reconcile-failure:
+    name: 'Close Stale Failure Issue'
+    # Success-gated sibling of report-failure: a re-run that passes skips the
+    # notifier, which is why the issue an earlier attempt filed would otherwise
+    # stay open against a shipped release (#15840).
+    needs:
+      - 'prepare'
+      - 'build'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.build.result == 'success' &&
+        needs.publish.result == 'success'
+      }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      contents: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Checkout release workflow scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.workflow_sha }}'
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |-
+            /.github/scripts
+          sparse-checkout-cone-mode: false
+          path: '.release-workflow'
+
+      - name: 'Close the issue an earlier attempt filed'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          FAILURE_TITLE_PREFIX: 'VSCode IDE Companion Release Failed for '
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          RUN_ATTEMPT: '${{ github.run_attempt }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh reconcile-failure'

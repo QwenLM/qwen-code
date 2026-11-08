@@ -5,12 +5,15 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 export interface AnthropicTokenParts {
   inputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  outputTokens: number;
+  outputTokens?: number;
+  cacheReadTokensReported?: boolean;
+  cacheCreationTokensReported?: boolean;
 }
 
 /**
@@ -24,7 +27,7 @@ export interface AnthropicTokenParts {
  * has no equivalent — so its presence is a strong signal the response
  * follows real Anthropic semantics. Use that as the primary discriminator:
  *
- *   - cache_creation > 0  → Anthropic semantics, sum all three
+ *   - cache_creation field reported → Anthropic semantics, sum all three
  *   - else if cache_read > 0 and input ≥ cache_read → OpenAI-style on the
  *     Anthropic protocol (input already covers the cached portion), trust
  *     input alone
@@ -44,16 +47,29 @@ export function buildAnthropicUsageMetadata(
   const { inputTokens, cacheReadTokens, cacheCreationTokens, outputTokens } =
     parts;
   const looksLikeOpenAi =
+    parts.cacheCreationTokensReported !== true &&
     cacheCreationTokens === 0 &&
     cacheReadTokens > 0 &&
     inputTokens >= cacheReadTokens;
   const promptTotal = looksLikeOpenAi
     ? inputTokens
     : inputTokens + cacheReadTokens + cacheCreationTokens;
-  return {
+  const usage: GenerateContentResponseUsageMetadata = {
     promptTokenCount: promptTotal,
-    candidatesTokenCount: outputTokens,
-    totalTokenCount: promptTotal + outputTokens,
     cachedContentTokenCount: cacheReadTokens,
+    ...(outputTokens !== undefined
+      ? {
+          candidatesTokenCount: outputTokens,
+          totalTokenCount: promptTotal + outputTokens,
+        }
+      : {}),
   };
+  setGenAiUsageProvenance(usage, {
+    cachedInputTokensReported: parts.cacheReadTokensReported === true,
+    cacheCreationInputTokens:
+      parts.cacheCreationTokensReported === true
+        ? cacheCreationTokens
+        : undefined,
+  });
+  return usage;
 }

@@ -5,6 +5,7 @@
  */
 
 import { SettingScope, type LoadedSettings } from './settings.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 
 export function hasOwnModelProviders(settingsObj: unknown): boolean {
   if (!settingsObj || typeof settingsObj !== 'object') {
@@ -12,7 +13,8 @@ export function hasOwnModelProviders(settingsObj: unknown): boolean {
   }
   const obj = settingsObj as Record<string, unknown>;
   // Treat an explicitly configured empty object (modelProviders: {}) as "owned"
-  // by this scope, which is important when mergeStrategy is REPLACE.
+  // by this scope: ownership is keyed on presence of the setting, not on
+  // whether it has any entries.
   return Object.prototype.hasOwnProperty.call(obj, 'modelProviders');
 }
 
@@ -44,5 +46,42 @@ export function getModelProvidersOwnerScope(
 export function getPersistScopeForModelSelection(
   settings: LoadedSettings,
 ): SettingScope {
+  // Subscription activation owns workspace auth/model settings without a
+  // modelProviders entry; writing to User would be shadowed on restart.
+  if (
+    settings.isTrusted &&
+    settings.workspace.settings.security?.auth?.selectedType ===
+      AuthType.QWEN_SUBSCRIPTION
+  ) {
+    return SettingScope.Workspace;
+  }
   return getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+}
+
+/**
+ * The writable scopes that contribute to the effective (merged) config, highest
+ * precedence first. Workspace is only writable/honored when trusted.
+ */
+export function getWritableScopes(settings: LoadedSettings): SettingScope[] {
+  return settings.isTrusted
+    ? [SettingScope.Workspace, SettingScope.User]
+    : [SettingScope.User];
+}
+
+/**
+ * Returns the highest-precedence writable scope that explicitly owns `key`
+ * (top-level settings key), or `undefined` when no writable scope sets it.
+ * Used to persist an edit to a key back to the same scope it lives in, since
+ * keys like `modelFallbacks` / `model` are independently scoped from
+ * `modelProviders`.
+ */
+export function getOwnKeyScope(
+  settings: LoadedSettings,
+  key: string,
+): SettingScope | undefined {
+  for (const scope of getWritableScopes(settings)) {
+    const obj = settings.forScope(scope).settings as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(obj, key)) return scope;
+  }
+  return undefined;
 }

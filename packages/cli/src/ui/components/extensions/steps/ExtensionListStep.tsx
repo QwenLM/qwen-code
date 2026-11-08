@@ -9,11 +9,11 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import {
-  type Extension,
   getExtensionDisplayName,
   getExtensionDescription,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/extension/i18n.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
@@ -102,6 +102,7 @@ export const ExtensionListStep = ({
         return theme.text.secondary;
       case ExtensionUpdateState.UPDATE_AVAILABLE:
       case ExtensionUpdateState.UPDATED_NEEDS_RESTART:
+      case ExtensionUpdateState.UPDATED_WITH_WARNINGS:
         return theme.status.warning;
       case ExtensionUpdateState.ERROR:
         return theme.status.error;

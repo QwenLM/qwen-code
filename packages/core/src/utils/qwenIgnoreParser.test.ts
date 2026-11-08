@@ -196,4 +196,22 @@ describe('QwenIgnoreParser', () => {
       expect(parser.isIgnored('any_file.txt')).toBe(false);
     });
   });
+
+  // These files use gitignore syntax, so they inherit gitignore whitespace
+  // rules — see the matching suite in gitIgnoreParser.test.ts.
+  describe('pattern whitespace', () => {
+    it('keeps leading whitespace and strips only a trailing CR', async () => {
+      await createTestFile(
+        '.qwenignore',
+        ' leading.txt\r\n  #hash.txt\r\n# real comment\r\n',
+      );
+      const parser = new QwenIgnoreParser(projectRoot);
+
+      // `getPatterns()` is public and feeds FileDiscoveryService, so the
+      // stored text is asserted as well as the match result.
+      expect(parser.getPatterns()).toEqual([' leading.txt', '  #hash.txt']);
+      expect(parser.isIgnored(' leading.txt')).toBe(true);
+      expect(parser.isIgnored('leading.txt')).toBe(false);
+    });
+  });
 });

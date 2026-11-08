@@ -19,6 +19,10 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { resolveActiveTeamName } from '../agents/team/identity.js';
+import {
+  getPlanRequiredTeammatePreApprovalMessage,
+  isPlanRequiredTeammateAwaitingApproval,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 import { createTask } from '../agents/team/tasks.js';
 
 export interface TaskCreateParams {
@@ -94,6 +98,17 @@ class TaskCreateInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
+    if (isPlanRequiredTeammateAwaitingApproval(this.config)) {
+      const msg = getPlanRequiredTeammatePreApprovalMessage(
+        ToolNames.TASK_CREATE,
+      );
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     const teamName = resolveActiveTeamName(
       this.config.getTeamContext()?.teamName,
     );

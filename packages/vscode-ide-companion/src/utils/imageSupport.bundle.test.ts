@@ -28,10 +28,10 @@ describe('imageSupport browser bundling', () => {
     expect(output).not.toContain('supportedImageFormats.js');
   });
 
-  it('does not leave qwen-code-core runtime imports in the App webview bundle', async () => {
+  it('does not leave qwen-code-core runtime imports in the embedded webview bundle', async () => {
     const result = await esbuild.build({
       entryPoints: [
-        fileURLToPath(new URL('../webview/App.tsx', import.meta.url)),
+        fileURLToPath(new URL('../webview/EmbeddedApp.tsx', import.meta.url)),
       ],
       bundle: true,
       format: 'iife',
@@ -46,7 +46,16 @@ describe('imageSupport browser bundling', () => {
 
     const output = result.outputFiles[0]?.text ?? '';
 
-    expect(output).not.toContain('@qwen-code/qwen-code-core');
-    expect(output).not.toContain('tokenLimits.js');
+    // A failing not.toContain diffs the ~32 MB bundle and dies with
+    // RangeError: Invalid array length before the assertion can render
+    // (#10695). A boolean presence check keeps the failure readable.
+    expect(
+      output.includes('@qwen-code/qwen-code-core'),
+      'embedded webview bundle embeds @qwen-code/qwen-code-core',
+    ).toBe(false);
+    expect(
+      output.includes('tokenLimits.js'),
+      'embedded webview bundle embeds tokenLimits.js',
+    ).toBe(false);
   });
 });

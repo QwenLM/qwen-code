@@ -1,40 +1,106 @@
-import { useState, useEffect, useRef } from 'react';
+import {
+  useCallback,
+  useState,
+  useEffect,
+  useRef,
+  type ReactNode,
+} from 'react';
 import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
-import { useStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import { useStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { useWebShellCustomization } from '../customization';
 import { useStreamingLoadingMetrics } from '../hooks/useStreamingLoadingMetrics';
 import { formatTokenCount } from '../utils/formatTokenCount';
 import styles from './StreamingStatus.module.css';
 
 interface StreamingStatusProps {
   startedAt?: number;
+  backgroundLabel?: string;
+  /**
+   * When false, hide the rotating "witty" loading phrase and skip its rotation
+   * timer entirely — the spinner, elapsed time, token count, and cancel hint
+   * still render. Split-view panes pass false to keep each pane's composer
+   * status compact. Defaults to true (the main chat shows the phrase).
+   */
+  showPhrase?: boolean;
+  /**
+   * When true, the daemon reports the session has an in-flight prompt. The
+   * indicator stays visible even while streamingState is idle, so long tool
+   * calls that produce >3s silent gaps do not hide the loading state mid-turn
+   * (#9487). The daemon's session live state is the authoritative source.
+   */
+  hasActivePrompt?: boolean;
+  showResponseTokensPerSecond?: boolean;
+  /** Optional control rendered after the status metadata, e.g. the minigame. */
+  trailing?: ReactNode;
 }
 
-export function StreamingStatus({ startedAt }: StreamingStatusProps) {
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+export function StreamingStatus({
+  startedAt,
+  backgroundLabel,
+  showPhrase = true,
+  hasActivePrompt,
+  showResponseTokensPerSecond = false,
+  trailing,
+}: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
     useStreamingLoadingMetrics();
   const { language, t } = useI18n();
+  const { loadingPhrases: customLoadingPhrases } = useWebShellCustomization();
+  // Read the resolver through a ref so its identity never feeds the rotation
+  // effect below. A host that passes an inline `loadingPhrases` arrow hands a
+  // fresh reference on every render, and during streaming App re-renders on
+  // every transcript delta — so depending on the resolver identity would tear
+  // down and recreate the 15s interval each render and flicker the phrase. The
+  // ref keeps the latest resolver while `resolvePhrases` stays stable; a changed
+  // resolver's output is picked up on the next tick.
+  const customLoadingPhrasesRef = useRef(customLoadingPhrases);
+  customLoadingPhrasesRef.current = customLoadingPhrases;
+  // Prefer the host's custom phrases; fall back to the built-in defaults when
+  // the resolver is absent or returns undefined/null. An empty array is honored
+  // as an explicit "hide" signal. The resolver is host-supplied, so a throw is
+  // contained here (it would otherwise propagate out of the setInterval tick
+  // below on every cycle and freeze the phrase) and falls back to defaults.
+  const resolvePhrases = useCallback((lang: string): readonly string[] => {
+    try {
+      return customLoadingPhrasesRef.current?.(lang) ?? getLoadingPhrases(lang);
+    } catch (error: unknown) {
+      console.warn(
+        '[web-shell] loadingPhrases resolver threw; using defaults',
+        error,
+      );
+      return getLoadingPhrases(lang);
+    }
+  }, []);
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());
   const [dotFrame, setDotFrame] = useState(0);
-  const [loadingPhrase, setLoadingPhrase] = useState(() => {
-    const phrases = getLoadingPhrases(language);
-    return phrases[0] ?? '';
-  });
-
-  const isActive = streamingState !== 'idle';
+  const [loadingPhrase, setLoadingPhrase] = useState(
+    () => resolvePhrases(language)[0] ?? '',
+  );
+  const isActive = streamingState !== 'idle' || hasActivePrompt === true;
+  // Tracks whether the previous effect run was active, so a silent gap (active
+  // via hasActivePrompt while the host's startedAt goes undefined) keeps the
+  // turn's original anchor instead of restarting the elapsed clock at zero.
+  const wasActiveRef = useRef(false);
 
   useEffect(() => {
     if (!isActive) {
+      wasActiveRef.current = false;
       setElapsed(0);
       return;
     }
 
-    startTime.current = startedAt ?? Date.now();
+    if (startedAt !== undefined || !wasActiveRef.current) {
+      startTime.current = startedAt ?? Date.now();
+    }
+    wasActiveRef.current = true;
     setElapsed(elapsedSeconds(startTime.current));
     const interval = setInterval(() => {
       setElapsed(elapsedSeconds(startTime.current));
@@ -43,13 +109,22 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   }, [isActive, startedAt]);
 
   useEffect(() => {
-    const phrases = getLoadingPhrases(language);
-    if (streamingState === 'idle' || phrases.length === 0) {
-      setLoadingPhrase(phrases[0] ?? '');
+    // Callers that hide the phrase (e.g. split-view panes) don't need the
+    // rotation timer at all — bail before arming it so panes don't each run a
+    // needless interval and re-render on every tick.
+    if (!showPhrase) return;
+    if (streamingState === 'idle') {
+      setLoadingPhrase(resolvePhrases(language)[0] ?? '');
       return;
     }
 
+    // Re-resolve on every tick (not once at effect setup) so a host that swaps
+    // its resolver mid-stream is reflected on the next tick — resolvePhrases is
+    // kept stable by the ref above, so the effect itself does not re-run on
+    // resolver identity changes. An empty result picks index 0 → '' and hides
+    // the phrase, and is re-checked on the following tick.
     const pickPhrase = () => {
+      const phrases = resolvePhrases(language);
       const idx = Math.floor(Math.random() * phrases.length);
       setLoadingPhrase(phrases[idx] ?? '');
     };
@@ -57,37 +132,56 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
     pickPhrase();
     const interval = setInterval(pickPhrase, PHRASE_CHANGE_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [language, streamingState]);
+  }, [language, streamingState, resolvePhrases, showPhrase]);
 
   useEffect(() => {
-    if (streamingState === 'idle') return;
+    if (!isActive) return;
     const interval = setInterval(() => {
-      setDotFrame((f) => (f + 1) % 4);
+      setDotFrame((f) => (f + 1) % SPINNER_FRAMES.length);
     }, 250);
     return () => clearInterval(interval);
-  }, [streamingState]);
+  }, [isActive]);
 
-  if (streamingState === 'idle') return null;
+  if (!isActive) return null;
 
-  const dots = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  const spinnerChar = dots[dotFrame % dots.length];
+  const spinnerChar = SPINNER_FRAMES[dotFrame % SPINNER_FRAMES.length];
   const arrow = isReceivingContent ? '↓' : '↑';
   const timeStr = elapsed < 60 ? `${elapsed}s` : formatDuration(elapsed * 1000);
   const tokenStr =
     estimatedOutputTokens > 0
       ? ` · ${arrow} ${t('stream.tokens', { count: formatTokenCount(estimatedOutputTokens) })}`
       : '';
+  const tokenRateStr =
+    showResponseTokensPerSecond &&
+    streamingState === 'responding' &&
+    isReceivingContent &&
+    elapsed > 0
+      ? ` · ${formatTokensPerSecond(estimatedOutputTokens / elapsed)}`
+      : '';
 
   return (
     <div className={styles.status}>
       <span className={styles.spinner}>{spinnerChar}</span>
-      {loadingPhrase && <span className={styles.label}>{loadingPhrase}</span>}
-      <span className={styles.meta}>
-        ({timeStr}
-        {tokenStr} · {t('stream.cancel')})
+      {(backgroundLabel || (showPhrase && loadingPhrase)) && (
+        <span className={styles.label}>
+          {backgroundLabel
+            ? t('background.processing', { label: backgroundLabel })
+            : loadingPhrase}
+        </span>
+      )}
+      <span className={`${styles.meta} ${styles.streamingMeta}`}>
+        {timeStr}
+        {tokenStr}
+        {tokenRateStr} · {t('stream.cancel')}
       </span>
+      {trailing}
     </div>
   );
+}
+
+function formatTokensPerSecond(rate: number): string {
+  if (!Number.isFinite(rate) || rate <= 0) return '0 t/s';
+  return `${rate >= 10 ? Math.round(rate) : rate.toFixed(1)} t/s`;
 }
 
 function formatDuration(milliseconds: number): string {

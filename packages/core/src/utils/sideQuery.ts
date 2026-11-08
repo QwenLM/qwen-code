@@ -12,7 +12,7 @@ import type {
   Part,
 } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_MODEL } from './default-qwen-model.js';
 import { SchemaValidator } from './schemaValidator.js';
 
 export interface SideQueryJsonOptions<TResponse> {
@@ -24,8 +24,7 @@ export interface SideQueryJsonOptions<TResponse> {
    * `config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
    * — side queries run on the fast model when one is configured, including
    * fast models registered under a different authType than the main session.
-   * Pass an explicit value to pin to the main model (e.g. long-form
-   * summarization in web-fetch).
+   * Pass an explicit value to pin a specific model.
    */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;
@@ -35,7 +34,12 @@ export interface SideQueryJsonOptions<TResponse> {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` gets a best-effort budget from
+   * `BaseLlmClient` against the target's resolved context window (#13208);
+   * when no window is declared or configured and the id is in neither the
+   * catalog nor the curated tables, that term falls back to a fabricated
+   * 200 000 (`DEFAULT_TOKEN_LIMIT`) and does not bind. A value supplied here
+   * is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,
@@ -50,6 +54,7 @@ export interface SideQueryJsonOptions<TResponse> {
    * pass `1` to avoid burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  boundedRetries?: boolean;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -72,8 +77,7 @@ export interface SideQueryTextOptions {
    * `config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
    * — side queries run on the fast model when one is configured, including
    * fast models registered under a different authType than the main session.
-   * Pass an explicit value to pin to the main model (e.g. long-form
-   * summarization in web-fetch).
+   * Pass an explicit value to pin a specific model.
    */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;
@@ -83,7 +87,12 @@ export interface SideQueryTextOptions {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` gets a best-effort budget from
+   * `BaseLlmClient` against the target's resolved context window (#13208);
+   * when no window is declared or configured and the id is in neither the
+   * catalog nor the curated tables, that term falls back to a fabricated
+   * 200 000 (`DEFAULT_TOKEN_LIMIT`) and does not bind. A value supplied here
+   * is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,
@@ -99,7 +108,22 @@ export interface SideQueryTextOptions {
    * new user-visible side queries honor the preference automatically.
    */
   skipOutputLanguagePreference?: boolean;
+  /**
+   * Opt in to stream the response so a slow inference keeps its HTTP connection
+   * alive against gateways that would time out the non-streaming request (e.g.
+   * chat compression behind a BFF); see {@link GenerateTextOptions.stream} for
+   * the full rationale. Defaults to `false`.
+   */
+  stream?: boolean;
   validate?: (text: string) => string | null;
+  /**
+   * Fail (throw) instead of silently falling back to the main generator when a
+   * distinct generator for `model` can't be created. See
+   * {@link GenerateTextOptions.failClosed} — the vision bridge sets this so a
+   * missing cross-provider credential never sends image payloads to the
+   * text-only primary.
+   */
+  failClosed?: boolean;
 }
 
 export interface SideQueryTextResult {
@@ -220,6 +244,9 @@ export async function runSideQuery<TResponse>(
       systemInstruction,
       promptId,
       config: requestConfig,
+      ...(options.boundedRetries !== undefined && {
+        boundedRetries: options.boundedRetries,
+      }),
       ...(options.maxAttempts !== undefined && {
         maxAttempts: options.maxAttempts,
       }),
@@ -248,6 +275,8 @@ export async function runSideQuery<TResponse>(
     ...(options.maxAttempts !== undefined && {
       maxAttempts: options.maxAttempts,
     }),
+    ...(options.stream !== undefined && { stream: options.stream }),
+    ...(options.failClosed !== undefined && { failClosed: options.failClosed }),
   });
 
   const customError = options.validate?.(result.text);

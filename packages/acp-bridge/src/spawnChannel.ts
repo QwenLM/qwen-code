@@ -4,25 +4,321 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import * as os from 'node:os';
+import { spawn } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
-import { ndJsonStream } from '@agentclientprotocol/sdk';
-import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
+import { CLIENT_METHODS, type AnyMessage } from '@agentclientprotocol/sdk';
+// The SDK does not export its runtime validators from the package root.
+/* eslint-disable import/no-internal-modules */
+import {
+  zCreateTerminalRequest,
+  zKillTerminalCommandRequest,
+  zReadTextFileRequest,
+  zReleaseTerminalRequest,
+  zRequestPermissionRequest,
+  zSessionNotification,
+  zTerminalOutputRequest,
+  zWaitForTerminalExitRequest,
+  zWriteTextFileRequest,
+} from '@agentclientprotocol/sdk/dist/schema/zod.gen.js';
+/* eslint-enable import/no-internal-modules */
+import type { ChannelFactory } from './channel.js';
+import { markChannelFactoryForwardsChildEnv } from './child-env-forwarding.js';
+import { redactLogCredentials } from './logRedaction.js';
+import {
+  DAEMON_ACP_NDJSON_LIMITS,
+  NdJsonQueueLimitError,
+  ndJsonStream,
+  type NdJsonMessageObservation,
+  type NdJsonStreamHooks,
+  type NdJsonStreamLimits,
+  validateNdJsonStreamLimits,
+} from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
+import { AcpChildCapacityExceededError } from './bridgeErrors.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
+import { ProcessRegistry } from './process-registry.js';
+import type { ChildHeapPolicy } from './child-heap-policy.js';
+import { applyChildHeapLimit } from './child-heap-args.js';
+import { estimateJsonStringBytes } from './json-string-bytes.js';
+import { detectAvailableMemoryMb } from './daemon-memory-budget.js';
 
 let cachedMemoryArgs: string[] | undefined;
+export { DAEMON_ACP_NDJSON_LIMITS };
+
+const daemonClientParamValidators = new Map<
+  string,
+  { safeParse(value: unknown): { success: boolean } }
+>([
+  [CLIENT_METHODS.fs_read_text_file, zReadTextFileRequest],
+  [CLIENT_METHODS.fs_write_text_file, zWriteTextFileRequest],
+  [CLIENT_METHODS.session_request_permission, zRequestPermissionRequest],
+  [CLIENT_METHODS.session_update, zSessionNotification],
+  [CLIENT_METHODS.terminal_create, zCreateTerminalRequest],
+  [CLIENT_METHODS.terminal_kill, zKillTerminalCommandRequest],
+  [CLIENT_METHODS.terminal_output, zTerminalOutputRequest],
+  [CLIENT_METHODS.terminal_release, zReleaseTerminalRequest],
+  [CLIENT_METHODS.terminal_wait_for_exit, zWaitForTerminalExitRequest],
+]);
+
+function validateDaemonInboundMessage(message: AnyMessage): boolean {
+  if (!('method' in message)) return true;
+  const validator = daemonClientParamValidators.get(message.method);
+  return !validator || validator.safeParse(message.params).success;
+}
+
+class PreparedResponseBudget {
+  private objectCharges = new WeakMap<object, number[]>();
+  private readonly primitiveCharges = new Map<unknown, number[]>();
+  private retainedCount = 0;
+  private retainedBytes = 0;
+  private closed = false;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  reserve(value: unknown): void {
+    if (this.closed) return;
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    const envelopeBytes = Math.min(2_048, this.limits.maxQueuedBytes);
+    const charge =
+      envelopeBytes +
+      estimatePreparedResponseBytes(
+        value,
+        Math.max(0, availableBytes - envelopeBytes),
+      );
+    if (
+      this.retainedCount >= this.limits.maxQueuedMessages ||
+      charge > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        'prepared_response',
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        charge,
+        availableBytes,
+      );
+    }
+    const charges = this.getCharges(value, true);
+    charges.push(charge);
+    this.retainedCount++;
+    this.retainedBytes += charge;
+  }
+
+  releaseMessage(message: unknown): void {
+    if (
+      !isPlainRecord(message) ||
+      Object.hasOwn(message, 'method') ||
+      !Object.hasOwn(message, 'id')
+    ) {
+      return;
+    }
+    const value = Object.hasOwn(message, 'result')
+      ? message['result']
+      : message['error'];
+    const charges = this.getCharges(value, false);
+    if (!charges) return;
+    const charge = charges.shift();
+    if (charge === undefined) return;
+    if (charges.length === 0 && !isObjectValue(value)) {
+      this.primitiveCharges.delete(value);
+    }
+    this.retainedCount--;
+    this.retainedBytes -= charge;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.objectCharges = new WeakMap<object, number[]>();
+    this.primitiveCharges.clear();
+    this.retainedCount = 0;
+    this.retainedBytes = 0;
+  }
+
+  private getCharges(value: unknown, create: true): number[];
+  private getCharges(value: unknown, create: false): number[] | undefined;
+  private getCharges(value: unknown, create: boolean): number[] | undefined {
+    const charges = isObjectValue(value)
+      ? this.objectCharges.get(value)
+      : this.primitiveCharges.get(value);
+    if (charges || !create) return charges;
+    const created: number[] = [];
+    if (isObjectValue(value)) {
+      this.objectCharges.set(value, created);
+    } else {
+      this.primitiveCharges.set(value, created);
+    }
+    return created;
+  }
+}
+
+class OutboundOperationBudget {
+  private retainedCount = 0;
+  private retainedBytes = 0;
+  private generation = 0;
+  private closed = false;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  reserve(value: unknown): () => void {
+    if (this.closed) return () => {};
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    const envelopeBytes = Math.min(2_048, this.limits.maxQueuedBytes);
+    const charge =
+      envelopeBytes +
+      estimatePreparedResponseBytes(
+        value,
+        Math.max(0, availableBytes - envelopeBytes),
+      );
+    if (
+      this.retainedCount >= this.limits.maxQueuedMessages ||
+      charge > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        'outbound_operation',
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        charge,
+        availableBytes,
+      );
+    }
+    this.retainedCount++;
+    this.retainedBytes += charge;
+    const generation = this.generation;
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      if (this.closed || this.generation !== generation) return;
+      this.retainedCount--;
+      this.retainedBytes -= charge;
+    };
+  }
+
+  close(): void {
+    this.closed = true;
+    this.generation++;
+    this.retainedCount = 0;
+    this.retainedBytes = 0;
+  }
+}
+
+type PreparedResponseEstimationFrame =
+  | { kind: 'value'; value: unknown }
+  | { kind: 'array'; value: unknown[]; index: number }
+  | {
+      kind: 'record';
+      value: Record<string, unknown>;
+      keys: Generator<string, void, unknown>;
+      first: boolean;
+    };
+
+function* enumerableOwnKeys(
+  value: Record<string, unknown>,
+): Generator<string, void, unknown> {
+  for (const key in value) {
+    if (Object.hasOwn(value, key)) yield key;
+  }
+}
+
+function estimatePreparedResponseBytes(value: unknown, limitBytes: number) {
+  let bytes = 0;
+  const stack: PreparedResponseEstimationFrame[] = [{ kind: 'value', value }];
+  const seen = new WeakSet<object>();
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.kind === 'array') {
+      if (frame.index >= frame.value.length) continue;
+      if (frame.index > 0) bytes++;
+      if (bytes > limitBytes) return limitBytes + 1;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        frame.value,
+        String(frame.index),
+      );
+      if (descriptor?.get || descriptor?.set) return limitBytes + 1;
+      stack.push({ ...frame, index: frame.index + 1 });
+      stack.push({ kind: 'value', value: descriptor?.value });
+      continue;
+    }
+    if (frame.kind === 'record') {
+      const next = frame.keys.next();
+      if (next.done) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        frame.value,
+        next.value,
+      );
+      if (!descriptor || descriptor.get || descriptor.set) {
+        return limitBytes + 1;
+      }
+      bytes +=
+        (frame.first ? 0 : 1) +
+        estimateJsonStringBytes(next.value, Math.max(0, limitBytes - bytes)) +
+        1;
+      if (bytes > limitBytes) return limitBytes + 1;
+      stack.push({ ...frame, first: false });
+      stack.push({ kind: 'value', value: descriptor.value });
+      continue;
+    }
+    const current = frame.value;
+    if (current === null) {
+      bytes += 4;
+    } else if (current === undefined) {
+      bytes += 4;
+    } else if (typeof current === 'string') {
+      bytes += estimateJsonStringBytes(
+        current,
+        Math.max(0, limitBytes - bytes),
+      );
+    } else if (typeof current === 'number') {
+      bytes += 24;
+    } else if (typeof current === 'boolean') {
+      bytes += 5;
+    } else if (Array.isArray(current)) {
+      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+        return limitBytes + 1;
+      }
+      seen.add(current);
+      bytes += 2;
+      stack.push({ kind: 'array', value: current, index: 0 });
+    } else if (isPlainRecord(current)) {
+      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+        return limitBytes + 1;
+      }
+      seen.add(current);
+      bytes += 2;
+      stack.push({
+        kind: 'record',
+        value: current,
+        keys: enumerableOwnKeys(current),
+        first: true,
+      });
+    } else {
+      return limitBytes + 1;
+    }
+    if (bytes > limitBytes) return limitBytes + 1;
+  }
+  return Math.max(1, bytes);
+}
+
+function isObjectValue(value: unknown): value is object {
+  return typeof value === 'object' && value !== null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isObjectValue(value) || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
-  const constrainedMemory = (process as { constrainedMemory?: () => number })
-    .constrainedMemory;
-  const constrained =
-    typeof constrainedMemory === 'function' ? constrainedMemory() : 0;
-  const totalBytes =
-    constrained && constrained > 0 ? constrained : os.totalmem();
-  const totalMB = Math.floor(totalBytes / (1024 * 1024));
-  const targetMB = Math.min(Math.floor(totalMB * 0.5), 16_384);
+  const { memoryMb } = detectAvailableMemoryMb();
+  const targetMB = Math.min(Math.floor(memoryMb * 0.5), 16_384);
   const currentLimitMB = Math.floor(
     getHeapStatistics().heap_size_limit / (1024 * 1024),
   );
@@ -63,8 +359,9 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
 
   const flush = (line: string) => {
     if (line.length > 0) {
-      process.stderr.write(prefix + line + '\n');
-      if (onDiagnosticLine) onDiagnosticLine(prefix + line, 'warn');
+      const safe = redactLogCredentials(line);
+      process.stderr.write(prefix + safe + '\n');
+      if (onDiagnosticLine) onDiagnosticLine(prefix + safe, 'warn');
     }
   };
 
@@ -80,7 +377,9 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
       // Force-flush the unterminated tail if it's grown past the cap
       // — keeps memory bounded against a `\n`-less stderr storm.
       while (buf.length > STDERR_LINE_CAP_CHARS) {
-        const truncated = buf.slice(0, STDERR_LINE_CAP_CHARS) + ' [truncated]';
+        const truncated =
+          redactLogCredentials(buf.slice(0, STDERR_LINE_CAP_CHARS)) +
+          ' [truncated]';
         process.stderr.write(prefix + truncated + '\n');
         if (onDiagnosticLine) onDiagnosticLine(prefix + truncated, 'warn');
         buf = buf.slice(STDERR_LINE_CAP_CHARS);
@@ -99,6 +398,22 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
 export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
+  pipeHooks?: NdJsonStreamHooks;
+  pipeLimits?: NdJsonStreamLimits;
+  sourceEnv?: Readonly<NodeJS.ProcessEnv>;
+  processRegistry?: ProcessRegistry;
+  /**
+   * Daemon child-heap policy. Only meaningful together with a **shared**
+   * `processRegistry`: the factory otherwise builds its own, every spawn sees
+   * a concurrent count of 1, and each child is handed the whole pool — the
+   * current overcommit, now with a policy object attesting to it. All three
+   * daemon factories pass the same registry.
+   *
+   * Omitted by every single-child caller (interactive CLI, IDE companion,
+   * direct-embed), which keeps the host-derived ceiling.
+   */
+  childHeapPolicy?: ChildHeapPolicy;
+  reclaimIdleChild?: (signal?: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -113,37 +428,158 @@ export interface SpawnChannelFactoryOptions {
 export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
-  return async (workspaceCwd, childEnvOverrides) => {
-    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
+  if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
+  const policy = options.childHeapPolicy?.snapshot();
+  const admissionEnforced =
+    policy?.mode === 'admit' || policy?.mode === 'enforce';
+  if (!options.processRegistry && admissionEnforced) {
+    throw new TypeError(
+      'ACP admission requires an explicit shared process registry.',
+    );
+  }
+  const sourceEnv = options.sourceEnv ?? process.env;
+  const enforcedCeiling =
+    policy?.mode === 'enforce' ? policy.perChildCeilingMb : undefined;
+  if (enforcedCeiling !== undefined) {
+    if (
+      enforcedCeiling === null ||
+      !Number.isInteger(enforcedCeiling) ||
+      enforcedCeiling <= 0
+    ) {
+      throw new TypeError(
+        'ACP heap enforcement requires a positive heap ceiling.',
+      );
+    }
+    applyChildHeapLimit(process.execArgv, { ...sourceEnv }, enforcedCeiling);
+  }
+  const processRegistry = options.processRegistry ?? new ProcessRegistry();
+  const factory: ChannelFactory = async (
+    workspaceCwd,
+    childEnvOverrides,
+    signal,
+    startup,
+  ) => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('ACP channel spawn was aborted');
+    }
+    const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
     if (!cliEntry) {
       throw new MissingCliEntryError();
     }
     const childEnv = scrubChildEnv(
-      process.env,
+      sourceEnv,
       SCRUBBED_CHILD_ENV_KEYS,
       childEnvOverrides,
     );
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    // Marks the child as daemon-spawned so its ACP channel fallback reports
+    // channel=daemon in usage statistics (see cli/src/config/acp-channel-fallback.ts).
+    childEnv['QWEN_CODE_SERVE'] = '1';
 
-    const memoryArgs = getAcpMemoryArgs();
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
     );
-    const child = spawn(
-      process.execPath,
-      [
-        ...execArgs,
-        ...memoryArgs,
-        cliEntry,
-        '--acp',
-        ...(options.extraArgs ?? []),
-      ],
-      {
-        cwd: workspaceCwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: childEnv,
-      },
+    const enforcedArgs =
+      enforcedCeiling !== undefined
+        ? applyChildHeapLimit(execArgs, childEnv, enforcedCeiling)
+        : undefined;
+    // Reserve BEFORE deciding: the reservation is what makes this spawn
+    // visible to any other spawn racing it, so the count below includes this
+    // child and two concurrent spawns cannot both be told they are alone.
+    let reservation = processRegistry.reserve();
+    let child;
+    // Everything between `reserve()` and `attach()` belongs inside this try.
+    // `childHeapPolicy` is a public `createSpawnChannelFactory` option, so an
+    // externally supplied `decide()` can throw; outside the try that would
+    // reject the spawn while leaving the reservation held forever, inflating
+    // `committedProcessCount` for every later spawn.
+    try {
+      let decision = options.childHeapPolicy?.decide(
+        processRegistry.committedProcessCount,
+      );
+      if (decision?.refuse && admissionEnforced && options.reclaimIdleChild) {
+        reservation.cancel();
+        if (startup) {
+          startup.getTimeoutError = () =>
+            new AcpChildCapacityExceededError(
+              options.childHeapPolicy!.snapshot().maxConcurrentChildren!,
+              processRegistry.committedProcessCount,
+            );
+        }
+        try {
+          await options.reclaimIdleChild(signal);
+        } catch (error) {
+          options.onDiagnosticLine?.(
+            `Idle ACP reclamation failed: ${String(error)}`,
+            'warn',
+          );
+        } finally {
+          if (startup) delete startup.getTimeoutError;
+        }
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error('ACP channel spawn was aborted');
+        }
+        const limit =
+          options.childHeapPolicy!.snapshot().maxConcurrentChildren!;
+        if (processRegistry.committedProcessCount >= limit) {
+          throw new AcpChildCapacityExceededError(
+            limit,
+            processRegistry.committedProcessCount,
+          );
+        }
+        reservation = processRegistry.reserve();
+        decision = options.childHeapPolicy!.decide(
+          processRegistry.committedProcessCount,
+        );
+      }
+      if (decision?.refuse) {
+        const policy = options.childHeapPolicy!.snapshot();
+        if (admissionEnforced) {
+          throw new AcpChildCapacityExceededError(
+            policy.maxConcurrentChildren!,
+            processRegistry.committedProcessCount - 1,
+          );
+        }
+      }
+      const nodeArgs = enforcedArgs ?? [...execArgs, ...getAcpMemoryArgs()];
+      child = spawn(
+        process.execPath,
+        [...nodeArgs, cliEntry, '--acp', ...(options.extraArgs ?? [])],
+        {
+          cwd: workspaceCwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+          windowsHide: true,
+          env: childEnv,
+        },
+      );
+    } catch (error) {
+      reservation.cancel();
+      throw error;
+    }
+    const trackedChild = reservation.attach(child, { ownsProcessTree: true });
+    const abortSpawn = () => {
+      try {
+        trackedChild.killSync();
+      } catch {
+        // The child may have exited between the abort and the signal.
+      }
+    };
+    signal?.addEventListener('abort', abortSpawn, { once: true });
+    void trackedChild.exited.then(
+      () => signal?.removeEventListener('abort', abortSpawn),
+      () => signal?.removeEventListener('abort', abortSpawn),
     );
+    if (signal?.aborted) {
+      abortSpawn();
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('ACP channel spawn was aborted');
+    }
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can
@@ -163,21 +599,8 @@ export function createSpawnChannelFactory(
       });
     }
 
-    const exited = new Promise<AcpChannelExitInfo | undefined>((resolve) => {
-      let resolved = false;
-      const finish = (info?: AcpChannelExitInfo) => {
-        if (resolved) return;
-        resolved = true;
-        resolve(info);
-      };
-      child.once('exit', (code, signal) =>
-        finish({ exitCode: code, signalCode: signal }),
-      );
-      child.once('error', () => finish(undefined));
-    });
-
     if (!child.stdin || !child.stdout) {
-      child.kill('SIGKILL');
+      trackedChild.killSync();
       throw new Error(
         'Spawned ACP child has no stdin/stdout — cannot establish NDJSON channel.',
       );
@@ -185,23 +608,90 @@ export function createSpawnChannelFactory(
 
     const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const stream = ndJsonStream(writable, readable);
+    const preparedResponses = options.pipeLimits
+      ? new PreparedResponseBudget(options.pipeLimits)
+      : undefined;
+    const outboundOperations = options.pipeLimits
+      ? new OutboundOperationBudget(options.pipeLimits)
+      : undefined;
+    let reportTransportFailure: ((error: unknown) => void) | undefined;
+    let transportFailureReported = false;
+    const transportFailed = options.pipeLimits
+      ? new Promise<unknown>((resolve) => {
+          reportTransportFailure = resolve;
+        })
+      : undefined;
+    const failTransport = options.pipeLimits
+      ? (error: unknown) => {
+          if (transportFailureReported) return;
+          transportFailureReported = true;
+          reportTransportFailure?.(error);
+          reportTransportFailure = undefined;
+          preparedResponses?.close();
+          outboundOperations?.close();
+          child.stdout?.destroy();
+          child.stdin?.destroy();
+          void trackedChild.terminate().catch(() => {});
+          options.pipeHooks?.onTransportError?.(error);
+        }
+      : undefined;
+    const pipeHooks = options.pipeLimits
+      ? {
+          ...options.pipeHooks,
+          onMessageObserved: (observation: NdJsonMessageObservation) => {
+            if (observation.direction === 'sent') {
+              preparedResponses?.releaseMessage(observation.message);
+            }
+            options.pipeHooks?.onMessageObserved?.(observation);
+          },
+          onTransportError: failTransport,
+        }
+      : options.pipeHooks;
+    const stream = ndJsonStream(
+      writable,
+      readable,
+      pipeHooks,
+      options.pipeLimits,
+      options.pipeLimits ? validateDaemonInboundMessage : undefined,
+      options.pipeLimits !== undefined,
+    );
 
     return {
       stream,
-      kill: () => killChild(child),
-      killSync: () => {
-        if (child.exitCode === null && child.signalCode === null) {
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            /* already dead / pid recycled — ignore */
+      ...(transportFailed ? { transportFailed } : {}),
+      ...(failTransport && options.pipeLimits
+        ? {
+            transportGuard: {
+              maxActiveHandlers: options.pipeLimits.maxQueuedMessages,
+              maxActiveHandlerBytes: options.pipeLimits.maxQueuedBytes,
+              reserveOutboundOperation: (value) => {
+                try {
+                  return outboundOperations?.reserve(value) ?? (() => {});
+                } catch (error) {
+                  failTransport(error);
+                  throw error;
+                }
+              },
+              reservePreparedResponse: (value) => {
+                try {
+                  preparedResponses?.reserve(value);
+                } catch (error) {
+                  failTransport(error);
+                  throw error;
+                }
+              },
+              fail: failTransport,
+            },
           }
-        }
-      },
-      exited,
+        : {}),
+      kill: () => trackedChild.terminate(),
+      killSync: () => trackedChild.killSync(),
+      exited: trackedChild.exited,
+      registryReleased: trackedChild.registryReleased,
     };
   };
+  markChannelFactoryForwardsChildEnv(factory);
+  return factory;
 }
 
 /**
@@ -211,7 +701,7 @@ export function createSpawnChannelFactory(
  *
  * Note on `cwd`: CodeQL flags the `workspaceCwd` flow into `spawn({cwd})`
  * as an "uncontrolled data used in path expression" finding. That's the
- * Stage 1 trust model speaking — the caller (a token-authenticated HTTP
+ * Stage 1 trust model speaking — the caller (an operator-authorized HTTP
  * client) is treated as an extension of the operator. The agent already
  * runs as the same UID with shell-tool access, so restricting the spawn
  * cwd to a sandbox here would be theatre. Stage 4+ remote-sandbox swaps
@@ -230,8 +720,6 @@ export function createSpawnChannelFactory(
 export const defaultSpawnChannelFactory: ChannelFactory =
   createSpawnChannelFactory();
 
-const KILL_HARD_DEADLINE_MS = 10_000;
-
 /**
  * Environment variables stripped from the spawned `qwen --acp` child's
  * environment. Everything else is passed through — see the
@@ -246,6 +734,14 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  * `QWEN_CODE_SIMPLE`: an invocation-level bare-mode override. Letting a
  * daemon or IDE environment leak it into per-session `qwen --acp`
  * children silently disables skills in those children.
+ *
+ * `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN`: daemon-local credential for the
+ * loopback Guard provider. The ACP child reaches the daemon over its private
+ * channel and never needs this token.
+ *
+ * `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`: the Hosted Harness's Runtime Broker
+ * credential. Only the daemon calls the Broker; a prompt-injected agent
+ * holding it could drive Runtime executions directly.
  *
  * **WARNING**: this denylist is correct *only because the agent
  * already has unrestricted shell-tool access* — anything in the env
@@ -262,6 +758,8 @@ const KILL_HARD_DEADLINE_MS = 10_000;
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
   'QWEN_CODE_SIMPLE',
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  'QWEN_MANAGED_RUNTIME_BROKER_TOKEN',
 ]);
 
 /**
@@ -305,64 +803,4 @@ export function scrubChildEnv(
     }
   }
   return childEnv;
-}
-
-function killChild(child: ChildProcess): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve();
-      return;
-    }
-    let resolved = false;
-    const finish = () => {
-      if (resolved) return;
-      resolved = true;
-      child.removeListener('exit', finish);
-      resolve();
-    };
-    child.once('exit', finish);
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      finish();
-      return;
-    }
-    setTimeout(() => {
-      if (!resolved && child.exitCode === null && child.signalCode === null) {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* swallow */
-        }
-      }
-    }, 5_000).unref();
-    // Even SIGKILL doesn't return if the child is in uninterruptible
-    // sleep (D-state, e.g. NFS read blocked on a dead server). Without
-    // this hard deadline, `bridge.shutdown()`'s `Promise.all` waits
-    // forever on that one wedged child and SHUTDOWN_FORCE_CLOSE_MS in
-    // `runQwenServe` only covers `server.close()`, not the bridge.
-    // After the deadline give up: the child is probably stuck in a
-    // kernel call we can't cancel, and `process.exit(0)` will reap it
-    // when the daemon returns to its caller.
-    //
-    // Emit a stderr line BEFORE we
-    // abandon the child so operators see a signal that a zombie
-    // exists. Without this, `shutdown()` returns "graceful" while a
-    // wedged `qwen --acp` process keeps holding FDs / memory / locks;
-    // under systemd/k8s supervision, the daemon respawn would then
-    // race the orphan for the same workspace. Single-line warning is
-    // intentionally noisy on the daemon's stderr so monitoring/log
-    // aggregators catch it.
-    setTimeout(() => {
-      if (!resolved) {
-        process.stderr.write(
-          `qwen serve: killChild hard deadline (${KILL_HARD_DEADLINE_MS}ms) ` +
-            `reached; child pid=${child.pid} still alive (uninterruptible sleep?) — ` +
-            `abandoning. Operator should check for zombie qwen --acp processes ` +
-            `holding workspace resources.\n`,
-        );
-        finish();
-      }
-    }, KILL_HARD_DEADLINE_MS).unref();
-  });
 }

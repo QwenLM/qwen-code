@@ -32,5 +32,6 @@ describe('settingsCommand', () => {
     expect(settingsCommand.description).toBe(
       'View and edit Qwen Code settings',
     );
+    expect(settingsCommand.canRunDuringStreaming).toBe(true);
   });
 });

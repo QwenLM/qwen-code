@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
@@ -48,6 +49,19 @@ describe('useWorktreeSession', () => {
 
   afterEach(async () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('ignores worktree sidecars and skips watcher setup in tool sandbox', async () => {
+    await writeWorktreeSession(sidecarPath, sample);
+    const config = makeMockConfig(sidecarPath);
+    config.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ backend: 'bwrap' });
+    const sessionService = vi.spyOn(config, 'getSessionService');
+    const { result } = renderHook(() => useWorktreeSession(config));
+    expect(result.current).toBeNull();
+    expect(sessionService).not.toHaveBeenCalled();
+    expect(await fs.readFile(sidecarPath, 'utf8')).toContain(sample.slug);
   });
 
   it('returns null when no sidecar exists', async () => {

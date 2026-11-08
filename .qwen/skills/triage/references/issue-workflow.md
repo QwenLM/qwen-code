@@ -2,9 +2,11 @@
 
 Triage a GitHub issue. Shared rules in `SKILL.md` — read those first.
 
-**Single comment, updated in place.** Stage 1 posts a concise bilingual
-comment; Stage 2 appends results to the same comment via `gh api PATCH`.
-Key points only — no verbose prose.
+**Single comment, updated in place.** Stage 1 drafts a concise bilingual
+comment; Stage 2 drafts the same comment again with results appended — the
+publisher upserts by the `stage=1` marker, so exactly one comment exists.
+Key points only — no verbose prose. All writes are drafts (see "Publishing"
+in `SKILL.md`).
 
 ```markdown
 <!-- qwen-triage stage=1 -->
@@ -43,27 +45,45 @@ Classify the issue from title, body, comments, labels, docs, and source context:
 - **Feature**: new capability, behavior change, or product request.
 
 Apply labels using existing labels only. Prefer one `type/*`, one `category/*`,
-relevant `scope/*`, one priority label, and status labels as needed. Apply
-labels with `gh issue edit --add-label`.
+relevant `scope/*`, one priority label, and status labels as needed. Every
+label change is a `labels` draft action (the publisher verifies each label
+exists and never creates one):
 
-Post a single triage comment (bilingual, concise key points — see format
-below). This comment is updated in place by Stage 2; never post a second one.
+```bash
+jq -cn '{action:"labels",add:["type/bug","scope/cli"],remove:[]}' >> "$DRAFT_DIR/actions.jsonl"
+```
+
+If the issue is no longer unclear and currently has `status/need-information`,
+remove that label:
+
+```bash
+jq -cn '{action:"labels",add:[],remove:["status/need-information"]}' >> "$DRAFT_DIR/actions.jsonl"
+```
+
+Draft a single triage comment (bilingual, concise key points — see format
+below): write the body to `$DRAFT_DIR/bodies/triage-comment.md` (first line
+`<!-- qwen-triage stage=1 -->`), then append the action. Stage 2 drafts the
+same marker again with the result appended; never draft a second marker.
+
+```bash
+jq -cn '{action:"upsert-comment",marker:"stage=1",body:"bodies/triage-comment.md"}' >> "$DRAFT_DIR/actions.jsonl"
+```
 
 If inadmissible, close the issue and stop:
 
 ```bash
-gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason "not planned"
+jq -cn '{action:"close-issue",reason:"not planned"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
-
-Save the comment ID for Stage 2 to update.
 
 ## Stage 2: Handle By Type
 
-Work the issue by type below, then **update** the Stage 1 comment in place with
-the result appended:
+Work the issue by type below, then **re-draft** the Stage 1 comment with the
+result appended (write the full updated body to the same
+`$DRAFT_DIR/bodies/triage-comment.md`, then append the same `upsert-comment`
+action again — the publisher PATCHes the existing comment by marker):
 
 ```bash
-gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-comment.md
+jq -cn '{action:"upsert-comment",marker:"stage=1",body:"bodies/triage-comment.md"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
 
 ### For unclear issues:
@@ -93,7 +113,12 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 ### For bugs with clear reproduction:
 
 1. Check safety — no untrusted code with write tokens or secrets.
-2. Use `tmux-real-user-testing` skill if available; otherwise tmux manually (runs in main working tree, not worktree):
+2. **Local invocation only** (no `GITHUB_EVENT_NAME`): drive the repro in tmux.
+   In unattended CI, skip this step — the SKILL.md static-review rule forbids
+   executing PR code (see SKILL.md Rules); do the static analysis of step 3
+   instead and state in the comment that the reproduction was not executed. Use
+   `tmux-real-user-testing` skill if available; otherwise tmux manually (runs in
+   main working tree, not worktree):
 
    ```bash
    S=triage-test-$(date +%H%M%S); mkdir -p "tmp/$S"
@@ -113,7 +138,8 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 
 ### For bugs without clear reproduction:
 
-1. Add `welcome-pr` if it exists. Say community PRs are welcome.
+1. Say community PRs are welcome. Do not draft the `welcome-pr` label —
+   process labels are rejected by the publisher (see SKILL.md Rules).
 2. Add `status/need-retesting` if on a stale version.
 3. Inspect source and docs inside worktree; state confidence: confirmed / plausible / no clear
    direction.

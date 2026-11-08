@@ -1,0 +1,272 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  branchExists,
+  checkoutRef,
+  createBranch,
+  deleteBranch,
+  getHeadCommit,
+  isDirtyTree,
+} from './git-branch-ops.js';
+
+// `git-branch-ops.ts` captures `promisify(execFile)` at module load, which
+// `vi.mock('node:child_process')` cannot intercept, so these tests exercise the
+// real git binary against a throwaway repository. This verifies the actual
+// command strings and argument ordering (e.g. the `refs/heads/` prefix,
+// `--untracked-files=no`, and `-D`) rather than a mocked stand-in.
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: 'pipe',
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+    },
+  });
+}
+
+let repo: string;
+
+beforeEach(() => {
+  // Scrub ambient git config so the production-spawned git (which inherits
+  // process.env) never resolves a system/global `core.hooksPath`.
+  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+  vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+  repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-git-branch-ops-test-'));
+  git(repo, 'init', '-q', '-b', 'main');
+  git(repo, 'config', 'user.email', 'test@example.com');
+  git(repo, 'config', 'user.name', 'Test');
+  git(repo, 'config', 'commit.gpgsign', 'false');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'hello\n');
+  git(repo, 'add', 'README.md');
+  git(repo, 'commit', '-qm', 'init');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
+describe('branchExists', () => {
+  it('returns true for an existing branch', async () => {
+    await expect(branchExists(repo, 'main')).resolves.toBe(true);
+  });
+
+  it('returns false for a missing branch', async () => {
+    await expect(branchExists(repo, 'no-such-branch')).resolves.toBe(false);
+  });
+
+  it('matches only a local branch ref, not a tag of the same name', async () => {
+    git(repo, 'tag', 'v1.0.0');
+    await expect(branchExists(repo, 'v1.0.0')).resolves.toBe(false);
+  });
+});
+
+describe('isDirtyTree', () => {
+  it('returns false for a clean tree', async () => {
+    await expect(isDirtyTree(repo)).resolves.toBe(false);
+  });
+
+  it('returns true when a tracked file is modified', async () => {
+    fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
+    await expect(isDirtyTree(repo)).resolves.toBe(true);
+  });
+
+  it('ignores untracked files', async () => {
+    fs.writeFileSync(path.join(repo, 'untracked.txt'), 'new\n');
+    await expect(isDirtyTree(repo)).resolves.toBe(false);
+  });
+
+  // The plant is a `/bin/sh` script, so the attack does not exist on Windows.
+  it.skipIf(process.platform === 'win32')(
+    'does not run a helper the repository names in its own config',
+    async () => {
+      const canary = path.join(repo, 'PWNED');
+      const helper = path.join(repo, 'plant.sh');
+      // An fsmonitor helper reports "trust nothing" by failing, which keeps the
+      // status correct either way — so only the canary distinguishes the two.
+      fs.writeFileSync(helper, `#!/bin/sh\ntouch '${canary}'\nexit 1\n`);
+      fs.chmodSync(helper, 0o755);
+      git(repo, 'config', 'core.fsmonitor', helper);
+      // The refresh only re-stats what changed.
+      fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
+
+      // Control: the fixture is a live attack when the same command is ungated.
+      git(repo, 'status', '--porcelain', '--untracked-files=no');
+      expect(fs.existsSync(canary)).toBe(true);
+      fs.unlinkSync(canary);
+
+      await expect(isDirtyTree(repo)).resolves.toBe(true);
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+  );
+
+  // `post-index-change` fires when a `status` *writes* the index — a
+  // tree-shipped program no `-c core.fsmonitor=` can suppress, so only
+  // `--no-optional-locks` skips the write. The control lives in its own case
+  // with a fresh repo, because one ungated status consumes the stat dirt that
+  // would otherwise make the guarded probe's hook fire.
+  //
+  // The write needs a racily-clean entry, and whether beforeEach's add and
+  // commit land in one filesystem tick is luck — a loaded runner straddles
+  // the tick, the status then writes nothing, and the control goes silent.
+  // Re-adding with a future-dated mtime forces raciness at any tick; the
+  // re-add itself writes the index and fires the hook, so reset the canary.
+  function plantPostIndexChangeHook(canary: string): void {
+    const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
+    fs.mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true });
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
+    fs.chmodSync(hook, 0o755);
+    const readme = path.join(repo, 'README.md');
+    const future = new Date(Date.now() + 3_600_000);
+    fs.utimesSync(readme, future, future);
+    git(repo, 'add', 'README.md');
+    fs.rmSync(canary, { force: true });
+    fs.writeFileSync(readme, 'changed\n');
+  }
+
+  it.skipIf(process.platform === 'win32')(
+    'does not run a tree-shipped post-index-change hook',
+    async () => {
+      const canary = path.join(repo, 'PIC');
+      plantPostIndexChangeHook(canary);
+
+      await expect(isDirtyTree(repo)).resolves.toBe(true);
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'an ungated status on a dirty tree runs the tree-shipped post-index-change hook (control)',
+    async () => {
+      const canary = path.join(repo, 'PIC');
+      plantPostIndexChangeHook(canary);
+
+      git(repo, 'status', '--porcelain', '--untracked-files=no');
+      expect(fs.existsSync(canary)).toBe(true);
+    },
+  );
+});
+
+describe('getHeadCommit', () => {
+  it('returns the current HEAD commit sha', async () => {
+    const expected = git(repo, 'rev-parse', 'HEAD').trim();
+    await expect(getHeadCommit(repo)).resolves.toBe(expected);
+  });
+
+  it('returns undefined outside a git repository', async () => {
+    const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-not-repo-'));
+    try {
+      await expect(getHeadCommit(notARepo)).resolves.toBeUndefined();
+    } finally {
+      fs.rmSync(notARepo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('createBranch', () => {
+  it('creates and checks out a new branch at the current commit', async () => {
+    const before = git(repo, 'rev-parse', 'HEAD').trim();
+    await createBranch(repo, 'feature');
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(
+      'feature',
+    );
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(before);
+    await expect(branchExists(repo, 'feature')).resolves.toBe(true);
+  });
+
+  it('rejects when the branch already exists', async () => {
+    await expect(createBranch(repo, 'main')).rejects.toThrow();
+  });
+
+  it('rejects but leaves the branch created and checked out when a post-checkout hook fails', async () => {
+    // A failing post-checkout hook makes `git checkout -b` exit nonzero AFTER
+    // git has already created the ref and moved HEAD (verified against real
+    // git). The route must treat this as a partial success and roll back; this
+    // test locks in the hazard shape that rollback guards against.
+    const hooksDir = path.join(repo, '.git', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const hookPath = path.join(hooksDir, 'post-checkout');
+    fs.writeFileSync(hookPath, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(hookPath, 0o755);
+
+    const before = git(repo, 'rev-parse', 'HEAD').trim();
+    await expect(createBranch(repo, 'feature')).rejects.toThrow();
+    // The branch exists and HEAD moved despite the nonzero exit.
+    await expect(branchExists(repo, 'feature')).resolves.toBe(true);
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(
+      'feature',
+    );
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(before);
+  });
+});
+
+describe('checkoutRef', () => {
+  it('switches to an existing branch', async () => {
+    git(repo, 'branch', 'other');
+    await checkoutRef(repo, 'other');
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('other');
+  });
+
+  it('rejects for an unknown ref', async () => {
+    await expect(checkoutRef(repo, 'no-such-ref')).rejects.toThrow();
+  });
+
+  // The plant is a `/bin/sh` script, so the attack does not exist on Windows.
+  it.skipIf(process.platform === 'win32')(
+    'does not run a helper the repository names in its own config',
+    async () => {
+      const canary = path.join(repo, 'PWNED');
+      const helper = path.join(repo, 'plant.sh');
+      fs.writeFileSync(helper, `#!/bin/sh\ntouch '${canary}'\nexit 1\n`);
+      fs.chmodSync(helper, 0o755);
+      git(repo, 'config', 'core.fsmonitor', helper);
+      git(repo, 'branch', 'other');
+
+      // Control: the fixture is a live attack when the checkout is ungated.
+      git(repo, 'checkout', '-q', 'other');
+      expect(fs.existsSync(canary)).toBe(true);
+      fs.unlinkSync(canary);
+
+      // Guarded: `checkoutRef` must not run the helper.
+      await checkoutRef(repo, 'main');
+      expect(fs.existsSync(canary)).toBe(false);
+      expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(
+        'main',
+      );
+    },
+  );
+});
+
+describe('deleteBranch', () => {
+  it('deletes an existing branch', async () => {
+    git(repo, 'branch', 'doomed');
+    await deleteBranch(repo, 'doomed');
+    await expect(branchExists(repo, 'doomed')).resolves.toBe(false);
+  });
+
+  it('force-deletes an unmerged branch', async () => {
+    git(repo, 'checkout', '-qb', 'unmerged');
+    fs.writeFileSync(path.join(repo, 'file.txt'), 'x\n');
+    git(repo, 'add', 'file.txt');
+    git(repo, 'commit', '-qm', 'unmerged commit');
+    git(repo, 'checkout', '-q', 'main');
+    await deleteBranch(repo, 'unmerged');
+    await expect(branchExists(repo, 'unmerged')).resolves.toBe(false);
+  });
+
+  it('rejects when deleting the currently checked-out branch', async () => {
+    await expect(deleteBranch(repo, 'main')).rejects.toThrow();
+  });
+});

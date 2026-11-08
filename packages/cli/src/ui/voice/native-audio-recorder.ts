@@ -15,6 +15,7 @@ import type {
 // Native silence detection sets a flag we poll for; older addons lack it.
 const SILENCE_POLL_INTERVAL_MS = 200;
 const debugLogger = createDebugLogger('VOICE_NATIVE_RECORDER');
+const AUDIO_CAPTURE_PACKAGE = '@qwen-code/audio-capture';
 
 interface NativeAudioRecorderOptions {
   loadBackend?: () =>
@@ -71,7 +72,11 @@ class NativeAudioRecorder implements VoiceRecorder {
     this.starting = true;
     let backend: NativeAudioCaptureBackend;
     try {
-      backend = await this.loadBackend();
+      try {
+        backend = await this.loadBackend();
+      } catch (loadError) {
+        throw explainMissingNativePackage(loadError);
+      }
       const silenceDetection = options.silenceDetection === true;
       backend.startRecording({
         sampleRate: 16000,
@@ -128,6 +133,39 @@ async function loadDefaultBackend(): Promise<NativeAudioCaptureBackend> {
     '@qwen-code/audio-capture'
   );
   return createNativeAudioCaptureBackend();
+}
+
+function explainMissingNativePackage(error: unknown): unknown {
+  if (!(error instanceof Error) || !isMissingNativePackageError(error)) {
+    return error;
+  }
+
+  debugLogger.warn(
+    '[voice] native package missing:',
+    error.message,
+    (error as NodeJS.ErrnoException).code,
+  );
+  return new Error(
+    `Native voice capture package '${AUDIO_CAPTURE_PACKAGE}' is missing. ` +
+      'If Qwen Code was installed from a mirror or private registry, the ' +
+      'registry may not have synced this optional package. Reinstall from ' +
+      'https://registry.npmjs.org or make sure the configured registry ' +
+      `provides ${AUDIO_CAPTURE_PACKAGE}. (${error.message})`,
+    { cause: error },
+  );
+}
+
+function isMissingNativePackageError(error: Error): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
+    return error.message.includes(AUDIO_CAPTURE_PACKAGE);
+  }
+
+  return (
+    error.message.includes(AUDIO_CAPTURE_PACKAGE) &&
+    (error.message.startsWith('Cannot find package') ||
+      error.message.startsWith('Cannot find module'))
+  );
 }
 
 export function createNativeAudioRecorder(

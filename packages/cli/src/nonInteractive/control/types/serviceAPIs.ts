@@ -16,6 +16,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type {
   MCPServerConfig,
   TeammateApprovalRequestEvent,
+  WorkflowApproval,
 } from '@qwen-code/qwen-code-core';
 import type { PermissionSuggestion } from '../../types.js';
 
@@ -56,6 +57,13 @@ export interface PermissionServiceAPI {
    * SDK host for permission; other modes are handled by the caller.
    */
   handleTeammateApproval(event: TeammateApprovalRequestEvent): Promise<void>;
+
+  handleWorkflowApproval(
+    runId: string,
+    approval: WorkflowApproval,
+    rawArgs: Record<string, unknown>,
+    approvalSignal: AbortSignal,
+  ): Promise<void>;
 }
 
 /**

@@ -18,6 +18,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
+    applyProviderInstallPlan: vi.fn(actual.applyProviderInstallPlan),
     Storage: {
       ...actual.Storage,
       getGlobalSettingsPath: mockGetGlobalSettingsPath,
@@ -25,13 +26,26 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-import { AuthType, type ProviderInstallPlan } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  applyProviderInstallPlan,
+  buildInstallPlan,
+  customProvider,
+  generateCustomEnvKey,
+  getModelsForProviderProtocol,
+  ModelRegistry,
+  type ModelProvidersConfig,
+  CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_GLOBAL_BASE_URL,
+  type ProviderInstallPlan,
+} from '@qwen-code/qwen-code-core';
 import { CODING_PLAN_ENV_KEY } from './subscriptionPlanDefinitions.js';
 import {
   applyProviderInstallPlanToFile,
   clearPersistedAuth,
   readQwenSettingsForVSCode,
   restoreSettingsSnapshot,
+  resolveProviderSettings,
   snapshotSettingsForRollback,
   writeCodingPlanConfig,
   writeModelProvidersConfig,
@@ -50,6 +64,288 @@ describe('settingsWriter', () => {
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it.each(
+    [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC].flatMap((protocol) =>
+      [true, false].flatMap((rotate) =>
+        ['shell', 'settings'].map((source) => ({ protocol, rotate, source })),
+      ),
+    ),
+  )(
+    'preserves credential placeholders for $protocol (rotate=$rotate, source=$source)',
+    async ({ protocol, rotate, source }) => {
+      const baseUrl = 'https://rotation.example/v1';
+      const envKey = generateCustomEnvKey(protocol, baseUrl);
+      const placeholder = '${' + envKey + '}';
+      vi.stubEnv(envKey, source === 'shell' ? 'test-only-old' : undefined);
+      const raw = {
+        env: { [envKey]: 'test-only-old' },
+        modelProviders: {
+          [protocol]: ['selected', 'sibling'].map((id) => ({
+            id,
+            name: id,
+            baseUrl,
+            envKey,
+            generationConfig: { customHeaders: { 'X-Key': placeholder } },
+          })),
+        },
+      };
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify(raw));
+      try {
+        const apiKey = rotate ? 'test-only-new' : 'test-only-old';
+        const view = resolveProviderSettings(raw);
+        const plan = buildInstallPlan(
+          customProvider,
+          { protocol, baseUrl, modelIds: ['selected'], apiKey },
+          getModelsForProviderProtocol(
+            view['modelProviders'] as ModelProvidersConfig,
+            protocol,
+          ),
+        );
+        await applyProviderInstallPlanToFile(plan);
+        const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        expect(saved.env[envKey]).toBe(apiKey);
+        expect(saved.modelProviders[protocol]).toEqual(
+          raw.modelProviders[protocol],
+        );
+        const result = await vi.mocked(applyProviderInstallPlan).mock
+          .results[0]!.value;
+        expect(result.updatedModelProviders[protocol]).toHaveLength(2);
+        for (const model of result.updatedModelProviders[protocol]!) {
+          expect(model.generationConfig?.customHeaders?.['X-Key']).toBe(apiKey);
+        }
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each(['shell', 'settings'])(
+    'reconfigures a released route with %s placeholders without leaving a stale winner',
+    async (source) => {
+      const env = {
+        VSCODE_COMPAT_URL: 'https://compat.example/v1',
+        VSCODE_COMPAT_ID: 'saved',
+        VSCODE_COMPAT_REF: 'VSCODE_COMPAT_KEY',
+        VSCODE_COMPAT_KEY: 'test-only-old',
+      };
+      for (const [key, value] of Object.entries(env)) {
+        vi.stubEnv(key, source === 'shell' ? value : undefined);
+      }
+      const rawModel = {
+        id: '${VSCODE_COMPAT_ID}',
+        baseUrl: '${VSCODE_COMPAT_URL}',
+        envKey: '${VSCODE_COMPAT_REF}',
+        generationConfig: {
+          customHeaders: { 'X-Key': '${VSCODE_COMPAT_KEY}' },
+        },
+      };
+      const sibling = {
+        id: 'keep',
+        baseUrl: 'https://sibling.example/v1',
+        envKey: 'SIBLING_KEY',
+        generationConfig: {
+          customHeaders: { 'X-Key': '${VSCODE_COMPAT_KEY}' },
+        },
+      };
+      const raw = {
+        $version: 4,
+        env: source === 'settings' ? env : {},
+        modelProviders: { 'openai-responses': [rawModel, sibling] },
+      };
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify(raw));
+      try {
+        const view = resolveProviderSettings(raw);
+        const plan = buildInstallPlan(
+          customProvider,
+          {
+            wireApi: 'responses',
+            baseUrl: env.VSCODE_COMPAT_URL,
+            modelIds: ['saved'],
+            apiKey: 'test-only-new',
+          },
+          getModelsForProviderProtocol(
+            view['modelProviders'] as ModelProvidersConfig,
+            AuthType.USE_OPENAI,
+          ),
+        );
+        expect(plan.env).toEqual({ VSCODE_COMPAT_KEY: 'test-only-new' });
+        await applyProviderInstallPlanToFile(plan);
+        const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        expect(saved.modelProviders['openai-responses']).toEqual([sibling]);
+        expect(saved.modelProviders.openai[0]).toMatchObject({
+          ...rawModel,
+          wireApi: 'responses',
+        });
+        expect(saved.env.VSCODE_COMPAT_KEY).toBe('test-only-new');
+        const result = await vi.mocked(applyProviderInstallPlan).mock
+          .results[0]!.value;
+        expect(
+          result.updatedModelProviders['openai-responses']?.[0]
+            ?.generationConfig?.customHeaders?.['X-Key'],
+        ).toBe('test-only-new');
+        const registry = new ModelRegistry(result.updatedModelProviders);
+        expect(
+          registry.getModel(
+            AuthType.USE_OPENAI_RESPONSES,
+            'saved',
+            env.VSCODE_COMPAT_URL,
+          ),
+        ).toMatchObject({
+          envKey: 'VSCODE_COMPAT_KEY',
+          generationConfig: { customHeaders: { 'X-Key': 'test-only-new' } },
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'removes an identical released duplicate without placeholders (legacy first=%s)',
+    async (legacyFirst) => {
+      vi.stubEnv('VSCODE_DUPLICATE_KEY', 'test-only-old');
+      const model = {
+        id: 'same',
+        baseUrl: 'https://duplicate.example/v1',
+        envKey: 'VSCODE_DUPLICATE_KEY',
+      };
+      const canonical = { ...model, wireApi: 'responses' };
+      const modelProviders = legacyFirst
+        ? { 'openai-responses': [model], openai: [canonical] }
+        : { openai: [canonical], 'openai-responses': [model] };
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ $version: 4, modelProviders }),
+      );
+      try {
+        const plan = buildInstallPlan(
+          customProvider,
+          {
+            baseUrl: model.baseUrl,
+            modelIds: ['same'],
+            wireApi: 'responses',
+            apiKey: 'test-only-new',
+          },
+          getModelsForProviderProtocol(modelProviders, AuthType.USE_OPENAI),
+        );
+        await applyProviderInstallPlanToFile(plan);
+        const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        expect(saved.modelProviders['openai-responses']).toEqual([]);
+        expect(
+          new ModelRegistry(saved.modelProviders).getModelsForAuthType(
+            AuthType.USE_OPENAI_RESPONSES,
+          ),
+        ).toHaveLength(1);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it('persists the selected Coding Plan region metadata', () => {
+    writeCodingPlanConfig('global', 'coding-plan-key');
+
+    const settings = JSON.parse(
+      fs.readFileSync(settingsPath, 'utf-8'),
+    ) as Record<string, Record<string, Record<string, unknown>>>;
+
+    expect(settings.providerMetadata?.['coding-plan']).toMatchObject({
+      region: 'global',
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+    });
+    // model.baseUrl must follow the selected region, not the China default.
+    expect(settings.model).toMatchObject({
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+    });
+  });
+
+  type ModelSettings = {
+    name?: string;
+    baseUrl?: string;
+    reasoningEffort?: string;
+    maxSessionTurns?: number;
+  };
+
+  const writeCliManagedModelSettings = () => {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        model: {
+          name: 'cli-model',
+          baseUrl: 'https://old.example/v1',
+          reasoningEffort: 'high',
+          maxSessionTurns: 40,
+        },
+      }),
+    );
+  };
+
+  const readModelSettings = () =>
+    (
+      JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+        model: ModelSettings;
+      }
+    ).model;
+
+  it('preserves sibling model settings when writing a Coding Plan', () => {
+    writeCliManagedModelSettings();
+
+    writeCodingPlanConfig('china', 'coding-plan-key');
+
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      model: ModelSettings;
+      modelProviders: Record<string, Array<{ id: string; baseUrl: string }>>;
+    };
+
+    // Only name and its paired baseUrl change; the CLI-owned keys survive.
+    expect(settings.model).toEqual({
+      name: settings.modelProviders[AuthType.USE_OPENAI]?.[0]?.id,
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
+  });
+
+  it('preserves sibling model settings when writing api-key providers', () => {
+    writeCliManagedModelSettings();
+
+    // A non-default URL so the assertion below can only pass by reading the
+    // map — the fallback literal would satisfy it otherwise.
+    writeModelProvidersConfig({
+      apiKey: 'manual-key',
+      modelProviders: { 'gpt-4o': 'https://gateway.example/v1' },
+      activeModel: 'gpt-4o',
+    });
+
+    expect(readModelSettings()).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://gateway.example/v1',
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
+  });
+
+  it('falls back to the default baseUrl when the active model is absent from the map', () => {
+    writeCliManagedModelSettings();
+
+    writeModelProvidersConfig({
+      apiKey: 'manual-key',
+      modelProviders: { 'qwen3.5-plus': 'https://dashscope.example/v1' },
+      activeModel: 'gpt-4o',
+    });
+
+    expect(readModelSettings()).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
   });
 
   it('clears stale coding plan metadata when writing api-key providers', () => {
@@ -75,7 +371,10 @@ describe('settingsWriter', () => {
     expect(env.OPENAI_API_KEY).toBe('manual-key');
     expect(env[CODING_PLAN_ENV_KEY]).toBeUndefined();
     expect(settings.codingPlan).toBeUndefined();
-    expect(settings.model).toEqual({ name: 'gpt-4o' });
+    expect(settings.model).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+    });
     // The new entry must be present
     expect(openaiModels[0]).toEqual({
       id: 'gpt-4o',
@@ -176,6 +475,50 @@ describe('settingsWriter', () => {
       expect(written.modelProviders[AuthType.USE_OPENAI]).toEqual([
         { id: 'gpt-4o', envKey: 'TEST_API_KEY' },
       ]);
+    });
+
+    it('writes a custom baseUrl while preserving sibling model settings', async () => {
+      writeCliManagedModelSettings();
+
+      // Non-default endpoint: only the plan's baseUrl can produce this value.
+      const baseUrl = 'https://gateway.example/v1';
+      const plan = buildInstallPlan(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl,
+        modelIds: ['gpt-4o'],
+        apiKey: 'manual-key',
+      });
+
+      await applyProviderInstallPlanToFile(plan);
+
+      expect(readModelSettings()).toEqual({
+        name: 'gpt-4o',
+        baseUrl,
+        reasoningEffort: 'high',
+        maxSessionTurns: 40,
+      });
+    });
+
+    it('clears a stale model.baseUrl when the plan selects by model id only', async () => {
+      writeCliManagedModelSettings();
+
+      // Subscription installs select by model id alone, so no baseUrl flows
+      // through the plan. The empty-string tombstone must survive JSON
+      // serialization — dropping the key would leave the stale URL in place.
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        modelSelection: { modelId: 'gpt-4o' },
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      expect(readModelSettings()).toEqual({
+        name: 'gpt-4o',
+        baseUrl: '',
+        reasoningEffort: 'high',
+        maxSessionTurns: 40,
+      });
     });
 
     it('strips a runtime snapshot prefix before persisting model.name', async () => {

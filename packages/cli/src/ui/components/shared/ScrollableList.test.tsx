@@ -5,17 +5,34 @@
  */
 
 import type React from 'react';
+import { createRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { Text } from 'ink';
-import { ScrollableList } from './ScrollableList.js';
+import { ScrollableList, type ScrollableListRef } from './ScrollableList.js';
 import { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 
 vi.mock('../../utils/measure-element-position.js', () => ({
   measureElementPosition: () => ({ x: 0, y: 0, width: 40, height: 5 }),
 }));
+
+// ink-testing-library's fake stdout has no `isTTY`, but `useMouseEvents` now
+// gates SGR mouse mode on `stdout.isTTY` (so it never leaks escapes into piped
+// output). Report a TTY here so the scrollbar/wheel pipeline arms as it does in
+// a real terminal; without this the mouse-scroll assertions never receive
+// events. Preserve every other ink export.
+vi.mock('ink', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink')>();
+  return {
+    ...actual,
+    useStdout: () => ({
+      stdout: { write: vi.fn(), isTTY: true },
+      writeToStdout: vi.fn(),
+    }),
+  };
+});
 
 type Item = { id: number; label: string };
 
@@ -27,6 +44,14 @@ const withKeypress = (children: React.ReactNode) => (
 
 const makeItems = (n: number): Item[] =>
   Array.from({ length: n }, (_, i) => ({ id: i, label: `item-${i}` }));
+
+// Mouse wheel/drag scrolling is coalesced to one viewport update per ~16ms
+// frame (useFrameCoalescedFlush). Wait past that window so the real timer
+// fires before asserting — this exercises the production batching path.
+const flushScrollFrame = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
 
 const keyExtractor = (item: Item) => `k-${item.id}`;
 const estimatedItemHeight = () => 1;
@@ -68,7 +93,7 @@ describe('<ScrollableList /> mouse scrolling', () => {
     await act(async () => {
       for (let i = 0; i < 5; i++) stdin.write(wheelDown(5, 5));
     });
-    await act(async () => {});
+    await flushScrollFrame();
     // After scrolling down, item-0 should no longer be in the window.
     expect(lastFrame()).not.toContain('item-0');
 
@@ -76,8 +101,40 @@ describe('<ScrollableList /> mouse scrolling', () => {
     await act(async () => {
       for (let i = 0; i < 10; i++) stdin.write(wheelUp(5, 5));
     });
-    await act(async () => {});
+    await flushScrollFrame();
     expect(lastFrame()).toContain('item-0');
+  });
+
+  it('preserves the full delta of a coalesced wheel burst', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(200)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    await act(async () => {
+      for (let i = 0; i < 30; i++) stdin.write(wheelUp(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(105);
   });
 
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {
@@ -128,7 +185,7 @@ describe('<ScrollableList /> mouse scrolling', () => {
       stdin.write(leftDrag(5, 6));
       stdin.write(leftRelease(5, 6));
     });
-    await act(async () => {});
+    await flushScrollFrame();
     expect(lastFrame()).toBe(before);
   });
 
@@ -158,7 +215,7 @@ describe('<ScrollableList /> mouse scrolling', () => {
       stdin.write(leftDrag(40, 5));
       stdin.write(leftRelease(40, 5));
     });
-    await act(async () => {});
+    await flushScrollFrame();
 
     expect(lastFrame()).not.toContain('item-0');
     expect(lastFrame()).toContain('item-49');
@@ -190,7 +247,7 @@ describe('<ScrollableList /> mouse scrolling', () => {
       stdin.write(leftDrag(40, 3));
       stdin.write(leftRelease(40, 3));
     });
-    await act(async () => {});
+    await flushScrollFrame();
 
     expect(lastFrame()).not.toContain('item-0');
     expect(lastFrame()).toContain('item-23');
@@ -223,10 +280,87 @@ describe('<ScrollableList /> mouse scrolling', () => {
       stdin.write(leftDrag(35, 5));
       stdin.write(leftRelease(35, 5));
     });
-    await act(async () => {});
+    await flushScrollFrame();
 
     expect(lastFrame()).not.toContain('item-0');
     expect(lastFrame()).toContain('item-49');
+  });
+
+  it('a scrollbar press cancels a still-pending wheel flush', async () => {
+    // Regression: a wheel burst schedules a coalesced flush; clicking the
+    // scrollbar within that window must drop the queued wheel delta so the
+    // timer can't yank the view off the just-clicked row.
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+
+    // Wheel down (queues a flush), then immediately click the top of the
+    // scrollbar — all before the frame timer fires.
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelDown(5, 5));
+      stdin.write(leftPress(40, 1));
+      stdin.write(leftRelease(40, 1));
+    });
+    await flushScrollFrame();
+
+    // The press pinned the top; the canceled wheel must not have scrolled away.
+    expect(lastFrame()).toContain('item-0');
+  });
+
+  it('a focus loss cancels a still-pending wheel flush', async () => {
+    // Regression: whoever takes focus may have just pulled the tail into view
+    // (a pending approval dialog at the end of the transcript). A burst armed
+    // before that flip must not land after it — with both subscribers now off,
+    // it scrolls the answering surface out of the render window and nothing on
+    // this list can bring it back.
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = ({ focused }: { focused: boolean }) => (
+      <ScrollableList<Item>
+        hasFocus={focused}
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(
+      withKeypress(<Wrapper focused />),
+    );
+    rerender(withKeypress(<Wrapper focused />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+
+    // Queue a burst, then take focus away inside the same coalescing window.
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelDown(5, 5));
+      rerender(withKeypress(<Wrapper focused={false} />));
+    });
+    await flushScrollFrame();
+
+    expect(lastFrame()).toContain('item-0');
   });
 
   it('does not start a scrollbar drag when content fits the viewport', async () => {
@@ -255,7 +389,7 @@ describe('<ScrollableList /> mouse scrolling', () => {
       stdin.write(leftDrag(40, 5));
       stdin.write(leftRelease(40, 5));
     });
-    await act(async () => {});
+    await flushScrollFrame();
 
     expect(lastFrame()).toBe(before);
   });

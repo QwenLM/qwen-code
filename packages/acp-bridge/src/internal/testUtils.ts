@@ -36,9 +36,12 @@
  */
 
 import * as path from 'node:path';
+import v8 from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
+  RequestError,
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -62,8 +65,9 @@ import type {
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
 import { createAcpSessionBridge } from '../bridge.js';
+import { isNotCurrentlyGeneratingCancelError } from '../bridgeErrors.js';
 import type { BridgeOptions } from '../bridgeOptions.js';
-import type { AcpSessionBridge } from '../bridgeTypes.js';
+import { PROMPT_CANCEL_METHOD, type AcpSessionBridge } from '../bridgeTypes.js';
 import type { AcpChannel } from '../channel.js';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -77,8 +81,17 @@ export const WS_B = path.resolve(path.sep, 'work', 'b');
 export const SESS_A = `sess:${WS_A}`;
 
 /**
- * Convenience wrapper: `createAcpSessionBridge` requires `boundWorkspace`
- * (per #3803 §02 — 1 daemon = 1 workspace). Tests that only ever talk
+ * Deliberately attest that a test-fake channel factory forwards its
+ * `childEnvOverrides` argument into the child. Production factories receive
+ * this mark from `createSpawnChannelFactory`; test fakes must opt in
+ * explicitly so a shape-resembling but non-forwarding fake fails the
+ * bridge's mandatory-lease attestation.
+ */
+export { markChannelFactoryForwardsChildEnv as attestChannelFactoryForwardsChildEnv } from '../child-env-forwarding.js';
+
+/**
+ * Convenience wrapper: `createAcpSessionBridge` requires the workspace owned
+ * by this bridge. Tests that only ever talk
  * to `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere;
  * this helper defaults it. Tests that need a different bind path (e.g.
  * the mismatch test) pass `boundWorkspace` explicitly.
@@ -106,6 +119,10 @@ export interface FakeAgentOpts {
   initializeDelayMs?: number;
   /** Force `initialize` to throw. */
   initializeThrows?: Error;
+  initializeImpl?: (
+    p: InitializeRequest,
+    self: FakeAgent,
+  ) => Promise<InitializeResponse> | InitializeResponse;
   /**
    * Custom prompt handler. Default returns `end_turn` synchronously. Useful
    * for test cases that want to observe prompt ordering.
@@ -115,6 +132,8 @@ export interface FakeAgentOpts {
     self: FakeAgent,
   ) => Promise<PromptResponse> | PromptResponse;
   cancelImpl?: (p: CancelNotification, self: FakeAgent) => Promise<void> | void;
+  /** Make the fake expose only standard ACP cancellation. */
+  promptCancelExtension?: boolean;
   /**
    * Custom `newSession` handler. Default returns a synthesized id (see
    * `newSession` below). Used by tests that need to exercise the
@@ -141,6 +160,7 @@ export interface FakeAgentOpts {
 }
 
 export class FakeAgent implements Agent {
+  initializeCalls: InitializeRequest[] = [];
   newSessionCalls: NewSessionRequest[] = [];
   loadSessionCalls: LoadSessionRequest[] = [];
   resumeSessionCalls: ResumeSessionRequest[] = [];
@@ -150,10 +170,14 @@ export class FakeAgent implements Agent {
     [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
 
-  async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
+  async initialize(p: InitializeRequest): Promise<InitializeResponse> {
+    this.initializeCalls.push(p);
     if (this.opts.initializeThrows) throw this.opts.initializeThrows;
     if (this.opts.initializeDelayMs) {
       await new Promise((r) => setTimeout(r, this.opts.initializeDelayMs));
+    }
+    if (this.opts.initializeImpl) {
+      return await this.opts.initializeImpl(p, this);
     }
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -225,6 +249,29 @@ export class FakeAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     this.extMethodCalls.push({ method, params });
+    if (method === PROMPT_CANCEL_METHOD) {
+      if (this.opts.promptCancelExtension === false) {
+        throw RequestError.methodNotFound(method);
+      }
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string') {
+        throw new Error('Invalid or missing sessionId');
+      }
+      let delayMs = 1;
+      while (true) {
+        try {
+          await this.cancel({ sessionId });
+          return { cancelled: true };
+        } catch (error) {
+          if (!isNotCurrentlyGeneratingCancelError(error)) throw error;
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          timer.unref();
+        });
+        delayMs = Math.min(delayMs * 2, 100);
+      }
+    }
     if (this.opts.extMethodImpl) {
       return this.opts.extMethodImpl(method, params, this);
     }
@@ -324,4 +371,43 @@ export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
     },
   };
   return handle;
+}
+
+/**
+ * Forces full collections until `ref` is cleared or the attempts run out.
+ * deref() keeps its target alive until the current job ends, so each
+ * collection runs in a job that has not dereferenced it.
+ */
+export async function collectedAfterGc(ref: WeakRef<object>): Promise<boolean> {
+  v8.setFlagsFromString('--expose_gc');
+  const gc = runInNewContext('gc') as () => void;
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await tick();
+    gc();
+    await tick();
+    if (ref.deref() === undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether this runtime's native `Promise.race` keeps a finished race's value
+ * reachable from a competitor that is still pending. Node 22 and 24 and the
+ * Electron runtime the VS Code companion uses do; Node 26 does not, so
+ * retention tests have nothing to prove there.
+ */
+export async function nativeRaceRetainsValues(): Promise<boolean> {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const finished = await (async () => {
+    const value = {};
+    await Promise.race([Promise.resolve(value), pending]);
+    return new WeakRef(value);
+  })();
+  const retained = !(await collectedAfterGc(finished));
+  release();
+  return retained;
 }

@@ -8,10 +8,29 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 
 export const PROJECT_SKILLS_RELATIVE_DIR = path.join('.qwen', 'skills');
+export const ARCHIVED_SKILLS_RELATIVE_DIR = path.join(
+  '.qwen',
+  'archived-skills',
+);
 export const SKILL_FILE_NAME = 'SKILL.md';
 
 export function getProjectSkillsRoot(projectRoot: string): string {
   return path.join(projectRoot, PROJECT_SKILLS_RELATIVE_DIR);
+}
+
+export function getArchivedSkillsRoot(projectRoot: string): string {
+  return path.join(projectRoot, ARCHIVED_SKILLS_RELATIVE_DIR);
+}
+
+export const PENDING_SKILLS_RELATIVE_DIR = path.join('.qwen', 'pending-skills');
+
+/**
+ * Staging root for auto-skills awaiting user confirmation. Deliberately a
+ * SIBLING of `.qwen/skills/` so `loadSkillsFromDir` never discovers
+ * unconfirmed skills (it scans the skills root only).
+ */
+export function getPendingSkillsRoot(projectRoot: string): string {
+  return path.join(projectRoot, PENDING_SKILLS_RELATIVE_DIR);
 }
 
 export function isProjectSkillPath(

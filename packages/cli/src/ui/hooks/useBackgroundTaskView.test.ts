@@ -3,24 +3,33 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  WorkflowApproval,
+  WorkflowTask,
+} from '@qwen-code/qwen-code-core';
 import { useBackgroundTaskView, entryId } from './useBackgroundTaskView.js';
 
 interface FakeRegistry {
   setStatusChangeCallback: ReturnType<typeof vi.fn>;
   setApprovalChangeCallback: ReturnType<typeof vi.fn>;
+  setApprovalRequestCallback: ReturnType<typeof vi.fn>;
   /** Test helper — invokes the currently-set status callback. */
   fire: () => void;
   /** Test helper — invokes the currently-set approval callback. */
   fireApproval: () => void;
+  /** Test helper — invokes the currently-set approval-request callback. */
+  fireApprovalRequest: () => void;
 }
 
 function makeFakeRegistry(): FakeRegistry {
   let cb: (() => void) | undefined;
   let approvalCb: (() => void) | undefined;
+  let approvalRequestCb: (() => void) | undefined;
   return {
     setStatusChangeCallback: vi.fn((next: (() => void) | undefined) => {
       cb = next;
@@ -28,8 +37,14 @@ function makeFakeRegistry(): FakeRegistry {
     setApprovalChangeCallback: vi.fn((next: (() => void) | undefined) => {
       approvalCb = next;
     }),
+    setApprovalRequestCallback: vi.fn(
+      (next: ((...args: unknown[]) => void) | undefined) => {
+        approvalRequestCb = next as (() => void) | undefined;
+      },
+    ),
     fire: () => cb?.(),
     fireApproval: () => approvalCb?.(),
+    fireApprovalRequest: () => approvalRequestCb?.(),
   };
 }
 
@@ -78,6 +93,7 @@ function makeConfig(opts: {
   const agentReg = makeFakeRegistry();
   const shellReg = makeFakeRegistry();
   const monitorReg = makeFakeRegistry();
+  const workflowReg = makeFakeRegistry();
   const memoryMgr = makeFakeMemoryManager();
   const dreams = opts.dreams ?? (() => []);
 
@@ -95,8 +111,8 @@ function makeConfig(opts: {
       getAll: opts.monitors,
     }),
     getWorkflowRunRegistry: () => ({
+      ...workflowReg,
       list: () => opts.workflows?.() ?? [],
-      setStatusChangeCallback: () => {},
     }),
     getMemoryManager: () => ({
       subscribe: memoryMgr.subscribe,
@@ -107,11 +123,24 @@ function makeConfig(opts: {
     getProjectRoot: () => '/test/project',
   } as unknown as Config;
 
-  return { config, agentReg, shellReg, monitorReg, memoryMgr };
+  return {
+    config,
+    agentReg,
+    shellReg,
+    monitorReg,
+    workflowReg,
+    memoryMgr,
+  };
 }
 
 type StatusOverride = {
-  status?: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  status?:
+    | 'running'
+    | 'pausing'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
   endTime?: number;
 };
 
@@ -201,12 +230,13 @@ const dream = (
       | 'skipped';
     progressText: string;
     error: string;
+    projectRoot: string;
     metadata: Record<string, unknown>;
   }> = {},
 ) => ({
   id,
   taskType: 'dream' as const,
-  projectRoot: '/test/project',
+  projectRoot: overrides.projectRoot ?? '/test/project',
   status: overrides.status ?? ('running' as const),
   createdAt: new Date(startTimeMs).toISOString(),
   updatedAt: new Date(startTimeMs).toISOString(),
@@ -257,7 +287,7 @@ describe('useBackgroundTaskView', () => {
     ]);
   });
 
-  it('puts active (running + paused) entries above terminal entries even when terminals are newer', () => {
+  it('puts active entries above terminal entries even when terminals are newer', () => {
     // The literal phrasing of the issue is "new OR running tasks
     // should appear at the top". A pure startTime DESC sort handles
     // the "new" half but lets a long-running entry get buried under a
@@ -291,6 +321,33 @@ describe('useBackgroundTaskView', () => {
       // Terminal bucket (endTime DESC): a-done-fresh (600), s-failed (450).
       'a-done-fresh',
       's-failed',
+    ]);
+  });
+
+  it('keeps a pausing workflow in the active bucket', () => {
+    const pausing = {
+      id: 'wf-pausing',
+      kind: 'workflow' as const,
+      runId: 'wf-pausing',
+      status: 'pausing' as const,
+      startTime: 100,
+    } as WorkflowTask;
+    const done = agent('a-done', 500, {
+      status: 'completed',
+      endTime: 600,
+    });
+    const { config } = makeConfig({
+      agents: () => [done],
+      shells: () => [],
+      monitors: () => [],
+      workflows: () => [pausing],
+    });
+
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+
+    expect(result.current.entries.map(entryId)).toEqual([
+      'wf-pausing',
+      'a-done',
     ]);
   });
 
@@ -332,8 +389,8 @@ describe('useBackgroundTaskView', () => {
     expect(kinds).toEqual(['agent', 'monitor', 'shell']);
   });
 
-  it('subscribes to all three registries on mount', () => {
-    const { config, agentReg, shellReg, monitorReg } = makeConfig({
+  it('subscribes to all registries on mount', () => {
+    const { config, agentReg, shellReg, monitorReg, workflowReg } = makeConfig({
       agents: () => [],
       shells: () => [],
       monitors: () => [],
@@ -349,6 +406,9 @@ describe('useBackgroundTaskView', () => {
       expect.any(Function),
     );
     expect(agentReg.setApprovalChangeCallback).toHaveBeenCalledWith(
+      expect.any(Function),
+    );
+    expect(workflowReg.setApprovalChangeCallback).toHaveBeenCalledWith(
       expect.any(Function),
     );
   });
@@ -410,12 +470,131 @@ describe('useBackgroundTaskView', () => {
     });
   });
 
-  it('clears all three subscriptions on unmount', () => {
-    const { config, agentReg, shellReg, monitorReg, memoryMgr } = makeConfig({
+  it('refreshes workflow entries when approval state changes without a status change', () => {
+    let workflows = [
+      {
+        id: 'wf-1',
+        kind: 'workflow' as const,
+        runId: 'wf-1',
+        description: 'demo',
+        meta: null,
+        status: 'running' as const,
+        startTime: 100,
+        pendingApprovals: [],
+      },
+    ] as unknown as WorkflowTask[];
+    const { config, workflowReg } = makeConfig({
       agents: () => [],
       shells: () => [],
       monitors: () => [],
+      workflows: () => workflows,
     });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+
+    workflows = [
+      {
+        ...workflows[0],
+        pendingApprovals: [
+          {
+            approvalId: 'wfap-1',
+            subagentId: 'sub-1',
+            callId: 'call-1',
+            name: 'Shell',
+            description: 'run',
+            confirmationDetails: {
+              type: 'exec',
+              title: 'Confirm command',
+              command: 'echo workflow',
+              rootCommand: 'echo',
+            },
+            at: Date.now(),
+          },
+        ],
+      },
+    ];
+
+    act(() => workflowReg.fireApproval());
+
+    expect(result.current.entries[0]).toMatchObject({
+      kind: 'workflow',
+      pendingApprovals: [expect.objectContaining({ approvalId: 'wfap-1' })],
+    });
+  });
+
+  it('registers a workflow approval-request responder that re-reads the snapshot', () => {
+    // `setApprovalChangeCallback` only repaints the "needs approval" badge;
+    // the registry fails closed unless a host also registers a responder for
+    // the request itself. Without this registration a parked workflow
+    // approval never becomes an entry the dialog can render or settle.
+    const pending: WorkflowApproval = {
+      approvalId: 'wfap-req',
+      subagentId: 'sub-1',
+      callId: 'call-req',
+      name: 'Shell',
+      description: 'run',
+      confirmationDetails: { type: 'exec' },
+      at: 1_700_000_000_000,
+    } as WorkflowApproval;
+    let workflows = [
+      {
+        id: 'wf-req',
+        kind: 'workflow' as const,
+        runId: 'wf-req',
+        description: 'demo',
+        meta: null,
+        status: 'running' as const,
+        startTime: 100,
+        pendingApprovals: [],
+      },
+    ] as unknown as WorkflowTask[];
+    let reads = 0;
+    const { config, workflowReg } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      workflows: () => {
+        reads += 1;
+        return workflows;
+      },
+    });
+    const { result, unmount } = renderHook(() => useBackgroundTaskView(config));
+
+    // 1. mount registers a responder (not just the badge callback).
+    expect(workflowReg.setApprovalRequestCallback).toHaveBeenCalledWith(
+      expect.any(Function),
+    );
+
+    // 3. behaviour, not just call count: the registry parks an approval and
+    // fires the request; the hook must re-read the registry so the parked
+    // approval shows up in `entries`.
+    const readsBefore = reads;
+    workflows = [
+      {
+        ...workflows[0],
+        pendingApprovals: [pending],
+      } as unknown as WorkflowTask,
+    ];
+    act(() => workflowReg.fireApprovalRequest());
+    expect(reads).toBeGreaterThan(readsBefore);
+    expect(result.current.entries[0]).toMatchObject({
+      kind: 'workflow',
+      pendingApprovals: [expect.objectContaining({ approvalId: 'wfap-req' })],
+    });
+
+    // 2. cleanup releases the single-slot responder.
+    unmount();
+    expect(workflowReg.setApprovalRequestCallback).toHaveBeenLastCalledWith(
+      undefined,
+    );
+  });
+
+  it('clears all registry subscriptions on unmount', () => {
+    const { config, agentReg, shellReg, monitorReg, workflowReg, memoryMgr } =
+      makeConfig({
+        agents: () => [],
+        shells: () => [],
+        monitors: () => [],
+      });
     const { unmount } = renderHook(() => useBackgroundTaskView(config));
     unmount();
     // Each setStatusChangeCallback should have been called twice — once
@@ -436,6 +615,14 @@ describe('useBackgroundTaskView', () => {
       [undefined],
     ]);
     expect(monitorReg.setStatusChangeCallback.mock.calls).toEqual([
+      [expect.any(Function)],
+      [undefined],
+    ]);
+    expect(workflowReg.setApprovalChangeCallback.mock.calls).toEqual([
+      [expect.any(Function)],
+      [undefined],
+    ]);
+    expect(workflowReg.setStatusChangeCallback.mock.calls).toEqual([
       [expect.any(Function)],
       [undefined],
     ]);
@@ -525,6 +712,31 @@ describe('useBackgroundTaskView', () => {
     const [only] = result.current.entries;
     expect(only.kind).toBe('dream');
     expect(only.status).toBe('cancelled');
+  });
+
+  it('shows the current project Dream and global User Dream only', () => {
+    const { config } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      dreams: () => [
+        dream('project-dream', 100),
+        dream('other-project-dream', 200, {
+          projectRoot: '/other/project',
+        }),
+        dream('user-dream', 300, {
+          projectRoot: '/global/user-memory',
+          metadata: { scope: 'user' },
+        }),
+      ],
+    });
+
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+
+    expect(result.current.entries.map(entryId)).toEqual([
+      'user-dream',
+      'project-dream',
+    ]);
   });
 
   it('subscribes to MemoryManager with a dream taskType filter so extract notifies are skipped at the source', () => {

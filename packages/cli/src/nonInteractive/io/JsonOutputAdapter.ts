@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
 import type { CLIAssistantMessage, CLIMessage } from '../types.js';
 import {
   BaseJsonOutputAdapter,
   type JsonOutputAdapterInterface,
   type ResultOptions,
 } from './BaseJsonOutputAdapter.js';
+import { observeHeadlessJsonToolResultWire } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * JSON output adapter that collects all messages and emits them
@@ -22,6 +23,8 @@ export class JsonOutputAdapter
   implements JsonOutputAdapterInterface
 {
   private readonly messages: CLIMessage[] = [];
+  private attemptMessageCheckpoint = 0;
+  private lastAssistantMessageAtAttemptStart: CLIAssistantMessage | null = null;
 
   constructor(config: Config) {
     super(config);
@@ -51,6 +54,58 @@ export class JsonOutputAdapter
     return false;
   }
 
+  override startAssistantMessage(): void {
+    this.attemptMessageCheckpoint = this.messages.length;
+    this.lastAssistantMessageAtAttemptStart = this.lastAssistantMessage;
+    super.startAssistantMessage();
+  }
+
+  override restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    if (preserveText) {
+      const discardedIds = new Set(
+        discardedToolCalls.map((request) => request.callId),
+      );
+      if (discardedIds.size > 0) {
+        const retained = this.messages
+          .slice(this.attemptMessageCheckpoint)
+          .filter(
+            (message) =>
+              message.type !== 'assistant' ||
+              !message.message.content.some(
+                (block) =>
+                  block.type === 'tool_use' && discardedIds.has(block.id),
+              ),
+          );
+        this.messages.splice(
+          this.attemptMessageCheckpoint,
+          this.messages.length - this.attemptMessageCheckpoint,
+          ...retained,
+        );
+        this.lastAssistantMessage =
+          this.messages.findLast(
+            (message): message is CLIAssistantMessage =>
+              message.type === 'assistant',
+          ) ?? this.lastAssistantMessageAtAttemptStart;
+      }
+    } else {
+      // Keep system/control metadata (notably model_fallback), but retract
+      // assistant messages produced by the abandoned provider attempt.
+      const retained = this.messages
+        .slice(this.attemptMessageCheckpoint)
+        .filter((message) => message.type !== 'assistant');
+      this.messages.splice(
+        this.attemptMessageCheckpoint,
+        this.messages.length - this.attemptMessageCheckpoint,
+        ...retained,
+      );
+      this.lastAssistantMessage = this.lastAssistantMessageAtAttemptStart;
+    }
+    super.restartAttempt(preserveText, discardedToolCalls);
+  }
+
   finalizeAssistantMessage(): CLIAssistantMessage {
     return this.finalizeAssistantMessageInternal(
       this.mainAgentMessageState,
@@ -74,7 +129,9 @@ export class JsonOutputAdapter
     } else {
       // Emit the entire messages array as JSON (includes all main agent + subagent messages)
       const json = JSON.stringify(this.messages);
-      process.stdout.write(`${json}\n`);
+      const frame = `${json}\n`;
+      observeHeadlessJsonToolResultWire(this.messages, frame);
+      process.stdout.write(frame);
     }
   }
 

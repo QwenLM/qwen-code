@@ -3,12 +3,12 @@
   align-items: baseline;
   gap: 6px;
   min-width: 0;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 13px;
 }
 
 .pending {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .running {
@@ -30,12 +30,12 @@
 }
 
 .name {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 700;
 }
 
 .elapsed {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
 }
 

@@ -114,7 +114,7 @@ describe('StickyTodoList', () => {
     );
     const output = lastFrame() ?? '';
 
-    expect(output).toContain('10. ◐ Task 10');
+    expect(output).toContain('10. ◐\uFE0E Task 10');
     expect(output).not.toContain('... and 9 more');
   });
 

@@ -5,29 +5,37 @@
  */
 
 import type React from 'react';
+import {
+  buildToolSummary,
+  getActiveToolHint,
+} from '../../utils/tool-group-summary.js';
+export {
+  buildToolSummary,
+  isCollapsibleTool,
+} from '../../utils/tool-group-summary.js';
 import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
+import wrapAnsi from 'wrap-ansi';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
-import { theme } from '../../semantic-colors.js';
-import { localizeToolDisplayName, t } from '../../../i18n/index.js';
-import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import {
+  STATUS_INDICATOR_WIDTH,
+  ToolStatusIndicator,
+} from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { formatDuration } from '../../utils/formatters.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
   contentWidth: number;
-  /**
-   * Optional LLM-generated label (~30 chars, git-commit-subject style) that
-   * replaces the "active tool name + count + description" header when
-   * present. Falls back to the default rendering while the label is still
-   * being generated or if generation was skipped/failed.
-   */
-  compactLabel?: string;
 }
 
+const ELAPSED_TIME_MARGIN_LEFT = 1;
+const EXECUTING_ELAPSED_TIME_RESERVED_LABEL = '99h 59m 59s';
+
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
-function getOverallStatus(
+export function getOverallStatus(
   toolCalls: IndividualToolCallDisplay[],
 ): ToolCallStatus {
   if (toolCalls.some((t) => t.status === ToolCallStatus.Confirming))
@@ -54,10 +62,6 @@ function getActiveTool(
   );
 }
 
-// Pull the configured shell timeout off an AnsiOutputDisplay result so
-// ToolElapsedTime can surface it inline (matches the expanded
-// ToolMessage path). Non-ansi resultDisplay → undefined → legacy
-// quiet-then-elapsed behavior.
 function getShellTimeoutMs(
   tool: IndividualToolCallDisplay,
 ): number | undefined {
@@ -72,83 +76,75 @@ function getShellTimeoutMs(
   return undefined;
 }
 
-/**
- * Summary-label header: bold label + " · N tools" count when there are 2+
- * tools in the batch. The count is intentionally suppressed for N=1 so
- * single-tool batches don't read as `Read config.json · 1 tools`. Future
- * edits: keep the `length > 1` guard, not `>= 1`.
- */
-function renderSummaryHeader(label: string, count: number) {
+function isToolGroupActive(status: ToolCallStatus): boolean {
   return (
-    <>
-      <Text bold>{label}</Text>
-      {count > 1 ? (
-        <Text color={theme.text.secondary}>
-          {'  · '}
-          {count} tools
-        </Text>
-      ) : null}
-    </>
+    status === ToolCallStatus.Executing ||
+    status === ToolCallStatus.Pending ||
+    status === ToolCallStatus.Confirming
   );
 }
 
-/**
- * Default header: active tool name + " × N" count + first-line description.
- * Same N=1 suffix suppression as `renderSummaryHeader`.
- */
-function renderDefaultHeader(
-  activeToolName: string,
-  activeToolDescription: string,
-  count: number,
-) {
-  return (
-    <>
-      <Text bold>{activeToolName}</Text>
-      {count > 1 ? (
-        <Text color={theme.text.secondary}>
-          {' × '}
-          {count}
-        </Text>
-      ) : null}
-      {activeToolDescription ? (
-        <Text color={theme.text.secondary}>
-          {'  '}
-          {activeToolDescription}
-        </Text>
-      ) : null}
-    </>
+function getElapsedTimeReservedWidth(
+  tool: IndividualToolCallDisplay,
+  status: ToolCallStatus,
+): number {
+  if (status !== ToolCallStatus.Executing) return 0;
+
+  const timeoutMs = getShellTimeoutMs(tool);
+  let label = EXECUTING_ELAPSED_TIME_RESERVED_LABEL;
+  if (timeoutMs != null && timeoutMs > 0) {
+    const maxElapsedStr = formatDuration(timeoutMs, {
+      hideTrailingZeros: true,
+    });
+    label = `(${maxElapsedStr} · timeout ${maxElapsedStr})`;
+  }
+
+  return ELAPSED_TIME_MARGIN_LEFT + stringWidth(label);
+}
+
+export function estimateCompactToolGroupHeight(
+  toolCalls: IndividualToolCallDisplay[],
+  contentWidth: number,
+): number {
+  if (toolCalls.length === 0) return 0;
+
+  const overallStatus = getOverallStatus(toolCalls);
+  const activeTool = getActiveTool(toolCalls);
+  const isActive = isToolGroupActive(overallStatus);
+  const summary = `${buildToolSummary(toolCalls, isActive)}${isActive ? '…' : ''}`;
+  const hint = getActiveToolHint(toolCalls);
+  const summaryWidth = Math.max(
+    1,
+    contentWidth -
+      STATUS_INDICATOR_WIDTH -
+      getElapsedTimeReservedWidth(activeTool, overallStatus),
   );
+  const wrappedSummary = wrapAnsi(summary, summaryWidth, {
+    hard: true,
+    trim: false,
+  });
+
+  return Math.max(1, wrappedSummary.split('\n').length) + (hint ? 1 : 0);
 }
 
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
-> = ({ toolCalls, contentWidth, compactLabel }) => {
+> = ({ toolCalls, contentWidth }) => {
   if (toolCalls.length === 0) return null;
 
   const overallStatus = getOverallStatus(toolCalls);
   const activeTool = getActiveTool(toolCalls);
-
-  // Take only the first line of description to prevent multi-line shell scripts
-  // from expanding the compact view (wrap="truncate-end" only handles width overflow,
-  // not literal \n characters in the content)
-  const activeToolDescription = activeTool.description
-    ? activeTool.description.split('\n')[0]
-    : '';
+  const isActive = isToolGroupActive(overallStatus);
+  const hint = getActiveToolHint(toolCalls);
 
   return (
-    <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
-      {/* Status line: icon + (summary | tool name + description) + count + elapsed */}
+    <Box flexDirection="column" width={contentWidth} gap={0}>
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
-          <Text wrap="truncate-end">
-            {compactLabel
-              ? renderSummaryHeader(compactLabel, toolCalls.length)
-              : renderDefaultHeader(
-                  localizeToolDisplayName(activeTool.name),
-                  activeToolDescription,
-                  toolCalls.length,
-                )}
+          <Text wrap="wrap" bold>
+            {buildToolSummary(toolCalls, isActive)}
+            {isActive && <Text key="ellipsis">…</Text>}
           </Text>
         </Box>
         <ToolElapsedTime
@@ -157,11 +153,13 @@ export const CompactToolGroupDisplay: React.FC<
           timeoutMs={getShellTimeoutMs(activeTool)}
         />
       </Box>
-
-      {/* Hint line */}
-      <Text color={theme.text.secondary}>
-        {t('Press Ctrl+O to show full tool output')}
-      </Text>
+      {hint && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <Text dimColor wrap="truncate-end">
+            ⎿ {hint}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };

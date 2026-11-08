@@ -60,6 +60,23 @@ describe('diffCommand', () => {
     mockContext = makeContextWithCwd();
   });
 
+  it.each(['interactive', 'non_interactive'] as const)(
+    'rejects the host Git preview in sandboxed %s mode',
+    async (executionMode) => {
+      const context = makeContextWithCwd();
+      context.executionMode = executionMode;
+      context.services.config!.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({ network: 'closed' });
+      expect(await diffCommand.action!(context, '')).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Run git diff through the Shell tool'),
+      });
+      expect(mockFetchGitDiff).not.toHaveBeenCalled();
+    },
+  );
+
   it('errors when config is unavailable', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
     const noConfigContext = createMockCommandContext();
@@ -152,6 +169,28 @@ describe('diffCommand', () => {
     expect(content).toContain('-3');
     expect(content).toContain('src/a.ts');
     expect(content).toContain('src/b.ts');
+  });
+
+  it('shows renamed files as `old → new`', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 1, linesAdded: 2, linesRemoved: 1 },
+      perFileStats: new Map([
+        [
+          'src/new-name.ts',
+          {
+            added: 2,
+            removed: 1,
+            isBinary: false,
+            oldPath: 'src/old-name.ts',
+          },
+        ],
+      ]),
+    } satisfies GitDiffResult);
+    const result = await diffCommand.action(mockContext, '');
+    const content = (result as { content: string }).content;
+    const row = content.split('\n').find((l) => l.includes('new-name.ts'))!;
+    expect(row).toContain('src/old-name.ts → src/new-name.ts');
   });
 
   it('shows untracked text files with their line count and a (new) marker', async () => {

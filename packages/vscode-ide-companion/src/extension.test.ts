@@ -6,7 +6,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
+import { DiffManager } from './diff-manager.js';
 import { activate } from './extension.js';
+import { ChatProviderRegistry } from './webview/providers/ChatProviderRegistry.js';
 import { IDE_DEFINITIONS, detectIdeFromEnv } from '@qwen-code/qwen-code-core';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -82,10 +84,16 @@ describe('activate', () => {
     vi.mocked(vscode.window.showInformationMessage).mockResolvedValue(
       undefined,
     );
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [];
     context = {
       subscriptions: [],
       environmentVariableCollection: {
         replace: vi.fn(),
+        get: vi.fn(),
       },
       globalState: {
         get: vi.fn(),
@@ -99,12 +107,37 @@ describe('activate', () => {
           version: '1.1.0',
         },
       },
+      extensionMode: vscode.ExtensionMode.Production,
     } as unknown as vscode.ExtensionContext;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  it.each([
+    [vscode.ExtensionMode.Development, true],
+    [vscode.ExtensionMode.Production, true],
+  ] as const)(
+    'sets subscription command visibility at cold activation for mode %s',
+    async (extensionMode, enabled) => {
+      Object.assign(context, { extensionMode });
+      const execute = vi.mocked(vscode.commands.executeCommand);
+      execute.mockClear();
+      const createEditor = vi.spyOn(
+        ChatProviderRegistry.prototype,
+        'createEditorProvider',
+      );
+      await activate(context);
+      expect(execute).toHaveBeenNthCalledWith(
+        1,
+        'setContext',
+        'qwen-code.subscriptionEnabled',
+        enabled,
+      );
+      expect(createEditor).not.toHaveBeenCalled();
+    },
+  );
 
   it('should show the info message on first activation', async () => {
     const showInformationMessageMock = vi
@@ -117,6 +150,65 @@ describe('activate', () => {
     await activate(context);
     expect(showInformationMessageMock).toHaveBeenCalledWith(
       'Qwen Code Companion extension successfully installed.',
+    );
+  });
+
+  it('writes production logs to the Qwen Code Companion output channel', async () => {
+    const appendLine = vi.fn();
+    vi.mocked(vscode.window.createOutputChannel).mockReturnValue({
+      appendLine,
+    } as unknown as vscode.LogOutputChannel);
+
+    await activate(context);
+
+    expect(vscode.window.createOutputChannel).toHaveBeenCalledWith(
+      'Qwen Code Companion',
+    );
+    expect(appendLine).toHaveBeenCalledWith('[INFO] Extension activated');
+  });
+
+  it('launches Qwen Code with the full multi-root workspace env', async () => {
+    vi.mocked(context.globalState.get).mockReturnValue(true);
+    const first = {
+      name: 'first',
+      index: 0,
+      uri: { fsPath: '/workspace/first' },
+    } as vscode.WorkspaceFolder;
+    const second = {
+      name: 'second',
+      index: 1,
+      uri: { fsPath: '/workspace/second' },
+    } as vscode.WorkspaceFolder;
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [first, second];
+    vi.mocked(vscode.window.showWorkspaceFolderPick).mockResolvedValue(second);
+    vi.mocked(vscode.Uri.joinPath).mockReturnValue({
+      fsPath: '/extension/dist/qwen-cli/cli.js',
+    } as vscode.Uri);
+
+    await activate(context);
+
+    const command = vi
+      .mocked(vscode.commands.registerCommand)
+      .mock.calls.find(([id]) => id === 'qwen-code.runQwenCode')?.[1] as
+      | (() => Promise<void>)
+      | undefined;
+    expect(command).toBeDefined();
+    await command!();
+
+    expect(vscode.window.createTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: '/workspace/second',
+        env: {
+          QWEN_CODE_IDE_WORKSPACE_PATH: JSON.stringify([
+            '/workspace/first',
+            '/workspace/second',
+          ]),
+        },
+      }),
     );
   });
 
@@ -305,6 +397,238 @@ describe('activate', () => {
       await activate(context);
 
       expect(showInformationMessageMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('diff vote command gate', () => {
+    it('routes diff votes only when the managed diff has a request id', async () => {
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const provider = {
+        hasPendingPermission: vi.fn(() => true),
+        respondToPendingPermission: vi.fn(),
+        dispose: vi.fn(),
+      };
+      const registrySpy = vi
+        .spyOn(ChatProviderRegistry.prototype, 'getPermissionAwareProviders')
+        .mockReturnValue([provider] as never);
+
+      await activate(context);
+
+      const findHandler = (name: string) =>
+        vi
+          .mocked(vscode.commands.registerCommand)
+          .mock.calls.find(([id]) => id === name)?.[1] as
+          | ((uri?: unknown) => void)
+          | undefined;
+      const acceptHandler = findHandler('qwen.diff.accept');
+      expect(acceptHandler).toBeDefined();
+
+      const diffUri = {
+        scheme: 'qwen-diff',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'qwen-diff:///workspace/src/app.ts',
+      };
+      const hasDiff = vi
+        .spyOn(DiffManager.prototype, 'hasDiff')
+        .mockReturnValue(true);
+      const getPermissionRequestId = vi
+        .spyOn(DiffManager.prototype, 'getPermissionRequestId')
+        .mockReturnValue('req-1');
+
+      await acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
+        'allow',
+        { fromDiffEditor: true, permissionRequestId: 'req-1' },
+      );
+
+      provider.respondToPendingPermission.mockClear();
+      const fileUri = {
+        scheme: 'file',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'file:///workspace/src/app.ts',
+      };
+      await acceptHandler!(fileUri);
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
+
+      getPermissionRequestId.mockReturnValue(undefined);
+      await acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
+
+      hasDiff.mockRestore();
+      getPermissionRequestId.mockRestore();
+      registrySpy.mockRestore();
+    });
+
+    // R3-7: the `!permissionRequestId` guard decides whether the diff editor
+    // resolves the diff itself or hands the decision to the approval that owns
+    // it. Only the provider half was pinned; without this, dropping the guard
+    // would accept the diff *and* vote.
+    it('leaves acceptDiff to the approval owner when the diff is request-bound', async () => {
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const provider = {
+        hasPendingPermission: vi.fn(() => true),
+        respondToPendingPermission: vi.fn(),
+        notifyPermissionDiffClosed: vi.fn(),
+        dispose: vi.fn(),
+      };
+      const registrySpy = vi
+        .spyOn(ChatProviderRegistry.prototype, 'getPermissionAwareProviders')
+        .mockReturnValue([provider] as never);
+
+      await activate(context);
+
+      const acceptHandler = vi
+        .mocked(vscode.commands.registerCommand)
+        .mock.calls.find(([id]) => id === 'qwen.diff.accept')?.[1] as (
+        uri?: unknown,
+      ) => Promise<void>;
+      const diffUri = {
+        scheme: 'qwen-diff',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'qwen-diff:///workspace/src/app.ts',
+      };
+      const hasDiff = vi
+        .spyOn(DiffManager.prototype, 'hasDiff')
+        .mockReturnValue(true);
+      const getPermissionRequestId = vi
+        .spyOn(DiffManager.prototype, 'getPermissionRequestId')
+        .mockReturnValue('req-1');
+      const acceptDiff = vi
+        .spyOn(DiffManager.prototype, 'acceptDiff')
+        .mockResolvedValue(undefined);
+
+      await acceptHandler(diffUri);
+      expect(acceptDiff).not.toHaveBeenCalled();
+
+      getPermissionRequestId.mockReturnValue(undefined);
+      await acceptHandler(diffUri);
+      expect(acceptDiff).toHaveBeenCalledTimes(1);
+
+      hasDiff.mockRestore();
+      getPermissionRequestId.mockRestore();
+      acceptDiff.mockRestore();
+      registrySpy.mockRestore();
+    });
+
+    // R3-8: the reject half of the same gate. `qwen.diff.cancel` must resolve a
+    // request-bound diff through the approval, not by cancelling the diff.
+    it('routes a request-bound reject through the approval instead of cancelDiff', async () => {
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const provider = {
+        hasPendingPermission: vi.fn(() => true),
+        respondToPendingPermission: vi.fn(),
+        notifyPermissionDiffClosed: vi.fn(),
+        dispose: vi.fn(),
+      };
+      const registrySpy = vi
+        .spyOn(ChatProviderRegistry.prototype, 'getPermissionAwareProviders')
+        .mockReturnValue([provider] as never);
+
+      await activate(context);
+
+      const cancelHandler = vi
+        .mocked(vscode.commands.registerCommand)
+        .mock.calls.find(([id]) => id === 'qwen.diff.cancel')?.[1] as (
+        uri?: unknown,
+      ) => Promise<void>;
+      expect(cancelHandler).toBeDefined();
+
+      const diffUri = {
+        scheme: 'qwen-diff',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'qwen-diff:///workspace/src/app.ts',
+      };
+      const hasDiff = vi
+        .spyOn(DiffManager.prototype, 'hasDiff')
+        .mockReturnValue(true);
+      const getPermissionRequestId = vi
+        .spyOn(DiffManager.prototype, 'getPermissionRequestId')
+        .mockReturnValue('req-1');
+      const cancelDiff = vi
+        .spyOn(DiffManager.prototype, 'cancelDiff')
+        .mockResolvedValue(undefined);
+
+      await cancelHandler(diffUri);
+      expect(cancelDiff).not.toHaveBeenCalled();
+      expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
+        'cancel',
+        { fromDiffEditor: true, permissionRequestId: 'req-1' },
+      );
+
+      provider.respondToPendingPermission.mockClear();
+      getPermissionRequestId.mockReturnValue(undefined);
+      await cancelHandler(diffUri);
+      expect(cancelDiff).toHaveBeenCalledTimes(1);
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
+
+      hasDiff.mockRestore();
+      getPermissionRequestId.mockRestore();
+      cancelDiff.mockRestore();
+      registrySpy.mockRestore();
+    });
+  });
+
+  describe('permission diff dismissal fan-out', () => {
+    // This subscription is the middle hop of the dismissal chain and the only
+    // place the two ends connect; dropping it leaves the shell locked on a
+    // diff the user already closed (#10557). Pin it by driving the listener
+    // `activate` registers and asserting the fan-out reaches the provider.
+    it('forwards a closed permission diff to every permission-aware provider', async () => {
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const provider = {
+        hasPendingPermission: vi.fn(() => false),
+        respondToPendingPermission: vi.fn(),
+        notifyPermissionDiffClosed: vi.fn(),
+        dispose: vi.fn(),
+      };
+      const registrySpy = vi
+        .spyOn(ChatProviderRegistry.prototype, 'getPermissionAwareProviders')
+        .mockReturnValue([provider] as never);
+
+      // `vscode.EventEmitter` is mocked as `vi.fn(() => ({ event: vi.fn(), … }))`,
+      // so the handler registered on `diffManager.onDidClosePermissionDiff` lands
+      // in that emitter's `event.mock.calls`. Clear prior activations, then drive
+      // every listener captured by this one.
+      vi.mocked(vscode.EventEmitter).mockClear();
+      await activate(context);
+
+      const emitters = vi
+        .mocked(vscode.EventEmitter)
+        .mock.results.map((r) => r.value) as unknown as Array<{
+        event: { mock: { calls: unknown[][] } };
+      }>;
+      const listeners = emitters.flatMap((e) => {
+        const calls = e.event.mock.calls;
+        return calls.map((call) => call[0]) as Array<(arg: unknown) => void>;
+      });
+      expect(listeners.length).toBeGreaterThan(0);
+
+      for (const listener of listeners) {
+        try {
+          listener({ permissionRequestId: 'req-1' });
+        } catch {
+          // Listeners on other emitters expect a different payload shape.
+        }
+      }
+
+      expect(provider.notifyPermissionDiffClosed).toHaveBeenCalledWith('req-1');
+      registrySpy.mockRestore();
     });
   });
 });

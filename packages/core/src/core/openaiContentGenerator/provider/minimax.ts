@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
@@ -38,7 +39,40 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     }
   }
 
-  getResponseParsingOptions(): OpenAIResponseParsingOptions {
+  /**
+   * MiniMax rejects a function tool that carries no `parameters` at all
+   * (#11834: `400 invalid params, function parameters is empty (2013)`), so
+   * zero-argument tools get an empty object schema injected here.
+   *
+   * This deliberately reverses the converter's invariant one layer down:
+   * converter.ts sets `parameters = undefined` for parameterless tools
+   * (#11431), because the default-provider endpoints #10080 was written for
+   * (llama.cpp, LM Studio, vLLM) reject the empty-object shape. Keep this
+   * MiniMax-scoped: do not hoist it into DefaultOpenAICompatibleProvider,
+   * and do not move it into the converter ahead of
+   * `relaxSchemaForFunctionCalling`, which strips empty `properties` and
+   * would emit the bare `{"type":"object"}` that #11410 reports as a 400.
+   */
+  override buildRequest(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+    userPromptId: string,
+  ): OpenAI.Chat.ChatCompletionCreateParams {
+    const baseRequest = super.buildRequest(request, userPromptId);
+    baseRequest.tools = baseRequest.tools?.map((tool) =>
+      tool.function.parameters === undefined
+        ? {
+            ...tool,
+            function: {
+              ...tool.function,
+              parameters: { type: 'object', properties: {} },
+            },
+          }
+        : tool,
+    );
+    return baseRequest;
+  }
+
+  override getResponseParsingOptions(): OpenAIResponseParsingOptions {
     return { taggedThinkingTags: true };
   }
 }

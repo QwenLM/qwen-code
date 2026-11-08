@@ -1,10 +1,136 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { TelegramChannel } from './TelegramAdapter.js';
-import type { AcpBridge, ChannelConfig } from '@qwen-code/channel-base';
+import type {
+  ChannelAgentBridge,
+  ChannelConfig,
+  ChannelTaskLifecycleEvent,
+  Envelope,
+} from '@qwen-code/channel-base';
+
+type LifecycleBase = Omit<
+  Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
+  'type'
+>;
+
+type TestTelegramMessage = {
+  from: { id: number; first_name: string; last_name?: string };
+  chat: { id: number; type: string; title?: string };
+  message_thread_id?: number;
+  reply_to_message?: { from?: { id: number }; text?: string };
+};
+
+type TestTelegramEntity = { type: string; offset: number; length: number };
 
 class TestTelegramChannel extends TelegramChannel {
-  startTyping(chatId: string): void {
+  inboundErrorLabel?: string;
+  readonly inboundPreparations: Array<{
+    envelope: Envelope;
+    prepare: () => Promise<boolean | void>;
+  }> = [];
+
+  protected override async prepareThenHandleInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+  ): Promise<void> {
+    this.inboundPreparations.push({ envelope, prepare });
+  }
+
+  beginTyping(chatId: string): void {
     this.onPromptStart(chatId);
+  }
+
+  emitLifecycle(event: ChannelTaskLifecycleEvent): void {
+    this.onTaskLifecycle(event);
+  }
+
+  buildTestEnvelope(
+    msg: TestTelegramMessage,
+    text: string,
+    entities?: TestTelegramEntity[],
+  ): Envelope {
+    return (
+      this as unknown as {
+        buildEnvelope: (
+          msg: TestTelegramMessage,
+          text: string,
+          entities?: TestTelegramEntity[],
+        ) => Envelope;
+      }
+    ).buildEnvelope(msg, text, entities);
+  }
+
+  pushTestProactive(
+    target: { chatId: string; threadId?: string },
+    text: string,
+    sourceLabel?: string,
+  ) {
+    return this.pushProactive(
+      { channelName: 'telegram', senderId: '1', ...target },
+      text,
+      sourceLabel,
+    );
+  }
+
+  sendTestResponse(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ) {
+    return this.sendResponseMessage(chatId, text, sessionId, sourceLabel);
+  }
+
+  sendTestResponseFromThread(
+    threadId: string | undefined,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ) {
+    const inboundRoute = (
+      this as unknown as {
+        inboundRoute: {
+          run<T>(store: { threadId?: string }, callback: () => T): T;
+        };
+      }
+    ).inboundRoute;
+    const route = threadId === undefined ? {} : { threadId };
+    return inboundRoute.run(route, () =>
+      this.sendResponseMessage(chatId, text, sessionId),
+    );
+  }
+
+  reportInboundErrorForTest(
+    inbound: Envelope,
+    error: unknown,
+    reply: () => Promise<unknown>,
+  ): void {
+    (
+      this as unknown as {
+        reportInboundError(
+          inbound: Envelope,
+          error: unknown,
+          reply: () => Promise<unknown>,
+        ): void;
+      }
+    ).reportInboundError(inbound, error, reply);
+  }
+
+  protected override getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorLabel;
   }
 }
 
@@ -16,23 +142,62 @@ const config: ChannelConfig = {
   sessionScope: 'user',
   cwd: process.cwd(),
   groupPolicy: 'disabled',
+  dmPolicy: 'open',
   groups: {},
 };
 
-function createChannel(): TestTelegramChannel {
-  return new TestTelegramChannel('telegram', config, {} as AcpBridge, {
-    router: {} as never,
-  });
+function createChannel(
+  configOverrides: Partial<ChannelConfig> = {},
+  router: unknown = { getTarget: vi.fn() },
+): TestTelegramChannel {
+  return new TestTelegramChannel(
+    'telegram',
+    { ...config, ...configOverrides },
+    {} as ChannelAgentBridge,
+    {
+      router: { setChannelRotation: vi.fn(), ...(router as object) } as never,
+    },
+  );
+}
+
+function envelope(overrides: Partial<Envelope> = {}): Envelope {
+  return {
+    channelName: 'telegram',
+    senderId: 'user-1',
+    senderName: 'User 1',
+    chatId: 'chat-1',
+    text: 'hello',
+    isGroup: false,
+    isMentioned: false,
+    isReplyToBot: false,
+    ...overrides,
+  };
 }
 
 function installFakeBot(channel: TelegramChannel): {
-  api: { sendChatAction: ReturnType<typeof vi.fn> };
+  token: string;
+  api: {
+    getMe: ReturnType<typeof vi.fn>;
+    getFile: ReturnType<typeof vi.fn>;
+    setMyCommands: ReturnType<typeof vi.fn>;
+    sendChatAction: ReturnType<typeof vi.fn>;
+    sendMessage: ReturnType<typeof vi.fn>;
+  };
+  on: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
 } {
   const bot = {
+    token: 'token',
     api: {
+      getMe: vi.fn().mockResolvedValue({ id: 123, username: 'qwen_bot' }),
+      getFile: vi.fn().mockRejectedValue(new Error('download unavailable')),
+      setMyCommands: vi.fn().mockResolvedValue(true),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
     },
+    on: vi.fn(),
+    start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
   };
   (channel as unknown as { bot: typeof bot }).bot = bot;
@@ -40,6 +205,17 @@ function installFakeBot(channel: TelegramChannel): {
 }
 
 describe('TelegramChannel', () => {
+  const qwenHome = mkdtempSync(join(tmpdir(), 'telegram-channel-home-'));
+
+  beforeAll(() => {
+    vi.stubEnv('QWEN_HOME', qwenHome);
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    rmSync(qwenHome, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -49,13 +225,19 @@ describe('TelegramChannel', () => {
     vi.useRealTimers();
   });
 
+  it('supports proactive loop messages', () => {
+    const channel = createChannel();
+
+    expect(channel.supportsProactiveSend()).toBe(true);
+  });
+
   it('clears active typing intervals on disconnect', () => {
     const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
     const channel = createChannel();
     const bot = installFakeBot(channel);
 
-    channel.startTyping('chat-1');
-    channel.startTyping('chat-2');
+    channel.beginTyping('chat-1');
+    channel.beginTyping('chat-2');
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
 
     channel.disconnect();
@@ -65,5 +247,982 @@ describe('TelegramChannel', () => {
 
     vi.advanceTimersByTime(4000);
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps lifecycle start and terminal events to typing', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    const baseEvent = {
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+
+    channel.emitLifecycle({ ...baseEvent, type: 'completed' });
+    channel.emitLifecycle({
+      ...baseEvent,
+      type: 'failed',
+      error: 'boom',
+      phase: 'agent',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps typing active until every session in the chat reaches terminal state', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    const baseEvent = {
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+    } satisfies Omit<LifecycleBase, 'sessionId'>;
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-1',
+      type: 'started',
+    });
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-2',
+      type: 'started',
+    });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-1',
+      type: 'completed',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(3);
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-2',
+      type: 'cancelled',
+      reason: 'cancel_command',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(3);
+  });
+
+  it('clears typing when a session dies without a terminal event', () => {
+    const handleSessionDied = vi.fn();
+    const channel = createChannel({}, { handleSessionDied });
+    const bot = installFakeBot(channel);
+
+    channel.emitLifecycle({
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+      type: 'started',
+    });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    channel.onSessionDied('session-1');
+
+    expect(handleSessionDied).toHaveBeenCalledWith('session-1');
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats typing status API failures as best-effort', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.sendChatAction.mockImplementation(() => {
+      throw new Error('telegram unavailable');
+    });
+
+    expect(() => channel.beginTyping('chat-1')).not.toThrow();
+    expect(() =>
+      channel.emitLifecycle({
+        channelName: 'telegram',
+        chatId: 'chat-2',
+        sessionId: 'session-2',
+        messageId: 'message-2',
+        identity: { id: 'channel:telegram', displayName: 'telegram' },
+        memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+        type: 'started',
+      }),
+    ).not.toThrow();
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(4);
+  });
+
+  it('registers the Telegram command menu before polling starts', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const processOnceSpy = vi.spyOn(process, 'once').mockReturnValue(process);
+
+    await channel.connect();
+
+    expect(bot.api.setMyCommands).toHaveBeenCalledWith([
+      { command: 'start', description: 'Show quick-start help' },
+      { command: 'help', description: 'Show available commands' },
+      { command: 'new', description: 'Start a fresh conversation' },
+      { command: 'cancel', description: 'Cancel the running request' },
+      { command: 'status', description: 'Show session info' },
+    ]);
+    expect(bot.start).toHaveBeenCalledWith({ drop_pending_updates: true });
+    expect(bot.api.setMyCommands.mock.invocationCallOrder[0]).toBeLessThan(
+      bot.start.mock.invocationCallOrder[0],
+    );
+    expect(processOnceSpy).toHaveBeenCalled();
+  });
+
+  it.each([
+    ['document', true],
+    ['document', false],
+    ['voice', true],
+    ['voice', false],
+  ] as const)(
+    'preserves the routed %s caption when download succeeds=%s',
+    async (kind, succeeds) => {
+      const channel = createChannel();
+      const bot = installFakeBot(channel);
+      bot.api.getFile.mockResolvedValue({ file_path: 'input.bin' });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: succeeds,
+        status: 500,
+        arrayBuffer: async () => new Uint8Array([1]).buffer,
+      } as Response);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([event]) => event === `message:${kind}`,
+      )?.[1] as (ctx: unknown) => Promise<void>;
+      await handler({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          caption: '/review inspect this',
+          [kind]: { file_id: 'file-1', file_name: 'input.bin' },
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+      const preparation = channel.inboundPreparations[0]!;
+      preparation.envelope.text = 'inspect this';
+      await preparation.prepare();
+      expect(preparation.envelope.text).toMatch(/^inspect this/);
+      expect(preparation.envelope.text).not.toContain('/review');
+      if (succeeds) {
+        expect(preparation.envelope.text).toBe('inspect this');
+        rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+          recursive: true,
+        });
+      } else {
+        expect(preparation.envelope.text).toContain('download failed');
+      }
+    },
+  );
+
+  it('preserves the document caption when the download fails', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    expect(handler).toBeDefined();
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        document: {
+          file_id: 'file-1',
+          file_name: 'input.txt',
+          mime_type: 'text/plain',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe(
+      '/review inspect this\n\n(User sent a file "input.txt" but download failed)',
+    );
+  });
+
+  it('keeps document captions after a successful download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'input.txt' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        document: {
+          file_id: 'file-1',
+          file_name: 'input.txt',
+          mime_type: 'text/plain',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('/review inspect this');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'file',
+      fileName: 'input.txt',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('keeps voice captions after a successful download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'voice.ogg' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:voice',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        voice: { file_id: 'voice-1', mime_type: 'audio/ogg' },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('/review inspect this');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'audio',
+      mimeType: 'audio/ogg',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('clears a captionless voice placeholder after download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'voice.ogg' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:voice',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        voice: { file_id: 'voice-1', mime_type: 'audio/ogg' },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    expect(preparation.envelope.syntheticText).toBe(true);
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'audio',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('clears a captionless document placeholder after a successful download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'report.pdf' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'file',
+      fileName: 'report.pdf',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+    },
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+    },
+  ])('marks a captionless $label as synthetic', async ({ event, message }) => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([registered]) => registered === event,
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        ...message,
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+
+    expect(channel.inboundPreparations[0]?.envelope.syntheticText).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+      placeholder: '(image)',
+      note: '(User sent an image but download failed)',
+    },
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      placeholder: '(file: report.pdf)',
+      note: '(User sent a file "report.pdf" but download failed)',
+    },
+    {
+      label: 'voice',
+      event: 'message:voice',
+      message: { voice: { file_id: 'voice-1', mime_type: 'audio/ogg' } },
+      placeholder: '(voice message)',
+      note: '(User sent a voice message but download failed)',
+    },
+  ])(
+    'drops the $label placeholder from the prompt when the download fails',
+    async ({ event, message, placeholder, note }) => {
+      const channel = createChannel();
+      const bot = installFakeBot(channel);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([registered]) => registered === event,
+      )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+      await handler!({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          ...message,
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+      const preparation = channel.inboundPreparations[0]!;
+      await preparation.prepare();
+
+      expect(preparation.envelope.text).not.toContain(placeholder);
+      expect(preparation.envelope.text).toBe(`\n\n${note}`);
+    },
+  );
+
+  it('keeps a photo caption as user-authored text', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:photo',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: 'inspect this photo',
+        photo: [{ file_id: 'photo-1' }],
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+
+    expect(channel.inboundPreparations[0]?.envelope.text).toBe(
+      'inspect this photo',
+    );
+    expect(
+      channel.inboundPreparations[0]?.envelope.syntheticText,
+    ).toBeUndefined();
+  });
+
+  it('continues startup when Telegram command menu registration fails', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.setMyCommands.mockRejectedValue(new Error('bot api down'));
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    await channel.connect();
+
+    expect(bot.start).toHaveBeenCalledWith({ drop_pending_updates: true });
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to register bot commands'),
+    );
+  });
+
+  it('routes attributed inbound failures through the originating topic', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const reply = vi.fn().mockResolvedValue(undefined);
+    channel.inboundErrorLabel = '[review]';
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    channel.reportInboundErrorForTest(
+      envelope({ chatId: '2', threadId: '42' }),
+      new Error('agent unavailable'),
+      reply,
+    );
+    await Promise.resolve();
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      '[review] Sorry, something went wrong processing your message.',
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('enters inbound routing before downloading a photo', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await channel.connect();
+    const photoHandler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:photo',
+    )?.[1] as ((context: unknown) => Promise<void>) | undefined;
+    expect(photoHandler).toBeDefined();
+
+    await photoHandler?.({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'private' },
+        photo: [{ file_id: 'photo-1' }],
+      },
+      api: bot.api,
+      reply: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(channel.inboundPreparations).toHaveLength(1);
+    expect(bot.api.getFile).not.toHaveBeenCalled();
+    const prepare = channel.inboundPreparations[0]?.prepare;
+    expect(prepare).toEqual(expect.any(Function));
+    await prepare?.();
+    expect(bot.api.getFile).toHaveBeenCalledWith('photo-1');
+  });
+
+  it('handles /start locally', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    await channel.handleInbound(envelope({ text: '/start' }));
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      'chat-1',
+      expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML' },
+    );
+  });
+
+  it('handles the Telegram Start button', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:text',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler?.({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        text: '/start',
+        entities: [{ type: 'bot_command', offset: 0, length: 6 }],
+      },
+      reply: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await vi.waitFor(() => expect(bot.api.sendMessage).toHaveBeenCalled());
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '1',
+      expect.stringContaining('Use /help'),
+      { parse_mode: 'HTML' },
+    );
+    expect(String(bot.api.sendMessage.mock.calls[0]?.[1])).toContain(
+      'Send any message to chat with Qwen Code.',
+    );
+  });
+
+  it('sends command replies back to the Telegram forum topic', async () => {
+    const channel = createChannel({
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: false } },
+    });
+    const bot = installFakeBot(channel);
+
+    await channel.handleInbound(
+      envelope({
+        chatId: '2',
+        threadId: '42',
+        text: '/start',
+        isGroup: true,
+      }),
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+  });
+
+  it('sends agent responses back to their routed Telegram forum topic', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponse('2', 'topic response', 'session-1');
+
+    expect(router.getTarget).toHaveBeenCalledWith('session-1');
+    expect(bot.api.sendMessage).toHaveBeenCalledWith('2', expect.any(String), {
+      parse_mode: 'HTML',
+      message_thread_id: 42,
+    });
+  });
+
+  it('escapes and repeats the source label on every bounded HTML chunk', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const sourceLabel = '[review_*<&>]';
+    const text = Array.from(
+      { length: 80 },
+      (_, index) => `paragraph ${index}: ${'x'.repeat(80)}`,
+    ).join('\n');
+
+    await channel.sendTestResponse('2', text, 'session-1', sourceLabel);
+
+    const chunks = bot.api.sendMessage.mock.calls.map((call) => call[1]);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk).toMatch(/^\[review_\*&lt;&amp;&gt;\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+    }
+  });
+
+  it('keeps a near-limit labeled response as bounded HTML', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = 'x'.repeat(4090);
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(
+      calls
+        .map((call) => call[1])
+        .join('')
+        .replaceAll('[review] ', ''),
+    ).toBe(text);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('keeps a labeled code block with one oversized line as bounded HTML', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `\`\`\`text\n${'x'.repeat(5000)}\n\`\`\``;
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    expect(
+      calls
+        .map((call) => call[1].replace(/^\[review\] /u, ''))
+        .join('')
+        .replace(/<[^>]+>/gu, ''),
+    ).toBe(`${'x'.repeat(5000)}\n`);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('preserves safe HTML when a later labeled chunk needs splitting', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `**bold first**\n\n${'x'.repeat(4090)}`;
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls[0]).toEqual([
+      '2',
+      '[review] <b>bold first</b>\n\n',
+      { parse_mode: 'HTML' },
+    ]);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('preserves unlabeled HTML when a later chunk is oversized', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `**bold first**\n\n${'x'.repeat(5000)}`;
+
+    await channel.sendTestResponse('2', text, 'session-1');
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      '<b>bold first</b>\n\n',
+      { parse_mode: 'HTML' },
+    );
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(
+      calls
+        .map((call) => call[1])
+        .join('')
+        .replace(/<[^>]+>/gu, ''),
+    ).toBe(`bold first\n\n${'x'.repeat(5000)}`);
+    for (const [, chunk, options] of calls) {
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('restores the plain source label when an HTML send falls back', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.sendMessage
+      .mockRejectedValueOnce(new Error('HTML rejected'))
+      .mockResolvedValueOnce(undefined);
+
+    await channel.sendTestResponse('2', 'result', 'session-1', '[review_*<&>]');
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      '[review_*<&>] result',
+      undefined,
+    );
+  });
+
+  it('prefers the current inbound topic over a stale session route', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponseFromThread(
+      '43',
+      '2',
+      'new topic response',
+      'session-1',
+    );
+    await channel.sendTestResponseFromThread(
+      undefined,
+      '2',
+      'general response',
+      'session-1',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML', message_thread_id: 43 },
+    );
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML' },
+    );
+  });
+
+  it('only treats addressed Telegram bot commands as mentions in groups', () => {
+    const channel = createChannel();
+    installFakeBot(channel);
+    (channel as unknown as { botUsername: string }).botUsername = 'qwen_bot';
+
+    const directCommand = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group' },
+      },
+      '/cancel',
+      [{ type: 'bot_command', offset: 0, length: 7 }],
+    );
+    const addressedCommand = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group' },
+      },
+      '/cancel@qwen_bot',
+      [{ type: 'bot_command', offset: 0, length: 16 }],
+    );
+    const otherBotCommand = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group' },
+      },
+      '/cancel@other_bot',
+      [{ type: 'bot_command', offset: 0, length: 17 }],
+    );
+
+    expect(directCommand.isMentioned).toBe(false);
+    expect(addressedCommand.isMentioned).toBe(true);
+    expect(otherBotCommand.isMentioned).toBe(false);
+  });
+
+  it('preserves Telegram forum topic ids in envelopes', () => {
+    const channel = createChannel();
+
+    const topicMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'supergroup' },
+        message_thread_id: 42,
+      },
+      'topic message',
+    );
+
+    expect(topicMessage.threadId).toBe('42');
+  });
+
+  it('preserves group and supergroup display names in envelopes', () => {
+    const channel = createChannel();
+
+    const groupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group', title: 'Project Group' },
+      },
+      'group message',
+    );
+    const supergroupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 3, type: 'supergroup', title: 'Project Supergroup' },
+      },
+      'supergroup message',
+    );
+    const privateMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private', title: 'Ignored Title' },
+      },
+      'direct message',
+    );
+
+    expect(groupMessage.chatName).toBe('Project Group');
+    expect(supergroupMessage.chatName).toBe('Project Supergroup');
+    expect(privateMessage.chatName).toBeUndefined();
+  });
+
+  it('sends proactive messages back to the Telegram forum topic', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    await channel.pushTestProactive(
+      { chatId: '2', threadId: '42' },
+      'topic response',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith('2', expect.any(String), {
+      parse_mode: 'HTML',
+      message_thread_id: 42,
+    });
+  });
+
+  it('does not let bare bot commands pass mention-gated groups', async () => {
+    const router = { getSession: vi.fn().mockReturnValue(undefined) };
+    const channel = createChannel(
+      {
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      },
+      router,
+    );
+    const bot = installFakeBot(channel);
+    (channel as unknown as { botUsername: string }).botUsername = 'qwen_bot';
+    const groupMessage = {
+      from: { id: 1, first_name: 'User' },
+      chat: { id: 2, type: 'group' },
+    };
+
+    await channel.handleInbound(
+      channel.buildTestEnvelope(groupMessage, '/cancel', [
+        { type: 'bot_command', offset: 0, length: 7 },
+      ]),
+    );
+
+    expect(router.getSession).not.toHaveBeenCalled();
+    expect(bot.api.sendMessage).not.toHaveBeenCalled();
+
+    await channel.handleInbound(
+      channel.buildTestEnvelope(groupMessage, '/cancel@qwen_bot', [
+        { type: 'bot_command', offset: 0, length: 16 },
+      ]),
+    );
+
+    expect(router.getSession).toHaveBeenCalledWith(
+      'telegram',
+      '1',
+      '2',
+      undefined,
+      undefined,
+    );
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      'No request is currently running.',
+      { parse_mode: 'HTML' },
+    );
   });
 });

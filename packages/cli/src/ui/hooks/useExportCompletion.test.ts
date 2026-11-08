@@ -89,6 +89,10 @@ function createCompletion(
     handleAutocomplete: vi.fn(),
     completionMode: CompletionMode.IDLE,
     midInputGhostText: null,
+    activeCategory: 'all',
+    availableCategories: ['all'],
+    selectCategory: vi.fn(),
+    switchCategory: vi.fn(),
     ...overrides,
   };
 }
@@ -165,6 +169,37 @@ describe('useExportCompletion', () => {
 
     expect(consumed).toBe(false);
     expect(buffer.setText).not.toHaveBeenCalled();
+  });
+
+  it('reports the buffer replacement a format cycle performs', () => {
+    const buffer = createTextBuffer('');
+    const completion = createCompletion();
+    const onBufferReplace = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ textBuffer }) =>
+        useExportCompletion(textBuffer, exportSlashCommands, onBufferReplace),
+      { initialProps: { textBuffer: buffer } },
+    );
+
+    act(() => {
+      result.current.markNextTextChangeAsUserInput();
+      buffer.setText('/export md');
+    });
+    rerender({ textBuffer: buffer });
+    vi.mocked(buffer.setText).mockClear();
+
+    let consumed = false;
+    act(() => {
+      consumed = result.current.handleExportInput(
+        createKey('down'),
+        completion,
+      );
+    });
+
+    expect(consumed).toBe(true);
+    expect(buffer.setText).toHaveBeenLastCalledWith('/export json');
+    // The caller supersedes an in-flight clipboard read on this signal.
+    expect(onBufferReplace).toHaveBeenCalledTimes(1);
   });
 
   it('seeds cycling state after a marked user text edit', () => {

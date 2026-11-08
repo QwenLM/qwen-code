@@ -187,6 +187,22 @@ describe('statsCommand', () => {
     );
   });
 
+  it('should display skill stats when using the "skills" subcommand', () => {
+    const skillsSubCommand = statsCommand.subCommands?.find(
+      (sc) => sc.name === 'skills',
+    );
+    if (!skillsSubCommand?.action) throw new Error('Subcommand has no action');
+
+    skillsSubCommand.action(mockContext, '');
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.SKILL_STATS,
+      },
+      expect.any(Number),
+    );
+  });
+
   describe('non-interactive mode', () => {
     let nonInteractiveContext: ReturnType<typeof createMockCommandContext>;
 
@@ -211,6 +227,68 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Session duration');
       expect(result.content).toContain('Prompts');
       expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('includes live generation timing when a streamed response is available', async () => {
+      if (!statsCommand.action) throw new Error('Command has no action');
+      nonInteractiveContext.session.stats.metrics.generation = {
+        timedRequests: 2,
+        totalTtftMs: 300,
+        totalGenerationDurationMs: 2000,
+        totalThroughputOutputTokens: 80,
+        last: {
+          model: 'qwen3-coder',
+          ttftMs: 250,
+          generationDurationMs: 1250,
+          outputTokens: 50,
+        },
+      };
+
+      const result = (await statsCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('Generation Metrics');
+      expect(result.content).toContain('Generation Metrics (Latest Request)');
+      expect(result.content).toContain('Model: qwen3-coder');
+      expect(result.content).toContain('TTFT: 250ms');
+      expect(result.content).toContain('Generation Time: 1.3s');
+      expect(result.content).toContain('TPS: 40.0 tok/s');
+      expect(result.content).toContain('Average TTFT: 150ms');
+      expect(result.content).toContain('Session TPS: 40.0 tok/s');
+    });
+
+    it('should return skill stats in text mode', async () => {
+      const skillsSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'skills',
+      );
+      if (!skillsSubCommand?.action)
+        throw new Error('Subcommand has no action');
+      nonInteractiveContext.session.stats.metrics.skills = {
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: {
+          review: { count: 2, success: 1, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      };
+
+      const result = (await skillsSubCommand.action(
+        nonInteractiveContext,
+        '',
+      )) as {
+        type: string;
+        messageType: string;
+        content: string;
+      };
+
+      expect(result.type).toBe('message');
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('Skill calls: 3 (2 ok, 1 fail)');
+      expect(result.content).toContain('review');
+      expect(result.content).toContain('testing');
     });
 
     it('should return info with zero duration if sessionStartTime is not available', async () => {
@@ -421,6 +499,152 @@ describe('statsCommand', () => {
       // model-b: 500K * $0.10 + 200K * $0.50 = $0.05 + $0.10 = $0.15
       expect(result.content).toContain('Estimated cost: $2.5000');
       expect(result.content).toContain('Estimated cost: $0.1500');
+    });
+
+    it('stats model bills total - prompt for OpenAI-shaped usage (#15444)', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      (context.services.settings as unknown as Record<string, unknown>)[
+        'merged'
+      ] = {
+        // Output at $1/M makes the printed figure exactly output / 1M.
+        modelPricing: {
+          'qwen3-max-001': { outputPerMillionTokens: 1 },
+        },
+      };
+      // Reasoning already sits inside `candidates`, so summing `thoughts` on
+      // top of it would print $0.2700 instead of the provider's $0.1500.
+      context.session.stats.metrics.models = {
+        'qwen3-max-001': toModelMetrics({
+          tokens: {
+            prompt: 100_000,
+            candidates: 150_000,
+            cached: 0,
+            total: 250_000,
+            thoughts: 120_000,
+          },
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 0 },
+        }),
+      };
+
+      const result = (await modelSubCommand.action(context, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.type).toBe('message');
+      expect(result.content).toContain('Estimated cost: $0.1500');
+      expect(result.content).not.toContain('$0.2700');
+    });
+
+    it.each([0, 180_000])(
+      'stats model prefers authoritative output %i',
+      async (output) => {
+        const modelSubCommand = statsCommand.subCommands?.find(
+          (sc) => sc.name === 'model',
+        );
+        if (!modelSubCommand?.action)
+          throw new Error('Subcommand has no action');
+        const context = createMockCommandContext({
+          executionMode: 'non_interactive',
+        });
+        (context.services.settings as unknown as Record<string, unknown>)[
+          'merged'
+        ] = {
+          modelPricing: { model: { outputPerMillionTokens: 1 } },
+        };
+        context.session.stats.metrics.models = {
+          model: toModelMetrics({
+            api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 0 },
+            tokens: {
+              prompt: 120_000,
+              candidates: 60_000,
+              thoughts: 120_000,
+              cached: 0,
+              total: 270_000,
+            },
+          }),
+        };
+        context.session.stats.metrics.billableOutputTokens = {
+          model: { total: output, bySource: { main: output } },
+        };
+        const result = (await modelSubCommand.action(context, '')) as {
+          content: string;
+        };
+        expect(result.content).toContain(
+          `Estimated cost: $${(output / 1_000_000).toFixed(4)}`,
+        );
+      },
+    );
+
+    it('stats model bills each source bucket, not the model aggregate (#15444)', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      (context.services.settings as unknown as Record<string, unknown>)[
+        'merged'
+      ] = {
+        modelPricing: { 'qwen3-max-001': { outputPerMillionTokens: 1 } },
+      };
+      // The clamp is per record, so it is not additive over bySource:
+      // `researcher` cached its whole prompt, its derived 52_000 lands above
+      // its band [10_000, 12_000] and falls back to 12_000, while the same
+      // tokens summed into the aggregate give an in-band 202_000.
+      const api = { totalRequests: 1, totalErrors: 0, totalLatencyMs: 0 };
+      context.session.stats.metrics.models = {
+        'qwen3-max-001': {
+          api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 0 },
+          tokens: {
+            prompt: 100_000,
+            candidates: 160_000,
+            cached: 40_000,
+            total: 302_000,
+            thoughts: 122_000,
+          },
+          bySource: {
+            [MAIN_SOURCE]: {
+              api,
+              tokens: {
+                prompt: 100_000,
+                candidates: 150_000,
+                cached: 0,
+                total: 250_000,
+                thoughts: 120_000,
+              },
+            },
+            researcher: {
+              api,
+              tokens: {
+                prompt: 0,
+                candidates: 10_000,
+                cached: 40_000,
+                total: 52_000,
+                thoughts: 2_000,
+              },
+            },
+          },
+        },
+      };
+
+      const result = (await modelSubCommand.action(context, '')) as {
+        type: string;
+        content: string;
+      };
+
+      // 150_000 + 12_000. The aggregate would print $0.2020.
+      expect(result.content).toContain('Estimated cost: $0.1620');
+      expect(result.content).not.toContain('$0.2020');
     });
 
     it('stats model shows cost only for models with pricing', async () => {

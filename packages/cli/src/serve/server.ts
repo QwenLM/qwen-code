@@ -4,198 +4,463 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as crypto from 'node:crypto';
-import * as net from 'node:net';
-import * as path from 'node:path';
+import { mountMemoryImportRoutes } from './memory-import.js';
+
 import express from 'express';
-import type { Application, NextFunction, Request, Response } from 'express';
+import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
+import type { Application } from 'express';
+import * as path from 'node:path';
+import { TLSSocket } from 'node:tls';
+import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
-  APPROVAL_MODES,
-  ALL_PROVIDERS,
-  BTW_MAX_INPUT_LENGTH,
-  ExtensionUpdateState,
-  ExtensionManager,
-  checkForExtensionUpdate,
-  redactUrlCredentials,
-  SettingScope,
-  parseInstallSource,
-  SessionService,
-  shouldShowStep,
-  TrustGateError,
-  addDaemonRequestAttribute,
-  emitDaemonLog,
   hashDaemonWorkspace,
-  recordDaemonBridgeError,
-  recordDaemonError,
-  recordDaemonHttpRequest,
-  recordDaemonHttpResponse,
-  withDaemonRequestSpan,
-  type ApprovalMode,
-  type Extension,
-  type ExtensionInstallMetadata,
-  type ExtensionSetting,
+  readCronTasks,
+  Storage,
+  WebTerminalRegistry,
+  type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { DaemonLogger } from './daemon-logger.js';
+import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
+import type {
+  DaemonMetricsBucket,
+  DaemonPerfSnapshot,
+  DaemonStartupSnapshot,
+} from './daemon-status.js';
+import type {
+  ChannelWorkerSnapshot,
+  ChannelWorkerSupervisor,
+} from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
+import type {
+  ChannelWorkerControlState,
+  ChannelWorkerSetResult,
+  ChannelWorkerStopResult,
+} from './channel-worker-manager.js';
 import {
   allowOriginCors,
   bearerAuth,
   createMutationGate,
-  denyBrowserOriginCors,
+  findNonLoopbackHttpOrigin,
   hostAllowlist,
+  isTrustedLoopbackMode,
+  MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { isLoopbackBind } from './loopback-binds.js';
 import {
+  CredentialStore,
+  listenerIdentityOf,
+  LocalControlService,
+} from './local-control/index.js';
+import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
+import { RemoteAccessService } from './remote-access.js';
+import { registerRemoteAccessRoutes } from './routes/remote-access.js';
+import { registerWebShellPairingRoutes } from './routes/web-shell-pairing.js';
+import type {
+  DeviceFlowProvider,
   DeviceFlowRegistry,
-  setDeviceFlowRegistry,
-  TooManyActiveDeviceFlowsError,
-  UnsupportedDeviceFlowProviderError,
-  UpstreamDeviceFlowError,
-  type DeviceFlowEventSink,
-  type DeviceFlowProvider,
-  type DeviceFlowProviderId,
-  type DeviceFlowPublicView,
 } from './auth/device-flow.js';
-import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
-import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
-import { isServeDebugMode } from './debug-mode.js';
-import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
-import { loadSettings } from '../config/settings.js';
-import { isWorkspaceTrusted } from '../config/trustedFolders.js';
-import { isLoopbackBind } from './loopback-binds.js';
-import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
-import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
+import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import {
-  buildDaemonStatusResponse,
-  parseDaemonStatusDetail,
-} from './daemon-status.js';
+  deleteWorkspaceSkill,
+  installWorkspaceSkill,
+} from './workspace-skill-management.js';
+import {
+  mountAcpHttp,
+  type AcpHttpHandle,
+  type ExtraWsRoute,
+} from './acp-http/index.js';
+import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
+import { createTerminalWsHandler } from './routes/terminal.js';
+import { registerSshWorkspaceBoundary } from './routes/ssh-workspace.js';
+import {
+  sshCommand,
+  quoteSshArgument,
+} from '@qwen-code/qwen-code-core/services/ssh-workspace.js';
+import {
+  ClientMcpSenderRegistry,
+  createClientMcpServerProvider,
+} from './acp-http/client-mcp-sender-registry.js';
+import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   canonicalizeWorkspace,
-  CancelSentinelCollisionError,
-  BranchWhilePromptActiveError,
   createAcpSessionBridge,
-  InvalidClientIdError,
-  InvalidPermissionOptionError,
-  InvalidSessionMetadataError,
-  InvalidSessionScopeError,
-  MAX_WORKSPACE_PATH_LENGTH,
-  McpServerNotFoundError,
-  McpServerRestartFailedError,
-  PermissionForbiddenError,
-  PermissionPolicyNotImplementedError,
-  PromptQueueFullError,
-  RestoreInProgressError,
-  SessionBusyError,
-  InvalidRewindTargetError,
-  SessionLimitExceededError,
+  createSpawnChannelFactory,
+  defaultSpawnChannelFactory,
+  MAX_SESSION_RESTORE_TIMEOUT_MS,
+  resolveSessionRestoreTimeoutMs,
   SessionNotFoundError,
-  SessionShellClientRequiredError,
-  SessionShellDisabledError,
-  WorkspaceInitConflictError,
-  WorkspaceInitPathEscapeError,
-  WorkspaceInitSymlinkError,
-  WorkspaceInitRaceError,
-  WorkspaceMismatchError,
-  type BridgeSessionSummary,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import {
-  getAdvertisedServeFeatures,
-  getServeProtocolVersions,
-} from './capabilities.js';
-import { SubscriberLimitExceededError, type BridgeEvent } from './event-bus.js';
-import {
-  CAPABILITIES_SCHEMA_VERSION,
-  type CapabilitiesEnvelope,
-  type ServeAuthProviderCatalog,
-  type ServeAuthProviderDescriptor,
   type ServeAuthProviderInstallRequest,
   type ServeAuthProviderInstallResult,
+  type ServeChannelSelection,
+  type ChannelWebhookConfigSource,
+  type ServeModelProviderRuntimeSyncResult,
   type ServeOptions,
 } from './types.js';
-import { getDemoHtml } from './demo.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
-import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
-import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
+import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
-  createWorkspaceFileSystemFactory,
-  type WorkspaceFileSystemFactory,
-} from './fs/index.js';
-import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
-import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
+  mountManagedLocalWeb,
+  type ManagedLocalWebOptions,
+} from './managed-local-web.js';
+import {
+  mountWorkspaceMemoryRoutes,
+  mountWorkspaceQualifiedMemoryRoutes,
+} from './workspace-memory.js';
+import {
+  mountWorkspaceMemoryRememberRoutes,
+  mountWorkspaceQualifiedMemoryRememberRoutes,
+  WorkspaceRememberTaskLane,
+} from './workspace-remember.js';
+import {
+  mountWorkspaceAgentsRoutes,
+  mountWorkspaceQualifiedAgentsRoutes,
+} from './workspace-agents.js';
+import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
+import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
+import { createHealthRoutes } from './routes/health.js';
+import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
+import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
+import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
+import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
+import type { WorkspaceFileSystemFactory } from './fs/index.js';
+import {
+  registerWorkspaceFileReadRoutes,
+  registerWorkspaceQualifiedFileReadRoutes,
+} from './routes/workspace-file-read.js';
+import {
+  createUploadConcurrencyGate,
+  registerWorkspaceFileWriteRoutes,
+  registerWorkspaceFileUploadRoutes,
+  registerWorkspaceQualifiedFileWriteRoutes,
+  registerWorkspaceQualifiedFileUploadRoutes,
+} from './routes/workspace-file-write.js';
+import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
+import {
+  registerWorkspaceQualifiedTrustRoutes,
+  registerWorkspaceTrustRoutes,
+} from './routes/workspace-trust.js';
+import { registerPermissionRoutes } from './routes/permission.js';
+import { registerSessionRoutes } from './routes/session.js';
+import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
+import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
+import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
+import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
+import {
+  createRequestedSessionIdAdmission,
+  requestedSessionIdPersistenceExists,
+} from './session-id-admission.js';
+import { sessionAttachmentsRoots } from './session-attachments-root.js';
+import {
+  createPairedExecutionEngines,
+  type ManagedExecutionEngine,
+} from './session-execution-engine-selector.js';
+import {
+  registerScheduledTasksRoutes,
+  registerWorkspaceQualifiedScheduledTasksRoutes,
+} from './routes/scheduled-tasks.js';
+import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
+import { registerGoalsRoutes } from './routes/goals.js';
+import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
+import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
+import {
+  registerSessionAgentRoutes,
+  registerSessionAgentSendRoute,
+} from './routes/session-agents.js';
+import {
+  normalizeAgentChainLimit,
+  normalizeAgentTokenBudget,
+} from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
+import { registerUsageStatsRoutes } from './routes/usage-stats.js';
+import {
+  collectBoundSessionIds,
+  startScheduledTaskKeepalive,
+  rehydrateScheduledTaskSessions,
+} from './scheduled-task-keepalive.js';
+import {
+  registerWorkspaceDiagnosticStatusRoutes,
+  registerWorkspaceQualifiedDiagnosticStatusRoutes,
+  registerWorkspaceQualifiedStatusRoutes,
+  registerWorkspaceStatusRoutes,
+} from './routes/workspace-status.js';
+import {
+  registerWorkspaceQualifiedRuntimeRoutes,
+  registerWorkspaceRuntimeRoutes,
+} from './routes/workspace-runtime.js';
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
-  type WorkspaceRequestContext,
+  type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
-import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
-import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
+import { registerBrandRoutes } from './routes/brand.js';
+import { registerCapabilitiesRoutes } from './routes/capabilities.js';
+import {
+  createHostedHarnessContract,
+  installHostedHarnessContractMiddleware,
+} from './hosted-harness-contract.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
+import {
+  registerWorkspacePermissionsRoutes,
+  registerWorkspaceQualifiedPermissionsRoutes,
+} from './routes/workspace-permissions.js';
+import {
+  readEffectiveSessionWorkflow,
+  registerWorkspaceQualifiedSettingsRoutes,
+  registerWorkspaceSettingsRoutes,
+  withSessionWorkflowWriteLock,
+} from './routes/workspace-settings.js';
+import { registerWorkspaceDirectoriesRoutes } from './routes/workspace-directories.js';
+import { registerUserLanguageRoutes } from './routes/user-language.js';
+import {
+  getActiveSseCount,
+  registerSseEventsRoutes,
+} from './routes/sse-events.js';
+import {
+  registerWorkspaceQualifiedVoiceRoutes,
+  registerWorkspaceVoiceRoutes,
+  type WorkspaceVoiceRouteDeps,
+} from './routes/workspace-voice.js';
+import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
+import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
   createRateLimiter,
   setRateLimiter,
   type RateLimiterInstance,
 } from './rate-limit.js';
+import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
 import {
-  STATUS_SCHEMA_VERSION,
-  type ServeExtensionCapabilities,
-  type ServeExtensionEntry,
-  type ServeWorkspaceExtensionsStatus,
-} from './status.js';
+  createTotalSessionAdmissionController,
+  type TotalSessionAdmissionSnapshot,
+} from './total-session-admission.js';
+import {
+  sendBridgeError as sendBridgeErrorResponse,
+  sendPermissionVoteError as sendPermissionVoteErrorResponse,
+  type SendBridgeError,
+} from './server/error-response.js';
+import { resolveBridgeFsFactory } from './server/fs-factory.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
+import {
+  createBuildWorkspaceCtx,
+  parseAndValidateWorkspaceClientId,
+  parseClientIdHeader,
+  safeBody,
+} from './server/request-helpers.js';
+import {
+  daemonInboundTraceIdCaptureMiddleware,
+  daemonTelemetryMiddleware,
+} from './server/telemetry.js';
+import { installAccessLogMiddleware } from './server/access-log.js';
+import { setupDeviceFlowRegistry } from './server/device-flow-registry.js';
+import {
+  installFinalErrorHandler,
+  installJsonBodyParser,
+} from './server/error-handlers.js';
+import { installRateLimiter } from './server/rate-limiter-setup.js';
+import { createServeFeatures } from './server/serve-features.js';
+import {
+  deleteDaemonSessionIfOrphan,
+  SessionArchiveCoordinator,
+} from './server/session-archive.js';
+import {
+  installSelfOriginStripMiddleware,
+  installRemoteSelfOriginMiddleware,
+} from './server/self-origin.js';
+import {
+  createSingleWorkspaceRegistry,
+  createWorkspaceSessionOwnerIndex,
+  WorkspaceGenerationClosedError,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
+  type WorkspaceRuntimeEnvMetadata,
+} from './workspace-registry.js';
+import { supportsWorkspaceRuntimeLifecycle } from './workspace-runtime-coordinator.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
+import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from './workspace-runtime-storage.js';
+import {
+  isScratchRootCompatible,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from './managed-scratch-workspace.js';
+import {
+  isPortableAbsolutePath,
+  requireTrustedWorkspaceRuntime,
+  resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveWorkspaceRuntimeFromParam,
+  sendWorkspaceRuntimeUnavailable,
+} from './workspace-route-runtime.js';
+import {
+  registerWorkspaceLifecycleRoutes,
+  registerWorkspaceQualifiedLifecycleRoutes,
+} from './routes/workspace-lifecycle.js';
+import { resolveMaxRegisteredWorkspaces } from './workspace-inputs.js';
+import {
+  registerWorkspaceManagementRoutes,
+  type WorkspaceManagementHandle,
+  type WorkspaceRuntimeRemovalController,
+} from './routes/workspace-management.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import { isGitAvailable } from './git-availability.js';
+import { createWorkspaceGitCloner } from './workspace-git-clone.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from './local-path-open.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
+import {
+  registerWorkspaceGitRoutes,
+  registerWorkspaceQualifiedGitRoutes,
+} from './routes/workspace-git.js';
+import {
+  registerWorkspaceGitDiffRoutes,
+  registerWorkspaceQualifiedGitDiffRoutes,
+} from './routes/workspace-git-diff.js';
+import {
+  registerWorkspaceGitLogRoutes,
+  registerWorkspaceQualifiedGitLogRoutes,
+} from './routes/workspace-git-log.js';
+import {
+  registerWorkspaceGitBranchRoutes,
+  registerWorkspaceQualifiedGitBranchRoutes,
+} from './routes/workspace-git-branches.js';
+import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
+import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import {
+  registerAutofixPrWatchesRoutes,
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes,
+} from './routes/autofix-pr-watches.js';
+import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
+import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
+import { WorkspaceGitState } from './workspace-git-state.js';
+import {
+  registerWorkspaceMcpControlRoutes,
+  registerWorkspaceQualifiedMcpControlRoutes,
+} from './routes/workspace-mcp-control.js';
+import { registerWorkspaceMcpConfigRoutes } from './routes/workspace-mcp-config.js';
+import { registerWorkspaceRuntimeMcpRoutes } from './routes/workspace-runtime-mcp.js';
+import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
+import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
+import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
+import type { ChannelManagementService } from './channel-management-service.js';
+import {
+  registerWorkspaceQualifiedToolsRoutes,
+  registerWorkspaceToolsRoutes,
+} from './routes/workspace-tools.js';
+import {
+  registerWorkspaceQualifiedSkillsRoutes,
+  registerWorkspaceSkillsRoutes,
+} from './routes/workspace-skills.js';
+import { SkillInstallAttemptStore } from './skill-install-attempts.js';
+import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import {
+  AGENT_HOST_RATE_LIMIT,
+  registerAgentHostTransportRoutes,
+} from './routes/agent-hosts.js';
+import { registerAgentHostRuntimeRoutes } from './routes/agent-host-connection.js';
+import {
+  registerAgentHostRelayRoutes,
+  relayBaseUrl,
+} from './agent-host-relay.js';
+import { registerA2ATransportRoutes } from './routes/a2a.js';
+import type {
+  ChannelDeliveryAccepted,
+  ChannelDeliveryRequest,
+} from '../runtime/channel-delivery-ipc.js';
+import type { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import {
+  parseChannelWebhookConfigLenient,
+  type parseChannelWebhookConfig,
+} from '../commands/channel/config-utils.js';
+import { loadChannelsConfig } from '../commands/channel/runtime.js';
+import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
+import { runWithoutDebugLogSession } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
+import { registerLiveRoutes } from './routes/live.js';
+import { registerLiveSetupRoutes } from './routes/live-setup.js';
+import { LiveHostCoordinator } from './live/live-host-coordinator.js';
+import { LiveHostInstaller } from './live/live-host-installer.js';
+import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
+import { LiveSetupController } from './live/live-setup-controller.js';
+import { LiveTaskService } from './live/live-task-service.js';
+import { resolveLiveNativeHostEnabled } from './live/native-host-enabled.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
+import {
+  conversationRootCompromisedError,
+  conversationRuntimeUnavailableError,
+} from './conversations/conversation-runtime-errors.js';
+import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
+import { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import { StandaloneDeletionJournal } from './conversations/standalone-deletion-journal.js';
+import { checkLegacyConversationRuntimeOwner } from './conversations/conversation-runtime-ownership.js';
+import {
+  assertLiveDiscoveryPublisher,
+  getStableLiveDiscoveryBaseDir,
+} from './live/discovery.js';
+import {
+  installServeAppLifecycle,
+  type ServeAppLifecycleController,
+} from './serve-app-lifecycle.js';
+import {
+  LiveProviderConfigError,
+  readLiveVoiceConfiguration,
+  resolveLiveProviderCredential,
+  type LiveProviderCredential,
+} from './live/provider-credentials.js';
+import type {
+  ChildHeapPolicy,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import type { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import {
+  createIdleAcpReclaimer,
+  type IdleAcpReclaimer,
+} from './idle-acp-reclamation.js';
+import { readWorkspaceActivity } from './workspace-activity.js';
+import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
-let activeSseCount = 0;
-export function getActiveSseCount(): number {
-  return activeSseCount;
-}
+export {
+  createDefaultFsAuditEmit,
+  resolveBoundWorkspacesFromIdeEnv,
+  resolveBridgeFsFactory,
+} from './server/fs-factory.js';
+export { PromptDeadlineExceededError } from './acp-session-bridge.js';
+export { resolvePromptDeadlineMs } from './server/prompt-deadline.js';
+export { detectFromLoopback } from './server/request-helpers.js';
+export {
+  InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
+  invalidateWorkspaceSessionListCache,
+  listWorkspaceSessionsForResponse,
+} from './server/session-list.js';
+export type {
+  ListWorkspaceSessionsOptions,
+  ListWorkspaceSessionsReadOptions,
+  ListWorkspaceSessionsResult,
+  WorkspaceSessionInfoResult,
+} from './server/session-list.js';
+export { getActiveSseCount } from './routes/sse-events.js';
 
-/**
- * Build a no-op fs-audit emitter that logs a warning every
- * `WARN_EVERY` dropped events. The default factory uses this so a
- * regression that silently strips audit events shows up in operator
- * logs instead of disappearing. `runQwenServe` replaces this with a
- * real per-session emit, so legitimate production traffic never hits
- * the warning.
- */
-export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
-  const WARN_EVERY = 100;
-  let droppedCount = 0;
-  return (event: BridgeEvent) => {
-    droppedCount += 1;
-    if (droppedCount === 1 || droppedCount % WARN_EVERY === 0) {
-      const data = event.data as
-        | { errorKind?: string; pathHash?: string; intent?: string }
-        | undefined;
-      const ctx: string[] = [];
-      if (data?.errorKind) ctx.push(`errorKind=${data.errorKind}`);
-      if (data?.intent) ctx.push(`intent=${data.intent}`);
-      if (data?.pathHash) ctx.push(`pathHash=${data.pathHash}`);
-      const ctxStr = ctx.length > 0 ? ` (${ctx.join(' ')})` : '';
-      writeStderrLine(
-        `qwen serve: fs audit emit is the default no-op — ${droppedCount} event(s) dropped so far. ` +
-          `Latest type=${event.type}${ctxStr}. ` +
-          `Inject deps.fsFactory in createServeApp to wire audit into the EventBus.`,
-      );
-    }
-  };
-}
-
-/**
- * Shared `WorkspaceFileSystemFactory` construction used by both
- * `runQwenServe` and `createServeApp`'s default bridge wiring.
- * Centralizes the "use the injected factory if provided, otherwise
- * build one with the given trust + audit-emit posture" logic.
- *
- * Trust is intentionally a **required** parameter — the two call
- * sites have different correct defaults:
- *   - `runQwenServe` defaults to `trusted: true`
- *   - `createServeApp` defaults to `trusted: false` (test-safe)
- */
 /**
  * Module-scoped once-per-process guard for the `createServeApp`
  * default-trust stderr warning. Without this, tests calling
@@ -203,503 +468,104 @@ export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
  */
 let warnedDefaultTrust = false;
 
-export function resolveBridgeFsFactory(input: {
-  boundWorkspace: string;
-  injected?: WorkspaceFileSystemFactory;
-  trusted: boolean;
-  emit?: (event: BridgeEvent) => void;
-  customIgnoreFiles?: string[];
-}): WorkspaceFileSystemFactory {
-  if (input.injected) return input.injected;
-  return createWorkspaceFileSystemFactory({
-    boundWorkspace: input.boundWorkspace,
-    trusted: input.trusted,
-    emit: input.emit ?? createDefaultFsAuditEmit(),
-    ...(input.customIgnoreFiles !== undefined
-      ? { customIgnoreFiles: input.customIgnoreFiles }
-      : {}),
-  });
-}
+function loadServeChannelWebhookConfigs(
+  sources: readonly ChannelWebhookConfigSource[],
+): Record<string, { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }> {
+  const parsed: Record<
+    string,
+    { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }
+  > = {};
 
-const DEFAULT_SESSION_PAGE_SIZE = 20;
-const MAX_SESSION_PAGE_SIZE = 100;
-
-export interface ListWorkspaceSessionsOptions {
-  cursor?: string;
-  size?: number;
-}
-
-export interface ListWorkspaceSessionsResult {
-  sessions: BridgeSessionSummary[];
-  nextCursor?: string;
-}
-
-export class InvalidCursorError extends Error {
-  constructor(cursor: string) {
-    super(`Invalid cursor: "${cursor}" is not a valid numeric cursor`);
-    this.name = 'InvalidCursorError';
+  for (const source of sources) {
+    let channelsConfig: ReturnType<typeof loadChannelsConfig>;
+    try {
+      channelsConfig = loadChannelsConfig(source.workspaceCwd);
+    } catch (error) {
+      writeStderrLine(
+        `[daemon] Skipping webhook config source ${JSON.stringify(source.workspaceCwd)}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      continue;
+    }
+    const selectedChannels = source.channelNames
+      ? new Set(source.channelNames)
+      : undefined;
+    for (const [channelName, rawConfig] of Object.entries(channelsConfig)) {
+      if (
+        (selectedChannels && !selectedChannels.has(channelName)) ||
+        typeof rawConfig !== 'object' ||
+        rawConfig === null
+      ) {
+        continue;
+      }
+      let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
+      try {
+        webhooks = parseChannelWebhookConfigLenient(
+          channelName,
+          rawConfig as Record<string, unknown>,
+          (webhookSource, sourceError) => {
+            const sourceMessage =
+              sourceError instanceof Error
+                ? sourceError.message
+                : String(sourceError);
+            writeStderrLine(
+              `[daemon] Skipping malformed webhook source "${webhookSource}" for channel "${channelName}": ${sourceMessage}`,
+            );
+          },
+          source.env,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeStderrLine(
+          `[daemon] Skipping malformed webhook config for channel "${channelName}": ${message}`,
+        );
+        continue;
+      }
+      if (webhooks) {
+        parsed[channelName] = { webhooks };
+      }
+    }
   }
-}
 
-function parseSessionCursor(cursor: string): number | undefined {
-  if (cursor === '') return undefined;
-  const trimmed = cursor.trim();
-  const parsed = Number(trimmed);
-  if (
-    trimmed === '' ||
-    !Number.isFinite(parsed) ||
-    parsed < 0 ||
-    parsed > Number.MAX_SAFE_INTEGER
-  ) {
-    throw new InvalidCursorError(cursor);
-  }
   return parsed;
 }
 
-export async function listWorkspaceSessionsForResponse(
-  bridge: AcpSessionBridge,
-  workspaceCwd: string,
-  options?: ListWorkspaceSessionsOptions,
-): Promise<ListWorkspaceSessionsResult> {
-  const rawSize = options?.size;
-  const requestedSize =
-    typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
-      ? rawSize
-      : DEFAULT_SESSION_PAGE_SIZE;
-  const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
-
-  let numericCursor: number | undefined;
-  if (options?.cursor != null) {
-    numericCursor = parseSessionCursor(options.cursor);
-  }
-  const isFirstPage = numericCursor === undefined;
-
-  const sessionService = new SessionService(workspaceCwd);
-  const persisted = await sessionService.listSessions({
-    cursor: numericCursor,
-    size: pageSize,
-  });
-  const bySessionId = new Map<string, BridgeSessionSummary>();
-
-  for (const item of persisted.items) {
-    bySessionId.set(item.sessionId, {
-      sessionId: item.sessionId,
-      workspaceCwd: item.cwd,
-      createdAt: item.startTime,
-      updatedAt: new Date(item.mtime).toISOString(),
-      displayName: item.customTitle || item.prompt,
-      clientCount: 0,
-      hasActivePrompt: false,
-    });
-  }
-
-  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
-  for (const live of liveSessions) {
-    const existing = bySessionId.get(live.sessionId);
-    if (existing) {
-      bySessionId.set(live.sessionId, {
-        ...existing,
-        ...live,
-        createdAt: existing.createdAt,
-        displayName: live.displayName ?? existing.displayName,
-        updatedAt: live.updatedAt ?? existing.updatedAt,
-        clientCount: live.clientCount,
-        hasActivePrompt: live.hasActivePrompt,
-      });
-    } else if (
-      isFirstPage &&
-      !(await sessionService.sessionExists(live.sessionId))
-    ) {
-      bySessionId.set(live.sessionId, {
-        ...live,
-        createdAt: live.createdAt,
-        clientCount: live.clientCount,
-        hasActivePrompt: live.hasActivePrompt,
-      });
-    }
-  }
-
-  const sessions = [...bySessionId.values()].sort((a, b) => {
-    const aTime = Date.parse(a.updatedAt ?? a.createdAt);
-    const bTime = Date.parse(b.updatedAt ?? b.createdAt);
-    return bTime - aTime;
-  });
-
-  const nextCursor =
-    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
-
-  return { sessions, nextCursor };
-}
-
-function parseSessionPageSizeQuery(raw: unknown): number | undefined {
-  if (typeof raw !== 'string') return undefined;
-  const trimmed = raw.trim();
-  if (!/^[+-]?\d+$/.test(trimmed)) return undefined;
-  const parsed = Number.parseInt(trimmed, 10);
-  if (!Number.isFinite(parsed)) return undefined;
-  if (Number.isSafeInteger(parsed)) return parsed;
-  return trimmed.startsWith('-') ? 1 : MAX_SESSION_PAGE_SIZE;
-}
-
-const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
-  'protocol',
-  'baseUrl',
-  'apiKey',
-  'models',
-  'advancedConfig',
-];
-
-function buildAuthProviderDescriptor(
-  provider: (typeof ALL_PROVIDERS)[number],
-): ServeAuthProviderDescriptor {
-  const steps = AUTH_PROVIDER_STEPS.filter((step) =>
-    shouldShowStep(provider, step),
+function describeRegistryPrimaryForConflict(
+  registry: WorkspaceRegistry,
+): string {
+  return (
+    `registry primary cwd=${JSON.stringify(registry.primary.workspaceCwd)}, ` +
+    `workspaceId=${JSON.stringify(registry.primary.workspaceId)}`
   );
-  return {
-    id: provider.id,
-    label: provider.label,
-    description: provider.description,
-    ...(provider.uiGroup ? { uiGroup: provider.uiGroup } : {}),
-    protocol: provider.protocol,
-    ...(provider.protocolOptions
-      ? { protocolOptions: [...provider.protocolOptions] }
-      : {}),
-    ...(provider.baseUrl !== undefined ? { baseUrl: provider.baseUrl } : {}),
-    ...(typeof provider.envKey === 'string' ? { envKey: provider.envKey } : {}),
-    ...(provider.models
-      ? {
-          models: provider.models.map((model) => ({
-            id: model.id,
-            ...(model.contextWindowSize !== undefined
-              ? { contextWindowSize: model.contextWindowSize }
-              : {}),
-            ...(model.enableThinking !== undefined
-              ? { enableThinking: model.enableThinking }
-              : {}),
-            ...(model.modalities ? { modalities: model.modalities } : {}),
-            ...(model.description ? { description: model.description } : {}),
-          })),
-        }
-      : {}),
-    ...(provider.modelsEditable !== undefined
-      ? { modelsEditable: provider.modelsEditable }
-      : {}),
-    ...(provider.apiKeyPlaceholder
-      ? { apiKeyPlaceholder: provider.apiKeyPlaceholder }
-      : {}),
-    ...(typeof provider.documentationUrl === 'string'
-      ? { documentationUrl: provider.documentationUrl }
-      : {}),
-    ...(provider.showAdvancedConfig !== undefined
-      ? { showAdvancedConfig: provider.showAdvancedConfig }
-      : {}),
-    ...(provider.uiLabels ? { uiLabels: provider.uiLabels } : {}),
-    steps,
-  };
 }
 
-function buildAuthProviderCatalog(
-  workspaceCwd: string,
-): ServeAuthProviderCatalog {
-  const providers = ALL_PROVIDERS.map(buildAuthProviderDescriptor);
-  const providerIdsByGroup = (group: string) =>
-    providers
-      .filter((provider) => provider.uiGroup === group)
-      .map((provider) => provider.id);
-  return {
-    v: 1,
-    workspaceCwd,
-    providers,
-    groups: [
-      {
-        id: 'alibaba',
-        label: 'Alibaba ModelStudio',
-        description:
-          'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
-        providerIds: providerIdsByGroup('alibaba'),
-      },
-      {
-        id: 'third-party',
-        label: 'Third-party Providers',
-        description: 'Choose a built-in provider and connect with an API key',
-        providerIds: providerIdsByGroup('third-party'),
-      },
-      {
-        id: 'custom',
-        label: 'Custom Provider',
-        description:
-          'Manually connect a local server, proxy, or unsupported provider',
-        providerIds: providerIdsByGroup('custom'),
-      },
-    ],
-  };
-}
-
-function parseStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const result = value
-    .map((item) => (typeof item === 'string' ? item.trim() : ''))
-    .filter((item) => item.length > 0);
-  return result.length > 0 ? [...new Set(result)] : undefined;
-}
-
-function parsePositiveBoundedInteger(
-  value: unknown,
-  max: number,
-): number | undefined {
-  if (
-    typeof value !== 'number' ||
-    !Number.isInteger(value) ||
-    !Number.isFinite(value) ||
-    value <= 0 ||
-    value > max
-  ) {
-    return undefined;
+function getRuntimeEffectiveEnv(
+  metadata: WorkspaceRuntimeEnvMetadata | undefined,
+): Readonly<Record<string, string | undefined>> | undefined {
+  if (!metadata || metadata.mode === 'parent-process') {
+    return metadata?.effectiveEnv;
   }
-  return value;
-}
-
-function parseIPv4MappedHexSuffix(suffix: string): string | undefined {
-  const hexParts = suffix.split(':');
-  if (hexParts.length !== 2) return undefined;
-
-  const [hiRaw, loRaw] = hexParts;
-  if (!/^[0-9a-f]{1,4}$/i.test(hiRaw) || !/^[0-9a-f]{1,4}$/i.test(loRaw)) {
-    return undefined;
-  }
-
-  const hi = Number.parseInt(hiRaw, 16);
-  const lo = Number.parseInt(loRaw, 16);
-  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-}
-
-function parseIPv6FirstHextet(host: string): number | undefined {
-  const first = host.split(':', 1)[0];
-  if (!first || !/^[0-9a-f]{1,4}$/i.test(first)) return undefined;
-  return Number.parseInt(first, 16);
-}
-
-function parseLegacyIPv4Part(value: string, max: number): number | undefined {
-  let parsed: number;
-  if (/^0x[0-9a-f]+$/i.test(value)) {
-    parsed = Number.parseInt(value.slice(2), 16);
-  } else if (/^0[0-7]+$/.test(value)) {
-    parsed = Number.parseInt(value, 8);
-  } else if (/^[0-9]+$/.test(value)) {
-    parsed = Number.parseInt(value, 10);
-  } else {
-    return undefined;
-  }
-  return parsed <= max ? parsed : undefined;
-}
-
-// Match URL parsers that still accept inet_aton-style IPv4 aliases, so blocked
-// host checks also catch SSH sources such as git@0177.1:owner/repo.git.
-function parseLegacyIPv4Host(host: string): string | undefined {
-  const parts = host.split('.');
-  if (parts.length < 1 || parts.length > 4 || parts.some((part) => !part)) {
-    return undefined;
-  }
-
-  // In legacy one-, two-, and three-part IPv4 forms, the final part carries the
-  // remaining bytes rather than a single octet.
-  const maxLastPart = [0xffffffff, 0xffffff, 0xffff, 0xff][parts.length - 1];
-  if (maxLastPart === undefined) return undefined;
-
-  const parsed = parts.map((part, index) =>
-    parseLegacyIPv4Part(part, index === parts.length - 1 ? maxLastPart : 0xff),
-  );
-  if (parsed.some((part) => part === undefined)) return undefined;
-
-  const values = parsed as number[];
-  const numeric =
-    values.length === 1
-      ? values[0]
-      : values.length === 2
-        ? values[0] * 0x1000000 + values[1]
-        : values.length === 3
-          ? values[0] * 0x1000000 + values[1] * 0x10000 + values[2]
-          : values[0] * 0x1000000 +
-            values[1] * 0x10000 +
-            values[2] * 0x100 +
-            values[3];
-
-  return [
-    Math.floor(numeric / 0x1000000) & 0xff,
-    Math.floor(numeric / 0x10000) & 0xff,
-    Math.floor(numeric / 0x100) & 0xff,
-    numeric & 0xff,
-  ].join('.');
-}
-
-function isBlockedAuthProviderHost(hostname: string): boolean {
-  const stripped = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
-  const host = stripped.toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost')) return true;
-
-  const bareHost =
-    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
-  const blocklistHost = parseLegacyIPv4Host(bareHost) ?? bareHost;
-  const ipVersion = net.isIP(blocklistHost);
-  if (ipVersion === 4) {
-    const parts = blocklistHost.split('.').map((part) => Number(part));
-    const [a, b] = parts;
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 100 && b !== undefined && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b !== undefined && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168)
-    );
-  }
-
-  if (ipVersion === 6) {
-    if (blocklistHost === '::' || blocklistHost === '::1') return true;
-    const firstHextet = parseIPv6FirstHextet(blocklistHost);
-    if (
-      firstHextet !== undefined &&
-      ((firstHextet >= 0xfe80 && firstHextet <= 0xfebf) ||
-        (firstHextet & 0xfe00) === 0xfc00)
-    ) {
-      return true;
-    }
-    if (blocklistHost.startsWith('::ffff:')) {
-      const suffix = blocklistHost.slice('::ffff:'.length);
-      if (net.isIP(suffix) === 4) {
-        return isBlockedAuthProviderHost(suffix);
-      }
-      const mappedIPv4 = parseIPv4MappedHexSuffix(suffix);
-      return mappedIPv4 ? isBlockedAuthProviderHost(mappedIPv4) : true;
-    }
-  }
-
-  return false;
-}
-
-function parseAuthProviderBaseUrl(
-  value: unknown,
-  allowPrivateBaseUrl: boolean,
-): string | undefined | null {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-  if (parsed.username || parsed.password) return null;
-  if (!allowPrivateBaseUrl && isBlockedAuthProviderHost(parsed.hostname)) {
-    return null;
-  }
-  return parsed.toString().replace(/\/$/, '');
-}
-
-type AuthProviderParseResult =
-  | { ok: true; value: ServeAuthProviderInstallRequest }
-  | { ok: false; code: string; error: string };
-
-function parseAuthProviderInstallRequest(
-  body: Record<string, unknown>,
-  options?: { allowPrivateBaseUrl?: boolean },
-): AuthProviderParseResult {
-  const providerId = body['providerId'];
-  const apiKey = body['apiKey'];
-  if (
-    typeof providerId !== 'string' ||
-    providerId.trim().length === 0 ||
-    typeof apiKey !== 'string' ||
-    apiKey.trim().length === 0
-  ) {
-    return {
-      ok: false,
-      code: 'invalid_request',
-      error: '`providerId` and `apiKey` are required',
-    };
-  }
-  const protocol = body['protocol'];
-  const baseUrl = parseAuthProviderBaseUrl(
-    body['baseUrl'],
-    options?.allowPrivateBaseUrl === true,
-  );
-  if (baseUrl === null) {
-    return {
-      ok: false,
-      code: 'invalid_base_url',
-      error:
-        '`baseUrl` must be an http(s) URL without credentials or blocked private-network host',
-    };
-  }
-  const modelIds = parseStringArray(body['modelIds']);
-  const rawAdvanced =
-    body['advancedConfig'] && typeof body['advancedConfig'] === 'object'
-      ? (body['advancedConfig'] as Record<string, unknown>)
-      : undefined;
-  const rawMultimodal =
-    rawAdvanced?.['multimodal'] && typeof rawAdvanced['multimodal'] === 'object'
-      ? (rawAdvanced['multimodal'] as Record<string, unknown>)
-      : undefined;
-  const contextWindowSize = parsePositiveBoundedInteger(
-    rawAdvanced?.['contextWindowSize'],
-    10_000_000,
-  );
-  const maxTokens = parsePositiveBoundedInteger(
-    rawAdvanced?.['maxTokens'],
-    10_000_000,
-  );
-  const advancedConfig = rawAdvanced
-    ? {
-        ...(typeof rawAdvanced['enableThinking'] === 'boolean'
-          ? { enableThinking: rawAdvanced['enableThinking'] }
-          : {}),
-        ...(rawMultimodal
-          ? {
-              multimodal: {
-                ...(typeof rawMultimodal['image'] === 'boolean'
-                  ? { image: rawMultimodal['image'] }
-                  : {}),
-                ...(typeof rawMultimodal['pdf'] === 'boolean'
-                  ? { pdf: rawMultimodal['pdf'] }
-                  : {}),
-                ...(typeof rawMultimodal['audio'] === 'boolean'
-                  ? { audio: rawMultimodal['audio'] }
-                  : {}),
-                ...(typeof rawMultimodal['video'] === 'boolean'
-                  ? { video: rawMultimodal['video'] }
-                  : {}),
-              },
-            }
-          : {}),
-        ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
-        ...(maxTokens !== undefined ? { maxTokens } : {}),
-      }
-    : undefined;
-  return {
-    ok: true,
-    value: {
-      providerId: providerId.trim(),
-      ...(typeof protocol === 'string' && protocol.trim()
-        ? {
-            protocol:
-              protocol.trim() as ServeAuthProviderInstallRequest['protocol'],
-          }
-        : {}),
-      ...(baseUrl ? { baseUrl } : {}),
-      apiKey,
-      ...(modelIds ? { modelIds } : {}),
-      ...(advancedConfig ? { advancedConfig } : {}),
-    },
-  };
+  return metadata.effectiveEnv ?? {};
 }
 
 export interface ServeAppDeps {
+  managedLocalWeb?: ManagedLocalWebOptions;
+  restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Enables resident management of scheduled-task-owned sessions: a periodic
+   * keepalive (so their schedulers aren't idle-reaped) and a boot-time
+   * rehydration (so they re-arm after a restart). Opt-in — only the real
+   * long-running daemon (`runQwenServe`) sets it. Tests and direct embeds
+   * leave it off so `createServeApp` neither spawns sessions on boot nor holds
+   * a heartbeat timer.
+   */
+  manageScheduledTaskSessions?: boolean;
+  /** Advertise current-session task binding only when every managed daemon
+   * runtime installs the private cron-tool callback. */
+  currentSessionSchedulingAvailable?: boolean;
   /**
    * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
    * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
@@ -744,6 +610,7 @@ export interface ServeAppDeps {
    * and a stderr audit sink.
    */
   deviceFlowRegistry?: DeviceFlowRegistry;
+  maxExtensionOperationHistory?: number;
   /**
    * Extra device-flow providers for tests / future extensions.
    * Production builds register only `QwenOAuthDeviceFlowProvider`;
@@ -758,6 +625,7 @@ export interface ServeAppDeps {
    */
   installAuthProvider?: (
     req: ServeAuthProviderInstallRequest,
+    assertGenerationOpen?: () => void,
   ) => Promise<ServeAuthProviderInstallResult>;
   /**
    * Optional daemon logger. When provided, `sendBridgeError` routes
@@ -766,235 +634,168 @@ export interface ServeAppDeps {
    * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
+  startup?: DaemonStartupSnapshot;
+  /** Advertise only when the injected channel controller enforces this limit. */
+  maxChannelControlWorkspaces?: number;
+  getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
+  getChannelWorkerControl?: () => ChannelWorkerControlState;
+  isChannelControlDraining?: () => boolean;
+  isChannelControlInitializing?: () => boolean;
+  setChannelWorkerSelection?: (
+    selection: ServeChannelSelection,
+  ) => Promise<ChannelWorkerSetResult>;
+  stopChannelWorker?: () => Promise<ChannelWorkerStopResult>;
+  enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
+  deliverChannelMessage?: (
+    workspaceCwd: string,
+    request: ChannelDeliveryRequest,
+  ) => Promise<ChannelDeliveryAccepted>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
+  channelWebhookConfigSources?: readonly ChannelWebhookConfigSource[];
+  getChannelWebhookConfigSources?: () => readonly ChannelWebhookConfigSource[];
+  getChannelWebhookConfigVersion?: () => number;
+  registerChannelWebhookConfigRefresh?: (refresh: () => void) => void;
+  /**
+   * Stop and relaunch the daemon-managed channel worker so it re-reads
+   * settings.json. Its presence mounts the compatibility reload route;
+   * `channel_reload` is advertised only while the control state is enabled.
+   */
+  reloadChannelWorker?: () => Promise<ChannelWorkerSnapshot>;
+  channelManagementService?: (
+    runtime: WorkspaceRuntime,
+  ) =>
+    | ChannelManagementService
+    | undefined
+    | Promise<ChannelManagementService | undefined>;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
+  /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
+  getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  managedChildProcesses?: {
+    registry: ProcessRegistry;
+    policy: ChildHeapPolicy;
+    ownsBridge?: (bridge: AcpSessionBridge) => boolean;
+  };
+  /**
+   * Managed engine for the default Bridge when `experimentalPairedEngines`
+   * pairs it. Without one, paired sessions run on Legacy and Managed owners
+   * are refused on restore.
+   */
+  managedExecutionEngine?: ManagedExecutionEngine;
+  /**
+   * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
+   * the metrics ring can bucket request rate and latency for the charts.
+   */
+  recordDaemonRequest?: (durationMs: number, statusCode: number) => void;
   workspace?: DaemonWorkspaceService;
+  statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
     workspace: string,
     toolName: string,
     enabled: boolean,
   ) => Promise<void>;
+  persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
+  persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
+  persistUserSkillsActivation?: (
+    workspace: string,
+    skillNames: readonly string[],
+    activation: import('../config/skill-settings.js').UserSkillActivation,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    import('./workspace-service/types.js').PersistUserSkillsActivationResult
+  >;
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
+    assertGenerationOpen?: () => void,
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
-}
-
-function resolveDaemonTelemetryRoute(
-  req: Request,
-):
-  | { route: string; sessionId?: string; permissionRequestId?: string }
-  | undefined {
-  const path = req.path.replace(/\/$/, '') || '/';
-  if (req.method === 'POST' && path === '/session') {
-    return { route: 'POST /session' };
-  }
-  if (req.method === 'POST' && path === '/sessions/delete') {
-    return { route: 'POST /sessions/delete' };
-  }
-  if (req.method === 'GET' && path === '/daemon/status') {
-    return { route: 'GET /daemon/status' };
-  }
-  const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|mid-turn-message|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
-  );
-  const sessionActionId = sessionAction?.[1];
-  const sessionActionName = sessionAction?.[2];
-  if (sessionActionId && sessionActionName && req.method === 'POST') {
-    return {
-      route: `POST /session/:id/${sessionActionName}`,
-      sessionId: sessionActionId,
-    };
-  }
-  const sessionMetadata = path.match(/^\/session\/([^/]+)\/metadata$/);
-  if (sessionMetadata?.[1] && req.method === 'PATCH') {
-    return {
-      route: 'PATCH /session/:id/metadata',
-      sessionId: sessionMetadata[1],
-    };
-  }
-  const sessionPermission = path.match(
-    /^\/session\/([^/]+)\/permission\/([^/]+)$/,
-  );
-  if (
-    sessionPermission?.[1] &&
-    sessionPermission?.[2] &&
-    req.method === 'POST'
-  ) {
-    const rawRequestId = sessionPermission[2];
-    return {
-      route: 'POST /session/:id/permission/:requestId',
-      sessionId: sessionPermission[1],
-      ...(rawRequestId.length <= MAX_CLIENT_ID_LENGTH &&
-      CLIENT_ID_RE.test(rawRequestId)
-        ? { permissionRequestId: rawRequestId }
-        : {}),
-    };
-  }
-  const globalPermission = path.match(/^\/permission\/([^/]+)$/);
-  if (globalPermission?.[1] && req.method === 'POST') {
-    const rawRequestId = globalPermission[1];
-    return {
-      route: 'POST /permission/:requestId',
-      ...(rawRequestId.length <= MAX_CLIENT_ID_LENGTH &&
-      CLIENT_ID_RE.test(rawRequestId)
-        ? { permissionRequestId: rawRequestId }
-        : {}),
-    };
-  }
-  const deleteSession = path.match(/^\/session\/([^/]+)$/);
-  const deleteSessionId = deleteSession?.[1];
-  if (deleteSessionId && req.method === 'DELETE') {
-    return { route: 'DELETE /session/:id', sessionId: deleteSessionId };
-  }
-  if (req.method === 'GET' && /^\/workspace\/[^/]+\/sessions$/.test(path)) {
-    return { route: 'GET /workspace/:id/sessions' };
-  }
-  if (req.method === 'POST' && path === '/workspace/init') {
-    return { route: 'POST /workspace/init' };
-  }
-  if (req.method === 'POST' && path === '/workspace/reload') {
-    return { route: 'POST /workspace/reload' };
-  }
-  const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
-  if (mcpRestart?.[1] && req.method === 'POST') {
-    return { route: 'POST /workspace/mcp/:server/restart' };
-  }
-  if (req.method === 'POST' && path === '/workspace/mcp/servers') {
-    return { route: 'POST /workspace/mcp/servers' };
-  }
-  const mcpDelete = path.match(/^\/workspace\/mcp\/servers\/([^/]+)$/);
-  if (mcpDelete?.[1] && req.method === 'DELETE') {
-    return { route: 'DELETE /workspace/mcp/servers/:name' };
-  }
-  if (req.method === 'POST' && path === '/workspace/auth/device-flow') {
-    return { route: 'POST /workspace/auth/device-flow' };
-  }
-  const deviceFlowDelete = path.match(
-    /^\/workspace\/auth\/device-flow\/([^/]+)$/,
-  );
-  if (deviceFlowDelete?.[1] && req.method === 'DELETE') {
-    return { route: 'DELETE /workspace/auth/device-flow/:id' };
-  }
-  const toolEnable = path.match(/^\/workspace\/tools\/([^/]+)\/enable$/);
-  if (toolEnable?.[1] && req.method === 'POST') {
-    return { route: 'POST /workspace/tools/:name/enable' };
-  }
-  if (path === '/workspace/settings') {
-    if (req.method === 'GET') return { route: 'GET /workspace/settings' };
-    if (req.method === 'POST') return { route: 'POST /workspace/settings' };
-  }
-  if (path === '/workspace/permissions') {
-    if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
-    if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
-  }
-  return undefined;
-}
-
-function daemonTelemetryMiddleware(
-  boundWorkspace: string,
-): (req: Request, res: Response, next: NextFunction) => void {
-  const workspaceHash = hashDaemonWorkspace(boundWorkspace);
-  return (req, res, next) => {
-    const route = resolveDaemonTelemetryRoute(req);
-    if (!route) {
-      next();
-      return;
-    }
-    const rawClientId = req.get(CLIENT_ID_HEADER);
-    const clientId =
-      rawClientId !== undefined &&
-      rawClientId !== '' &&
-      rawClientId.length <= MAX_CLIENT_ID_LENGTH &&
-      CLIENT_ID_RE.test(rawClientId)
-        ? rawClientId
-        : undefined;
-    const startMs = Date.now();
-    void withDaemonRequestSpan(
-      {
-        method: req.method,
-        route: route.route,
-        workspaceHash,
-        ...(route.sessionId ? { sessionId: route.sessionId } : {}),
-        ...(route.permissionRequestId
-          ? { permissionRequestId: route.permissionRequestId }
-          : {}),
-        ...(clientId ? { clientId } : {}),
-      },
-      async (span) =>
-        await new Promise<void>((resolve, reject) => {
-          let done = false;
-          const finish = () => {
-            if (done) return;
-            done = true;
-            recordDaemonHttpResponse(span, res.statusCode);
-            recordDaemonHttpRequest(
-              Date.now() - startMs,
-              route.route,
-              res.statusCode,
-            );
-            resolve();
-          };
-          res.once('finish', finish);
-          res.once('close', finish);
-          try {
-            next();
-          } catch (error) {
-            recordDaemonError(span, error);
-            reject(error);
-          }
-        }),
-    ).catch(next);
-  };
-}
-
-/**
- * Sentinel passed as `AbortController.abort(reason)` when a prompt
- * exceeds its server-configured wallclock. Exported so tests can
- * match on the class identity.
- */
-export class PromptDeadlineExceededError extends Error {
-  readonly deadlineMs: number;
-  constructor(deadlineMs: number) {
-    super(`prompt exceeded the ${deadlineMs}ms deadline`);
-    this.name = 'PromptDeadlineExceededError';
-    this.deadlineMs = deadlineMs;
-  }
-}
-
-/**
- * Resolve the effective per-prompt wallclock from the server flag +
- * an optional request body override. Returns `undefined` when no
- * deadline applies. The request override may SHORTEN the deadline but
- * never EXTEND it — operators stay the upper bound.
- */
-export function resolvePromptDeadlineMs(
-  serverMs: number | undefined,
-  requestMs: number | undefined,
-): number | undefined {
-  if (serverMs === undefined || !Number.isFinite(serverMs) || serverMs <= 0) {
-    return undefined;
-  }
-  if (
-    requestMs === undefined ||
-    !Number.isFinite(requestMs) ||
-    requestMs <= 0
-  ) {
-    return serverMs;
-  }
-  return Math.min(serverMs, requestMs);
-}
-
-// Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
-const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
-
-function advertisedMaxPendingPromptsPerSession(
-  value: number | undefined,
-): number | null {
-  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
-  if (value === 0 || value === Number.POSITIVE_INFINITY) return null;
-  return value;
+  persistSettings?: (
+    workspace: string,
+    writes: Array<{
+      scope: import('../config/settings.js').SettingScope;
+      key: string;
+      value: unknown;
+    }>,
+    assertGenerationOpen?: () => void,
+  ) => Promise<void>;
+  updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
+  sessionArtifactsPersistenceAvailable?: boolean;
+  /**
+   * Test/embed override for the native directory picker probe. Production
+   * evaluates `isNativeDirectoryPickerAvailable()`; tests pin this so the
+   * capability wiring is assertable on headless hosts too.
+   */
+  nativeDirectoryPickerAvailable?: boolean;
+  /**
+   * Test/embed override for the local path open probe. Production evaluates
+   * `isLocalPathOpenAvailable()`; tests pin this so the capability wiring is
+   * assertable on headless hosts too.
+   */
+  localPathOpenAvailable?: boolean;
+  /**
+   * Test/embed override for the local terminal open probe. Production
+   * evaluates `isLocalTerminalAvailable()`; tests pin this so the capability
+   * wiring is assertable on headless hosts too.
+   */
+  localTerminalOpenAvailable?: boolean;
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
+   * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+   * child's `client_mcp/message` ext-method. `runQwenServe` constructs ONE and
+   * passes the SAME instance here AND to its `createAcpSessionBridge` call (as
+   * `clientMcpSender: registry.lookup`) so the bridge that answers the child
+   * and the WS provider that registers senders agree. When omitted (the
+   * standalone `createServeApp` path with no injected bridge), `createServeApp`
+   * builds its own registry and wires it into the bridge it creates.
+   */
+  clientMcpSenderRegistry?: ClientMcpSenderRegistry;
+  workspaceRegistry?: WorkspaceRegistry;
+  /**
+   * Returns every bridge generation that is still alive, including draining
+   * generations no longer exposed by the workspace registry.
+   */
+  getSessionBridges?: () => readonly AcpSessionBridge[];
+  workspaceTrustHotReloadAvailable?: boolean;
+  getWorkspaceTrustPolicySnapshot?: () =>
+    | DaemonTrustPolicySnapshot
+    | Promise<DaemonTrustPolicySnapshot>;
+  createWorkspaceRuntime?: (
+    cwd: string,
+    options: { provenance: WorkspaceRuntimeProvenance },
+  ) => Promise<WorkspaceRuntime>;
+  managedScratchRoot?: ManagedScratchRoot;
+  validateWorkspaceRuntimeForPublication?: (
+    runtime: WorkspaceRuntime,
+  ) => Promise<WorkspaceRuntime>;
+  runWorkspaceTrustOperation?: <T>(operation: () => Promise<T>) => Promise<T>;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
+  workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
+  primaryWorkspaceTrusted?: boolean;
+  primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
+  daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  modelSelectionBaseEnv?: Readonly<NodeJS.ProcessEnv>;
+  runtimePlatform?: NodeJS.Platform;
+  voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
+  voiceCoordinator?: WorkspaceVoiceCoordinator;
+  liveCoordinator?: LiveHostCoordinator;
+  liveHostInstaller?: LiveHostInstaller;
+  liveSessionCoordinator?: LiveSessionCoordinator;
+  liveConversationWorkspace?: ConversationWorkspace;
+  readLiveConversationScheduledTasks?: () => Promise<
+    readonly DurableCronTask[]
+  >;
+  liveDiscoveryStableBaseDir?: string;
+  checkLegacyConversationOwner?: () => Promise<void>;
+  serveAppLifecycle?: ServeAppLifecycleController;
+  validateLiveProviderCredential?: (
+    credential: LiveProviderCredential,
+  ) => Promise<void>;
 }
 
 /**
@@ -1006,30 +807,9 @@ function advertisedMaxPendingPromptsPerSession(
  * resolves. Defaults to `opts.port` for callers (e.g. tests) that pin a port
  * up front.
  *
- * Supported routes:
- *   - `GET  /health`
- *   - `GET  /daemon/status`
- *   - `GET  /capabilities`
- *   - `GET  /workspace/mcp`
- *   - `GET  /workspace/skills`
- *   - `GET  /workspace/providers`
- *   - `GET  /workspace/env`
- *   - `GET  /workspace/preflight`
- *   - `POST /session`
- *   - `POST /session/:id/load`
- *   - `POST /session/:id/resume`
- *   - `GET  /workspace/:id/sessions`
- *   - `GET  /session/:id/context`
- *   - `GET  /session/:id/supported-commands`
- *   - `GET  /session/:id/tasks`
- *   - `GET  /session/:id/lsp`
- *   - `POST /session/:id/prompt`
- *   - `POST /session/:id/cancel`
- *   - `POST /session/:id/heartbeat`
- *   - `POST /session/:id/model`
- *   - `GET  /session/:id/events` (SSE)
- *   - `POST /session/:id/permission/:requestId`
- *   - `POST /permission/:requestId`
+ * Route modules are registered below in middleware order. Keep this file as
+ * the assembly point so auth/rate-limit/body-parser/REST/ACP/Web Shell order
+ * stays reviewable in one place.
  *
  * **Workspace validation contract.** `createServeApp` itself does NOT
  * verify that `opts.workspace` exists or is a directory — it
@@ -1047,32 +827,238 @@ function advertisedMaxPendingPromptsPerSession(
  * a "healthy"-looking daemon whose every spawn fails with cryptic
  * child-process ENOENT.
  */
+// Mirrors the bridge's session-idle reaper default (30 min). Used only to
+// size the scheduled-task keepalive interval when no explicit timeout is set.
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+const SCHEDULED_TASK_RESTORE_HEADROOM_MS = 10_000;
+// Bounds for the keepalive interval: ≥30s (avoid busy-looping on a tiny custom
+// timeout) and ≤10min (stay well inside the 30-min default reaper window).
+const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
+const KEEPALIVE_MAX_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Sizes the keepalive heartbeat interval so a resident task session is beaten
+ * BEFORE the idle reaper closes it. Targets a third of the reaper window, but
+ * never exceeds HALF of it — so at least one heartbeat lands in time even for a
+ * small custom timeout, where the 30s floor would otherwise overshoot the whole
+ * window and let the session be reaped before the first beat. When the reaper is
+ * disabled (idle timeout ≤ 0) sessions are never reaped, so heartbeats aren't
+ * needed — the loop still runs (to revive re-enabled bound sessions) but at the
+ * relaxed max cadence.
+ */
+export function computeKeepaliveIntervalMs(idleTimeoutMs: number): number {
+  if (idleTimeoutMs <= 0) return KEEPALIVE_MAX_INTERVAL_MS;
+  const target = Math.min(
+    Math.max(KEEPALIVE_MIN_INTERVAL_MS, Math.floor(idleTimeoutMs / 3)),
+    KEEPALIVE_MAX_INTERVAL_MS,
+  );
+  return Math.max(1, Math.min(target, Math.floor(idleTimeoutMs / 2)));
+}
+
+function createLiveWorkspaceDelegate<T extends object>(getTarget: () => T): T {
+  return new Proxy({} as T, {
+    get(_target, property) {
+      const target = getTarget();
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+    set(_target, property, value) {
+      return Reflect.set(getTarget(), property, value);
+    },
+    has(_target, property) {
+      return Reflect.has(getTarget(), property);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(getTarget());
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(
+        getTarget(),
+        property,
+      );
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+    getPrototypeOf() {
+      return Reflect.getPrototypeOf(getTarget());
+    },
+  });
+}
+
 export function createServeApp(
   opts: ServeOptions,
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  validateHostedHarnessProfile(opts);
+  if (opts.profile === 'hosted-harness' && deps.manageScheduledTaskSessions) {
+    throw new Error(
+      '--profile hosted-harness cannot manage scheduled task sessions.',
+    );
+  }
+  if (opts.profile === 'hosted-harness') opts = { ...opts, requireAuth: true };
+  if (
+    (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== opts.childHeapMode
+  ) {
+    throw new TypeError('ACP admission requires managed child process wiring.');
+  }
+  if (
+    opts.childHeapMode === 'enforce' &&
+    ((deps.bridge && !deps.managedChildProcesses?.ownsBridge?.(deps.bridge)) ||
+      deps.workspaceRegistry
+        ?.listManaged()
+        .some(
+          (runtime) =>
+            !deps.managedChildProcesses?.ownsBridge?.(runtime.bridge),
+        ))
+  ) {
+    throw new TypeError(
+      'ACP heap enforcement requires managed bridge ownership.',
+    );
+  }
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
+    opts.maxRegisteredWorkspaces,
+    daemonEnvAtBoot,
+  );
+  opts = { ...opts, maxRegisteredWorkspaces };
+  if (
+    deps.workspaceRegistry &&
+    deps.workspaceRegistry.listAllEntries().filter((entry) => !entry.internal)
+      .length > maxRegisteredWorkspaces
+  ) {
+    throw new Error(
+      `Initial workspace registry exceeds the configured limit of ${maxRegisteredWorkspaces}.`,
+    );
+  }
+  const tokenConfigured =
+    typeof opts.token === 'string' && opts.token.length > 0;
+  if (opts.requireAuth === true && !tokenConfigured) {
+    throw new Error(
+      'createServeApp: requireAuth requires a non-empty bearer token.',
+    );
+  }
+  const trustedLoopbackMode = isTrustedLoopbackMode({
+    loopbackBind: isLoopbackBind(opts.hostname),
+    tokenConfigured,
+    requireAuth: opts.requireAuth === true,
+  });
+  let runtimeStopReady = false;
+  let runtimeStopsClosing = false;
+  const scheduledActivity = new WeakMap<WorkspaceRuntime, () => boolean>();
+  const rehydratingWorkspaces = new Set<WorkspaceRuntime>();
+  const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  // The scheduled-task helpers retain an outer watchdog for injected bridges.
+  // A value above the timer ceiling is their explicit no-watchdog sentinel.
+  const scheduledTaskRestoreTimeoutMs =
+    sessionRestoreTimeoutMs + SCHEDULED_TASK_RESTORE_HEADROOM_MS >
+    MAX_SESSION_RESTORE_TIMEOUT_MS
+      ? MAX_SESSION_RESTORE_TIMEOUT_MS + 1
+      : sessionRestoreTimeoutMs + SCHEDULED_TASK_RESTORE_HEADROOM_MS;
+  if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
+    throw new Error(
+      'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
+    );
+  }
+  if (
+    (deps.workspaceTrustHotReloadAvailable === true ||
+      deps.workspaceRuntimeRemoval !== undefined) &&
+    deps.getSessionBridges === undefined
+  ) {
+    throw new Error(
+      'createServeApp: runtime replacement/removal requires deps.getSessionBridges so session-id admission can inspect draining generations.',
+    );
+  }
   const app = express();
+  const serveAppLifecycle = installServeAppLifecycle(
+    app,
+    deps.serveAppLifecycle,
+  );
   // Forward `maxSessions` into the default-constructed bridge so
   // direct callers of `createServeApp` (tests, embeds) get the same
   // cap they configured via `ServeOptions`. Previously the default
-  // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
+  // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (32) and
   // only the `runQwenServe` path piped the option through.
   //
-  // The daemon is bound to exactly one workspace. The value advertised
-  // on `/capabilities`, used for the `POST /session` cwd fallback,
-  // AND passed into the bridge must be the SAME canonical form.
+  // The primary workspace value advertised on `/capabilities`, used for the
+  // `POST /session` cwd fallback, AND passed into the primary bridge must be
+  // the SAME canonical form.
   // `deps.boundWorkspace` is the pre-canonicalized fast-path from
   // `runQwenServe`; when omitted we canonicalize ourselves.
+  const injectedWorkspaceRegistry = deps.workspaceRegistry;
   const boundWorkspace =
+    injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  if (
+    readSshWorkspace(boundWorkspace) ||
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory.sshWorkspace
+  ) {
+    throw new Error(
+      'Start qwen serve in a local workspace, then add the SSH workspace in the workspace picker.',
+    );
+  }
+  if (injectedWorkspaceRegistry) {
+    const primary = injectedWorkspaceRegistry.primary;
+    const registryConflictCandidates = [
+      {
+        depName: 'deps.boundWorkspace',
+        depValue: deps.boundWorkspace,
+        registryValue: primary.workspaceCwd,
+        detail: `deps.boundWorkspace=${JSON.stringify(deps.boundWorkspace)}`,
+      },
+      {
+        depName: 'deps.bridge',
+        depValue: deps.bridge,
+        registryValue: primary.bridge,
+        detail: 'deps.bridge is a different object',
+      },
+      {
+        depName: 'deps.workspace',
+        depValue: deps.workspace,
+        registryValue: primary.workspaceService,
+        detail: 'deps.workspace is a different object',
+      },
+      {
+        depName: 'deps.fsFactory',
+        depValue: deps.fsFactory,
+        registryValue: primary.routeFileSystemFactory,
+        detail: 'deps.fsFactory is a different object',
+      },
+      {
+        depName: 'deps.clientMcpSenderRegistry',
+        depValue: deps.clientMcpSenderRegistry,
+        registryValue: primary.clientMcpSenderRegistry,
+        detail: 'deps.clientMcpSenderRegistry is a different object',
+      },
+    ];
+    for (const candidate of registryConflictCandidates) {
+      if (
+        candidate.depValue === undefined ||
+        candidate.depValue === candidate.registryValue
+      ) {
+        continue;
+      }
+      throw new Error(
+        'createServeApp: workspaceRegistry conflicts with ' +
+          `${candidate.depName}: ${describeRegistryPrimaryForConflict(
+            injectedWorkspaceRegistry,
+          )}; ${candidate.detail}.`,
+      );
+    }
+  }
   // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
   // through `BridgeFileSystem` for ACP-side writeTextFile/readTextFile.
   // Default trust is `false` (test-safe). Embeds without `deps.fsFactory`
   // or `deps.bridge` will see agent writes rejected with
   // `untrusted_workspace` — warn once so the asymmetry is visible.
-  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+  if (
+    !injectedWorkspaceRegistry &&
+    !deps.fsFactory &&
+    !deps.bridge &&
+    !warnedDefaultTrust
+  ) {
     warnedDefaultTrust = true;
     process.stderr.write(
       'qwen serve: createServeApp default fsFactory uses trusted=false ' +
@@ -1080,60 +1066,421 @@ export function createServeApp(
         'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
     );
   }
-  const fsFactory = resolveBridgeFsFactory({
-    boundWorkspace,
-    injected: deps.fsFactory,
-    trusted: false,
-  });
-  const tokenConfigured =
-    typeof opts.token === 'string' && opts.token.length > 0;
+  const fsFactory =
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory ??
+    resolveBridgeFsFactory({
+      boundWorkspaces: [boundWorkspace],
+      injected: deps.fsFactory,
+      trusted: false,
+    });
   const sessionShellCommandEnabled =
-    opts.enableSessionShell === true && tokenConfigured;
+    opts.enableSessionShell === true &&
+    (tokenConfigured || trustedLoopbackMode);
+  // Reverse tool channel (issue #5626, Phase 2). Process-scoped registry that
+  // bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+  // child's `client_mcp/message` ext-method. Prefer the registry `runQwenServe`
+  // already wired into its injected bridge (`deps.clientMcpSenderRegistry`) so
+  // the bridge that answers the child and the WS provider share ONE map.
+  // Standalone `createServeApp` (no injected bridge) builds its own and wires
+  // it into the bridge it creates below. Inert until a WS client sends
+  // `mcp_register` (gated by `clientMcpOverWs`).
+  // Guard the split-brain case: an injected `deps.bridge` was already wired to
+  // its own sender, so building a fresh registry here would leave the bridge
+  // and this registry pointing at different maps. A caller injecting the bridge
+  // must inject the matching registry too. Only enforced when `clientMcpOverWs`
+  // is active — that's the only path that processes `mcp_*` frames, so without
+  // it the registry is inert and a mismatch can't manifest (and the vast
+  // majority of tests inject a fake bridge without ever touching client-MCP).
+  if (
+    opts.clientMcpOverWs === true &&
+    deps.bridge &&
+    !injectedWorkspaceRegistry &&
+    !deps.clientMcpSenderRegistry
+  ) {
+    throw new Error(
+      'createServeApp: deps.bridge requires deps.clientMcpSenderRegistry ' +
+        'when clientMcpOverWs is enabled (the bridge is already wired to its ' +
+        'own sender; a fresh registry here would be an orphan).',
+    );
+  }
+  const clientMcpSenderRegistry =
+    injectedWorkspaceRegistry?.primary.clientMcpSenderRegistry ??
+    deps.clientMcpSenderRegistry ??
+    new ClientMcpSenderRegistry();
+  const primaryRuntimeEnvMetadata =
+    injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
+  const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
+  const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    workspaceTrusted: true,
+    autoDiscover: true,
+  });
+  const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    workspaceTrusted: false,
+    includeUntrustedSkills: true,
+    autoDiscover: true,
+  });
+  const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
+    const obsolete = trusted
+      ? untrustedSkillsConfigStatus
+      : trustedSkillsConfigStatus;
+    obsolete.invalidate?.(workspaceCwd);
+    const provider = trusted
+      ? trustedSkillsConfigStatus
+      : untrustedSkillsConfigStatus;
+    return provider(workspaceCwd);
+  };
+  const invalidateSkillsConfigStatus = (workspaceCwd: string) => {
+    trustedSkillsConfigStatus.invalidate?.(workspaceCwd);
+    untrustedSkillsConfigStatus.invalidate?.(workspaceCwd);
+  };
+  app.locals['invalidateSkillsConfigStatus'] = invalidateSkillsConfigStatus;
+  const webTerminalRegistry = new WebTerminalRegistry();
+  const webTerminalLocals = app.locals as {
+    stopWebTerminalRegistry?: () => void;
+    releaseWebTerminalsForWorkspace?: (workspaceCwd: string) => void;
+  };
+  webTerminalLocals.stopWebTerminalRegistry = () =>
+    webTerminalRegistry.dispose();
+  webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
+    webTerminalRegistry.releaseWorkspace(workspaceCwd);
+  const acpHttpEnabledAtBoot =
+    opts.profile !== 'hosted-harness' && resolveAcpHttpEnabled(daemonEnvAtBoot);
+  const runtimePlatform = deps.runtimePlatform ?? process.platform;
+  // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
+  // Shell page itself (`/live/web`) on every platform; the native macOS Host
+  // (`/live/host`) is opt-in through QWEN_SERVE_LIVE_NATIVE_HOST=1.
+  const liveVoiceSurfaceAvailable =
+    opts.serveWebShell !== false &&
+    typeof deps.webShellDir === 'string' &&
+    acpHttpEnabledAtBoot;
+  const liveNativeHostAvailable =
+    liveVoiceSurfaceAvailable &&
+    runtimePlatform === 'darwin' &&
+    resolveLiveNativeHostEnabled(daemonEnvAtBoot);
+  const primaryRuntimeTrustAuthoritative =
+    deps.workspaceTrustHotReloadAvailable === true ||
+    deps.primaryWorkspaceTrusted !== undefined ||
+    injectedWorkspaceRegistry !== undefined;
+  let primaryTrustRegistry = injectedWorkspaceRegistry;
+  const isPrimaryWorkspaceTrusted = (): boolean => {
+    if (!primaryRuntimeTrustAuthoritative) return true;
+    const entry = primaryTrustRegistry?.primaryEntry;
+    if (entry) {
+      return (
+        entry.state === 'active' && entry.current?.runtime.trusted === true
+      );
+    }
+    return deps.primaryWorkspaceTrusted ?? false;
+  };
+  const capturePrimaryGenerationAssertion = (): (() => void) | undefined => {
+    const registry = primaryTrustRegistry;
+    if (!registry) return undefined;
+    const guard = registry.primaryEntry.current?.guard;
+    if (!guard) {
+      return () => {
+        throw new WorkspaceGenerationClosedError();
+      };
+    }
+    return () => guard.assertOpen();
+  };
+  // The collaboration flag is resolved per workspace at request time (see
+  // `isAgentCollaborationEnabledFor` below). One boot-time decision remains:
+  // when no registered workspace has it on, the routes and recovery are never
+  // registered, so enabling it for the first time still needs a
+  // daemon restart — the setting keeps `requiresRestart: true` for that case.
+  let standaloneSessionsAvailable = false;
+  const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
+    createServeFeatures({
+      opts,
+      boundWorkspace,
+      persistSettingAvailable: deps.persistSetting !== undefined,
+      userSkillActivationAvailable:
+        deps.persistUserSkillsActivation !== undefined,
+      sessionArtifactsPersistenceAvailable:
+        deps.sessionArtifactsPersistenceAvailable !== false,
+      sessionGenerationAvailable: () => {
+        const runtimes = workspaceRegistry.listAll();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionContent !== undefined,
+          )
+        );
+      },
+      sessionBtwStreamAvailable: () => {
+        const runtimes = workspaceRegistry.listAll();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionBtwStream !== undefined,
+          )
+        );
+      },
+      currentSessionSchedulingAvailable:
+        deps.manageScheduledTaskSessions === true &&
+        deps.currentSessionSchedulingAvailable === true,
+      workspaceGenerationAvailable: () => {
+        const entry = workspaceRegistry.primaryEntry;
+        const runtime =
+          entry.state === 'active' ? entry.current?.runtime : undefined;
+        return runtime?.bridge.generateWorkspaceContent !== undefined;
+      },
+      // Registry injection supplies the primary workspace service through the
+      // runtime, so it has the same reload surface as legacy deps.workspace.
+      reloadAvailable:
+        deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
+      channelControlAvailable:
+        deps.getChannelWorkerControl !== undefined &&
+        deps.setChannelWorkerSelection !== undefined &&
+        deps.stopChannelWorker !== undefined,
+      channelManagementAvailable: deps.channelManagementService !== undefined,
+      channelReloadAvailable: () => {
+        if (deps.reloadChannelWorker === undefined) return false;
+        const control = deps.getChannelWorkerControl?.();
+        if (control) {
+          return (
+            control.enabled &&
+            control.selection !== null &&
+            control.workers.length > 0
+          );
+        }
+        return (
+          deps.getChannelWorkerSnapshots?.().some((worker) => worker.enabled) ||
+          deps.getChannelWorkerSnapshot?.().enabled ||
+          false
+        );
+      },
+      sessionShellCommandEnabled,
+      multiWorkspaceSessionsEnabled: () =>
+        workspaceRegistry.listEntries().length > 1,
+      // Present only while the routes are: a workspace opted in after boot
+      // does not mount them until the daemon restarts.
+      agentCollaborationEnabled: () =>
+        agentCollaborationRoutesMounted && anyAgentCollaborationEnabled(),
+      dynamicWorkspaceRegistrationAvailable:
+        deps.createWorkspaceRuntime !== undefined,
+      persistentWorkspaceRegistrationAvailable:
+        deps.workspaceRegistrationStore !== undefined,
+      // Scratch creation is advertised only while every managed runtime still
+      // respects the root boundary and a complete disposal owner is present.
+      scratchWorkspaceRegistrationAvailable: () =>
+        deps.createWorkspaceRuntime !== undefined &&
+        deps.managedScratchRoot !== undefined &&
+        deps.workspaceRuntimeRemoval !== undefined &&
+        workspaceRegistry
+          .listManaged()
+          .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
+          .every((runtime) =>
+            isScratchRootCompatible(
+              runtime.workspaceCwd,
+              deps.managedScratchRoot!.canonicalRoot,
+            ),
+          ),
+      gitWorkspaceCloneAvailable:
+        deps.createWorkspaceRuntime !== undefined && isGitAvailable(),
+      // `realtime_voice` keeps meaning "a native Host can attach": shipped
+      // clients answer it with a macOS install prompt.
+      realtimeVoiceEnabled: () =>
+        liveNativeHostAvailable &&
+        (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
+          true,
+      realtimeVoiceWebEnabled: () =>
+        (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
+        true,
+      standaloneSessionsAvailable: () => standaloneSessionsAvailable,
+      acpHttpEnabled: acpHttpEnabledAtBoot,
+      workspaceRuntimeRemovalAvailable:
+        deps.workspaceRuntimeRemoval !== undefined,
+      workspaceDirectoriesAvailable:
+        deps.persistSetting !== undefined &&
+        opts.experimentalPairedEngines !== true,
+      nativeDirectoryPickerAvailable:
+        deps.nativeDirectoryPickerAvailable ??
+        isNativeDirectoryPickerAvailable(),
+      workspaceRuntimeStopAvailable: () =>
+        runtimeStopReady && !runtimeStopsClosing,
+      workspaceRuntimeAvailable: () => {
+        const runtimes = workspaceRegistry.list();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every((runtime) =>
+            supportsWorkspaceRuntimeLifecycle(runtime.bridge),
+          )
+        );
+      },
+      localPathOpenAvailable:
+        deps.localPathOpenAvailable ?? isLocalPathOpenAvailable(),
+      localTerminalOpenAvailable:
+        deps.localTerminalOpenAvailable ?? isLocalTerminalAvailable(),
+      workspaceTrustHotReloadAvailable:
+        deps.workspaceTrustHotReloadAvailable === true,
+      isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
+      ...(deps.workspaceTrustHotReloadAvailable === true
+        ? {
+            getEnv: () => {
+              const entry = primaryTrustRegistry?.primaryEntry;
+              const runtimeEnv =
+                entry?.state === 'active'
+                  ? entry.current?.runtime.env
+                  : undefined;
+              return getRuntimeEffectiveEnv(runtimeEnv) ?? daemonEnv;
+            },
+          }
+        : primaryEffectiveEnv
+          ? { env: primaryEffectiveEnv }
+          : {}),
+    });
+  (
+    app.locals as {
+      invalidateServeFeaturesCache?: () => void;
+    }
+  ).invalidateServeFeaturesCache = invalidateServeFeaturesCache;
+  const statusProvider =
+    deps.statusProvider ??
+    createDaemonStatusProvider(
+      primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
+    );
+  let reclaimIdleAcp: IdleAcpReclaimer | undefined;
+  let defaultBridgeForAdmission: AcpSessionBridge | undefined;
+  const totalSessionAdmission =
+    !deps.bridge && !injectedWorkspaceRegistry
+      ? createTotalSessionAdmissionController({
+          maxTotalSessions: opts.maxTotalSessions,
+          getBridges: () =>
+            defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
+        })
+      : undefined;
+  const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
+    ? createWorkspaceSessionOwnerIndex()
+    : undefined;
+  const acpChildArgs = acpChildExtraArgs(opts);
+  const attachmentsRoots = sessionAttachmentsRoots(
+    boundWorkspace,
+    Storage.getRuntimeBaseDir(),
+  );
+  const defaultBridgeChannels = () => {
+    const channelFactory =
+      acpChildArgs || deps.managedChildProcesses
+        ? createSpawnChannelFactory({
+            processRegistry: deps.managedChildProcesses?.registry,
+            childHeapPolicy: deps.managedChildProcesses?.policy,
+            ...(deps.managedChildProcesses
+              ? {
+                  reclaimIdleChild: async (signal?: AbortSignal) => {
+                    await reclaimIdleAcp?.(
+                      hashDaemonWorkspace(boundWorkspace),
+                      signal,
+                    );
+                  },
+                }
+              : {}),
+            extraArgs: acpChildArgs,
+          })
+        : undefined;
+    if (!opts.experimentalPairedEngines) {
+      return channelFactory ? { channelFactory } : {};
+    }
+    return {
+      executionEngines: createPairedExecutionEngines({
+        legacy: channelFactory ?? defaultSpawnChannelFactory,
+        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+        managed: deps.managedExecutionEngine,
+      }),
+    };
+  };
   const bridge =
+    injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      isWorkflowModeWriteAllowed: (sessionId): boolean => {
+        const registry = primaryTrustRegistry;
+        if (!registry) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.primaryEntry;
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.bridge === defaultBridgeForAdmission &&
+          entry.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          !entry.current.guard.closed
+        );
+      },
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+      sessionAttachmentsRoot: attachmentsRoots.root,
+      sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
+      ...(totalSessionAdmission
+        ? { freshSessionAdmission: totalSessionAdmission.admit }
+        : {}),
+      ...(defaultSessionOwnerIndex
+        ? {
+            sessionLifecycle:
+              defaultSessionOwnerIndex.handleBridgeSessionLifecycle,
+          }
+        : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      eventRingMaxBytes: opts.eventRingMaxBytes,
+      compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
+      maxJournalEvents: opts.maxJournalEvents,
+      maxJournalBytes: opts.maxJournalBytes,
+      initializeTimeoutMs: opts.initializeTimeoutMs,
+      sessionRestoreTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
+      ...(opts.restoreAskUserQuestion === true
+        ? { restoreAskUserQuestion: true }
+        : {}),
+      ...defaultBridgeChannels(),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
-      statusProvider: createDaemonStatusProvider(),
-      // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
-      // readTextFile pick up trust / TOCTOU / audit.
-      fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      statusProvider,
+      delegateReadTextFileToClient: false,
+      // Final ACP text writes remain delegated. Workspace writes use WFS;
+      // marked same-host tool writes may use the factory's host writer.
+      // Unexpected delegated reads still fail closed at the WFS boundary.
+      fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+        allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+      }),
+      // Reverse tool channel: answer the child's `client_mcp/message`
+      // ext-method by reaching the WS connection that hosts the named server.
+      clientMcpSender: clientMcpSenderRegistry.lookup,
     });
-
-  // Allow same-origin requests from the demo page. Browsers send an
-  // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
-  // below would reject them. This middleware strips `Origin` when it
-  // matches the daemon's own address so the demo page's API calls pass
-  // through. Only loopback origins are matched — non-loopback deployments
-  // require the operator to front the daemon with a reverse proxy for
-  // browser access anyway (per the threat-model docs).
-  let cachedStripPort = -1;
-  let cachedSelfOrigins: Set<string> = new Set();
-  app.use((req: import('express').Request, _res, next) => {
-    const origin = req.headers.origin;
-    if (origin) {
-      const port = getPort();
-      if (port !== cachedStripPort) {
-        cachedStripPort = port;
-        cachedSelfOrigins = new Set([
-          `http://127.0.0.1:${port}`,
-          `http://localhost:${port}`,
-          `http://[::1]:${port}`,
-          `http://host.docker.internal:${port}`,
-        ]);
-      }
-      if (cachedSelfOrigins.has(origin)) {
-        delete req.headers.origin;
-      }
+  if (!injectedWorkspaceRegistry && !deps.bridge) {
+    defaultBridgeForAdmission = bridge;
+  }
+  const archiveCoordinator = new SessionArchiveCoordinator();
+  const conversationRuntimeActivity =
+    deps.liveConversationWorkspace ||
+    injectedWorkspaceRegistry?.listAll().some(isInternalWorkspaceRuntime)
+      ? new ConversationRuntimeActivityGate()
+      : undefined;
+  (
+    app.locals as {
+      sessionArchiveCoordinator?: SessionArchiveCoordinator;
     }
-    next();
-  });
+  ).sessionArchiveCoordinator = archiveCoordinator;
+  if (conversationRuntimeActivity) {
+    (
+      app.locals as {
+        conversationRuntimeActivity?: ConversationRuntimeActivityGate;
+      }
+    ).conversationRuntimeActivity = conversationRuntimeActivity;
+  }
+
+  const cleanupSession = (runtime: WorkspaceRuntime, sessionId: string) =>
+    runWithWorkspaceRuntimeStorage(runtime, () =>
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service: createWorkspaceRuntimeSessionService(runtime),
+        bridge: runtime.bridge,
+        coordinator: archiveCoordinator,
+      }),
+    );
+
+  installSelfOriginStripMiddleware(app, getPort, opts.hostname);
 
   // Park the factory on `app.locals` so route handlers can pick it up
   // via `req.app.locals.fsFactory` without re-threading the value
@@ -1144,92 +1491,57 @@ export function createServeApp(
   // compute workspace-relative response paths without re-resolving.
   (app.locals as { boundWorkspace?: string }).boundWorkspace = boundWorkspace;
 
-  // Wire the device-flow registry. Default builds a single Qwen
-  // provider; tests inject `deps.deviceFlowRegistry` or
-  // `deps.deviceFlowProviders` to stub the OAuth client only.
-  const deviceFlowProviderMap = new Map<
-    DeviceFlowProviderId,
-    DeviceFlowProvider
-  >();
-  for (const provider of deps.deviceFlowProviders ?? []) {
-    deviceFlowProviderMap.set(provider.providerId, provider);
-  }
-  if (!deviceFlowProviderMap.has('qwen-oauth')) {
-    deviceFlowProviderMap.set('qwen-oauth', new QwenOAuthDeviceFlowProvider());
-  }
-  const deviceFlowEventSink: DeviceFlowEventSink = {
-    publish(emission, originatorClientId) {
-      bridge.publishWorkspaceEvent({
-        type: `auth_device_flow_${emission.type}`,
-        data: emission.data,
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-    },
-  };
-  const deviceFlowRegistry =
-    deps.deviceFlowRegistry ??
-    new DeviceFlowRegistry({
-      events: deviceFlowEventSink,
-      audit: {
-        record(line) {
-          // Structured stderr breadcrumb; deviceFlowId truncated to first
-          // 8 chars so log
-          // skimmers can follow a flow without retaining full uuids.
-          const id = line.deviceFlowId.slice(0, 8);
-          const parts = [
-            `[serve] auth.device-flow:`,
-            `provider=${line.providerId}`,
-            `deviceFlowId=${id}...`,
-            line.clientId ? `clientId=${line.clientId}` : 'clientId=-',
-            `status=${line.status}`,
-          ];
-          if (line.errorKind) parts.push(`errorKind=${line.errorKind}`);
-          if (line.expiresInMs !== undefined) {
-            parts.push(`expiresInMs=${Math.max(0, line.expiresInMs)}`);
-          }
-          // Include `line.hint` for operator-only breadcrumbs that
-          // aren't surfaced over SSE. Bound at 1 KiB.
-          if (line.hint) {
-            const STDERR_HINT_MAX = 1_024;
-            const hint =
-              line.hint.length > STDERR_HINT_MAX
-                ? `${line.hint.slice(0, STDERR_HINT_MAX)}…[+${line.hint.length - STDERR_HINT_MAX} bytes truncated]`
-                : line.hint;
-            // Quote the hint so multi-word values stay parseable.
-            parts.push(`hint=${JSON.stringify(hint)}`);
-          }
-          writeStderrLine(parts.join(' '));
-        },
+  const { deviceFlowRegistry, getSupportedDeviceFlowProviders } =
+    setupDeviceFlowRegistry({
+      app,
+      bridge,
+      registry: deps.deviceFlowRegistry,
+      providers: deps.deviceFlowProviders,
+      // Phase 4: fan device-flow events out to the primary and every trusted
+      // secondary runtime bridge, so workspace-qualified ACP clients receive
+      // their own flow's events. Resolved lazily: the registry is created
+      // before the workspace registry exists, but by the time a flow emits,
+      // `app.locals` holds the populated registry.
+      resolveEventBridges: () => {
+        const reg = (app.locals as { workspaceRegistry?: WorkspaceRegistry })
+          .workspaceRegistry;
+        if (!reg) return [bridge];
+        return reg
+          .listAll()
+          .filter((rt) => rt.trusted)
+          .map((rt) => rt.bridge);
       },
-      resolveProvider: (providerId) => deviceFlowProviderMap.get(providerId),
     });
-  // Park the registry on `app.locals` so request handlers can reach it.
-  // Typed accessor prevents a string-key typo from silently detaching
-  // `runQwenServe`'s shutdown dispose call.
-  setDeviceFlowRegistry(app, deviceFlowRegistry);
 
   const { daemonLog } = deps;
 
-  const sendBridgeError = (
-    res: import('express').Response,
-    err: unknown,
-    ctx?: BridgeErrorContext,
-  ) => sendBridgeErrorImpl(res, err, ctx, daemonLog);
+  const sendBridgeError: SendBridgeError = (res, err, ctx) =>
+    sendBridgeErrorResponse(res, err, ctx, daemonLog);
   const sendPermissionVoteError = (
     res: import('express').Response,
     err: unknown,
     ctx: { route: string; sessionId?: string },
-  ) => sendPermissionVoteErrorImpl(res, err, ctx, daemonLog);
+  ) => sendPermissionVoteErrorResponse(res, err, ctx, daemonLog);
 
   const workspace: DaemonWorkspaceService =
+    injectedWorkspaceRegistry?.primary.workspaceService ??
     deps.workspace ??
     createDaemonWorkspaceService({
       boundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
-      statusProvider: createDaemonStatusProvider(),
-      workspaceProvidersStatusProvider:
-        createWorkspaceProvidersStatusProvider(),
-      isChannelLive: () => bridge.isChannelLive(),
+      statusProvider,
+      workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider({
+        ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+      }),
+      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider({
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+      }),
+      ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
+      ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
@@ -1237,1469 +1549,2004 @@ export function createServeApp(
             'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
           );
         }),
+      persistDisabledSkills:
+        deps.persistDisabledSkills ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceSkillEnabled requires persistDisabledSkills in ServeAppDeps',
+          );
+        }),
+      persistDisabledSkillsBatch:
+        deps.persistDisabledSkillsBatch ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceSkillsEnabled requires persistDisabledSkillsBatch in ServeAppDeps',
+          );
+        }),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
-      refreshExtensionsForAllSessions: () =>
-        bridge.refreshExtensionsForAllSessions(),
-      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
-    });
-  let extensionInstallQueue: Promise<unknown> = Promise.resolve();
-  let extensionInstallQueueDepth = 0;
-  const MAX_EXTENSION_INSTALL_QUEUE_DEPTH = 10;
-  const enqueueExtensionInstall = async <T>(run: () => Promise<T>) => {
-    if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
-      throw new Error('Extension operation queue is full');
-    }
-    extensionInstallQueueDepth += 1;
-    const next = extensionInstallQueue.then(run, run).finally(() => {
-      extensionInstallQueueDepth -= 1;
-    });
-    extensionInstallQueue = next.catch(() => undefined);
-    return next;
-  };
-  const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
-  const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
-  const isExtensionQueueFullError = (err: unknown): boolean =>
-    err instanceof Error && err.message === 'Extension operation queue is full';
-  const sendExtensionQueueFull = (res: Response) => {
-    res.status(429).json({
-      error: 'Extension operation queue is full',
-      code: 'extension_queue_full',
-    });
-  };
-  const withExtensionTimeout = async <T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    operation: string,
-  ): Promise<T> =>
-    await new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      promise.then(
-        (value) => {
-          clearTimeout(timeout);
-          resolve(value);
-        },
-        (err: unknown) => {
-          clearTimeout(timeout);
-          reject(err);
-        },
-      );
-    });
-  const createExtensionManager = () =>
-    new ExtensionManager({
-      workspaceDir: boundWorkspace,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(boundWorkspace).merged,
-      ),
-      requestConsent: () => Promise.resolve(),
-      requestSetting: async (setting: ExtensionSetting) => {
-        throw new Error(
-          `Extension setting "${setting.envVar}" requires interactive configuration and is not supported over the daemon install endpoint.`,
-        );
-      },
-      requestChoicePlugin: async () => {
-        throw new Error(
-          'Marketplace plugin selection is not supported over the daemon install endpoint. Specify a plugin name in the source.',
-        );
+      preheatAcpChild: () => bridge.preheat(),
+      refreshExtensionsForAllSessions: (sessionIds) =>
+        sessionIds === undefined
+          ? bridge.refreshExtensionsForAllSessions()
+          : bridge.refreshExtensionsForAllSessions(undefined, { sessionIds }),
+      ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
+      ...(deps.persistSettings
+        ? { persistSettings: deps.persistSettings }
+        : {}),
+      publishWorkspaceEvent: (event) => {
+        if (
+          event.type === 'settings_changed' ||
+          event.type === 'settings_reloaded'
+        ) {
+          invalidateServeFeaturesCache();
+        }
+        bridge.publishWorkspaceEvent(event);
       },
     });
-  const validateExtensionMutationClient = (
-    req: Request,
-    res: Response,
-    route: string,
-  ): boolean => {
-    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-    if (clientId === null) return false;
-    if (clientId === undefined) {
-      res.status(400).json({
-        error: 'Missing X-Qwen-Client-Id header',
-        code: 'missing_client_id',
-      });
-      return false;
-    }
-    buildWorkspaceCtx(req, route, clientId);
-    return true;
-  };
-  const parseExtensionScope = (
-    body: Record<string, unknown>,
-    res: Response,
-  ): SettingScope | null => {
-    const scope = body['scope'];
-    if (scope !== 'user' && scope !== 'workspace') {
-      res
-        .status(400)
-        .json({ error: '`scope` must be either "user" or "workspace"' });
-      return null;
-    }
-    return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
-  };
-  const parseExtensionRegistryUrl = (
-    value: string,
-    res: Response,
-  ): string | null => {
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      res.status(400).json({ error: '`registry` must be a valid URL' });
-      return null;
-    }
-    if (parsed.protocol !== 'https:') {
-      res.status(400).json({ error: '`registry` must use https' });
-      return null;
-    }
-    if (parsed.username || parsed.password) {
-      res
-        .status(400)
-        .json({ error: '`registry` must not include credentials' });
-      return null;
-    }
-    if (isBlockedAuthProviderHost(parsed.hostname)) {
-      res.status(400).json({ error: '`registry` host is not allowed' });
-      return null;
-    }
-    return parsed.toString().replace(/\/$/, '');
-  };
-  const parsePotentialSourceUrl = (source: string): URL | null => {
-    if (/^[a-zA-Z]:[\\/]/.test(source)) return null;
-    try {
-      return new URL(source);
-    } catch {
-      const sshMatch = /^(?:[^@]+@)?(\[[^\]]+\]|[^:]+):/.exec(source);
-      if (!sshMatch?.[1]) return null;
-      try {
-        return new URL(`ssh://${sshMatch[1]}`);
-      } catch {
-        return null;
-      }
-    }
-  };
-  const validateExtensionSourceHost = (
-    source: string,
-    res: Response,
-  ): boolean => {
-    const parsed = parsePotentialSourceUrl(source);
-    if (!parsed) return true;
-    if (parsed.username || parsed.password) {
-      res.status(400).json({ error: '`source` must not include credentials' });
-      return false;
-    }
-    if (isBlockedAuthProviderHost(parsed.hostname)) {
-      res.status(400).json({ error: '`source` host is not allowed' });
-      return false;
-    }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'ssh:') {
-      res.status(400).json({ error: '`source` must use https or ssh' });
-      return false;
-    }
-    return true;
-  };
-  const validateExtensionSourceMetadata = (
-    installMetadata: ExtensionInstallMetadata,
-  ): boolean => {
-    if (installMetadata.type !== 'git') return true;
-    const parsed = parsePotentialSourceUrl(installMetadata.source);
-    return (
-      !!parsed &&
-      (parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
-      !isBlockedAuthProviderHost(parsed.hostname)
+  const workspaceRegistry =
+    injectedWorkspaceRegistry ??
+    createSingleWorkspaceRegistry(
+      {
+        workspaceId: hashDaemonWorkspace(boundWorkspace),
+        workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        primary: true,
+        trusted: deps.primaryWorkspaceTrusted ?? false,
+        env: primaryRuntimeEnvMetadata ?? {
+          mode: 'parent-process',
+          overlayKeys: [],
+        },
+        bridge,
+        workspaceService: workspace,
+        routeFileSystemFactory: fsFactory,
+        clientMcpSenderRegistry,
+      },
+      defaultSessionOwnerIndex
+        ? {
+            sessionOwnerIndex: defaultSessionOwnerIndex,
+            scanUnindexedOwners: deps.bridge !== undefined,
+          }
+        : {},
     );
+  (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
+    workspaceRegistry;
+  const getSessionBridges =
+    deps.getSessionBridges ??
+    (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge));
+  const requestedSessionIdAdmission = createRequestedSessionIdAdmission({
+    archiveCoordinator,
+    getBridges: getSessionBridges,
+    getPersistenceTargets: () =>
+      workspaceRegistry.listManaged().map((runtime) => ({
+        workspaceCwd: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      })),
+    getBridgeWorkspaceId: (bridge) =>
+      workspaceRegistry
+        .listAllEntries()
+        .find((entry) => entry.current?.runtime.bridge === bridge)?.workspaceId,
+  });
+  primaryTrustRegistry = workspaceRegistry;
+  const primaryRuntime = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary,
+  );
+  const primaryRuntimeEffectiveEnv = createLiveWorkspaceDelegate(
+    () => getRuntimeEffectiveEnv(workspaceRegistry.primary.env) ?? daemonEnv,
+  );
+  const voiceCoordinator =
+    deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
+  const acquirePrimaryVoiceLease = () => {
+    const entry = workspaceRegistry.primaryEntry;
+    const runtime =
+      entry.state === 'active' ? entry.current?.runtime : undefined;
+    return runtime
+      ? voiceCoordinator.acquire(runtime)
+      : ({ kind: 'rejected', reason: 'draining' } as const);
   };
-  const findLoadedExtension = (
-    extensionManager: ExtensionManager,
-    extensionName: string,
-  ): Extension | undefined => {
-    const requested = extensionName.toLowerCase();
-    const extensions = extensionManager.getLoadedExtensions();
-    const byName = extensions.find(
-      (extension) => extension.name.toLowerCase() === requested,
-    );
-    if (byName) return byName;
-    if (!extensionName.includes('://') && !extensionName.includes('@')) {
+  const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
+  const primaryBridge = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.bridge,
+  );
+  const primaryWorkspace = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.workspaceService,
+  );
+  const primaryRouteFileSystemFactory = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.routeFileSystemFactory,
+  );
+  const loadLiveSettings = () =>
+    loadSettings(primaryBoundWorkspace, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: true,
+      workspaceTrusted: false,
+    }).merged;
+  const liveSettingsAtBoot = (() => {
+    try {
+      return loadLiveSettings();
+    } catch {
       return undefined;
     }
-    return extensions.find(
-      (extension) =>
-        extension.installMetadata?.source?.toLowerCase() === requested,
-    );
-  };
-  type ExtensionMutationEvent = {
-    status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
-    source?: string;
-    name?: string;
-    version?: string;
-  };
-  type ExtensionOperationStatus = {
-    v: 1;
-    operationId: string;
-    operation: string;
-    status:
-      | 'queued'
-      | 'running'
-      | 'succeeded'
-      | 'succeeded_with_refresh_error'
-      | 'failed';
-    createdAt: number;
-    updatedAt: number;
-    source?: string;
-    name?: string;
-    result?: ExtensionMutationEvent & {
-      refreshed?: number;
-      failed?: number;
-      error?: string;
-    };
-    error?: string;
-  };
-  const extensionOperations = new Map<string, ExtensionOperationStatus>();
-  const MAX_EXTENSION_OPERATION_HISTORY = 100;
-  const isTerminalExtensionOperation = (
-    operation: ExtensionOperationStatus,
-  ): boolean => operation.status !== 'queued' && operation.status !== 'running';
-  const redactExtensionOperationResult = (
-    event: ExtensionMutationEvent,
-  ): ExtensionMutationEvent => ({
-    ...event,
-    ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
-  });
-  const rememberExtensionOperation = (
-    operation: ExtensionOperationStatus,
-  ): void => {
-    extensionOperations.set(operation.operationId, operation);
-    while (extensionOperations.size > MAX_EXTENSION_OPERATION_HISTORY) {
-      let evicted = false;
-      for (const [id, storedOperation] of extensionOperations) {
-        if (!isTerminalExtensionOperation(storedOperation)) continue;
-        extensionOperations.delete(id);
-        evicted = true;
-        break;
-      }
-      if (!evicted) break;
+  })();
+  // The collaboration opt-in is workspace-scoped like the feature itself:
+  // every surface resolves it from the same per-workspace merge a hosted
+  // session sees (workspace scope wins), and the env var stays the
+  // operator's process-wide override. The predicate is consulted at request
+  // time, so a workspace registered or reconfigured after boot is seen
+  // without a daemon restart. A daemon that joined another coordinator as an
+  // Agent Host may still coordinate its own workspace when that workspace
+  // opts in (plan decision 5: being a runtime is independent of the flag).
+  // A settings file caught mid-edit (half-written JSON) keeps the last answer
+  // read for that workspace: reading it as "off" would strand every live run
+  // there within one recovery tick. The load asks the loader to report a
+  // broken workspace file rather than recover it — recovery rewrites the file
+  // to `{}`, which this predicate could not tell from a real opt-out, and the
+  // rewrite would make the opt-out permanent. User and system scopes already
+  // throw on a parse error.
+  const lastAgentCollaborationSetting = new Map<string, boolean>();
+  const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
+    if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
+      return true;
+    try {
+      // A daemon-level probe, evaluated at boot and per request: its settings
+      // diagnostics belong to no session, and writing them into whichever one
+      // is ambient breaks untrusted-read log isolation.
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      const enabled = settings.merged.experimental?.agentCollaboration === true;
+      lastAgentCollaborationSetting.set(workspaceCwd, enabled);
+      return enabled;
+    } catch {
+      return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
     }
   };
-  const updateExtensionOperation = (
-    operationId: string,
-    patch: Partial<Omit<ExtensionOperationStatus, 'operationId' | 'createdAt'>>,
-  ): void => {
-    const current = extensionOperations.get(operationId);
-    if (!current) return;
-    extensionOperations.set(operationId, {
-      ...current,
-      ...patch,
-      updatedAt: Date.now(),
+  // `experimental.agentChainLimit` for session agents, read per use like the
+  // opt-in above. Unreadable settings fall back to the default (unlimited).
+  const agentChainLimitFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentChainLimit(
+        settings.merged.experimental?.agentChainLimit,
+      );
+    } catch {
+      return normalizeAgentChainLimit(undefined);
+    }
+  };
+  // `experimental.agentTokenBudget`: tokens agents may spend in a chat
+  // session between two human messages before they stop waking each other.
+  const agentTokenBudgetFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentTokenBudget(
+        settings.merged.experimental?.agentTokenBudget,
+      );
+    } catch {
+      return normalizeAgentTokenBudget(undefined);
+    }
+  };
+  // Whether the routes and recovery exist at all. Evaluated at call time over
+  // the registry rather than snapshotted at boot.
+  let agentCollaborationRoutesMounted = false;
+  // Only trusted workspaces count: an untrusted one cannot use collaboration,
+  // and reading its settings is itself something untrusted access must not do
+  // (the loader writes debug logs).
+  const anyAgentCollaborationEnabled = () =>
+    workspaceRegistry
+      .listAll()
+      .some(
+        (runtime) =>
+          runtime.trusted &&
+          isAgentCollaborationEnabledFor(runtime.workspaceCwd),
+      );
+
+  const liveConfigAtBoot = liveSettingsAtBoot
+    ? readLiveVoiceConfiguration(liveSettingsAtBoot)
+    : undefined;
+  let liveVoiceEnabled =
+    liveVoiceSurfaceAvailable && liveConfigAtBoot?.enabled === true;
+  (
+    app.locals as {
+      liveVoiceEnabled?: boolean;
+      liveVoiceSurfaceAvailable?: boolean;
+    }
+  ).liveVoiceEnabled = liveVoiceEnabled;
+  (
+    app.locals as {
+      liveVoiceEnabled?: boolean;
+      liveVoiceSurfaceAvailable?: boolean;
+    }
+  ).liveVoiceSurfaceAvailable = liveVoiceSurfaceAvailable;
+  const resolveLiveCredential = () => {
+    let settings;
+    try {
+      settings = loadLiveSettings();
+    } catch {
+      throw new LiveProviderConfigError(
+        'Live provider settings could not be loaded.',
+      );
+    }
+    return resolveLiveProviderCredential(settings, { env: daemonEnv });
+  };
+  const liveCoordinator =
+    deps.liveCoordinator ??
+    new LiveHostCoordinator({
+      shortcut: liveConfigAtBoot?.shortcut,
+      getProviderReadiness: () => {
+        try {
+          resolveLiveCredential();
+          return { state: 'ready' };
+        } catch (error) {
+          return {
+            state: 'unavailable',
+            blocker: 'provider_config',
+            message:
+              error instanceof LiveProviderConfigError &&
+              error.message === 'Live Voice is disabled.'
+                ? 'Live Voice is disabled in settings.'
+                : 'Live provider configuration is incomplete.',
+          };
+        }
+      },
+    });
+  const stableLiveDiscoveryBaseDir = path.resolve(
+    deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+  );
+  liveCoordinator.setAppshotReadiness(
+    liveVoiceEnabled && deps.liveConversationWorkspace
+      ? {
+          state: 'checking',
+          message: 'Checking the dedicated Live Appshot channel.',
+        }
+      : {
+          state: 'unavailable',
+          message: 'The Live Appshot channel is unavailable.',
+        },
+  );
+  let standaloneSessionService: StandaloneSessionService | undefined;
+  const conversationRuntimeManager = deps.liveConversationWorkspace
+    ? new ConversationRuntimeManager({
+        checkLegacyOwner:
+          deps.checkLegacyConversationOwner ??
+          (() =>
+            checkLegacyConversationRuntimeOwner({
+              stableBaseDir: stableLiveDiscoveryBaseDir,
+            })),
+        workspace: deps.liveConversationWorkspace,
+        registry: workspaceRegistry,
+        publishRuntime: async (canonicalRoot, validate) => {
+          const runtime = await workspaceManagementHandle.publishOwnedRuntime(
+            canonicalRoot,
+            'live-conversation',
+            async (candidate) => {
+              await validate(candidate);
+              try {
+                await deps.liveConversationWorkspace!.revalidate();
+              } catch (error) {
+                throw conversationRootCompromisedError(error);
+              }
+            },
+          );
+          invalidateServeFeaturesCache();
+          return runtime;
+        },
+        quarantineRuntime: async (runtime) => {
+          liveCoordinatorSealed = true;
+          liveVoiceEnabled = false;
+          (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled =
+            false;
+          liveCoordinator.setAppshotReadiness({
+            state: 'unavailable',
+            message: 'The Live Appshot channel is unavailable.',
+          });
+          invalidateServeFeaturesCache();
+          await Promise.all([
+            (
+              app.locals as {
+                sealAndWaitLiveCoordinator?: () => Promise<void>;
+              }
+            ).sealAndWaitLiveCoordinator?.() ?? Promise.resolve(),
+            conversationRuntimeActivity!.sealAndWait(),
+            publishLiveVoiceEnabled(false),
+          ]);
+          await workspaceManagementHandle.quarantineOwnedRuntime(runtime);
+        },
+        onTerminalQuarantine: (runtime) => {
+          standaloneSessionService?.freezeForTerminalQuarantine(runtime);
+        },
+      })
+    : undefined;
+  let liveBoundRuntime: WorkspaceRuntime | undefined;
+  let liveBindingPromise: Promise<WorkspaceRuntime> | undefined;
+  let liveRuntimeBootPromise: Promise<void> | undefined;
+  let liveRuntimeBootResult: WorkspaceRuntime | undefined;
+  let liveRuntimeBootWarned = false;
+  let liveAppshotChannelPromise: Promise<void> | undefined;
+  let liveCoordinatorSealed = false;
+  const clearLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
+    const handlers: Array<((handler: undefined) => void) | undefined> = [
+      runtime.bridge.setLiveScreenContextCaptureHandler,
+      runtime.bridge.setLiveTaskToolRequestHandler,
+      runtime.bridge.setLiveSpeakToUserHandler,
+    ];
+    for (const clear of handlers) {
+      try {
+        clear?.call(runtime.bridge, undefined);
+      } catch {
+        continue;
+      }
+    }
+  };
+  const bindLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
+    if (liveCoordinatorSealed) {
+      throw new Error('Live Voice is shutting down.');
+    }
+    const setScreenHandler = runtime.bridge.setLiveScreenContextCaptureHandler;
+    const setTaskHandler = runtime.bridge.setLiveTaskToolRequestHandler;
+    const setSpeakHandler = runtime.bridge.setLiveSpeakToUserHandler;
+    if (!setScreenHandler) {
+      throw new Error('Live conversation runtime has no Appshot channel.');
+    }
+    if (!setTaskHandler) {
+      throw new Error('Live conversation runtime has no task-tool channel.');
+    }
+    if (!setSpeakHandler) {
+      throw new Error('Live conversation runtime has no speech channel.');
+    }
+    liveBoundRuntime = runtime;
+    try {
+      setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
+        liveCoordinator.captureVisualContext(callerSessionId),
+      );
+      setTaskHandler.call(runtime.bridge, (info) =>
+        liveTaskService.handle(info),
+      );
+      setSpeakHandler.call(runtime.bridge, ({ callerSessionId, message }) =>
+        liveSessionCoordinator.speakToUser(callerSessionId, message),
+      );
+    } catch (error) {
+      clearLiveRuntimeHandlers(runtime);
+      throw error;
+    }
+  };
+  const ensureLiveConversationRuntime = (): Promise<WorkspaceRuntime> => {
+    if (liveCoordinatorSealed) {
+      return Promise.reject(new Error('Live Voice is shutting down.'));
+    }
+    if (liveBindingPromise) return liveBindingPromise;
+    const pending = (async (): Promise<WorkspaceRuntime> => {
+      await serveAppLifecycle.awaitBootAdmission();
+      if (!conversationRuntimeManager) {
+        throw new Error('Live conversation runtime is unavailable.');
+      }
+      const runtime = await conversationRuntimeManager.ensure();
+      if (liveCoordinatorSealed) {
+        throw new Error('Live Voice is shutting down.');
+      }
+      bindLiveRuntimeHandlers(runtime);
+      const notifyRuntimeReady = (
+        app.locals as {
+          onConversationRuntimeReady?: () => void;
+        }
+      ).onConversationRuntimeReady;
+      if (notifyRuntimeReady) {
+        void Promise.resolve()
+          .then(notifyRuntimeReady)
+          .catch(() => undefined);
+      }
+      return runtime;
+    })().finally(() => {
+      if (liveBindingPromise === pending) liveBindingPromise = undefined;
+    });
+    liveBindingPromise = pending;
+    return pending;
+  };
+  const describeConversationBootError = (error: unknown): string => {
+    // Boot errors wrap the real failure in generic ownership messages; walk
+    // the cause chain so the log names the innermost root cause.
+    const messages: string[] = [];
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (
+      current instanceof Error &&
+      !seen.has(current) &&
+      messages.length < 8
+    ) {
+      seen.add(current);
+      messages.push(current.message);
+      current = current.cause;
+    }
+    return messages.length > 0 ? messages.join(' <- ') : String(error);
+  };
+  const startConversationRuntimeBoot = (): Promise<void> => {
+    if (liveRuntimeBootPromise) return liveRuntimeBootPromise;
+    const pending = ensureLiveConversationRuntime()
+      .then((runtime) => {
+        liveRuntimeBootResult = runtime;
+        liveRuntimeBootWarned = false;
+      })
+      .catch((error) => {
+        // Boot failures surface to clients only as a generic 503; log the
+        // root cause once per failure episode so stalls are diagnosable.
+        if (!liveRuntimeBootWarned) {
+          liveRuntimeBootWarned = true;
+          // writeStderrLineSafe must not throw even on a dead stderr; the
+          // latch stays set so a lost line cannot spin per retry either.
+          writeStderrLineSafe(
+            `qwen serve: Conversations runtime boot failed: ${describeConversationBootError(error)}`,
+          );
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (liveRuntimeBootPromise === pending) {
+          liveRuntimeBootPromise = undefined;
+        }
+      });
+    liveRuntimeBootPromise = pending;
+    return pending;
+  };
+  if (liveVoiceEnabled) {
+    serveAppLifecycle.setBootStarter(startConversationRuntimeBoot);
+  }
+  if (deps.manageScheduledTaskSessions && deps.liveConversationWorkspace) {
+    const readTasks =
+      deps.readLiveConversationScheduledTasks ??
+      (() => readCronTasks(deps.liveConversationWorkspace!.rootPath));
+    void readTasks()
+      .then((tasks) => {
+        if (collectBoundSessionIds(tasks).length > 0) {
+          return startConversationRuntimeBoot();
+        }
+        return undefined;
+      })
+      .catch((error) => {
+        process.stderr.write(
+          `qwen serve: failed to restore the Conversations runtime for scheduled tasks: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      });
+  }
+  const ensureConversationRuntimeWithLifecycle = async () => {
+    await serveAppLifecycle.startBoot(startConversationRuntimeBoot);
+    if (!liveRuntimeBootResult) {
+      throw conversationRuntimeUnavailableError();
+    }
+    return liveRuntimeBootResult;
+  };
+  if (
+    conversationRuntimeManager &&
+    conversationRuntimeActivity &&
+    deps.liveConversationWorkspace
+  ) {
+    const deletionJournal = new StandaloneDeletionJournal(
+      path.resolve(
+        deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+      ),
+    );
+    standaloneSessionService = new StandaloneSessionService({
+      daemonLog,
+      ensureRuntime: ensureConversationRuntimeWithLifecycle,
+      assertRuntimeCurrent: (runtime) => {
+        conversationRuntimeManager.assertCurrent(runtime);
+      },
+      quarantineRuntime: (runtime) =>
+        conversationRuntimeManager.quarantine(
+          runtime,
+          'standalone_session_containment_failed',
+        ),
+      runRuntimeActivity: (_runtime, operation) =>
+        conversationRuntimeActivity.run(operation),
+      workspace: deps.liveConversationWorkspace,
+      deletionJournal,
+      lifecycle: archiveCoordinator,
+      requestedSessionIdAdmission,
+      hasForeignSessionOwner: async (runtime, sessionId) => {
+        for (const candidate of new Set(getSessionBridges())) {
+          if (candidate === runtime.bridge) continue;
+          try {
+            candidate.getSessionSummary(sessionId);
+            return true;
+          } catch (error) {
+            if (error instanceof SessionNotFoundError) continue;
+            throw error;
+          }
+        }
+        for (const candidate of workspaceRegistry.listManaged()) {
+          if (candidate === runtime) continue;
+          if (
+            await requestedSessionIdPersistenceExists(
+              createWorkspaceRuntimeSessionService(candidate),
+              sessionId,
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
+      invalidateSessionListCache: (runtime) =>
+        invalidateWorkspaceSessionListCache({
+          runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          workspaceCwd: runtime.workspaceCwd,
+          archiveStates: ['active', 'archived'],
+        }),
+    });
+    (
+      app.locals as {
+        standaloneSessionService?: StandaloneSessionService;
+      }
+    ).standaloneSessionService = standaloneSessionService;
+  }
+  const verifyLiveAppshotChannel = (): Promise<void> => {
+    if (liveAppshotChannelPromise) return liveAppshotChannelPromise;
+    const pending = ensureConversationRuntimeWithLifecycle()
+      .then(() => {
+        if (!liveCoordinatorSealed) {
+          liveCoordinator.setAppshotReadiness({ state: 'ready' });
+        }
+      })
+      .catch(() => {
+        if (!liveCoordinatorSealed) {
+          liveCoordinator.setAppshotReadiness({
+            state: 'unavailable',
+            message: 'The dedicated Live Appshot channel is unavailable.',
+          });
+        }
+      })
+      .finally(() => {
+        if (liveAppshotChannelPromise === pending) {
+          liveAppshotChannelPromise = undefined;
+        }
+      });
+    liveAppshotChannelPromise = pending;
+    return pending;
+  };
+  const liveTaskService = new LiveTaskService({
+    workspaceRegistry,
+    ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
+    materializeConversationDirectory: async (sessionId) => {
+      const conversationWorkspace = deps.liveConversationWorkspace;
+      if (!conversationWorkspace) {
+        throw new Error('Live conversation workspace is unavailable.');
+      }
+      return conversationWorkspace.materializeConversationDirectory(sessionId);
+    },
+  });
+  const liveSessionCoordinator =
+    deps.liveSessionCoordinator ??
+    new LiveSessionCoordinator({
+      host: liveCoordinator,
+      ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
+      workspaceRegistry,
+      getProviderCredential: resolveLiveCredential,
+      materializeConversationDirectory: async (sessionId) => {
+        const conversationWorkspace = deps.liveConversationWorkspace;
+        if (!conversationWorkspace) {
+          throw new Error('Live conversation workspace is unavailable.');
+        }
+        return conversationWorkspace.materializeConversationDirectory(
+          sessionId,
+        );
+      },
+      discardEmptyConversationDirectory: async (sessionId) => {
+        const conversationWorkspace = deps.liveConversationWorkspace;
+        if (!conversationWorkspace) return false;
+        return conversationWorkspace.discardEmptyConversationDirectory(
+          sessionId,
+        );
+      },
+      interruptTaskWaits: (callerSessionId) =>
+        liveTaskService.interruptWait(callerSessionId),
+    });
+  liveCoordinator.setHandlers({
+    beforeStart: async () => {
+      await ensureConversationRuntimeWithLifecycle();
+      await publishLiveVoiceEnabled(true);
+      await assertLiveDiscoveryPublisher(stableLiveDiscoveryBaseDir, {
+        pid: process.pid,
+        instanceNonce: liveCoordinator.daemonInstanceNonce,
+      });
+    },
+    onHostReady: () => {
+      if (!liveVoiceEnabled) return;
+      void verifyLiveAppshotChannel();
+    },
+    onStart: (call) => liveSessionCoordinator.start(call),
+    onStop: (call) => liveSessionCoordinator.stop(call),
+    onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
+    onScreenFeed: (message) => liveSessionCoordinator.handleScreenFeed(message),
+  });
+  const publishLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
+    const updateDiscovery = (
+      app.locals as {
+        setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
+      }
+    ).setLiveDiscoveryEnabled;
+    if (!updateDiscovery) return;
+    await updateDiscovery(enabled).catch((error) => {
+      daemonLog?.warn(
+        `failed to update Live Host discovery: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     });
   };
-  const runQueuedExtensionMutation = (
-    operation: string,
-    failureContext: { source?: string; name?: string },
-    res: Response,
-    run: (
-      extensionManager: ExtensionManager,
-    ) => Promise<ExtensionMutationEvent>,
-  ): void => {
-    if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
-      sendExtensionQueueFull(res);
+  const setLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
+    if (enabled && !liveVoiceSurfaceAvailable) {
+      throw new Error('Live Voice is available only in WebShell on macOS.');
+    }
+    if (enabled === liveVoiceEnabled) return;
+    if (enabled) {
+      await ensureConversationRuntimeWithLifecycle();
+      liveVoiceEnabled = true;
+      (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = true;
+      liveCoordinator.setAppshotReadiness({
+        state: 'checking',
+        message: 'Checking the dedicated Live Appshot channel.',
+      });
+      invalidateServeFeaturesCache();
+      await publishLiveVoiceEnabled(true);
+      void verifyLiveAppshotChannel();
       return;
     }
-    const operationId = crypto.randomUUID();
-    const now = Date.now();
-    rememberExtensionOperation({
-      v: 1,
-      operationId,
-      operation,
-      status: 'queued',
-      createdAt: now,
-      updatedAt: now,
-      ...(failureContext.source
-        ? { source: redactUrlCredentials(failureContext.source) }
-        : {}),
-      ...(failureContext.name ? { name: failureContext.name } : {}),
+    liveVoiceEnabled = false;
+    (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = false;
+    invalidateServeFeaturesCache();
+    try {
+      await liveCoordinator.deactivate();
+    } catch (error) {
+      liveVoiceEnabled = true;
+      (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = true;
+      invalidateServeFeaturesCache();
+      throw error;
+    }
+    liveCoordinator.setAppshotReadiness({
+      state: 'unavailable',
+      message: 'The Live Appshot channel is unavailable.',
     });
-    res.status(202).json({ accepted: true, operationId });
-    void enqueueExtensionInstall(async () => {
-      try {
-        updateExtensionOperation(operationId, { status: 'running' });
-        const extensionManager = createExtensionManager();
-        await extensionManager.refreshCache();
-        const event = await withExtensionTimeout(
-          run(extensionManager),
-          EXTENSION_MUTATION_TIMEOUT_MS,
-          `extension ${operation}`,
-        );
-        extensionsStatusCache = undefined;
-        try {
-          const result = await bridge.refreshExtensionsForAllSessions(event);
-          updateExtensionOperation(operationId, {
-            status: 'succeeded',
-            result: {
-              ...redactExtensionOperationResult(event),
-              refreshed: result.refreshed,
-              failed: result.failed,
-            },
-          });
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
-          );
-        } catch (refreshErr) {
-          const message = redactUrlCredentials(
-            refreshErr instanceof Error
-              ? refreshErr.message
-              : String(refreshErr),
-          );
-          updateExtensionOperation(operationId, {
-            status: 'succeeded_with_refresh_error',
-            result: {
-              ...redactExtensionOperationResult(event),
-              refreshed: 0,
-              failed: 1,
-              error: message.slice(0, 500),
-            },
-          });
-          try {
-            bridge.broadcastExtensionsChanged({
-              ...event,
-              refreshed: 0,
-              failed: 1,
-              error: message.slice(0, 500),
-            });
-          } catch (broadcastErr) {
-            writeStderrLine(
-              `qwen serve: extensions ${operation}: failed to broadcast refresh failure: ${
-                broadcastErr instanceof Error
-                  ? redactUrlCredentials(broadcastErr.message)
-                  : String(broadcastErr)
-              }`,
-            );
-          }
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: mutation succeeded but refresh failed: ${message}`,
-          );
-        }
-      } catch (err) {
-        const message = redactUrlCredentials(
-          err instanceof Error ? err.message : String(err),
-        );
-        updateExtensionOperation(operationId, {
-          status: 'failed',
-          error: message.slice(0, 500),
-        });
-        try {
-          bridge.broadcastExtensionsChanged({
-            status: 'failed',
-            ...(failureContext.source
-              ? { source: redactUrlCredentials(failureContext.source) }
-              : {}),
-            ...(failureContext.name ? { name: failureContext.name } : {}),
-            refreshed: 0,
-            failed: 0,
-            error: message.slice(0, 500),
-          });
-        } catch (broadcastErr) {
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: failed to broadcast failure: ${
-              broadcastErr instanceof Error
-                ? redactUrlCredentials(broadcastErr.message)
-                : String(broadcastErr)
-            }`,
-          );
-        }
-        try {
-          writeStderrLine(
-            `qwen serve: extensions ${operation}: background task failed: ${message}`,
-          );
-        } catch {
-          // Keep queued background work from surfacing as unhandledRejection.
-        }
-      }
-    }).catch((err) => {
-      const message = redactUrlCredentials(
-        err instanceof Error ? err.message : String(err),
-      );
-      updateExtensionOperation(operationId, {
-        status: 'failed',
-        error: message.slice(0, 500),
-      });
-      try {
-        writeStderrLine(
-          `qwen serve: extensions ${operation}: queued task failed: ${message}`,
-        );
-      } catch {
-        // Last-resort guard for detached async work.
-      }
-    });
+    await publishLiveVoiceEnabled(false);
   };
-  let extensionsStatusCache:
-    | { expiresAt: number; value: ServeWorkspaceExtensionsStatus }
-    | undefined;
-  const buildLocalExtensionsStatus =
-    async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      const now = Date.now();
-      if (extensionsStatusCache && extensionsStatusCache.expiresAt > now) {
-        return extensionsStatusCache.value;
-      }
-      const extensionManager = createExtensionManager();
-      await extensionManager.refreshCache();
-      const entries: ServeExtensionEntry[] = extensionManager
-        .getLoadedExtensions()
-        .map((ext): ServeExtensionEntry => {
-          const capabilities: ServeExtensionCapabilities = {
-            mcpServerCount: ext.mcpServers
-              ? Object.keys(ext.mcpServers).length
-              : 0,
-            skillCount: ext.skills?.length ?? 0,
-            agentCount: ext.agents?.length ?? 0,
-            hookCount: ext.hooks
-              ? Object.values(ext.hooks).reduce(
-                  (sum, defs) => sum + (defs?.length ?? 0),
-                  0,
-                )
-              : 0,
-            commandCount: ext.commands?.length ?? 0,
-            contextFileCount: ext.contextFiles.length,
-            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
-            hasSettings: (ext.settings?.length ?? 0) > 0,
-          };
-          return {
-            kind: 'extension',
-            id: ext.id,
-            name: ext.name,
-            ...(ext.displayName ? { displayName: ext.displayName } : {}),
-            version: ext.version,
-            isActive: ext.isActive,
-            path: ext.path,
-            ...(ext.installMetadata?.source
-              ? { source: redactUrlCredentials(ext.installMetadata.source) }
-              : {}),
-            ...(ext.installMetadata?.type
-              ? { installType: ext.installMetadata.type }
-              : {}),
-            ...(ext.installMetadata?.originSource
-              ? { originSource: ext.installMetadata.originSource }
-              : {}),
-            ...(ext.installMetadata?.ref
-              ? { ref: ext.installMetadata.ref }
-              : {}),
-            ...(ext.installMetadata?.autoUpdate !== undefined
-              ? { autoUpdate: ext.installMetadata.autoUpdate }
-              : {}),
-            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
-            capabilities,
-            details: {
-              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
-              commands: ext.commands ?? [],
-              skills: ext.skills?.map((skill) => skill.name) ?? [],
-              agents: ext.agents?.map((agent) => agent.name) ?? [],
-              contextFiles: ext.contextFiles,
-              settings:
-                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
-            },
-          };
-        });
-      const status = {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true,
-        extensions: entries,
-      };
-      extensionsStatusCache = {
-        expiresAt: now + 2_000,
-        value: status,
-      };
-      return status;
-    };
+  (
+    app.locals as {
+      setLiveVoiceEnabled?: (enabled: boolean) => Promise<void>;
+    }
+  ).setLiveVoiceEnabled = setLiveVoiceEnabled;
+  (
+    app.locals as {
+      liveCoordinator?: LiveHostCoordinator;
+      liveSessionCoordinator?: LiveSessionCoordinator;
+      stopLiveCoordinator?: () => void;
+      sealAndWaitLiveCoordinator?: () => Promise<void>;
+    }
+  ).liveCoordinator = liveCoordinator;
+  (
+    app.locals as {
+      liveCoordinator?: LiveHostCoordinator;
+      liveSessionCoordinator?: LiveSessionCoordinator;
+      stopLiveCoordinator?: () => void;
+      sealAndWaitLiveCoordinator?: () => Promise<void>;
+    }
+  ).liveSessionCoordinator = liveSessionCoordinator;
+  let liveCoordinatorStopped = false;
+  const stopLiveCoordinator = () => {
+    liveCoordinatorSealed = true;
+    if (liveCoordinatorStopped) return;
+    liveCoordinatorStopped = true;
+    if (liveBoundRuntime) clearLiveRuntimeHandlers(liveBoundRuntime);
+    liveSessionCoordinator.dispose();
+    liveCoordinator.dispose();
+  };
+  (
+    app.locals as {
+      stopLiveCoordinator?: () => void;
+    }
+  ).stopLiveCoordinator = stopLiveCoordinator;
+  (
+    app.locals as {
+      sealAndWaitLiveCoordinator?: () => Promise<void>;
+    }
+  ).sealAndWaitLiveCoordinator = async () => {
+    stopLiveCoordinator();
+    await Promise.all([
+      liveBindingPromise?.catch(() => undefined),
+      liveAppshotChannelPromise?.catch(() => undefined),
+    ]);
+  };
+  if (deps.workspaceTrustHotReloadAvailable === true) {
+    (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
+      primaryRouteFileSystemFactory;
+  }
+  const workspaceGitState = new WorkspaceGitState();
+  (app.locals as { stopWorkspaceGitState?: () => void }).stopWorkspaceGitState =
+    () => workspaceGitState.dispose();
+  (
+    app.locals as {
+      stopWorkspaceGitStateForWorkspace?: (workspaceCwd: string) => void;
+    }
+  ).stopWorkspaceGitStateForWorkspace = (workspaceCwd) =>
+    workspaceGitState.disposeWorkspace(workspaceCwd);
+  const workspaceQualifiedAcpEnabled = acpHttpEnabledAtBoot;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
   // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
   // amplified CPU/memory cost from any wrong-token client.
   //
-  // When `--allow-origin` is configured, install the
-  // allowlist middleware instead of the deny-wall. The allowlist owns
-  // both halves of the policy (matched → CORS headers + pass-through or
-  // 204 preflight; unmatched → 403 with the same error envelope as the
-  // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
-  // installed. Pattern parsing happens in `run-qwen-serve.ts` for validation;
-  // here we still keep the wildcard/no-token invariant for embedded
-  // callers that construct the app directly.
-  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
-    const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins);
-    if (parsedAllowOrigins.allowAny && !opts.token) {
-      throw new Error(
-        `Refusing to start with --allow-origin '*' but no bearer token ` +
-          `configured. '*' admits any cross-origin browser to the API; ` +
-          `without a token, any local page can drive the daemon. Set a ` +
-          `token or list specific origins instead of '*'.`,
-      );
-    }
-    app.use(allowOriginCors(parsedAllowOrigins));
-  } else {
-    app.use(denyBrowserOriginCors);
+  // The allowlist middleware owns both halves of the policy (matched → CORS
+  // headers + pass-through or 204 preflight; unmatched → 403). It is now
+  // installed unconditionally: with an empty allowlist every Origin-bearing
+  // request gets the same 403 envelope the `denyBrowserOriginCors` wall
+  // returned, so the no-`--allow-origin` posture is unchanged, and there is
+  // one middleware to reason about instead of two interchangeable ones.
+  // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
+  // still keep the tokenless origin restrictions for embedded callers that
+  // construct the app directly.
+  const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
+  if (parsedAllowOrigins.allowAny && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin '*' but no bearer token ` +
+        `configured. '*' admits any cross-origin browser to the API; ` +
+        `without a token, any local page can drive the daemon. Set a ` +
+        `token or list specific origins instead of '*'.`,
+    );
   }
+  if (
+    parsedAllowOrigins.loopbackPortWildcards &&
+    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
+    !opts.token
+  ) {
+    throw new Error(
+      `Refusing to start with a loopback port wildcard in --allow-origin ` +
+        `but no bearer token configured. A port wildcard admits any page ` +
+        `served from that loopback host, on any port; without a token, any ` +
+        `local page can drive the daemon. Set a token or list specific ` +
+        `origins instead.`,
+    );
+  }
+  const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
+  if (nonLoopbackHttpOrigin && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin ${JSON.stringify(
+        nonLoopbackHttpOrigin,
+      )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
+        `origins can drive the full operator API, including code execution ` +
+        `as the daemon user. Set a token or use a loopback origin.`,
+    );
+  }
+  // One CORS middleware for both deployments, over a set that can change.
+  // With no `--allow-origin` the behavior is byte-for-byte the
+  // `denyBrowserOriginCors` wall this replaces — every Origin-bearing request
+  // gets the same `Vary: Origin` + 403 body — but the set behind it can now
+  // gain the LAN origin while Local Control is on and lose it again on
+  // disable. Re-registering middleware at that point is not an option:
+  // Express fixes middleware order when the app is built.
+  const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
+  const credentials = new CredentialStore(opts.token);
+  const authenticate = bearerAuth(credentials);
+  const rateLimiter = installRateLimiter(app, opts, daemonLog, {
+    mount: false,
+    workspaceQualifiedAcpEnabled,
+  });
+
+  // Access logging and trace-id capture sit ahead of the origin wall and the
+  // same-origin credential check so their 403/401 short-circuits are recorded
+  // like every other reject (the pre-change chain logged them because
+  // bearerAuth ran below the access log). The access log excludes the exact
+  // paths GET /health and POST */heartbeat before attaching its finish
+  // logger, so those liveness probes stay unlogged at any mount position
+  // (HEAD /health and GET /health/ are logged like any request); wall
+  // rejects on those exempt paths are likewise not logged. Capture the
+  // caller trace id BEFORE authenticate / rate limiter / body parser: those
+  // layers short-circuit (401/429/400) before the telemetry middleware ever
+  // runs, and the access log still needs the captured id to join their log
+  // lines (and 404s) with the caller's trace.
+  installAccessLogMiddleware(app, daemonLog);
+  app.use(daemonInboundTraceIdCaptureMiddleware);
+
+  // The loopback Host allowlist stays ahead of the pre-auth health routes so
+  // the DNS-rebinding defense covers them. On non-loopback binds only the
+  // PRIMARY gate is a pass-through (the bearer gate authenticates there);
+  // the Local Control listener keeps its own Host gate whatever the primary
+  // bind is.
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  // --- Demo page: mirrors the `/health` loopback-gating pattern.
-  // On loopback binds, registered BEFORE bearerAuth so browsers can
-  // reach the page via address-bar navigation (which cannot attach
-  // Authorization headers). On non-loopback binds, registered AFTER
-  // bearerAuth — an unauthenticated `/demo` on a public interface
-  // would leak the full API surface (route enumeration + interactive
-  // console), far more than `/health`'s `{"status":"ok"}`.
-  // X-Frame-Options: DENY + CSP frame-ancestors 'none' prevent
-  // clickjacking — a malicious site embedding the demo in an iframe
-  // could trick a user into performing daemon actions via transparent
-  // overlay (the iframe's same-origin fetches bypass CORS).
-  const demoHandler = (
-    _req: import('express').Request,
-    res: import('express').Response,
-  ) => {
-    try {
-      res
-        .type('html')
-        .set('X-Frame-Options', 'DENY')
-        .set(
-          'Content-Security-Policy',
-          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
-        )
-        .send(getDemoHtml(getPort()));
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({ error: 'Failed to render demo page' });
-    }
-  };
-
-  // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
-  // the canonical liveness-probe case (k8s/Compose probes don't
-  // carry the daemon's bearer; round-tripping a 401 just to know
-  // the listener is up is waste). On non-loopback binds the
-  // exemption becomes a low-severity info leak (attacker can probe
-  // arbitrary IP:port to confirm a `qwen serve` is listening), so
-  // we register `/health` AFTER `bearerAuth` and let it 401 like
-  // every other route. Operators using the loopback default get the
-  // probe-friendly behavior; operators exposing the daemon publicly
-  // gate `/health` behind their token alongside everything else.
-  // CORS deny + Host allowlist still apply to `/health` in both
-  // cases.
-  // Shared handler so loopback (pre-auth) and non-loopback (post-auth)
-  // routes return the same shape. `?deep=1` exposes bridge counters
-  // (`sessions`, `pendingPermissions`) for observability — it is
-  // INFORMATIONAL only, not a true liveness probe. Counter getters
-  // are size accessors that don't perform per-session/channel pings,
-  // so a wedged child (stuck on a request, leaked FD, etc.) won't
-  // change the response. We retain the try/catch + 503 as a
-  // defense-in-depth net for custom bridge impls whose getters MAY
-  // throw — but the real bridge's getters never do, so under normal
-  // operation the 503 path is unreachable. The docs
-  // (`docs/users/qwen-serve.md` + `qwen-serve-protocol.md`) clarify
-  // that deep is for counters, not health verification. Default (no
-  // query) stays cheap so high-frequency liveness probes don't load
-  // the bridge.
-  const healthHandler = (
-    req: import('express').Request,
-    res: import('express').Response,
-  ): void => {
-    const deepQuery = req.query['deep'];
-    const deep = deepQuery === '1' || deepQuery === 'true' || deepQuery === '';
-    if (!deep) {
-      res.status(200).json({ status: 'ok' });
-      return;
-    }
-    try {
-      const lastActivity = bridge.lastActivityAt;
-      const now = Date.now();
-      res.status(200).json({
-        status: 'ok',
-        sessions: bridge.sessionCount,
-        pendingPermissions: bridge.pendingPermissionCount,
-        activePrompts: bridge.activePromptCount,
-        connectedClients: getActiveSseCount(),
-        channelAlive: bridge.isChannelLive(),
-        lastActivityAt:
-          lastActivity !== null ? new Date(lastActivity).toISOString() : null,
-        idleSinceMs: lastActivity !== null ? now - lastActivity : null,
-        ...(rateLimiter ? { rateLimitHits: rateLimiter.getHitCounts() } : {}),
-      });
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: /health deep probe failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(503).json({ status: 'degraded' });
-    }
-  };
-
-  const loopback = isLoopbackBind(opts.hostname);
-  // `--require-auth` extends the non-loopback "gate /health behind
-  // bearer too" rule to loopback.
-  const exposeHealthPreAuth = loopback && !opts.requireAuth;
-  if (exposeHealthPreAuth) {
-    app.get('/health', healthHandler);
-    app.get('/demo', demoHandler);
+  installRemoteSelfOriginMiddleware(
+    app,
+    opts.hostname,
+    opts.token ? credentials : undefined,
+  );
+  app.use(allowOriginCors(originAllowlist));
+  if (opts.profile === 'hosted-harness') {
+    const poolEnabled =
+      process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] !== undefined;
+    app.use((req, res, next) => {
+      if (
+        req.path === '/health' ||
+        req.path === '/capabilities' ||
+        req.path === '/session' ||
+        (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
+        req.path.startsWith('/session/')
+      )
+        next();
+      else res.sendStatus(404);
+    });
   }
 
-  // Access-log middleware. Registered BEFORE bearerAuth and JSON parser
-  // so auth rejections (401) and malformed-body errors (400) are also
-  // captured in the daemon log. Excluded:
-  //  - GET /health (high-frequency probe, would drown signal)
-  //  - Successful SSE streams (GET .../events with 200) — logged inline
-  //    at open/close; failed SSE handshakes (4xx) are still recorded.
-  if (daemonLog) {
-    const SESSION_ID_RE = /\/session\/([^/]+)/;
-    app.use((req, res, next) => {
-      const { method, path: reqPath } = req;
-      if (
-        (method === 'GET' && reqPath === '/health') ||
-        (method === 'POST' && reqPath.endsWith('/heartbeat'))
-      ) {
-        return next();
+  // Pre-auth health sits below the origin wall so matched cross-origin health
+  // probes carry CORS headers. It stays unlogged (path-exempt above), so the
+  // position costs nothing in log volume.
+  const healthRoutes = createHealthRoutes({
+    opts,
+    workspaceRegistry,
+    getActiveSseCount,
+    getRateLimiter: () => rateLimiter,
+  });
+  if (healthRoutes.exposeHealthPreAuth) {
+    app.use('/health', (req, res, next) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        authenticate(req, res, next);
+        return;
       }
-      const startMs = Date.now();
-      res.on('finish', () => {
-        try {
-          const status = res.statusCode;
-          if (
-            method === 'GET' &&
-            reqPath.endsWith('/events') &&
-            status === 200
-          ) {
-            return;
-          }
-          const durationMs = Date.now() - startMs;
-          const sessionMatch = reqPath.match(SESSION_ID_RE);
-          const sessionId = sessionMatch?.[1];
-          const clientId = req.headers['x-qwen-client-id'] as
-            | string
-            | undefined;
-          const ctx = {
-            route: `${method} ${reqPath}`,
-            ...(sessionId ? { sessionId } : {}),
-            ...(clientId ? { clientId } : {}),
-            status,
-            durationMs,
-          };
-          if (status >= 400) {
-            daemonLog.warn('request completed', ctx);
-          } else {
-            daemonLog.info('request completed', ctx);
-          }
-        } catch {
-          // Logging failure must not affect the request.
-        }
-      });
       next();
     });
+    healthRoutes.register(app);
   }
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
   // Authorization header to a `<script src>` subresource or an address-bar
-  // navigation, so gating it would just break the UI — the front-end's own
-  // API calls still carry the bearer (getDaemonAuthHeaders) and every API
-  // route below stays token-gated. The SPA deep-link fallback is registered
-  // LATER (after all API routes, see mountWebShellSpaFallback) so authed
-  // routes win over the shell. The assets dir is resolved by the caller
+  // navigation, so gating it would just break the UI. The front end attaches
+  // a configured bearer via getDaemonAuthHeaders; token-less trusted-loopback
+  // calls use listener authority. The SPA deep-link fallback is registered
+  // LATER (after all API routes, see mountWebShellSpaFallback) so API routes
+  // win over the shell. Exact `/session/:id` document navigations are
+  // mounted here too because a browser refresh cannot attach the bearer header
+  // before the shell loads. The assets dir is resolved by the caller
   // (runQwenServe) and injected via deps.webShellDir; `--no-web` sets
   // opts.serveWebShell=false to opt out.
   const webShellDir =
     opts.serveWebShell !== false ? deps.webShellDir : undefined;
+  // Extension origins (chrome-extension://…) explicitly allowed via
+  // --allow-origin may frame the Web Shell so the extension can host the UI in
+  // a Chrome side panel (issue #5626). All other origins still get
+  // frame-ancestors 'none' + X-Frame-Options: DENY.
+  const webShellFrameAncestors =
+    opts.allowOrigins && opts.allowOrigins.length > 0
+      ? [...parseAllowOriginPatterns(opts.allowOrigins).origins].filter(
+          (o) =>
+            o.startsWith('chrome-extension://') ||
+            o.startsWith('moz-extension://'),
+        )
+      : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir);
+    mountWebShellAssets(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+      deps.managedLocalWeb !== undefined,
+    );
+    (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
+      mountMcpAppSandbox(app, (origin, req) => {
+        if (originAllowlist.allows(origin)) return true;
+        if (!opts.token || listenerIdentityOf(req).kind !== 'primary')
+          return false;
+        const scheme =
+          req.socket instanceof TLSSocket && req.socket.encrypted
+            ? 'https'
+            : 'http';
+        // Match the existing self-origin rule; forwarded headers are not authority.
+        return origin === new URL(`${scheme}://${req.headers.host}`).origin;
+      });
   }
 
-  app.use(bearerAuth(opts.token));
-
-  // Rate limiter: after auth (only count authenticated requests),
-  // before body parser (reject early without burning JSON.parse CPU).
-  let rateLimiter: RateLimiterInstance | undefined;
-  if (opts.rateLimit) {
-    const windowMs = opts.rateLimitWindowMs ?? 60_000;
-    rateLimiter = createRateLimiter({
-      tiers: {
-        prompt: { windowMs, max: opts.rateLimitPrompt ?? 10 },
-        mutation: { windowMs, max: opts.rateLimitMutation ?? 30 },
-        read: { windowMs, max: opts.rateLimitRead ?? 120 },
+  if (deps.enqueueChannelWebhookTask) {
+    let channelWebhookConfigVersion = -1;
+    let channelWebhookConfigs: Record<
+      string,
+      { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }
+    > = {};
+    const refreshChannelWebhookConfigs = () => {
+      const version = deps.getChannelWebhookConfigVersion?.() ?? 0;
+      try {
+        // A mutable manager must provide committed routing explicitly;
+        // falling back to every primary-workspace webhook would keep old
+        // secrets active after DELETE or a failed replacement.
+        const sources =
+          deps.getChannelWebhookConfigSources?.() ??
+          (deps.getChannelWorkerControl
+            ? []
+            : (deps.channelWebhookConfigSources ?? [
+                { workspaceCwd: primaryBoundWorkspace },
+              ]));
+        channelWebhookConfigs = loadServeChannelWebhookConfigs(sources);
+        channelWebhookConfigVersion = version;
+      } catch (error) {
+        channelWebhookConfigs = {};
+        daemonLog?.warn(
+          `failed to refresh channel webhook configuration: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+    deps.registerChannelWebhookConfigRefresh?.(refreshChannelWebhookConfigs);
+    registerChannelWebhookRoutes(app, {
+      getChannelsConfig: () => {
+        const version = deps.getChannelWebhookConfigVersion?.() ?? 0;
+        if (channelWebhookConfigVersion !== version) {
+          refreshChannelWebhookConfigs();
+        }
+        return channelWebhookConfigs;
       },
-      hostname: opts.hostname,
-      onLimitReached: daemonLog
-        ? (tier, key, suppressed) => {
-            daemonLog.warn(
-              `rate limit hit${suppressed > 0 ? ` (${suppressed} suppressed)` : ''}`,
-              { tier, key: key.slice(0, 64) },
-            );
-          }
-        : undefined,
-      onError: daemonLog
-        ? (err, path) => {
-            daemonLog.warn(
-              `rate limiter error (fail-open): ${err instanceof Error ? err.message : String(err)}`,
-              { path },
-            );
-          }
-        : undefined,
+      safeBody,
+      enqueueWebhookTask: deps.enqueueChannelWebhookTask,
+      rateLimiter,
+      daemonLog,
     });
+  }
+
+  let agentHostRateLimiter: RateLimiterInstance | undefined;
+  // `session_send` relay for agent turns this daemon runs as a Host. Before
+  // the bearer gate: the MCP child holds only a per-run token, and the route
+  // answers loopback peers only. Mounted whatever the collaboration flag
+  // says, like the rest of being a runtime.
+  registerAgentHostRelayRoutes(app, {
+    hostname: opts.hostname,
+    getPort,
+    tls: Boolean(opts.tlsCert && opts.tlsKey),
+  });
+  // The URL this daemon's own loopback-only routes are reached on, for the
+  // `session_send` MCP child of an agent this daemon runs (read lazily: the
+  // port is 0 until `listen()` resolves).
+  const daemonLoopbackBaseUrl = () =>
+    relayBaseUrl({
+      hostname: opts.hostname,
+      port: getPort(),
+      tls: Boolean(opts.tlsCert && opts.tlsKey),
+    });
+
+  if (anyAgentCollaborationEnabled()) {
+    registerA2ATransportRoutes(
+      app,
+      workspaceRegistry,
+      rateLimiter,
+      isAgentCollaborationEnabledFor,
+    );
+    // Host traffic (events every 250 ms per turn, heartbeats, polls) gets
+    // its own budget per authenticated Host instead of the general `read`
+    // tier; same opt-in as the general limiter.
+    agentHostRateLimiter = rateLimiter
+      ? createRateLimiter({
+          tiers: {
+            prompt: AGENT_HOST_RATE_LIMIT,
+            mutation: AGENT_HOST_RATE_LIMIT,
+            read: AGENT_HOST_RATE_LIMIT,
+          },
+          hostname: opts.hostname,
+        })
+      : undefined;
+    registerAgentHostTransportRoutes(
+      app,
+      workspaceRegistry,
+      rateLimiter,
+      isAgentCollaborationEnabledFor,
+      agentHostRateLimiter,
+    );
+    // `session_send` from a local session agent's MCP child: per-binding
+    // token, loopback peers only, so it sits before the daemon bearer gate.
+    registerSessionAgentSendRoute(app, {
+      workspaceRegistry,
+      isAgentCollaborationEnabledFor,
+      ...(rateLimiter ? { rateLimiter } : {}),
+    });
+  }
+
+  // Credentials are a listener-scoped set, not one token: while Local Control
+  // is on, the LAN listener accepts a revocable pairing token and rejects the
+  // runtime token, and the primary listener does the reverse. With no Local
+  // Control session this behaves exactly as `bearerAuth(opts.token)` did.
+  if (webShellDir) {
+    registerWebShellPairingRoutes(app, credentials, opts.hostname, rateLimiter);
+  }
+  app.use(authenticate);
+
+  // Rate limiter: after auth (only count authenticated requests), except
+  // webhook and pairing routes which mount their limiter before returning.
+  if (rateLimiter) {
     app.use(rateLimiter.middleware);
   }
 
-  app.use(express.json({ limit: '10mb' }));
-  app.use(
-    (
-      err: unknown,
-      _req: import('express').Request,
-      res: import('express').Response,
-      next: import('express').NextFunction,
-    ) => {
-      if (sendJsonBodyParserError(res, err)) return;
-      next(err);
-    },
-  );
-
-  if (!exposeHealthPreAuth) {
+  if (!healthRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
-    // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
-    // the token. Otherwise unauthenticated callers can ping any
-    // reachable address:port to confirm a daemon exists (and `/demo`
-    // leaks the full API surface).
-    app.get('/health', healthHandler);
-    app.get('/demo', demoHandler);
+    // `/health` AFTER `bearerAuth` so probes must carry the token.
+    // Otherwise unauthenticated callers can ping any reachable
+    // address:port to confirm a daemon exists.
+    healthRoutes.register(app);
   }
 
-  // Mutation-route gate factory. Non-strict mode is passthrough;
-  // `{ strict: true }` requires a token even on loopback defaults.
+  if (deps.managedLocalWeb) {
+    if (
+      opts.hostname !== '127.0.0.1' ||
+      !opts.requireAuth ||
+      !opts.token ||
+      opts.profile === 'hosted-harness'
+    ) {
+      throw new Error(
+        'Managed local WebShell requires an authenticated loopback daemon.',
+      );
+    }
+    app.use(['/managed/boot', '/api/agent', '/v1/agents'], (req, res, next) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      next();
+    });
+    mountManagedLocalWeb(app, deps.managedLocalWeb);
+  }
+
+  installJsonBodyParser(app);
+
+  const hostedHarness =
+    opts.profile === 'hosted-harness'
+      ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
+      : undefined;
+  installHostedHarnessContractMiddleware(app, hostedHarness);
+  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
+  if (hostedHarness) {
+    const broker =
+      opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
+        ? {
+            baseUrl: opts.managedRuntimeBrokerUrl,
+            token: opts.managedRuntimeBrokerToken,
+          }
+        : undefined;
+    if (opts.hostedCsiSessionStoreUrl && broker) {
+      const privateSessions = registerHostedCsiSessionRoutes(
+        app,
+        hostedHarness,
+        opts.hostedCsiSessionStoreUrl,
+        broker,
+        (id) => ordinary.owns(id),
+      );
+      stopHostedCsiSessions = privateSessions.stopLocal;
+      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
+    }
+    const ordinary = registerHostedHarnessSessionRoutes(
+      app,
+      hostedHarness,
+      primaryBoundWorkspace,
+      broker,
+    );
+    app.use((req, res, next) => {
+      if (req.path === '/capabilities' || req.path === '/health') next();
+      else res.sendStatus(404);
+    });
+  }
+
+  if (opts.clientMcpOverWs === true) {
+    app.post('/desktop-relay/credential', (req, res) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      const body = req.body as unknown;
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: 'invalid_request' });
+        return;
+      }
+      const { sessionId, workspace } = body as Record<string, unknown>;
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        sessionId.length > 4_096
+      ) {
+        res.status(400).json({ error: 'invalid_session_id' });
+        return;
+      }
+
+      let acpPath = '/acp';
+      if (workspace !== undefined) {
+        if (
+          workspace === null ||
+          typeof workspace !== 'object' ||
+          Array.isArray(workspace)
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        const selector = workspace as Record<string, unknown>;
+        if (
+          (selector['kind'] !== 'id' && selector['kind'] !== 'cwd') ||
+          typeof selector['value'] !== 'string' ||
+          selector['value'].length === 0 ||
+          selector['value'].length > 4_096
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        acpPath = `/workspaces/${encodeURIComponent(selector['value'])}/acp`;
+      }
+
+      const credential = credentials.createDesktopRelayCredential({
+        acpPath,
+        sessionId,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      if (!credential) {
+        res.status(429).json({ error: 'credential_limit' });
+        return;
+      }
+      res.json({ credential });
+    });
+  }
+
+  // Mutation-route gate factory. Trusted primary loopback requests have
+  // operator authority; strict routes otherwise require verified credentials.
   const mutate = createMutationGate({
     tokenConfigured,
     requireAuth: opts.requireAuth === true,
+    trustedLoopbackMode,
   });
 
-  app.use(daemonTelemetryMiddleware(boundWorkspace));
+  app.use(
+    daemonTelemetryMiddleware((req) => {
+      const pluralMatch = req.path.match(/^\/workspaces\/([^/]+)/);
+      const singularCatalogMatch = req.path.match(
+        /^\/workspace\/([^/]+)\/(?:sessions|session-info)(?:\/|$)/,
+      );
+      const rawSelector = pluralMatch?.[1] ?? singularCatalogMatch?.[1];
+      if (rawSelector) {
+        try {
+          const selector = decodeURIComponent(rawSelector);
+          const byId = workspaceRegistry.getByWorkspaceId(selector);
+          if (byId) return byId.workspaceCwd;
+          if (isPortableAbsolutePath(selector)) {
+            const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+              workspaceRegistry,
+              selector,
+            );
+            if (runtime) return runtime.workspaceCwd;
+          }
+        } catch {
+          return undefined;
+        }
+        return undefined;
+      }
+      return primaryBoundWorkspace;
+    }, deps.recordDaemonRequest),
+  );
 
-  function buildWorkspaceCtx(
-    req: import('express').Request,
+  const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
+  registerSshWorkspaceBoundary(app, workspaceRegistry);
+  const syncModelProvidersRuntime = async (
     route: string,
-    clientId?: string,
-  ): WorkspaceRequestContext {
-    return {
-      originatorClientId: clientId,
-      route,
-      workspaceCwd: boundWorkspace,
-    };
+    writeScope?: SettingScope,
+  ): Promise<ServeModelProviderRuntimeSyncResult> => {
+    const trusted = isPrimaryWorkspaceTrusted();
+    const settings = loadSettings(primaryBoundWorkspace, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !trusted,
+      workspaceTrusted: trusted,
+    });
+    const scope =
+      writeScope ?? getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+    const primaryContext = buildWorkspaceCtx(route);
+    const secondaryRuntimes =
+      scope === SettingScope.User
+        ? workspaceRegistry.listAll().filter((runtime) => !runtime.primary)
+        : [];
+    const [primaryResult, ...secondaryResults] = await Promise.allSettled([
+      primaryWorkspace.reloadModelProviders(primaryContext),
+      ...secondaryRuntimes.map((runtime) =>
+        runtime.workspaceService.reloadModelProviders({
+          ...primaryContext,
+          workspaceCwd: runtime.workspaceCwd,
+        }),
+      ),
+    ]);
+
+    if (primaryResult.status === 'rejected') throw primaryResult.reason;
+    if (
+      primaryResult.value.status === 'failed' ||
+      secondaryResults.some(
+        (result) =>
+          result.status === 'rejected' || result.value.status === 'failed',
+      )
+    ) {
+      return { status: 'failed' };
+    }
+    if (
+      primaryResult.value.status === 'applied' ||
+      secondaryResults.some(
+        (result) =>
+          result.status === 'fulfilled' && result.value.status === 'applied',
+      )
+    ) {
+      return { status: 'applied' };
+    }
+    return { status: 'deferred' };
+  };
+
+  const acpHandleRef: { current?: AcpHttpHandle } = {};
+  const workspaceRememberLane = new WorkspaceRememberTaskLane(
+    primaryBridge,
+    primaryBoundWorkspace,
+  );
+
+  // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
+  // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
+  // both ends connect (gated by `cdpTunnelOverWs`).
+  const cdpTunnelRegistry =
+    opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
+
+  registerDaemonUpdateRoutes(app, {
+    currentVersion: deps.qwenCodeVersion,
+    runtimeToken: opts.token,
+    restartForUpdate: deps.restartForUpdate,
+    mutate,
+  });
+
+  registerDaemonStatusRoutes(app, {
+    opts,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspaceRegistry,
+    workspace: primaryWorkspace,
+    daemonLog,
+    startup: deps.startup,
+    qwenCodeVersion: deps.qwenCodeVersion,
+    getAcpHandle: () => acpHandleRef.current,
+    getRateLimiter: () => rateLimiter,
+    getRestSseActive: getActiveSseCount,
+    currentServeFeatures,
+    getSupportedDeviceFlowProviders,
+    deviceFlowRegistry,
+    sessionShellCommandEnabled,
+    getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+    getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    getChannelRestoreFailures: deps.getChannelRestoreFailures,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
+    getPerfSnapshot: deps.getPerfSnapshot,
+    getMetricsSeries: deps.getMetricsSeries,
+    getTotalSessionAdmissionSnapshot:
+      deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
+    getChildHeapPolicySnapshot: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.policy.snapshot()
+      : deps.getChildHeapPolicySnapshot,
+    getCommittedAcpChildCount: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.registry.committedProcessCount
+      : undefined,
+    childAdmissionEnforced:
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit' ||
+      deps.managedChildProcesses?.policy.snapshot().mode === 'enforce',
+  });
+
+  if (conversationRuntimeManager) {
+    app.use('/capabilities', (_req, _res, next) => {
+      const boot = serveAppLifecycle.getBootPromise();
+      if (!boot) {
+        next();
+        return;
+      }
+      void boot.then(
+        () => next(),
+        () => next(),
+      );
+    });
+  }
+  registerCapabilitiesRoutes(app, {
+    hostedHarness,
+    qwenCodeVersion: deps.qwenCodeVersion,
+    mode: opts.mode,
+    currentServeFeatures,
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    permissionPolicy: primaryBridge.permissionPolicy,
+    maxRegisteredWorkspaces,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
+    maxSessionsPerWorkspace: opts.maxSessions,
+    maxTotalSessions: opts.maxTotalSessions,
+    maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
+    sessionRestoreTimeoutMs,
+    languageCodes,
+    daemonEnv: daemonEnvAtBoot,
+    agentCollaborationEnabledFor: (workspaceCwd) =>
+      agentCollaborationRoutesMounted &&
+      isAgentCollaborationEnabledFor(workspaceCwd),
+  });
+  registerBrandRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+  });
+
+  if (liveVoiceSurfaceAvailable) {
+    registerLiveRoutes(app, {
+      coordinator: liveCoordinator,
+      mutate,
+      ...(deps.persistSetting
+        ? {
+            persistShortcut: async (shortcut: string) => {
+              const assertGenerationOpen =
+                capturePrimaryGenerationAssertion?.() ?? (() => {});
+              await deps.persistSetting!(
+                primaryBoundWorkspace,
+                SettingScope.User,
+                'experimental.liveVoice.shortcut',
+                shortcut,
+                assertGenerationOpen,
+              );
+            },
+          }
+        : {}),
+    });
+    const liveHostInstaller =
+      deps.liveHostInstaller ??
+      new LiveHostInstaller({ platform: runtimePlatform });
+    const liveSetupController = new LiveSetupController({
+      loadSettings: loadLiveSettings,
+      coordinator: liveCoordinator,
+      installer: liveHostInstaller,
+      getEnabled: () => liveVoiceEnabled,
+      setEnabled: setLiveVoiceEnabled,
+      env: daemonEnv,
+      nativeHost: liveNativeHostAvailable,
+      ...(deps.persistSettings
+        ? {
+            persistSettings: async (writes) => {
+              const assertGenerationOpen =
+                capturePrimaryGenerationAssertion?.() ?? (() => {});
+              await deps.persistSettings!(
+                primaryBoundWorkspace,
+                writes,
+                assertGenerationOpen,
+              );
+            },
+          }
+        : {}),
+      ...(deps.validateLiveProviderCredential
+        ? {
+            validateCredential: deps.validateLiveProviderCredential,
+          }
+        : {}),
+    });
+    (
+      app.locals as { liveSetupController?: LiveSetupController }
+    ).liveSetupController = liveSetupController;
+    registerLiveSetupRoutes(app, {
+      controller: liveSetupController,
+      mutate,
+    });
   }
 
-  const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
-  const currentServeFeatures = () =>
-    getAdvertisedServeFeatures(undefined, {
-      requireAuth: opts.requireAuth === true,
-      mcpPoolActive: opts.mcpPoolActive !== false,
-      allowOriginActive:
-        opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
-      ...(opts.promptDeadlineMs !== undefined
-        ? { promptDeadlineMs: opts.promptDeadlineMs }
-        : {}),
-      ...(opts.writerIdleTimeoutMs !== undefined
-        ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
-        : {}),
-      persistSettingAvailable: deps.persistSetting !== undefined,
-      sessionShellCommandEnabled,
-      rateLimit: opts.rateLimit === true,
-      reloadAvailable: deps.workspace !== undefined,
-      // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
-      // on). A configured token no longer suppresses it — the browser carries
-      // the bearer token via the WS subprotocol, which the upgrade listener
-      // verifies (acp-http/index.ts).
-      voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
-    });
-  const acpHandleRef: { current?: AcpHttpHandle } = {};
-
-  app.get('/daemon/status', async (req, res) => {
-    const detail = parseDaemonStatusDetail(req.query['detail']);
-    if (!detail.ok || !detail.detail) {
-      res.status(400).json({
-        error: 'detail must be one of: summary, full',
-        code: 'invalid_detail',
-      });
-      return;
-    }
-    try {
-      res.status(200).json(
-        await buildDaemonStatusResponse(detail.detail, {
-          opts,
-          boundWorkspace,
-          bridge,
-          workspace,
-          daemonLog,
-          qwenCodeVersion: deps.qwenCodeVersion,
-          acpHandle: acpHandleRef.current,
-          rateLimiter,
-          getRestSseActive: getActiveSseCount,
-          features: currentServeFeatures(),
-          protocolVersions: getServeProtocolVersions(),
-          supportedDeviceFlowProviders: Array.from(
-            deviceFlowProviderMap.keys(),
-          ),
-          deviceFlowRegistry,
-          sessionShellCommandEnabled,
-        }),
-      );
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: /daemon/status failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to build daemon status',
-        code: 'daemon_status_failed',
-      });
-    }
+  registerChannelNotifyRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    deliverChannelMessage: deps.deliverChannelMessage,
   });
 
-  app.get('/capabilities', (_req, res) => {
-    const envelope: CapabilitiesEnvelope = {
-      v: CAPABILITIES_SCHEMA_VERSION,
-      protocolVersions: getServeProtocolVersions(),
-      ...(deps.qwenCodeVersion
-        ? { qwenCodeVersion: deps.qwenCodeVersion }
-        : {}),
-      mode: opts.mode,
-      features: currentServeFeatures(),
-      modelServices: [],
-      // Surface the bound workspace so clients can detect mismatch
-      // pre-flight and omit `cwd` on `POST /session`.
-      workspaceCwd: boundWorkspace,
-      // Advertise supported transport families so SDK clients can
-      // auto-negotiate the best available transport via
-      // `negotiateTransport()`. REST is always available; future PRs
-      // will add 'acp-http' / 'acp-ws' entries when the corresponding
-      // routes are wired.
-      transports: ['rest'],
-      // Active mediation policy under the `policy` namespace.
-      policy: { permission: bridge.permissionPolicy },
-      limits: {
-        maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
-          opts.maxPendingPromptsPerSession,
-        ),
-      },
-      supportedLanguages: LANGUAGE_CODES,
-    };
-    res.status(200).json(envelope);
+  registerWorkspaceStatusRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
+    mutate,
+    sendBridgeError,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
-
-  app.get('/workspace/mcp', async (req, res) => {
-    try {
-      const ctx = buildWorkspaceCtx(req, 'GET /workspace/mcp');
-      res.status(200).json(await workspace.getWorkspaceMcpStatus(ctx));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/mcp' });
-    }
+  registerWorkspaceQualifiedStatusRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    sendBridgeError,
   });
-
-  app.get('/workspace/mcp/:server/tools', async (req, res) => {
-    const serverName = req.params['server'];
-    if (!serverName || typeof serverName !== 'string') {
-      res.status(400).json({
-        error: 'Server name path parameter is required',
-        code: 'invalid_server_name',
-      });
-      return;
-    }
-    if (serverName.length > MAX_SERVER_NAME_LENGTH) {
-      res.status(400).json({
-        error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
-        code: 'invalid_server_name',
-      });
-      return;
-    }
-    try {
-      res.status(200).json(await bridge.getWorkspaceMcpToolsStatus(serverName));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/mcp/:server/tools' });
-    }
+  registerWorkspaceRuntimeStopRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    available: () => runtimeStopReady && !runtimeStopsClosing,
+    ownsBridge: (runtime) =>
+      deps.managedChildProcesses?.ownsBridge?.(runtime.bridge) ??
+      runtime.bridge === defaultBridgeForAdmission,
+    getCapacity: () => ({
+      committedAcpChildren:
+        deps.managedChildProcesses?.registry.committedProcessCount ?? 0,
+      maxConcurrentChildren:
+        deps.managedChildProcesses?.policy.snapshot().maxConcurrentChildren ??
+        null,
+    }),
+    getActivity: (runtime) =>
+      deps.workspaceRuntimeRemoval && acpHandleRef.current
+        ? readWorkspaceActivity(
+            runtime,
+            deps.workspaceRuntimeRemoval.getActivity(runtime),
+            acpHandleRef.current.getWorkspaceActivity(runtime.workspaceId),
+          )
+        : undefined,
+    scheduledWorkActive: (runtime) =>
+      rehydratingWorkspaces.has(runtime) ||
+      scheduledActivity.get(runtime)?.() === true,
+    stopKeepalive: (runtime) => {
+      (
+        app.locals['stopScheduledTaskKeepaliveForWorkspace'] as
+          | ((cwd: string) => void)
+          | undefined
+      )?.(runtime.workspaceCwd);
+    },
+    startKeepalive: (runtime) => {
+      if (!runtimeStopsClosing)
+        (
+          app.locals['startScheduledTaskKeepaliveForWorkspace'] as
+            | ((runtime: WorkspaceRuntime) => void)
+            | undefined
+        )?.(runtime);
+    },
   });
-
-  app.get('/workspace/skills', async (req, res) => {
-    try {
-      const ctx = buildWorkspaceCtx(req, 'GET /workspace/skills');
-      res.status(200).json(await workspace.getWorkspaceSkillsStatus(ctx));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/skills' });
-    }
+  registerWorkspaceRuntimeRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
   });
-
-  app.get('/workspace/tools', async (_req, res) => {
-    try {
-      res.status(200).json(await bridge.getWorkspaceToolsStatus());
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/tools' });
-    }
+  registerWorkspaceQualifiedRuntimeRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
   });
-
-  app.get('/workspace/providers', async (req, res) => {
-    try {
-      const ctx = buildWorkspaceCtx(req, 'GET /workspace/providers');
-      res.status(200).json(await workspace.getWorkspaceProvidersStatus(ctx));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/providers' });
-    }
+  registerWorkspaceGitRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    gitState: workspaceGitState,
+    sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  registerWorkspaceQualifiedGitRoutes(app, {
+    workspaceRegistry,
+    gitState: workspaceGitState,
+    sendBridgeError,
+  });
+  registerWorkspaceLocalOpenRoutes(app, {
+    workspaceRegistry,
+    mutate,
+  });
+  registerWorkspaceGitDiffRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  registerWorkspaceQualifiedGitDiffRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceGitLogRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitLogRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceGitBranchRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitBranchRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitRemotesRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  // The /autofix-pr watches of a registered workspace's clone (the Web
+  // Shell's "PR watches" page and scheduled-task cards). Read-only.
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes(app, { workspaceRegistry });
+  registerWorkspaceQualifiedGitWorktreeRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerSessionPrBackfillRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+    archiveCoordinator,
+  });
+  // Read-only reverse lookup (PR bindings → sessions) for channel workers
+  // that deliver GitHub events into the session following a PR.
+  registerSessionPrBindingsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
   });
 
   // Workspace memory + agents CRUD routes.
+  mountMemoryImportRoutes(app, { workspaceRegistry, mutate });
   mountWorkspaceMemoryRoutes(app, {
-    bridge,
-    boundWorkspace,
+    bridge: primaryBridge,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  mountWorkspaceQualifiedMemoryRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceMemoryRememberRoutes(app, {
+    bridge: primaryBridge,
+    lane: workspaceRememberLane,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  mountWorkspaceQualifiedMemoryRememberRoutes(app, {
+    mutate,
+    resolveRouteDeps: (req, res, { creating, kind }) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res))
+        return null;
+      // The primary lane is owned locally (the same instance the ACP handle
+      // uses), so the qualified route stays available for the primary even when
+      // ACP HTTP is disabled. Secondary lanes live inside the ACP handle; reads
+      // use a non-creating lookup so a status poll never allocates a mount.
+      const handle = acpHandleRef.current;
+      const lane = runtime.primary
+        ? workspaceRememberLane
+        : creating
+          ? handle?.ensureWorkspaceRememberLane(runtime.workspaceId)
+          : handle?.getWorkspaceRememberLane(runtime.workspaceId);
+      if (!lane) {
+        if (!handle) {
+          // ACP HTTP disabled: no secondary lane can ever exist, so report a
+          // permanent failure instead of a retryable 503 + Retry-After.
+          res.status(501).json({
+            error: 'Workspace-qualified memory is not enabled on this daemon.',
+            code: 'workspace_memory_unavailable',
+            workspaceCwd: runtime.workspaceCwd,
+            workspaceId: runtime.workspaceId,
+          });
+        } else if (!creating) {
+          // No mount means no tasks: answer like the per-kind GET handler.
+          res.status(404).json({
+            error: `Workspace memory ${kind} task not found`,
+            code: `${kind}_task_not_found`,
+          });
+        } else {
+          // Handle present but the lane is unavailable (disposed/draining):
+          // a retry may succeed.
+          sendWorkspaceRuntimeUnavailable(res, runtime);
+        }
+        return null;
+      }
+      return {
+        bridge: runtime.bridge,
+        lane,
+        parseClientId: parseClientIdHeader,
+        safeBody,
+        isWorkspaceTrusted: () => runtime.trusted,
+        captureGenerationAssertion: () => {
+          const guard = runtime.generationGuard;
+          return guard ? () => guard.assertOpen() : undefined;
+        },
+      };
+    },
   });
   mountWorkspaceAgentsRoutes(app, {
-    bridge,
-    boundWorkspace,
+    bridge: primaryBridge,
+    boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  mountWorkspaceGenerationRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceQualifiedAgentsRoutes(app, {
+    workspaceRegistry,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
 
-  // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
-  // `audit.diagnostic_read` event from these two routes so a security
-  // operator can correlate "who read what when". Read-only diagnostic
-  // surfaces are reconnaissance vectors (env: secret-var presence;
-  // preflight: workspace path + CLI entry + Node version) and the absence
-  // of audit emission here is a deliberate scope deferral, not an
-  // oversight — the audit topic does not yet exist; PR 24 lands the
-  // shared `bridge.emitAudit` infrastructure that this and PR 18's
-  // `fs.access` events will both use.
-  app.get('/workspace/env', async (req, res) => {
-    try {
-      const ctx = buildWorkspaceCtx(req, 'GET /workspace/env');
-      res.status(200).json(await workspace.getWorkspaceEnvStatus(ctx));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/env' });
-    }
+  registerWorkspaceDiagnosticStatusRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
+    mutate,
+    sendBridgeError,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  registerWorkspaceQualifiedDiagnosticStatusRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
   });
 
-  app.get('/workspace/preflight', async (req, res) => {
-    try {
-      const ctx = buildWorkspaceCtx(req, 'GET /workspace/preflight');
-      res.status(200).json(await workspace.getWorkspacePreflightStatus(ctx));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
-    }
+  registerWorkspaceExtensionRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
+    // The primary runtime's own resolved env, so extension telemetry consent
+    // and proxy resolve per workspace instead of off the daemon's shared
+    // `process.env` (same carrier `registerWorkspaceSetupGithubRoutes` uses).
+    env: primaryRuntimeEffectiveEnv,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    workspaceRegistry,
+    conversationRuntimeActivity,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    ...(deps.maxExtensionOperationHistory === undefined
+      ? {}
+      : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
   });
-
-  // GET /workspace/hooks — read-only hook configuration status.
-  app.get('/workspace/hooks', async (req, res) => {
-    try {
-      const ctx = buildWorkspaceCtx(req, 'GET /workspace/hooks');
-      res.status(200).json(await workspace.getWorkspaceHooksStatus(ctx));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/hooks' });
-    }
-  });
-
-  // GET /workspace/extensions — read-only installed extension status.
-  app.get('/workspace/extensions', async (req, res) => {
-    try {
-      buildWorkspaceCtx(req, 'GET /workspace/extensions');
-      res.status(200).json(await buildLocalExtensionsStatus());
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /workspace/extensions' });
-    }
-  });
-
-  app.get('/workspace/extensions/operations/:operationId', async (req, res) => {
-    try {
-      buildWorkspaceCtx(
-        req,
-        'GET /workspace/extensions/operations/:operationId',
-      );
-      const operationId = req.params['operationId'];
-      if (!operationId) {
-        res.status(400).json({ error: 'Missing extension operation id' });
-        return;
-      }
-      const operation = extensionOperations.get(operationId);
-      if (!operation) {
-        res.status(404).json({
-          error: `Extension operation "${operationId}" not found`,
-          code: 'extension_operation_not_found',
-        });
-        return;
-      }
-      res.status(200).json(operation);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /workspace/extensions/operations/:operationId',
-      });
-    }
-  });
-
-  // POST /workspace/extensions/install — install an extension and refresh
-  // all active sessions asynchronously.
-  app.post(
-    '/workspace/extensions/install',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/install',
-          )
-        ) {
-          return;
-        }
-        const body = safeBody(req);
-        const source = body['source'];
-        const ref = body['ref'];
-        const autoUpdate = body['autoUpdate'];
-        const allowPreRelease = body['allowPreRelease'];
-        const registry = body['registry'];
-        const consent = body['consent'];
-
-        if (!source || typeof source !== 'string') {
-          res.status(400).json({ error: 'Missing or invalid source' });
-          return;
-        }
-        if (ref !== undefined && (typeof ref !== 'string' || ref === '')) {
-          res.status(400).json({ error: '`ref` must be a string' });
-          return;
-        }
-        if (typeof ref === 'string' && ref.startsWith('-')) {
-          res.status(400).json({ error: '`ref` must not start with "-"' });
-          return;
-        }
-        if (autoUpdate !== undefined && typeof autoUpdate !== 'boolean') {
-          res.status(400).json({ error: '`autoUpdate` must be a boolean' });
-          return;
-        }
-        if (
-          allowPreRelease !== undefined &&
-          typeof allowPreRelease !== 'boolean'
-        ) {
-          res
-            .status(400)
-            .json({ error: '`allowPreRelease` must be a boolean' });
-          return;
-        }
-        if (registry !== undefined && typeof registry !== 'string') {
-          res.status(400).json({ error: '`registry` must be a string' });
-          return;
-        }
-        const sourceValue = source;
-        const refValue = typeof ref === 'string' ? ref : undefined;
-        const autoUpdateValue =
-          typeof autoUpdate === 'boolean' ? autoUpdate : undefined;
-        const allowPreReleaseValue =
-          typeof allowPreRelease === 'boolean' ? allowPreRelease : undefined;
-        const registryValue =
-          typeof registry === 'string' ? registry : undefined;
-        const registryUrl =
-          registryValue !== undefined
-            ? parseExtensionRegistryUrl(registryValue, res)
-            : undefined;
-        if (registryUrl === null) return;
-        if (consent !== true) {
-          res.status(400).json({
-            error: 'Extension installation requires explicit consent',
-          });
-          return;
-        }
-        if (!validateExtensionSourceHost(sourceValue, res)) {
-          return;
-        }
-
-        runQueuedExtensionMutation(
-          'install',
-          { source: sourceValue },
-          res,
-          async (extensionManager) => {
-            const installMetadata = await parseInstallSource(sourceValue);
-
-            if (
-              installMetadata.type !== 'git' &&
-              installMetadata.type !== 'github-release' &&
-              installMetadata.type !== 'npm'
-            ) {
-              throw new Error(
-                'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-              );
-            }
-            if (installMetadata.type === 'npm' && refValue) {
-              throw new Error('--ref is not applicable for npm extensions.');
-            }
-            if (installMetadata.type !== 'npm' && registryValue) {
-              throw new Error(
-                '--registry is only applicable for npm extensions.',
-              );
-            }
-            if (!validateExtensionSourceMetadata(installMetadata)) {
-              throw new Error('`source` host is not allowed');
-            }
-            if (installMetadata.type === 'npm' && registryUrl) {
-              installMetadata.registryUrl = registryUrl;
-            }
-            const extension = await extensionManager.installExtension(
-              {
-                ...installMetadata,
-                ref: refValue,
-                autoUpdate: autoUpdateValue,
-                allowPreRelease: allowPreReleaseValue,
-              },
-              () => Promise.resolve(),
-            );
-            return {
-              status: 'installed',
-              source: sourceValue,
-              name: extension.name,
-              version: extension.config.version,
-            };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/install',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/check-updates',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/check-updates',
-          )
-        ) {
-          return;
-        }
-        const states = await enqueueExtensionInstall(async () =>
-          withExtensionTimeout(
-            (async () => {
-              const extensionManager = createExtensionManager();
-              await extensionManager.refreshCache();
-              const updateStates: Record<string, string> = {};
-              await extensionManager.checkForAllExtensionUpdates(
-                (name, state) => {
-                  updateStates[name] = state;
-                },
-              );
-              return updateStates;
-            })(),
-            EXTENSION_REFRESH_TIMEOUT_MS,
-            'extension update check',
-          ),
-        );
-        res.status(200).json({ states });
-      } catch (err) {
-        if (isExtensionQueueFullError(err)) {
-          sendExtensionQueueFull(res);
-          return;
-        }
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/check-updates',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/refresh',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/refresh',
-          )
-        ) {
-          return;
-        }
-        const result = await enqueueExtensionInstall(async () =>
-          withExtensionTimeout(
-            workspace.refreshExtensionsForAllSessions(),
-            EXTENSION_REFRESH_TIMEOUT_MS,
-            'extension refresh',
-          ),
-        );
-        res.status(200).json(result);
-      } catch (err) {
-        if (isExtensionQueueFullError(err)) {
-          sendExtensionQueueFull(res);
-          return;
-        }
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/refresh',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/:name/enable',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/:name/enable',
-          )
-        ) {
-          return;
-        }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        const scope = parseExtensionScope(safeBody(req), res);
-        if (scope === null) return;
-        runQueuedExtensionMutation(
-          'enable',
-          { name },
-          res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
-            await extensionManager.enableExtension(
-              extension.name,
-              scope,
-              boundWorkspace,
-            );
-            return { status: 'enabled', name: extension.name };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/:name/enable',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/:name/disable',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/:name/disable',
-          )
-        ) {
-          return;
-        }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        const scope = parseExtensionScope(safeBody(req), res);
-        if (scope === null) return;
-        runQueuedExtensionMutation(
-          'disable',
-          { name },
-          res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
-            await extensionManager.disableExtension(
-              extension.name,
-              scope,
-              boundWorkspace,
-            );
-            return { status: 'disabled', name: extension.name };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/:name/disable',
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/extensions/:name/update',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'POST /workspace/extensions/:name/update',
-          )
-        ) {
-          return;
-        }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        runQueuedExtensionMutation(
-          'update',
-          { name },
-          res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
-            let updateError: unknown;
-            const updateState = await withExtensionTimeout(
-              checkForExtensionUpdate(extension, extensionManager).catch(
-                (err: unknown) => {
-                  updateError = err;
-                  return ExtensionUpdateState.ERROR;
-                },
-              ),
-              EXTENSION_REFRESH_TIMEOUT_MS,
-              'extension update check',
-            );
-            if (updateState === ExtensionUpdateState.ERROR) {
-              const message =
-                updateError === undefined
-                  ? undefined
-                  : redactUrlCredentials(
-                      updateError instanceof Error
-                        ? updateError.message
-                        : String(updateError),
-                    );
-              throw new Error(
-                `Update check failed for extension "${extension.name}"${
-                  message ? `: ${message}` : ''
-                }`,
-              );
-            }
-            if (updateState !== ExtensionUpdateState.UPDATE_AVAILABLE) {
-              throw new Error(`Extension "${extension.name}" has no update`);
-            }
-            const info = await extensionManager.updateExtension(
-              extension,
-              updateState,
-              () => undefined,
-            );
-            return {
-              status: 'updated',
-              name: extension.name,
-              ...(info?.updatedVersion ? { version: info.updatedVersion } : {}),
-            };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/extensions/:name/update',
-        });
-      }
-    },
-  );
-
-  app.delete(
-    '/workspace/extensions/:name',
-    mutate({ strict: true }),
-    async (req, res) => {
-      try {
-        if (
-          !validateExtensionMutationClient(
-            req,
-            res,
-            'DELETE /workspace/extensions/:name',
-          )
-        ) {
-          return;
-        }
-        const name = req.params['name'];
-        if (!name) {
-          res.status(400).json({ error: 'Missing extension name' });
-          return;
-        }
-        runQueuedExtensionMutation(
-          'uninstall',
-          { name },
-          res,
-          async (extensionManager) => {
-            const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
-            await extensionManager.uninstallExtension(
-              extension.name,
-              false,
-              boundWorkspace,
-            );
-            return { status: 'uninstalled', name: extension.name };
-          },
-        );
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'DELETE /workspace/extensions/:name',
-        });
-      }
-    },
-  );
 
   // Workspace file routes (read-only + mutation).
   registerWorkspaceFileReadRoutes(app, {
     parseClientId: parseClientIdHeader,
   });
+  registerWorkspaceQualifiedFileReadRoutes(app, {
+    parseClientId: parseClientIdHeader,
+    workspaceRegistry,
+  });
   registerWorkspaceFileWriteRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+  registerWorkspaceQualifiedFileWriteRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    workspaceRegistry,
+  });
+  // One shared four-slot gate bounds upload-body buffering across both the
+  // legacy and workspace-qualified upload routes.
+  const uploadGate = createUploadConcurrencyGate();
+  registerWorkspaceFileUploadRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    uploadGate,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+  });
+  registerWorkspaceQualifiedFileUploadRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    uploadGate,
+    workspaceRegistry,
+  });
+  registerWorkspaceSetupGithubRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    env: primaryRuntimeEffectiveEnv,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  registerWorkspaceTrustRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
+    workspaceRegistry,
+    workspaceTrustHotReloadAvailable:
+      deps.workspaceTrustHotReloadAvailable === true,
+    ...(deps.getWorkspaceTrustPolicySnapshot
+      ? {
+          getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+        }
+      : {}),
+    mutate,
+    safeBody,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedTrustRoutes(app, {
+    workspaceRegistry,
+    workspaceTrustHotReloadAvailable:
+      deps.workspaceTrustHotReloadAvailable === true,
+    ...(deps.getWorkspaceTrustPolicySnapshot
+      ? {
+          getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+        }
+      : {}),
+    mutate,
+    safeBody,
+  });
+
+  // Dynamic workspace registration.
+  const workspaceGitCloner =
+    deps.createWorkspaceRuntime !== undefined && isGitAvailable()
+      ? createWorkspaceGitCloner()
+      : undefined;
+  const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
+    maxRegisteredWorkspaces,
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    createWorkspaceRuntime: deps.createWorkspaceRuntime,
+    managedScratchRoot: deps.managedScratchRoot,
+    workspaceGitCloner,
+    validateWorkspaceRuntimeForPublication:
+      deps.validateWorkspaceRuntimeForPublication,
+    runWorkspaceTrustOperation: deps.runWorkspaceTrustOperation,
+    workspaceRegistrationStore: deps.workspaceRegistrationStore,
+    getAcpHandle: () => acpHandleRef.current,
+    runtimeRemoval: deps.workspaceRuntimeRemoval,
+    onWorkspaceRemoved: invalidateSkillsConfigStatus,
+    ...(deps.liveConversationWorkspace
+      ? { reservedWorkspaceRoots: [deps.liveConversationWorkspace.rootPath] }
+      : {}),
+  });
+  (
+    app.locals as { workspaceManagementHandle?: WorkspaceManagementHandle }
+  ).workspaceManagementHandle = workspaceManagementHandle;
+  (
+    app.locals as {
+      workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
+    }
+  ).workspaceRuntimeRemoval = deps.workspaceRuntimeRemoval;
+
+  const broadcastSettingsChanged = (
+    key: string,
+    value: unknown,
+    scope: string,
+    clientId: string | undefined,
+  ) => {
+    invalidateServeFeaturesCache();
+    const event = {
+      type: 'settings_changed',
+      data: { key, value, scope },
+    } as const;
+    const publish = (
+      bridge: AcpSessionBridge,
+      workspace: string,
+      originatorClientId?: string,
+    ) => {
+      try {
+        bridge.publishWorkspaceEvent({
+          ...event,
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: settings_changed broadcast to workspace ${workspace} failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    };
+
+    publish(primaryBridge, primaryBoundWorkspace, clientId);
+    if (scope !== 'user') return;
+    for (const runtime of workspaceRegistry.listAll()) {
+      if (runtime.primary) continue;
+      publish(runtime.bridge, runtime.workspaceCwd);
+    }
+  };
 
   if (deps.persistSetting) {
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
-      boundWorkspace,
+      boundWorkspace: primaryBoundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+      captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
-      broadcastSettingsChanged: (key, value, scope, clientId) => {
-        bridge.publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: { key, value, scope },
-          ...(clientId ? { originatorClientId: clientId } : {}),
-        });
+      syncImageModel: (scope) =>
+        syncModelProvidersRuntime('POST /workspace/settings imageModel', scope),
+      updateSessionWorkflow: (enabled) =>
+        primaryBridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+          { enabled },
+        ),
+      updateSiblingSessionWorkflows: async () => {
+        for (const runtime of workspaceRegistry.listAll()) {
+          if (runtime.primary) continue;
+          try {
+            // Each sibling re-derives its OWN post-write effective value: a
+            // workspace-scope file can shadow the user write differently per
+            // workspace, so the primary's value is not generally correct for
+            // them.
+            await withSessionWorkflowWriteLock(runtime.workspaceCwd, () =>
+              runtime.bridge.invokeWorkspaceCommand(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                {
+                  enabled: readEffectiveSessionWorkflow(
+                    runtime.workspaceCwd,
+                    runtime.trusted,
+                  ),
+                },
+              ),
+            );
+          } catch (err) {
+            // A draining or dead sibling must not fail the write; its
+            // sessions converge on daemon restart (no production caller
+            // re-triggers workspaceReload on sibling runtimes).
+            writeStderrLine(
+              `qwen serve: Session Workflow push to sibling workspace ${runtime.workspaceCwd} failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
       },
+      broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
-        parseAndValidateWorkspaceClientId(req, res, bridge),
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      // Listed wherever Live Voice exists. The bundled Web Shell trims its
+      // setup card to what applies (`/live/setup` reports `nativeHost`), so
+      // off macOS it never offers to install the native Host.
+      includeLiveVoice: liveVoiceSurfaceAvailable,
     });
-    registerWorkspacePermissionsRoutes(app, {
-      boundWorkspace,
+    registerWorkspaceQualifiedSettingsRoutes(app, {
+      workspaceRegistry,
       mutate,
       safeBody,
-      persistSetting,
-      invokeWorkspaceCommand: (method, params) =>
-        bridge.invokeWorkspaceCommand(method, params),
-      broadcastSettingsChanged: (key, value, scope, clientId) => {
-        bridge.publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: { key, value, scope },
-          ...(clientId ? { originatorClientId: clientId } : {}),
-        });
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
       },
+      invalidateServeFeaturesCache,
+    });
+    // Experimental paired engines put managed sessions on a second ACP child
+    // this workspace-scoped mutation cannot reach; omit the route (and the
+    // capability below) rather than apply it to one engine only.
+    if (!opts.experimentalPairedEngines) {
+      registerWorkspaceDirectoriesRoutes(app, {
+        workspaceRegistry,
+        mutate,
+        sendBridgeError,
+      });
+    }
+    // Process-global user-level language sync (issue #10234). Registered
+    // under the same `persistSetting` availability gate as the workspace
+    // settings routes and advertised as the conditional
+    // `user_language_sync` capability.
+    registerUserLanguageRoutes(app, {
+      boundWorkspace: primaryBoundWorkspace,
+      mutate,
+      safeBody,
+      languageCodes,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      workspaceRegistry,
       parseAndValidateClientId: (req, res) =>
-        parseAndValidateWorkspaceClientId(req, res, bridge),
+        parseAndValidateWorkspaceClientId(req, res, [
+          primaryBridge,
+          ...workspaceRegistry.list().map((runtime) => runtime.bridge),
+        ]),
+    });
+    registerWorkspaceMcpConfigRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      safeBody,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      sendBridgeError,
+      invalidateServeFeaturesCache,
+      broadcastSettingsChanged,
+    });
+  }
+  registerWorkspacePermissionsRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    mutate,
+    safeBody,
+    workspace: primaryWorkspace,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedPermissionsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+  });
+  registerWorkspaceVoiceRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    persistSettings: deps.persistSettings,
+    transcribe: deps.voiceTranscriber,
+    env: primaryRuntimeEffectiveEnv,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    acquireVoiceLease: acquirePrimaryVoiceLease,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+    broadcastSettingsChanged,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedVoiceRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    persistSettings: deps.persistSettings,
+    transcribe: deps.voiceTranscriber,
+    acquireVoiceLease: (runtime) => voiceCoordinator.acquire(runtime),
+    parseAndValidateClientId: (req, res, runtime) =>
+      parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+    invalidateServeFeaturesCache,
+  });
+  if (deps.persistSettings) {
+    registerWorkspaceModelsRoutes(app, {
+      boundWorkspace: primaryBoundWorkspace,
+      env: primaryRuntimeEffectiveEnv,
+      baseEnv: deps.modelSelectionBaseEnv ?? daemonEnvAtBoot,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+      captureGenerationAssertion: capturePrimaryGenerationAssertion,
+      mutate,
+      safeBody,
+      persistSettings: deps.persistSettings,
+      updateModelContextWindow: deps.updateModelContextWindow,
+      broadcastSettingsChanged,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      syncModelProvidersRuntime: (writeScope, method) =>
+        syncModelProvidersRuntime(`${method} /workspace/models`, writeScope),
     });
   }
 
@@ -2707,14 +3554,17 @@ export function createServeApp(
   // interactions from web clients are proxied to the UI MCP server's
   // standard `action` tool.
   registerA2uiActionRoutes(app, {
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
+    env: primaryRuntimeEffectiveEnv,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     // UI-server discovery uses the daemon's workspace MCP status, which
     // includes servers registered at runtime.
-    getMcpServers: async (req) => {
-      const ctx = buildWorkspaceCtx(req, 'POST /session/:id/a2ui-action');
-      const status = await workspace.getWorkspaceMcpStatus(ctx);
+    getMcpServers: async () => {
+      const ctx = buildWorkspaceCtx('POST /session/:id/a2ui-action');
+      const status = await primaryWorkspace.getWorkspaceMcpStatus(ctx);
       return (status.servers ?? []) as Array<{
         name: string;
         mcpStatus?: string;
@@ -2723,2179 +3573,567 @@ export function createServeApp(
     },
   });
 
-  // -- auth device-flow routes ---------------------------------------------
-
-  app.post(
-    '/workspace/auth/device-flow',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const body = safeBody(req);
-      const providerIdRaw = body['providerId'];
-      if (typeof providerIdRaw !== 'string' || providerIdRaw.length === 0) {
-        res.status(400).json({
-          error: '`providerId` must be a non-empty string',
-          code: 'invalid_request',
-        });
-        return;
-      }
-      // Validate against the runtime provider map (not the static
-      // tuple) so injected providers are accepted.
-      if (!deviceFlowProviderMap.has(providerIdRaw as DeviceFlowProviderId)) {
-        res.status(400).json({
-          error: `Unsupported device-flow provider: ${providerIdRaw}`,
-          code: 'unsupported_provider',
-          supportedProviders: Array.from(deviceFlowProviderMap.keys()),
-        });
-        return;
-      }
-      const providerId = providerIdRaw as DeviceFlowProviderId;
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      try {
-        const { view, attached } = await deviceFlowRegistry.start({
-          providerId,
-          ...(clientId !== undefined ? { initiatorClientId: clientId } : {}),
-        });
-        // Idempotent take-over → 200 with `attached: true`. Fresh start →
-        // 201 + `attached: false`. The registry is the source of truth on
-        // which branch fired (it's the one that decided not to call
-        // `provider.start()` again).
-        res
-          .status(attached ? 200 : 201)
-          .json(toDeviceFlowStartResponseBody(view, attached, clientId));
-      } catch (err) {
-        if (err instanceof UnsupportedDeviceFlowProviderError) {
-          res
-            .status(400)
-            .json({ error: err.message, code: 'unsupported_provider' });
-          return;
-        }
-        if (err instanceof TooManyActiveDeviceFlowsError) {
-          res
-            .status(409)
-            .json({ error: err.message, code: 'too_many_active_flows' });
-          return;
-        }
-        if (err instanceof UpstreamDeviceFlowError) {
-          // IdP-side failure (network / parse / non-2xx). 502 distinguishes
-          // "the upstream we depend on misbehaved" from a daemon bug (5xx
-          // generic) so SDK clients can branch on retry strategy.
-          res.status(502).json({ error: err.message, code: 'upstream_error' });
-          return;
-        }
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/auth/device-flow',
-        });
-      }
-    },
-  );
-
-  // GET surfaces verification material; strict-gated + caller-identity
-  // check so only the original initiator sees `userCode` etc.
-  app.get(
-    '/workspace/auth/device-flow/:id',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const id = req.params['id'];
-      if (!id) {
-        res.status(404).json({
-          error: 'Device-flow id required',
-          code: 'device_flow_not_found',
-        });
-        return;
-      }
-      const view = deviceFlowRegistry.get(id);
-      if (!view) {
-        res.status(404).json({
-          error: `Device-flow ${id} not found`,
-          code: 'device_flow_not_found',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      // Debug-mode breadcrumb when verification fields are redacted
-      // due to caller-clientId mismatch.
-      if (!callerIsDeviceFlowInitiator(view, clientId) && isServeDebugMode()) {
-        writeStderrLine(
-          `qwen serve debug: GET /workspace/auth/device-flow/${id} redacted verification fields — caller-clientId mismatch (initiator=${view.initiatorClientId ?? 'anonymous'}, caller=${clientId ?? 'anonymous'})`,
-        );
-      }
-      res.status(200).json(toDeviceFlowStateBody(view, clientId));
-    },
-  );
-
-  app.delete(
-    '/workspace/auth/device-flow/:id',
-    mutate({ strict: true }),
-    (req, res) => {
-      const id = req.params['id'];
-      if (!id) {
-        res.status(404).json({
-          error: 'Device-flow id required',
-          code: 'device_flow_not_found',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const result = deviceFlowRegistry.cancel(id, clientId);
-      if (result === undefined) {
-        res.status(404).json({
-          error: `Device-flow ${id} not found`,
-          code: 'device_flow_not_found',
-        });
-        return;
-      }
-      // Both freshly-cancelled and already-terminal are 204 (idempotent).
-      res.status(204).end();
-    },
-  );
-
-  app.get('/workspace/auth/status', (_req, res) => {
-    const pending = deviceFlowRegistry.listPending();
-    res.status(200).json({
-      v: 1,
-      workspaceCwd: boundWorkspace,
-      providers: [],
-      pendingDeviceFlows: pending.map((view) => ({
-        deviceFlowId: view.deviceFlowId,
-        providerId: view.providerId,
-        ...(view.expiresAt !== undefined ? { expiresAt: view.expiresAt } : {}),
-      })),
-      // Derive from runtime provider map (single source of truth).
-      supportedDeviceFlowProviders: Array.from(deviceFlowProviderMap.keys()),
-    });
+  registerWorkspaceSubscriptionRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    persistSettings: deps.persistSettings,
+    sendBridgeError,
   });
-
-  app.get('/workspace/auth/providers', (_req, res) => {
-    res.status(200).json(buildAuthProviderCatalog(boundWorkspace));
-  });
-
-  app.post(
-    '/workspace/auth/provider',
-    mutate({ strict: true }),
-    async (req, res) => {
-      if (!deps.installAuthProvider) {
-        res.status(501).json({
-          error: 'Auth provider installation is not implemented by this daemon',
-          code: 'not_implemented',
-        });
-        return;
-      }
-      const parsed = parseAuthProviderInstallRequest(safeBody(req), {
-        allowPrivateBaseUrl: opts.allowPrivateAuthBaseUrl === true,
-      });
-      if (!parsed.ok) {
-        res.status(400).json({
-          error: parsed.error,
-          code: parsed.code,
-        });
-        return;
-      }
-      const installRequest = parsed.value;
-      const knownProvider = ALL_PROVIDERS.find(
-        (provider) => provider.id === installRequest.providerId,
-      );
-      if (!knownProvider) {
-        res.status(400).json({
-          error: `Unsupported auth provider: ${installRequest.providerId}`,
-          code: 'unsupported_provider',
-        });
-        return;
-      }
-      if (installRequest.protocol) {
-        const allowedProtocols =
-          knownProvider.protocolOptions && knownProvider.protocolOptions.length
-            ? knownProvider.protocolOptions
-            : [knownProvider.protocol];
-        if (!allowedProtocols.includes(installRequest.protocol)) {
-          res.status(400).json({
-            error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
-            code: 'unsupported_protocol',
-          });
-          return;
-        }
-      }
-      try {
-        res.status(200).json(await deps.installAuthProvider(installRequest));
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/auth/provider',
-          providerId: installRequest.providerId,
-        });
-      }
-    },
-  );
-
-  app.post('/session', mutate(), async (req, res) => {
-    const body = safeBody(req);
-    // 1 daemon = 1 workspace. Three input shapes:
-    //   - `cwd` ABSENT from body → fall back to the daemon's bound
-    //     workspace (clients pre-flight
-    //     `caps.workspaceCwd` and may then omit `cwd`).
-    //   - `cwd` PRESENT but not a string → 400 malformed. A
-    //     client/orchestrator serialization bug (`cwd: null`,
-    //     `cwd: 123`, `cwd: {}`) must not silently bind a session
-    //     to the daemon's workspace; surface the bug instead.
-    //   - `cwd` PRESENT as a string → fall through to the
-    //     `path.isAbsolute` check (empty string and relative both
-    //     fail there with "must be an absolute path when provided").
-    //
-    // `safeBody` returns an `Object.create(null)` map, so
-    // `'cwd' in body` reflects exactly "did the client send the
-    // key?" without prototype-chain confusion. The presence-check
-    // is safe as long as `PROTOTYPE_POLLUTION_KEYS` doesn't grow to
-    // include `cwd` — see the cross-reference in the const's JSDoc
-    // for what to do if that invariant ever has to break.
-    const hasCwd = 'cwd' in body;
-    if (hasCwd && typeof body['cwd'] !== 'string') {
-      res
-        .status(400)
-        .json({ error: '`cwd` must be a string absolute path when provided' });
-      return;
-    }
-    // Length cap BEFORE assignment so a multi-MB `cwd` body can't
-    // amplify through downstream interpolations
-    // (`WorkspaceMismatchError`'s `.message` echoes `requested` twice;
-    // `sendBridgeError` writes it to stderr; `res.json` echoes it
-    // again). On the loopback-default-no-token deployment shape this
-    // is pre-auth, so a 10 MB cwd body — right under
-    // `express.json({limit: '10mb'})` — would otherwise cost
-    // ~60 MB per request × `maxConnections` (default 256). The
-    // `MAX_WORKSPACE_PATH_LENGTH` constant matches Linux's PATH_MAX
-    // (4096); legitimate filesystem paths fit well under it. The
-    // `WorkspaceMismatchError` constructor also truncates as a
-    // belt-and-suspenders defense for non-route callers (tests,
-    // embeds, future entry points that throw the error directly).
-    if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
-      res.status(400).json({
-        error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
-      });
-      return;
-    }
-    const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
-    if (!path.isAbsolute(cwd)) {
-      res
-        .status(400)
-        .json({ error: '`cwd` must be an absolute path when provided' });
-      return;
-    }
-    const modelServiceId =
-      typeof body['modelServiceId'] === 'string'
-        ? (body['modelServiceId'] as string)
-        : undefined;
-    // Per-request `sessionScope` override. Validate at the route
-    // boundary so a 400 surfaces before touching the bridge.
-    const rawSessionScope = body['sessionScope'];
-    let sessionScope: 'single' | 'thread' | undefined;
-    if (rawSessionScope !== undefined) {
-      if (rawSessionScope !== 'single' && rawSessionScope !== 'thread') {
-        res.status(400).json({
-          error: '`sessionScope` must be "single" or "thread" when provided',
-          code: 'invalid_session_scope',
-        });
-        return;
-      }
-      sessionScope = rawSessionScope;
-    }
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      const session = await bridge.spawnOrAttach({
-        workspaceCwd: cwd,
-        modelServiceId,
-        ...(clientId !== undefined ? { clientId } : {}),
-        ...(sessionScope !== undefined ? { sessionScope } : {}),
-      });
-      // Client may have disconnected during the 1–3s spawn window. If
-      // so, the response can't be delivered. The session is otherwise
-      // orphaned (in `byId` / `defaultEntry` with no client knowing the
-      // id), and under churn this leaks one child per aborted request.
-      //
-      // Detect "can we still write the response?" via `res.writable`,
-      // which stays true until the SOCKET destination side closes
-      // (the right signal for our case). The legacy `req.aborted`
-      // only flips while the request body is still being received,
-      // so a client that completed the POST and then closed during
-      // the spawn would slip past it. `req.destroyed` is too eager
-      // — clients (incl. supertest) close their writable end after
-      // sending the body even though they're still listening for the
-      // response. `res.writable` is the documented signal for
-      // "ServerResponse can still send to client".
-      //
-      // Combined with `!session.attached` we only reap when WE spawned
-      // a fresh child for this request — if another client legitimately
-      // attached, killing it would tear out their work mid-flight.
-      // The disconnect-without-reap branch also needs to skip
-      // `res.json` — writing to a closed socket would throw EPIPE
-      // through Express's default error handler.
-      if (daemonLog) {
-        daemonLog.info(
-          session.attached ? 'session attached' : 'session spawned',
-          { sessionId: session.sessionId, clientId: session.clientId },
-        );
-      }
-      if (!res.writable) {
-        if (daemonLog) {
-          daemonLog.warn(
-            'session reaped (client disconnected before response)',
-            {
-              sessionId: session.sessionId,
-              attached: session.attached,
-            },
-          );
-        }
-        if (!session.attached) {
-          // `requireZeroAttaches: true` closes a race: if
-          // a second client called `spawnOrAttach` for the same
-          // workspace between our `await` resolving and this reap
-          // dispatching, the bridge will see `attachCount > 0` and
-          // skip the kill. Without the flag, that second client's
-          // session would die mid-prompt.
-          bridge
-            .killSession(session.sessionId, { requireZeroAttaches: true })
-            .catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
-        } else {
-          // When an attaching client disconnects
-          // before its 200 response can be written, the
-          // `attachCount` bump we did inside `spawnOrAttach` is
-          // fictitious — there's no live attaching client. Roll the
-          // counter back and let the bridge decide whether to reap
-          // (it does if attachCount returns to 0 AND no live SSE
-          // subscribers). Without this, both-coalesced-callers-
-          // disconnect leaves an orphan agent child no client knows
-          // the id of.
-          bridge.detachClient(session.sessionId, session.clientId).catch(() => {
-            // Best-effort cleanup; channel.exited will eventually reap.
-          });
-        }
-        return;
-      }
-      res.status(200).json(session);
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'POST /session' });
-    }
-  });
-
-  const restoreSessionHandler =
-    (action: 'load' | 'resume') =>
-    async (req: express.Request, res: express.Response) => {
-      const sessionId = requireSessionId(req, res);
-      if (!sessionId) return;
-      const body = safeBody(req);
-      const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
-      if (cwd === undefined) return;
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      try {
-        const session =
-          action === 'load'
-            ? await bridge.loadSession({
-                sessionId,
-                workspaceCwd: cwd,
-                ...(clientId !== undefined ? { clientId } : {}),
-              })
-            : await bridge.resumeSession({
-                sessionId,
-                workspaceCwd: cwd,
-                ...(clientId !== undefined ? { clientId } : {}),
-              });
-        if (daemonLog) {
-          daemonLog.info(
-            `session ${action}${session.attached ? ' (attached)' : ''}`,
-            { sessionId: session.sessionId, clientId: session.clientId },
-          );
-        }
-        // Mirror the `POST /session` disconnect-cleanup path (see the
-        // long comment above the matching `if (!res.writable)` there
-        // for the rationale around `res.writable` vs `req.aborted` /
-        // `req.destroyed`, plus the `requireZeroAttaches` race
-        // and the attach-rollback case). Restore needs the
-        // same cleanup because a client that disconnects during a
-        // multi-second `session/load` would otherwise leave a freshly
-        // restored session in `byId` with no client holding its id.
-        if (!res.writable) {
-          if (!session.attached) {
-            bridge
-              .killSession(session.sessionId, { requireZeroAttaches: true })
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          } else {
-            bridge
-              .detachClient(session.sessionId, session.clientId)
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          }
-          return;
-        }
-        res.status(200).json(session);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: `POST /session/:id/${action}`,
-          sessionId,
-        });
-      }
-    };
-
-  app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
-  app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
-
-  app.post('/session/:id/branch', mutate(), async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const body = safeBody(req);
-    let name = typeof body?.['name'] === 'string' ? body['name'] : undefined;
-    if (name) {
-      // eslint-disable-next-line no-control-regex
-      name = name.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-      if (name.length > 200) {
-        name = name.slice(0, 200);
-      }
-    }
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      const result = await bridge.branchSession(
-        sessionId,
-        { name },
-        { clientId },
-      );
-      if (!res.writable) {
-        if (!result.attached) {
-          bridge
-            .killSession(result.sessionId, { requireZeroAttaches: true })
-            .catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
-        } else {
-          bridge.detachClient(result.sessionId, result.clientId).catch(() => {
-            // Best-effort cleanup; channel.exited will eventually reap.
-          });
-        }
-        return;
-      }
-      res.status(201).json(result);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/branch',
-        sessionId,
-      });
-    }
-  });
-
-  app.post('/session/:id/fork', mutate(), async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const body = safeBody(req);
-    const directive = body['directive'];
-    if (typeof directive !== 'string' || directive.trim().length === 0) {
-      res.status(400).json({
-        error: '`directive` is required and must be a non-empty string',
-        code: 'missing_directive',
-      });
-      return;
-    }
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      const result = await bridge.launchSessionForkAgent(
-        sessionId,
-        directive,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(202).json(result);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/fork',
-        sessionId,
-      });
-    }
-  });
-
-  app.get('/session/:id/context', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionContextStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/context',
-        sessionId,
-      });
-    }
-  });
-
-  app.get('/session/:id/context-usage', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(
-        await bridge.getSessionContextUsageStatus(sessionId, {
-          detail: req.query['detail'] === 'true',
-        }),
-      );
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/context-usage',
-        sessionId,
-      });
-    }
-  });
-
-  app.get('/session/:id/stats', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionStatsStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/stats',
-        sessionId,
-      });
-    }
-  });
-
-  app.get('/session/:id/supported-commands', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res
-        .status(200)
-        .json(await bridge.getSessionSupportedCommandsStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/supported-commands',
-        sessionId,
-      });
-    }
-  });
-
-  app.get('/session/:id/tasks', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionTasksStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/tasks',
-        sessionId,
-      });
-    }
-  });
-
-  app.get('/session/:id/lsp', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionLspStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/lsp',
-        sessionId,
-      });
-    }
-  });
-
-  // GET /session/:id/hooks — read-only session-scoped hook status.
-  app.get('/session/:id/hooks', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionHooksStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /session/:id/hooks', sessionId });
-    }
-  });
-
-  app.post(
-    '/session/:id/tasks/:taskId/cancel',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const sessionId = req.params['id'];
-      const taskId = req.params['taskId'];
-      if (!sessionId || !taskId) {
-        res.status(400).json({
-          error: '`sessionId` and `taskId` route parameters are required',
-        });
-        return;
-      }
-      const body = safeBody(req);
-      const kind = body['kind'];
-      if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
-        res
-          .status(400)
-          .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
-        return;
-      }
-      try {
-        res
-          .status(200)
-          .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /session/:id/tasks/:taskId/cancel',
-          sessionId,
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/session/:id/goal/clear',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const sessionId = req.params['id'];
-      if (!sessionId) {
-        res
-          .status(400)
-          .json({ error: '`sessionId` route parameter is required' });
-        return;
-      }
-      try {
-        res.status(200).json(await bridge.clearSessionGoal(sessionId));
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /session/:id/goal/clear',
-          sessionId,
-        });
-      }
-    },
-  );
-
-  app.post('/session/:id/prompt', mutate(), async (req, res) => {
-    const sessionId = req.params['id'];
-    const body = safeBody(req);
-    const prompt = body['prompt'];
-    if (!Array.isArray(prompt) || prompt.length === 0) {
-      res.status(400).json({
-        error:
-          '`prompt` is required and must be a non-empty array of content blocks',
-      });
-      return;
-    }
-    if (
-      !prompt.every(
-        (item: unknown) =>
-          typeof item === 'object' && item !== null && !Array.isArray(item),
-      )
-    ) {
-      res.status(400).json({
-        error: 'each `prompt` element must be an object (content block)',
-      });
-      return;
-    }
-    const rawRequestDeadline = body['deadlineMs'];
-    let requestDeadlineMs: number | undefined;
-    if (rawRequestDeadline !== undefined && rawRequestDeadline !== null) {
-      if (
-        typeof rawRequestDeadline !== 'number' ||
-        !Number.isFinite(rawRequestDeadline) ||
-        !Number.isInteger(rawRequestDeadline) ||
-        rawRequestDeadline <= 0
-      ) {
-        res.status(400).json({
-          error: '`deadlineMs` must be a positive integer (milliseconds)',
-          code: 'invalid_deadline_ms',
-        });
-        return;
-      }
-      requestDeadlineMs = rawRequestDeadline;
-    }
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-
-    const promptId = crypto.randomUUID();
-    const forwardedBody = { ...body };
-    delete forwardedBody['deadlineMs'];
-
-    let lastEventId: number;
-    try {
-      lastEventId = bridge.getSessionLastEventId(sessionId);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/prompt',
-        sessionId,
-      });
-      return;
-    }
-    addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
-
-    const abort = new AbortController();
-    const effectiveDeadlineMs = resolvePromptDeadlineMs(
-      opts.promptDeadlineMs,
-      requestDeadlineMs,
-    );
-    let deadlineTimer: NodeJS.Timeout | undefined;
-    if (effectiveDeadlineMs !== undefined) {
-      deadlineTimer = setTimeout(() => {
-        if (!abort.signal.aborted) {
-          abort.abort(new PromptDeadlineExceededError(effectiveDeadlineMs));
-        }
-      }, effectiveDeadlineMs);
-      deadlineTimer.unref();
-    }
-
-    let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
-    try {
-      promptPromise = bridge.sendPrompt(
-        sessionId,
-        {
-          ...forwardedBody,
-          sessionId,
-          prompt,
-        } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-        abort.signal,
-        {
-          ...(clientId !== undefined ? { clientId } : {}),
-          promptId,
-        },
-      );
-    } catch (err) {
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-      if (daemonLog && err instanceof PromptQueueFullError) {
-        daemonLog.warn('prompt admission rejected: queue full', {
-          sessionId,
-          promptId,
-          ...(clientId !== undefined ? { clientId } : {}),
-          limit: err.limit,
-          pendingCount: err.pendingCount,
-        });
-      }
-      if (daemonLog && err instanceof InvalidClientIdError) {
-        daemonLog.warn('prompt admission rejected: invalid client id', {
-          sessionId,
-          promptId,
-          ...(clientId !== undefined ? { clientId } : {}),
-        });
-      }
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/prompt',
-        sessionId,
-      });
-      return;
-    }
-
-    promptPromise
-      .then(
-        () => {
-          if (daemonLog) {
-            daemonLog.info('prompt turn completed', {
-              sessionId,
-              promptId,
-              clientId,
-            });
-          }
-        },
-        (err) => {
-          if (daemonLog) {
-            const errName = err instanceof Error ? err.name : undefined;
-            daemonLog.warn(
-              `prompt turn failed: ${errName ? `[${errName}] ` : ''}${err instanceof Error ? err.message : String(err)}`,
-              { sessionId, promptId, clientId },
-            );
-          }
-        },
-      )
-      .finally(() => {
-        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-      })
-      .catch(() => {});
-
-    if (daemonLog) {
-      daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
-    }
-    res.status(202).json({ promptId, lastEventId });
-  });
-
-  app.post('/session/:id/heartbeat', mutate(), (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      const result = bridge.recordHeartbeat(
-        sessionId,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/heartbeat',
-        sessionId,
-      });
-    }
-  });
-
-  app.post('/session/:id/detach', mutate(), async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      await bridge.detachClient(sessionId, clientId);
-      res.status(204).end();
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/detach',
-        sessionId,
-      });
-    }
-  });
-
-  app.post('/session/:id/cancel', mutate(), async (req, res) => {
-    const sessionId = req.params['id'];
-    const body = safeBody(req);
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      await bridge.cancelSession(
-        sessionId,
-        {
-          ...(body as object),
-          sessionId,
-        } as Parameters<AcpSessionBridge['cancelSession']>[1],
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      if (daemonLog) {
-        daemonLog.info('cancel sent', { sessionId, clientId });
-      }
-      res.status(204).end();
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/cancel',
-        sessionId,
-      });
-    }
-  });
-
-  app.delete('/session/:id', async (req, res) => {
-    const sessionId = req.params['id'];
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      await bridge.closeSession(
-        sessionId,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(204).end();
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'DELETE /session/:id',
-        sessionId,
-      });
-    }
-  });
-
-  app.post('/sessions/delete', mutate(), async (req, res) => {
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    const body = safeBody(req);
-    const sessionIds: unknown = body['sessionIds'];
-    if (
-      !Array.isArray(sessionIds) ||
-      sessionIds.length === 0 ||
-      sessionIds.length > 100 ||
-      !sessionIds.every((id) => typeof id === 'string')
-    ) {
-      res.status(400).json({
-        error: '`sessionIds` must be a non-empty string array (max 100)',
-        code: 'invalid_request',
-      });
-      return;
-    }
-    try {
-      const uniqueIds = [...new Set(sessionIds as string[])];
-      const closeResults = await Promise.allSettled(
-        uniqueIds.map(async (id) => {
-          // Intentional: no clientId — batch delete bypasses per-tab ownership.
-          await bridge.closeSession(id);
-          return id;
-        }),
-      );
-      const closeErrors: Array<{ sessionId: string; error: string }> = [];
-      const closedIds: string[] = [];
-      for (let i = 0; i < closeResults.length; i++) {
-        const r = closeResults[i];
-        const id = uniqueIds[i];
-        if (r.status === 'fulfilled') {
-          closedIds.push(id);
-        } else {
-          const closeErr = r.reason;
-          if (closeErr instanceof SessionNotFoundError) {
-            // Session not active in bridge — still attempt to remove its transcript file
-            closedIds.push(id);
-          } else {
-            const msg =
-              closeErr instanceof Error ? closeErr.message : String(closeErr);
-            writeStderrLine(
-              `qwen serve: closeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
-            );
-            closeErrors.push({ sessionId: id, error: msg });
-          }
-        }
-      }
-      const result = await new SessionService(boundWorkspace).removeSessions(
-        closedIds,
-      );
-      for (const e of result.errors) {
-        const msg =
-          e.error instanceof Error ? e.error.message : String(e.error);
-        writeStderrLine(
-          `qwen serve: removeSession failed for ${safeLogValue(e.sessionId)}: ${safeLogValue(msg)}`,
-        );
-      }
-      res.status(200).json({
-        removed: result.removed,
-        notFound: result.notFound,
-        errors: [
-          ...closeErrors,
-          ...result.errors.map((e) => ({
-            sessionId: e.sessionId,
-            error: e.error instanceof Error ? e.error.message : String(e.error),
-          })),
-        ],
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      writeStderrLine(
-        `qwen serve: failed to batch delete sessions: ${safeLogValue(message)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to delete sessions',
-        code: 'sessions_delete_failed',
-      });
-    }
-  });
-
-  app.patch('/session/:id/metadata', async (req, res) => {
-    const sessionId = req.params['id'];
-    const body = safeBody(req);
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    const rawDisplayName = body['displayName'];
-    if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
-      res.status(400).json({
-        error: '`displayName` must be a string',
-        code: 'invalid_metadata',
-        field: 'displayName',
-      });
-      return;
-    }
-    const displayName =
-      typeof rawDisplayName === 'string'
-        ? rawDisplayName.slice(0, 256)
-        : undefined;
-    try {
-      const effective = bridge.updateSessionMetadata(
-        sessionId,
-        { displayName },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json({ sessionId, ...effective });
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'PATCH /session/:id/metadata',
-        sessionId,
-      });
-    }
-  });
-
-  app.get('/workspace/:id/sessions', async (req, res) => {
-    // Express decodes URL-encoded path params automatically; clients pass
-    // the absolute workspace cwd encoded (e.g.
-    // GET /workspace/%2Fwork%2Fa/sessions).
-    const workspaceCwd = req.params['id'] ?? '';
-    if (!path.isAbsolute(workspaceCwd)) {
-      res
-        .status(400)
-        .json({ error: '`:id` must decode to an absolute workspace path' });
-      return;
-    }
-    // Reject cross-workspace queries so orchestrators don't mistake
-    // "no sessions here" for "workspace is idle".
-    const key = canonicalizeWorkspace(workspaceCwd);
-    if (key !== boundWorkspace) {
-      res.status(400).json({
-        error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
-        code: 'workspace_mismatch',
-        boundWorkspace,
-        requestedWorkspace: key,
-      });
-      return;
-    }
-    try {
-      const cursor =
-        typeof req.query['cursor'] === 'string'
-          ? req.query['cursor']
-          : undefined;
-      const size = parseSessionPageSizeQuery(req.query['size']);
-      const result = await listWorkspaceSessionsForResponse(bridge, key, {
-        cursor,
-        size,
-      });
-      res.status(200).json({
-        sessions: result.sessions,
-        ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
-      });
-    } catch (err) {
-      if (err instanceof InvalidCursorError) {
-        res.status(400).json({
-          error: err.message,
-          code: 'invalid_cursor',
-        });
-        return;
-      }
-      writeStderrLine(
-        `qwen serve: failed to list sessions for workspace ${safeLogValue(
-          key,
-        )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
-      );
-      res.status(500).json({
-        error: 'Failed to list sessions',
-        code: 'session_list_failed',
-      });
-    }
-  });
-
-  app.post('/session/:id/model', mutate(), async (req, res) => {
-    const sessionId = req.params['id'];
-    const body = safeBody(req);
-    const modelId = body['modelId'];
-    if (typeof modelId !== 'string' || !modelId) {
-      res.status(400).json({
-        error: '`modelId` is required and must be a non-empty string',
-      });
-      return;
-    }
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      const response = await bridge.setSessionModel(
-        sessionId,
-        {
-          ...(body as object),
-          sessionId,
-          modelId,
-        } as Parameters<AcpSessionBridge['setSessionModel']>[1],
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(response);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/model',
-        sessionId,
-      });
-    }
-  });
-
-  app.post('/session/:id/recap', mutate(), async (req, res) => {
-    // Wraps `generateSessionRecap` so daemon clients can fetch a
-    // one-sentence "where did I leave off" summary without a full
-    // prompt turn. Best-effort — `recap: null` on short history or
-    // transient model failure is a normal 200, not an error.
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      const response = await bridge.generateSessionRecap(
-        sessionId,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      if (daemonLog) {
-        const recap = response.recap;
-        daemonLog.info(
-          recap ? `recap generated len=${recap.length}` : 'recap returned null',
-          { sessionId, clientId },
-        );
-      }
-      res.status(200).json(response);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/recap',
-        sessionId,
-      });
-    }
-  });
-
-  app.post('/session/:id/btw', mutate(), async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const body = safeBody(req);
-    const question = body['question'];
-    if (
-      typeof question !== 'string' ||
-      question.trim().length === 0 ||
-      question.length > BTW_MAX_INPUT_LENGTH
-    ) {
-      res.status(400).json({
-        error: `\`question\` is required, must be a non-empty string, and at most ${BTW_MAX_INPUT_LENGTH} characters`,
-      });
-      return;
-    }
-    const abort = new AbortController();
-    const onResClose = () => {
-      if (!res.writableEnded) abort.abort();
-    };
-    res.once('close', onResClose);
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) {
-      res.off('close', onResClose);
-      return;
-    }
-    try {
-      const result = await bridge.generateSessionBtw(
-        sessionId,
-        question.trim(),
-        abort.signal,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    } catch (err) {
-      if (
-        err instanceof DOMException &&
-        err.name === 'AbortError' &&
-        abort.signal.aborted
-      ) {
-        return;
-      }
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/btw',
-        sessionId,
-      });
-    } finally {
-      res.off('close', onResClose);
-    }
-  });
-
-  // Queue a user message typed while the session's turn is still running. The
-  // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
-  // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted }`: `false` when the session is idle (or the per-session
-  // queue is full), so the browser keeps the message in its own queue and sends
-  // it as a normal next-turn prompt. Synchronous — the bridge only pushes onto
-  // an in-memory queue.
-  //
-  // Per-message abuse guard. The sibling `/btw` caps its field; without this
-  // only the global 10 MB body limit applies. Not a UX limit — a rejected
-  // message stays in the browser's own queue and is sent as the (uncapped)
-  // next-turn prompt — it only bounds how much a single mid-turn push can pin in
-  // the in-memory queue (the queue DEPTH is bounded in `enqueueMidTurnMessage`).
-  const MID_TURN_MESSAGE_MAX_LENGTH = 16 * 1024;
-  app.post('/session/:id/mid-turn-message', mutate(), (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const body = safeBody(req);
-    const message = body['message'];
-    // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
-    // stores the trimmed string, so checking the raw length would reject input
-    // whose real content fits but is padded with whitespace.
-    const trimmed = typeof message === 'string' ? message.trim() : '';
-    if (trimmed.length === 0) {
-      res.status(400).json({
-        error: '`message` is required and must be a non-empty string',
-      });
-      return;
-    }
-    if (trimmed.length > MID_TURN_MESSAGE_MAX_LENGTH) {
-      res.status(400).json({
-        error: `\`message\` must be at most ${MID_TURN_MESSAGE_MAX_LENGTH} characters`,
-      });
-      return;
-    }
-    // Forward the client id so the bridge authorizes it against the session
-    // (like `/prompt` and `/btw`) — a token-holding client bound to another
-    // session must not push into this one — and records it as the message's
-    // originator for SSE echo routing. `null` = malformed id (already answered).
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    try {
-      const result = bridge.enqueueMidTurnMessage(
-        sessionId,
-        trimmed,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/mid-turn-message',
-        sessionId,
-      });
-    }
-  });
-
-  app.post('/session/:id/shell', mutate({ strict: true }), async (req, res) => {
-    const sessionId = req.params['id'];
-    if (!sessionShellCommandEnabled) {
-      sendBridgeError(res, new SessionShellDisabledError(), {
-        route: 'POST /session/:id/shell',
-        sessionId,
-      });
-      return;
-    }
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) {
-      return;
-    }
-    if (clientId === undefined) {
-      sendBridgeError(res, new SessionShellClientRequiredError(), {
-        route: 'POST /session/:id/shell',
-        sessionId,
-      });
-      return;
-    }
-    const body = safeBody(req);
-    const command = body['command'];
-    if (typeof command !== 'string' || command.trim().length === 0) {
-      res.status(400).json({
-        error: '`command` is required and must be a non-empty string',
-      });
-      return;
-    }
-    const abort = new AbortController();
-    const onResClose = () => {
-      if (!res.writableEnded) abort.abort();
-    };
-    res.once('close', onResClose);
-    try {
-      const result = await bridge.executeShellCommand(
-        sessionId,
-        command.trim(),
-        abort.signal,
-        { clientId },
-      );
-      if (daemonLog) {
-        daemonLog.info('shell command completed', {
-          sessionId,
-          clientId,
-          exitCode: result.exitCode,
-        });
-      }
-      res.status(200).json(result);
-    } catch (err) {
-      if (
-        err instanceof DOMException &&
-        err.name === 'AbortError' &&
-        abort.signal.aborted
-      ) {
-        return;
-      }
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/shell',
-        sessionId,
-      });
-    } finally {
-      res.off('close', onResClose);
-    }
-  });
-
-  app.get('/session/:id/rewind/snapshots', async (req, res) => {
-    const sessionId = req.params['id'];
-    if (!sessionId) {
-      res
-        .status(400)
-        .json({ error: '`sessionId` route parameter is required' });
-      return;
-    }
-    try {
-      res.status(200).json(await bridge.getRewindSnapshots(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/rewind/snapshots',
-        sessionId,
-      });
-    }
-  });
-
-  app.post(
-    '/session/:id/rewind',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const sessionId = req.params['id'];
-      const body = safeBody(req);
-      const promptId = body['promptId'];
-      if (typeof promptId !== 'string' || promptId.length === 0) {
-        res.status(400).json({
-          error: '`promptId` is required and must be a non-empty string',
-          code: 'missing_prompt_id',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      try {
-        const response = await bridge.rewindSession(
-          sessionId,
-          { promptId, rewindFiles: body['rewindFiles'] !== false },
-          clientId !== undefined ? { clientId } : undefined,
-        );
-        res.status(200).json(response);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /session/:id/rewind',
-          sessionId,
-        });
-      }
-    },
-  );
-
-  app.post(
-    '/session/:id/approval-mode',
-    mutate({ strict: true }),
-    async (req, res) => {
-      // Validates `mode` against `APPROVAL_MODES` and an optional
-      // `persist: boolean` flag.
-      const sessionId = req.params['id'];
-      const body = safeBody(req);
-      const mode = body['mode'];
-      const persist = body['persist'];
-      if (
-        typeof mode !== 'string' ||
-        !APPROVAL_MODES.includes(mode as ApprovalMode)
-      ) {
-        res.status(400).json({
-          error: '`mode` is required and must be one of the allowed values',
-          code: 'invalid_approval_mode',
-          allowed: APPROVAL_MODES,
-        });
-        return;
-      }
-      if (persist !== undefined && typeof persist !== 'boolean') {
-        res.status(400).json({
-          error: '`persist` must be a boolean when provided',
-          code: 'invalid_persist_flag',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      try {
-        const response = await bridge.setSessionApprovalMode(
-          sessionId,
-          mode as ApprovalMode,
-          { persist: persist === true },
-          clientId !== undefined ? { clientId } : undefined,
-        );
-        res.status(200).json(response);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /session/:id/approval-mode',
-          sessionId,
-        });
-      }
-    },
-  );
-
-  app.post('/session/:id/language', mutate(), async (req, res) => {
-    const sessionId = req.params['id'];
-    const body = safeBody(req);
-    const language = body['language'];
-    const syncOutputLanguage = body['syncOutputLanguage'];
-
-    if (typeof language !== 'string' || !LANGUAGE_CODES.includes(language)) {
-      res.status(400).json({
-        error:
-          '`language` is required and must be one of: ' +
-          LANGUAGE_CODES.join(', '),
-        code: 'invalid_language',
-        allowed: LANGUAGE_CODES,
-      });
-      return;
-    }
-
-    if (
-      syncOutputLanguage !== undefined &&
-      typeof syncOutputLanguage !== 'boolean'
-    ) {
-      res.status(400).json({
-        error: '`syncOutputLanguage` must be a boolean when provided',
-        code: 'invalid_sync_flag',
-      });
-      return;
-    }
-
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-
-    try {
-      const response = await bridge.setSessionLanguage(
-        sessionId,
-        {
-          language,
-          syncOutputLanguage: syncOutputLanguage === true,
-        },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(response);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/language',
-        sessionId,
-      });
-    }
-  });
-
-  app.post(
-    '/workspace/mcp/:server/restart',
-    mutate({ strict: true }),
-    async (req, res) => {
-      // Single-server MCP restart with budget pre-check. Soft refusals
-      // are 200 OK with `{restarted:false, skipped:true, reason}`.
-      const serverName = req.params['server'];
-      if (!serverName || typeof serverName !== 'string') {
-        res.status(400).json({
-          error: 'Server name path parameter is required',
-          code: 'invalid_server_name',
-        });
-        return;
-      }
-      // Cap server name length to prevent unbounded path-parameter input.
-      if (serverName.length > MAX_SERVER_NAME_LENGTH) {
-        res.status(400).json({
-          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
-          code: 'invalid_server_name',
-        });
-        return;
-      }
-      // Validate `X-Qwen-Client-Id` against known client ids.
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      // Parse `?entryIndex=` for pool-mode targeted restarts. Accepts
-      // a non-negative integer or `*` / omitted (restart all).
-      let entryIndex: number | undefined;
-      const rawEntryIndex = req.query['entryIndex'];
-      if (rawEntryIndex !== undefined && rawEntryIndex !== '*') {
-        const candidate =
-          typeof rawEntryIndex === 'string' ? rawEntryIndex : undefined;
-        const parsed =
-          candidate !== undefined ? Number.parseInt(candidate, 10) : NaN;
-        if (
-          !Number.isInteger(parsed) ||
-          parsed < 0 ||
-          String(parsed) !== candidate
-        ) {
-          res.status(400).json({
-            error:
-              '`entryIndex` query parameter must be a non-negative integer or "*"',
-            code: 'invalid_entry_index',
-          });
-          return;
-        }
-        entryIndex = parsed;
-      }
-      try {
-        const ctx = buildWorkspaceCtx(
-          req,
-          'POST /workspace/mcp/:server/restart',
-          clientId,
-        );
-        const result = await workspace.restartMcpServer(
-          ctx,
-          serverName,
-          entryIndex !== undefined ? { entryIndex } : undefined,
-        );
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/mcp/:server/restart',
-        });
-      }
-    },
-  );
-
-  for (const [routeAction, bridgeAction] of [
-    ['enable', 'enable'],
-    ['disable', 'disable'],
-    ['authenticate', 'authenticate'],
-    ['clear-auth', 'clear-auth'],
-  ] as const) {
-    app.post(
-      `/workspace/mcp/:server/${routeAction}`,
-      mutate({ strict: true }),
-      async (req, res) => {
-        const serverName = req.params['server'];
-        if (!serverName || typeof serverName !== 'string') {
-          res.status(400).json({
-            error: 'Server name path parameter is required',
-            code: 'invalid_server_name',
-          });
-          return;
-        }
-        if (serverName.length > MAX_SERVER_NAME_LENGTH) {
-          res.status(400).json({
-            error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
-            code: 'invalid_server_name',
-          });
-          return;
-        }
-        const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-        if (clientId === null) return;
+  const stopSubscriptionAuth = registerSubscriptionAuthRoutes(
+    app,
+    mutate,
+    async () => {
+      let failed = false;
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (runtime.generationGuard?.closed) continue;
         try {
-          const result = await bridge.manageMcpServer(
-            serverName,
-            bridgeAction,
-            clientId,
+          runtime.generationGuard?.assertOpen();
+          const result = await runtime.workspaceService.reloadModelProviders(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(
+              'POST /auth/subscription/revoke',
+            ),
+            { subscriptionSignedOut: true },
           );
-          res.status(200).json(result);
-        } catch (err) {
-          sendBridgeError(res, err, {
-            route: `POST /workspace/mcp/:server/${routeAction}`,
-          });
+          if (result.status !== 'applied') failed = true;
+        } catch {
+          failed = true;
         }
-      },
-    );
+      }
+      if (failed)
+        throw new Error('Unable to restore model connections after sign-out.');
+    },
+  );
+  app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
+
+  registerWorkspaceAuthRoutes(app, {
+    mutate,
+    deviceFlowRegistry,
+    getSupportedDeviceFlowProviders,
+    sendBridgeError,
+    boundWorkspace: primaryBoundWorkspace,
+    allowPrivateAuthBaseUrl: opts.allowPrivateAuthBaseUrl === true,
+    installAuthProvider: deps.installAuthProvider,
+    syncModelProvidersRuntime: () =>
+      syncModelProvidersRuntime('POST /workspace/auth/provider'),
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+
+  const virtualSubagentSessions = new VirtualSubagentSessions();
+  const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
+
+  registerSessionCatalogRoutes(app, workspaceRegistry);
+  const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
+    sessionArtifactsPersistenceAvailable:
+      deps.sessionArtifactsPersistenceAvailable !== false,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspaceRegistry,
+    archiveCoordinator,
+    requestedSessionIdAdmission,
+    mutate,
+    sendBridgeError,
+    daemonLog,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+    promptDeadlineMs: opts.promptDeadlineMs,
+    sessionShellCommandEnabled,
+    languageCodes,
+    virtualSubagentSessions,
+    conversationRuntimeActivity,
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
+    isLiveSessionActive: (sessionId: string) =>
+      liveCoordinator.isActiveSession(sessionId),
+    ...(liveConversationWorkspaceForRoutes
+      ? {
+          ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
+          liveConversationRootPath: liveConversationWorkspaceForRoutes.rootPath,
+          materializeLiveConversationDirectory: (sessionId: string) =>
+            liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+              sessionId,
+            ),
+        }
+      : {}),
+  });
+
+  if (standaloneSessionService) {
+    registerStandaloneSessionRoutes(app, {
+      service: standaloneSessionService,
+      mutate,
+      sendBridgeError,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    });
+    standaloneSessionsAvailable = true;
   }
 
-  // Add a runtime MCP server.
-  app.post(
-    '/workspace/mcp/servers',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const body = safeBody(req);
-      const name = body['name'];
-      if (!validateMcpRuntimeServerName(name, res)) return;
-      // Validate config: must be a non-null object
-      const config = body['config'];
-      if (
-        typeof config !== 'object' ||
-        config === null ||
-        Array.isArray(config)
-      ) {
-        res.status(400).json({
-          error: '`config` must be a non-null object',
-          code: 'missing_required_field',
-          field: 'config',
-        });
-        return;
-      }
-      // Validate client identity (required for runtime MCP mutation)
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      if (!clientId) {
-        res.status(400).json({
-          error:
-            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
-          code: 'missing_client_id',
-        });
-        return;
-      }
-      try {
-        const result = await bridge.addRuntimeMcpServer(
-          name,
-          config as Record<string, unknown>,
-          clientId,
-        );
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/mcp/servers',
-        });
-      }
-    },
-  );
-
-  // Remove a runtime MCP server. Idempotent.
-  app.delete(
-    '/workspace/mcp/servers/:name',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const name = req.params['name'] ?? '';
-      if (!validateMcpRuntimeServerName(name, res)) return;
-      // Validate client identity (required for runtime MCP mutation)
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      if (!clientId) {
-        res.status(400).json({
-          error:
-            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
-          code: 'missing_client_id',
-        });
-        return;
-      }
-      try {
-        const result = await bridge.removeRuntimeMcpServer(name, clientId);
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'DELETE /workspace/mcp/servers/:name',
-        });
-      }
-    },
-  );
-
-  app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
-    // #4175 Wave 4 PR 17. Scaffold-only init: the workspace service
-    // writes an empty QWEN.md without invoking the LLM. Default refuses
-    // overwrite (409); body `{force: true}` overrides.
-    const body = safeBody(req);
-    const force = body['force'];
-    if (force !== undefined && typeof force !== 'boolean') {
-      res.status(400).json({
-        error: '`force` must be a boolean when provided',
-        code: 'invalid_force_flag',
-      });
-      return;
-    }
-    // Validate against known client ids.
-    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-    if (clientId === null) return;
-    try {
-      const ctx = buildWorkspaceCtx(req, 'POST /workspace/init', clientId);
-      const result = await workspace.initWorkspace(ctx, {
-        force: force === true,
-      });
-      res.status(200).json(result);
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'POST /workspace/init' });
-    }
+  registerWorkspaceMcpControlRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedMcpControlRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceRuntimeMcpRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  const channelWorkerControl =
+    deps.getChannelWorkerControl ??
+    (deps.getChannelWorkerSnapshot
+      ? () => {
+          const workers = deps.getChannelWorkerSnapshots?.() ?? [];
+          const primary = deps.getChannelWorkerSnapshot!();
+          return {
+            enabled:
+              workers.length > 0
+                ? workers.some((worker) => worker.enabled)
+                : primary.enabled,
+            selection: null,
+            transition: 'idle' as const,
+            workers,
+          };
+        }
+      : undefined);
+  if (
+    channelWorkerControl &&
+    (deps.reloadChannelWorker ||
+      (deps.setChannelWorkerSelection && deps.stopChannelWorker))
+  ) {
+    registerWorkspaceChannelControlRoutes(app, {
+      getChannelWorkerControl: channelWorkerControl,
+      ...(deps.isChannelControlDraining
+        ? { isDaemonDraining: deps.isChannelControlDraining }
+        : {}),
+      ...(deps.isChannelControlInitializing
+        ? { isManagerInitializing: deps.isChannelControlInitializing }
+        : {}),
+      ...(deps.setChannelWorkerSelection
+        ? { setChannelWorkerSelection: deps.setChannelWorkerSelection }
+        : {}),
+      ...(deps.stopChannelWorker
+        ? { stopChannelWorker: deps.stopChannelWorker }
+        : {}),
+      ...(deps.reloadChannelWorker
+        ? { reloadChannelWorker: deps.reloadChannelWorker }
+        : {}),
+      mutate,
+      safeBody,
+      sendBridgeError,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    });
+  }
+  if (deps.channelManagementService) {
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime,
+      workspaceRegistry,
+      resolveService: deps.channelManagementService,
+      mutate,
+      safeBody,
+      parseAndValidateClientId: (req, res, runtime) =>
+        parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+      daemonEnv: daemonEnvAtBoot,
+      conversationRuntimeActivity,
+    });
+  }
+  registerWorkspaceChannelObservedContactRoutes(app, {
+    primaryWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    conversationRuntimeActivity,
+  });
+  registerWorkspaceLifecycleRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    invalidateServeFeaturesCache,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedLifecycleRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    invalidateServeFeaturesCache,
+  });
+  registerWorkspaceToolsRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedToolsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  const archiveInstalls = new SkillInstallAttemptStore();
+  registerWorkspaceSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+    workspaceRuntime: primaryRuntime,
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
+    ...(deps.persistUserSkillsActivation
+      ? {
+          persistUserSkillsActivation: (skillNames, activation) =>
+            deps.persistUserSkillsActivation!(
+              primaryBoundWorkspace,
+              skillNames,
+              activation,
+              capturePrimaryGenerationAssertion(),
+            ),
+        }
+      : {}),
+    installSkillConfig: (workspaceCwd, request, options) =>
+      installWorkspaceSkill(
+        workspaceCwd,
+        request,
+        primaryEffectiveEnv?.['GH_TOKEN'] ??
+          primaryEffectiveEnv?.['GITHUB_TOKEN'] ??
+          daemonEnvAtBoot['GH_TOKEN'] ??
+          daemonEnvAtBoot['GITHUB_TOKEN'],
+        capturePrimaryGenerationAssertion(),
+        options,
+      ),
+    deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
+      deleteWorkspaceSkill(
+        workspaceCwd,
+        scope,
+        skillName,
+        installedPath,
+        capturePrimaryGenerationAssertion(),
+      ),
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+    getSkillsSnapshot: (workspaceCwd) =>
+      trustedSkillsConfigStatus.snapshot(workspaceCwd),
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
   });
 
-  app.post(
-    '/workspace/reload',
-    mutate({ strict: true }),
-    async (req: Request, res: Response) => {
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      try {
-        const ctx = buildWorkspaceCtx(req, 'POST /workspace/reload', clientId);
-        const result = await workspace.reload(ctx);
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, { route: 'POST /workspace/reload' });
-      }
-    },
-  );
+  // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).
+  // Reads/writes the per-project cron file only; firing stays with the
+  // session-side scheduler. Non-strict mutate: creating a scheduled prompt
+  // is the same capability class as POST /session/:id/prompt.
+  //
+  // The bridge is passed ONLY when resident task-session management is enabled.
+  // Binding a task to a dedicated session is only safe when something keeps that
+  // session resident and reloads it after a restart (the keepalive + rehydration
+  // below); without it, a bound task would fire only inside a session nothing
+  // revives and silently go dormant. So embedders that leave the manager off
+  // get UNBOUND tasks (shared-owner firing) instead.
+  registerScheduledTasksRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    safeBody,
+    bridge: deps.manageScheduledTaskSessions ? primaryBridge : undefined,
+    getRuntime: () =>
+      workspaceRegistry.primaryEntry.state === 'active'
+        ? workspaceRegistry.primaryEntry.current?.runtime
+        : undefined,
+    cleanupSession,
+    workspaceRegistry,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+  });
 
-  app.post(
-    '/workspace/tools/:name/enable',
-    mutate({ strict: true }),
-    async (req, res) => {
-      // Toggles a tool name in the workspace `tools.disabled` settings
-      // list. Strict-gated alongside other
-      // mutation routes; bridge writes the file directly (no
-      // ACP roundtrip) and fan-outs `tool_toggled` to every live
-      // session SSE bus. Already-registered tools in live sessions
-      // are NOT retroactively unregistered — toggling takes effect on
-      // the next ACP child spawn or session refresh.
-      const rawToolName = req.params['name'];
-      if (!rawToolName || typeof rawToolName !== 'string') {
-        res.status(400).json({
-          error: 'Tool name path parameter is required',
-          code: 'invalid_tool_name',
-        });
-        return;
-      }
-      // Trim before persistence so the write path matches the read path.
-      const toolName = rawToolName.trim();
-      if (toolName.length === 0) {
-        res.status(400).json({
-          error: 'Tool name path parameter is required',
-          code: 'invalid_tool_name',
-        });
-        return;
-      }
-      // Cap tool name length to prevent settings file bloat.
-      if (toolName.length > MAX_TOOL_NAME_LENGTH) {
-        res.status(400).json({
-          error: `Tool name exceeds ${MAX_TOOL_NAME_LENGTH}-character limit`,
-          code: 'invalid_tool_name',
-        });
-        return;
-      }
-      const body = safeBody(req);
-      const enabled = body['enabled'];
-      if (typeof enabled !== 'boolean') {
-        res.status(400).json({
-          error: '`enabled` is required and must be a boolean',
-          code: 'invalid_enabled_flag',
-        });
-        return;
-      }
-      // Validate against known client ids.
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      try {
-        const ctx = buildWorkspaceCtx(
-          req,
-          'POST /workspace/tools/:name/enable',
-          clientId,
-        );
-        const result = await workspace.setWorkspaceToolEnabled(
-          ctx,
-          toolName,
-          enabled,
-        );
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/tools/:name/enable',
-        });
-      }
-    },
-  );
+  // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
+  // GET like /daemon/status: it fans out to the live sessions and reports what
+  // their in-memory goal stores hold.
+  registerGoalsRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
 
-  app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
-    const sessionId = req.params['id'];
-    const requestId = req.params['requestId'];
-    const response = parsePermissionVoteBody(req, res);
-    if (response === undefined) return;
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    // Thread the kernel-stamped peer-IP loopback bit through the bridge
-    // context so the `local-only` policy can gate votes by transport.
-    const fromLoopback = detectFromLoopback(req);
-    const context = {
-      ...(clientId !== undefined ? { clientId } : {}),
-      fromLoopback,
-    };
-    let accepted: boolean;
-    try {
-      accepted = bridge.respondToSessionPermission(
-        sessionId,
-        requestId,
-        response,
-        context,
+  // The primary workspace's /autofix-pr watches, read from the clone's files
+  // (as `qwen autofix-pr status` lists them). Read-only.
+  registerAutofixPrWatchesRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+
+  // Being joined as a runtime (`hosts/service`, `hosts/connect`) needs only
+  // the bearer gate, a trusted workspace and the mutation gate — not the
+  // collaboration opt-in, so a running daemon can join without a restart.
+  registerAgentHostRuntimeRoutes(
+    app,
+    '/workspaces/:workspace/agent',
+    (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
       );
-    } catch (err) {
-      sendPermissionVoteError(res, err, {
-        route: 'POST /session/:id/permission/:requestId',
-        sessionId,
-      });
-      return;
-    }
-    if (!accepted) {
-      res.status(404).json({
-        error: 'No pending permission request for session',
-        sessionId,
-        requestId,
-      });
-      return;
-    }
-    res.status(200).json({});
-  });
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) {
+        return undefined;
+      }
+      return runtime;
+    },
+    () => mutate(),
+  );
 
-  app.post('/permission/:requestId', mutate(), (req, res) => {
-    const requestId = req.params['requestId'];
-    const response = parsePermissionVoteBody(req, res);
-    if (response === undefined) return;
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    // Same loopback bit threading as the session-scoped route above.
-    const fromLoopback = detectFromLoopback(req);
-    const context = {
-      ...(clientId !== undefined ? { clientId } : {}),
-      fromLoopback,
-    };
-    let accepted: boolean;
-    try {
-      accepted = bridge.respondToPermission(requestId, response, context);
-    } catch (err) {
-      sendPermissionVoteError(res, err, {
-        route: 'POST /permission/:requestId',
-      });
-      return;
-    }
-    if (!accepted) {
-      // Either the requestId never existed or another client already won
-      // the race. Stage 1 doesn't distinguish — both surface as 404.
-      res
-        .status(404)
-        .json({ error: 'No pending permission request', requestId });
-      return;
-    }
-    res.status(200).json({});
-  });
-
-  app.get('/session/:id/events', (req, res) => {
-    const sessionId = req.params['id'];
-    const lastEventId = parseLastEventId(req.headers['last-event-id']);
-    const maxQueued = parseMaxQueuedQuery(req.query['maxQueued'], res);
-    // `parseMaxQueuedQuery` sends its own 400 + JSON body on rejection
-    // (returns `null`) so the SSE handshake doesn't get half-written.
-    // `undefined` means "client didn't ask for an override; use bus
-    // default 256" — proceed as before.
-    if (maxQueued === null) return;
-
-    let iter: AsyncIterator<BridgeEvent> | undefined;
-    const abort = new AbortController();
-    try {
-      const snapshot = req.query['snapshot'] === '1';
-      const iterable = bridge.subscribeEvents(sessionId, {
-        signal: abort.signal,
-        lastEventId,
-        ...(maxQueued !== undefined ? { maxQueued } : {}),
-        ...(snapshot ? { snapshot: true } : {}),
-      });
-      iter = iterable[Symbol.asyncIterator]();
-    } catch (err) {
-      // `EventBus` throws `SubscriberLimitExceededError` when the
-      // per-session subscriber cap (default 64) is reached.
-      //
-      // Surface as `429 Too Many Requests` + `Retry-After`
-      // header rather than `200 + stream_error`. The previous
-      // SSE-shaped response triggered `EventSource`'s
-      // auto-reconnect (which honors the `retry:` directive AND
-      // default-reconnects on any closed stream). The reconnect hit
-      // the same cap, looped, amplifying the exact load the limit
-      // exists to prevent.
-      //
-      // `429` is the standard "back off" signal — browsers'
-      // `EventSource` treats `4xx` as terminal and does NOT
-      // auto-reconnect on it, unlike `200 + close` which DOES
-      // reconnect. Body shape mirrors the SSE frame's data field so
-      // a raw-fetch client gets the same structured error.
-      if (err instanceof SubscriberLimitExceededError) {
+  // Reconnect, in the background, every saved Host connection (`qwen agents
+  // join`, `hosts/connect`) of every trusted workspace, including ones
+  // registered or trusted after boot. The real daemon only, like
+  // scheduled-task residency below: tests and embeds that call
+  // createServeApp must not dial out on the strength of ~/.qwen.
+  if (deps.manageScheduledTaskSessions) {
+    const agentHostRestore = new AbortController();
+    (app.locals as { stopAgentHostRestore?: () => void }).stopAgentHostRestore =
+      () => agentHostRestore.abort();
+    void import('./agent-host-connections.js')
+      .then(({ restoreAgentHostConnections }) =>
+        restoreAgentHostConnections({
+          signal: agentHostRestore.signal,
+          runtimeFor: (workspaceCwd) => {
+            const runtime = workspaceRegistry.getByWorkspaceCwd(workspaceCwd);
+            if (!runtime?.generationGuard || runtime.generationGuard.closed) {
+              return undefined;
+            }
+            const trusted = runtime.primary
+              ? isPrimaryWorkspaceTrusted()
+              : runtime.trusted;
+            return trusted ? runtime : undefined;
+          },
+        }),
+      )
+      .catch((error: unknown) =>
         writeStderrLine(
-          `qwen serve: subscriber limit reached for session ${sessionId} (limit=${err.limit}); rejecting new SSE client with 429`,
-        );
-        res.setHeader('Retry-After', '5');
-        res.status(429).json({
-          error: err.message,
-          code: 'subscriber_limit_exceeded',
-          limit: err.limit,
+          `qwen serve: could not restore Agent Host connections: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
+
+  // Gated on the opt-in, and gated by *not registering* rather than by
+  // refusing inside the handlers. Skipping the call leaves the routes 404,
+  // which is also what the absent `agent_collaboration_v1` capability tells
+  // clients.
+  if (anyAgentCollaborationEnabled()) {
+    registerWorkspaceAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+    });
+    // Session multi-agent: agents answering @-mentions in a chat session.
+    registerSessionAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+      agentChainLimitFor,
+      agentTokenBudgetFor,
+      daemonLoopbackBaseUrl,
+      standaloneSessionService: () => standaloneSessionService,
+    });
+    // Squads: a leader agent that coordinates member agents in a session.
+    registerSessionAgentSquadRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+    });
+    agentCollaborationRoutesMounted = true;
+  }
+
+  // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
+  // manages every registered project's schedule against that project's own cron
+  // file (and its own session bridge) rather than always the primary's. Each
+  // request resolves + trust-checks `:workspace` before any read/write.
+  registerWorkspaceQualifiedScheduledTasksRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+    cleanupSession,
+    conversationRuntimeActivity,
+  });
+
+  // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
+  // usage only; open GET like /daemon/status, with its own short TTL cache.
+  registerUsageStatsRoutes(app);
+
+  // Resident management of scheduled-task-owned sessions — opt-in, so tests and
+  // embeds that call createServeApp neither spawn sessions on boot nor hold a
+  // heartbeat timer (both would read the bound workspace's real tasks file).
+  if (deps.manageScheduledTaskSessions) {
+    const registerScheduledTaskAuthorizations = (
+      workspaceCwd: string,
+      tasks: readonly DurableCronTask[],
+    ) => {
+      const authorizations = deps.channelDeliveryAuthorizations;
+      if (!authorizations) return;
+      for (const task of tasks) {
+        if (!task.delivery || !task.sessionId) continue;
+        authorizations.registerScheduledTask(workspaceCwd, {
+          sessionId: task.sessionId,
+          taskId: task.id,
+          target: task.delivery.target,
+          recurring: task.recurring,
+          ...(typeof task.lastFiredAt === 'number'
+            ? { lastFiredAt: task.lastFiredAt }
+            : {}),
         });
-        return;
       }
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/events',
-        sessionId,
-      });
-      return;
-    }
-
-    if (daemonLog) {
-      const sseOpenedAt = Date.now();
-      const sseClientId = req.headers['x-qwen-client-id'] as string | undefined;
-      daemonLog.info('SSE stream opened', { sessionId, clientId: sseClientId });
-      res.on('close', () => {
-        try {
-          daemonLog.info('SSE stream closed', {
-            sessionId,
-            clientId: sseClientId,
-            durationMs: Date.now() - sseOpenedAt,
-          });
-        } catch {
-          /* logger failure must not prevent counter decrement */
-        }
-      });
-    }
-
-    res.status(200);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    // Disable proxy buffering (nginx); event-stream content type alone
-    // doesn't always reach the client through every proxy.
-    res.setHeader('X-Accel-Buffering', 'no');
-    // Always present on the supported Node versions (engines.node >=22).
-    res.flushHeaders();
-
-    activeSseCount++;
-    let sseCounted = true;
-    res.on('close', () => {
-      if (sseCounted) {
-        sseCounted = false;
-        activeSseCount--;
-      }
-    });
-
-    // Backpressure helper: `res.write` returns false when the kernel send
-    // buffer is full. Without awaiting `drain` Node accumulates the
-    // payload in user-space memory unboundedly — a slow consumer on a
-    // chatty session can balloon daemon RSS. Wait for `drain` (or
-    // close/error) before scheduling the next write.
-    //
-    // Concurrency: serialize ALL writes through a per-connection chain
-    // so the heartbeat (fire-and-forget interval, see below) can't
-    // interleave with the main event-write loop. Without serialization,
-    // the heartbeat firing while the main loop is mid-`drain` await
-    // would issue a second `res.write()` that bypasses the
-    // backpressure guard — and could even interleave bytes between two
-    // SSE frames on the wire. The chain is single-flight: each call
-    // waits for the previous write to settle before scheduling its own.
-    let writeChain: Promise<void> = Promise.resolve();
-    // T2.9: epoch (ms) of the last write that fully resolved — either
-    // synchronous `res.write` returned `true`, or the async `drain`
-    // fired. The idle-timeout interval below compares
-    // `Date.now() - lastWriteAt` against the configured budget; a
-    // writer that stalls indefinitely on `drain` will never refresh
-    // this stamp, so the timer fires and forces cleanup. Initialized
-    // to "now" because cleanup runs only after the FIRST stall, and
-    // the SSE handshake itself counts as activity.
-    //
-    // Gated on `trackWriterIdle` so the default (flag unset) avoids
-    // a per-chunk `Date.now()` on a chatty stream — SSE writers can
-    // be in the hundreds-to-thousands of frames per session.
-    const trackWriterIdle =
-      opts.writerIdleTimeoutMs !== undefined && opts.writerIdleTimeoutMs > 0;
-    let lastWriteAt = trackWriterIdle ? Date.now() : 0;
-    const doWrite = (chunk: string): Promise<void> =>
-      new Promise((resolve, reject) => {
-        if (res.writableEnded) {
-          resolve();
-          return;
-        }
-        // `res.write` can throw synchronously when the socket is
-        // already destroyed (typical EPIPE shape). Wrap in try/catch
-        // so that surfaces as a rejection on this promise instead of
-        // escaping the executor and turning into an unhandled
-        // exception. Async failures still arrive via the `'error'`
-        // event handler below — Node's Writable.write callback isn't
-        // documented to receive an error argument (errors come on
-        // the event), so we don't rely on it.
-        let ok: boolean;
-        try {
-          ok = res.write(chunk);
-        } catch (err) {
-          reject(err);
-          return;
-        }
-        if (ok) {
-          if (trackWriterIdle) lastWriteAt = Date.now();
-          resolve();
-          return;
-        }
-        const onDrain = () => {
-          res.off('close', onClose);
-          res.off('error', onError);
-          if (trackWriterIdle) lastWriteAt = Date.now();
-          resolve();
-        };
-        const onClose = () => {
-          res.off('drain', onDrain);
-          res.off('error', onError);
-          resolve();
-        };
-        const onError = (err: Error) => {
-          res.off('drain', onDrain);
-          res.off('close', onClose);
-          reject(err);
-        };
-        res.once('drain', onDrain);
-        res.once('close', onClose);
-        res.once('error', onError);
-      });
-    const writeWithBackpressure = (chunk: string): Promise<void> => {
-      const next = writeChain.then(() => doWrite(chunk));
-      // Tail-swallow rejections on the chain itself so a single failed
-      // write doesn't poison every subsequent call. The CALLER's
-      // returned promise still rejects — chain-internal failures are
-      // someone else's problem, not blockers for queueing.
-      writeChain = next.catch(() => undefined);
-      return next;
     };
+    // Keepalive: keep task sessions resident so their in-child schedulers keep
+    // ticking rather than being idle-reaped, AND revive a re-enabled bound
+    // session the reaper already let go. The revive loop is needed even when the
+    // reaper is disabled (idle timeout ≤ 0), because archiving a task closes its
+    // session — so this always runs when task sessions are managed, not only
+    // when a reaper is active.
+    const idleTimeoutMs =
+      opts.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+    const keepaliveIntervalMs = computeKeepaliveIntervalMs(idleTimeoutMs);
 
-    // Tell EventSource to retry after 3s on disconnect. Awaiting drain on
-    // the very first write is overkill but cheap — `ok` is true the
-    // overwhelming majority of the time. Always swallow rejection: a
-    // socket that errors before the very first write would otherwise
-    // surface as an unhandled promise rejection (the `res.on('error')`
-    // hook below is what we actually rely on for cleanup).
-    void writeWithBackpressure('retry: 3000\n\n').catch(() => {});
-
-    // Heartbeat keeps NAT/proxy connections alive and lets the server
-    // notice a dead client through write-back-pressure. Comment frame is
-    // ignored by EventSource.
-    //
-    // The 15s heartbeat detects a TCP-dead writer
-    // via `drain` back-pressure on the comment frame itself. The
-    // `--writer-idle-timeout-ms` flag below adds the orthogonal
-    // application-level guard: if the LAST SUCCESSFUL FLUSH (any
-    // write — heartbeat, replay frame, live event) is older than the
-    // configured budget, the writer is considered stuck (NAT silently
-    // dropping flows, peer process frozen, etc.) and we force a
-    // terminal `client_evicted` frame + cleanup. The historical "Stage
-    // 2 may add an explicit application-level idle timeout" gap
-    // referenced here is now closed when the flag is set.
-    const heartbeatTimer = setInterval(() => {
-      if (!res.writableEnded) {
-        // Heartbeat writes are best-effort; failure swallowed via the
-        // `res.on('error')` hook below.
-        void writeWithBackpressure(': heartbeat\n\n').catch(() => {});
-      }
-    }, 15_000);
-    heartbeatTimer.unref();
-
-    // T2.9: declare the idle-timer slot up-front so `cleanup` below can
-    // clear it unconditionally. The actual interval is armed only when
-    // `--writer-idle-timeout-ms` is configured.
-    let idleTimer: NodeJS.Timeout | undefined;
-
-    const cleanup = () => {
-      clearInterval(heartbeatTimer);
-      if (idleTimer !== undefined) clearInterval(idleTimer);
-      abort.abort();
-    };
-
-    // T2.9: arm the SSE writer idle timeout (if configured). Distinct
-    // from the heartbeat above: heartbeat = "try to ping every 15s";
-    // this = "if no write SUCCEEDED for N ms, force-evict." Values
-    // BELOW the 15s heartbeat interval WILL evict otherwise-healthy
-    // idle connections before the first heartbeat fires — they're not
-    // a no-op. Production deployments should pick a value comfortably
-    // above 15s (e.g. 30000–300000ms) so legitimate idle streams stay
-    // alive and only genuinely stuck writers are reaped; small values
-    // are useful for tests / short-lived dev sessions. The interval
-    // polls at 1/4 the budget (bounded by [250ms, 5s]) so tests
-    // using short budgets still detect promptly, while long
-    // production budgets stay cheap. Values below roughly 1000ms all
-    // use the 250ms polling floor, so eviction can lag until the next
-    // tick instead of landing at exact millisecond precision.
-    if (trackWriterIdle) {
-      // Narrowed by `trackWriterIdle`; the const assertion keeps
-      // TypeScript happy inside the closure without re-reading opts.
-      const writerIdleTimeoutMs = opts.writerIdleTimeoutMs as number;
-      const checkIntervalMs = Math.max(
-        250,
-        Math.min(5_000, Math.floor(writerIdleTimeoutMs / 4)),
-      );
-      idleTimer = setInterval(() => {
-        if (res.writableEnded) return;
-        const idleForMs = Date.now() - lastWriteAt;
-        if (idleForMs < writerIdleTimeoutMs) return;
-        // Reuse the existing `client_evicted` taxonomy from
-        // `event-bus.ts` so SDK reducers branch on the same frame type
-        // they already handle for queue-overflow eviction; the new
-        // `reason` slot is the differentiator. Write DIRECTLY here
-        // (bypassing `writeWithBackpressure`) because the chain may
-        // already be stuck on a `drain` that will never come — which
-        // is the exact scenario this timer exists to catch. If the
-        // kernel send buffer has room the client sees the frame; if
-        // not, the client gets EPIPE on next read. Either way the
-        // socket is closed in the next two statements, so any drop
-        // is bounded.
-        try {
-          res.write(
-            formatSseFrame({
-              v: 1,
-              type: 'client_evicted',
-              data: {
-                reason: 'writer_idle_timeout',
-                errorKind: 'writer_idle_timeout',
-                idleForMs,
-                timeoutMs: writerIdleTimeoutMs,
-              },
-            }),
-          );
-        } catch {
-          /* socket already destroyed; nothing to send. */
-        }
-        // Wrap stderr + res.end so an
-        // EPIPE on the stderr pipe (or a synchronous throw from
-        // `res.end()` against a destroyed socket) can't escape this
-        // interval callback. If it did, `cleanup()` wouldn't run, the
-        // heartbeat + idle timers would never clear, and every
-        // subsequent tick would re-throw — turning one transient
-        // failure into a permanent uncaughtException loop.
-        try {
-          writeStderrLine(
-            `qwen serve: evicting SSE client (session ${sessionId}) — ` +
-              `writer idle for ${idleForMs}ms > ${writerIdleTimeoutMs}ms timeout`,
-          );
-        } catch {
-          /* stderr pipe closed; eviction is still happening. */
-        }
-        cleanup();
-        try {
-          if (!res.writableEnded) res.end();
-        } catch {
-          /* socket already destroyed; nothing more to do. */
-        }
-      }, checkIntervalMs);
-      idleTimer.unref();
-    }
-    req.on('close', cleanup);
-    // Swallow socket-level write errors. When the underlying TCP connection
-    // dies (RST, mid-flight kill -9), the next `res.write` throws EPIPE.
-    // Without an `error` listener Express forwards it to its default error
-    // handler which logs noisily. The req.on('close') path above is what we
-    // actually rely on to tear down the subscription; this listener just
-    // suppresses the noise + ensures cleanup runs even if for some reason
-    // the close event doesn't fire first.
-    res.on('error', (err) => {
-      // Without this log the daemon side is blind to SSE disconnects
-      // (RST, mid-flight kill -9, network blip). Cleanup still runs —
-      // the listener exists primarily so Node doesn't crash on EPIPE
-      // — but operators get a breadcrumb when chasing flaky clients.
-      writeStderrLine(
-        `qwen serve: SSE socket error (session ${sessionId}): ${err.message}`,
-      );
-      cleanup();
-    });
-
-    void (async () => {
-      try {
-        while (true) {
-          const next = await iter!.next();
-          if (next.done) break;
-          if (res.writableEnded) break;
-          // Log ring eviction events for operator observability.
-          if (next.value.type === 'state_resync_required') {
-            const data = next.value.data as {
-              lastDeliveredId?: number;
-              earliestAvailableId?: number;
-              reason?: string;
-            };
-            const gap =
-              typeof data.earliestAvailableId === 'number' &&
-              typeof data.lastDeliveredId === 'number'
-                ? data.earliestAvailableId - data.lastDeliveredId - 1
-                : undefined;
-            writeStderrLine(
-              `qwen serve: SSE ring eviction detected (session ${sessionId}): ` +
-                `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
-                `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
-                `gap=${gap ?? '?'} events, ` +
-                `reason=${data.reason ?? '?'}. ` +
-                `Consumer must call loadSession to recover.`,
+    // Rehydrate task-owned sessions on boot so their schedulers re-arm after a
+    // restart (a bound task fires only in its own session, which nothing else
+    // reloads). Fire-and-forget so it never delays the server coming up; a
+    // no-op when there are no bound tasks. Deliberately not awaited.
+    const rehydrateWorkspace = (runtime: WorkspaceRuntime) => {
+      rehydratingWorkspaces.add(runtime);
+      void runWithWorkspaceRuntimeStorage(runtime, () =>
+        rehydrateScheduledTaskSessions({
+          bridge: runtime.bridge,
+          boundWorkspace: runtime.workspaceCwd,
+          loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
+          onTasksRead: (tasks) =>
+            registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
+          onError: (sessionId, err) => {
+            process.stderr.write(
+              `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
             );
-          }
-          await writeWithBackpressure(formatSseFrame(next.value));
-        }
-      } catch (err) {
-        if (!res.writableEnded) {
-          // Don't burn an `id:` slot — `stream_error` is a terminal frame
-          // emitted on the daemon side when the bridge iterator throws, so
-          // it has no place in the per-session monotonic sequence and a
-          // hard-coded `id: 0` would regress the client's `Last-Event-ID`
-          // tracker. `formatSseFrame` omits the `id:` line when the input
-          // event has no id.
-          //
-          // Stamp the classified error kind so UIs can render typed responses
-          // (auth retry / file picker / proxy hint / etc.) rather than
-          // regex-matching the human-readable `error` string. Returns
-          // `undefined` for unclassified errors — SDK falls back to
-          // rendering `error` text as before, so adding `errorKind` is
-          // strictly additive / backward-compatible.
-          const errorKind = mapDomainErrorToErrorKind(err);
-          // Log bridge iterator errors to daemon stderr for
-          // operator observability.
-          writeStderrLine(
-            `qwen serve: bridge iterator error (session ${sessionId}): ` +
-              `${errorMessage(err)}` +
-              (errorKind ? ` [${errorKind}]` : ''),
+          },
+          // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+          // catches readCronTasks failures and per-session load errors internally
+          // (returning { loaded, failed }), so this only guards an unexpected throw
+          // from the function entry itself. Log rather than swallow it — a silent
+          // failure here leaves every bound task dormant with no diagnostic.
+        }),
+      )
+        .catch((err) => {
+          process.stderr.write(
+            `qwen serve: unexpected scheduled-task rehydration failure: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`,
           );
-          await writeWithBackpressure(
-            formatSseFrame({
-              v: 1,
-              type: 'stream_error',
-              data: {
-                error: errorMessage(err),
-                ...(errorKind ? { errorKind } : {}),
-              },
-            }),
-          ).catch(() => {});
-        }
-      } finally {
-        cleanup();
-        if (!res.writableEnded) res.end();
+        })
+        .finally(() => {
+          rehydratingWorkspaces.delete(runtime);
+        });
+    };
+
+    // Every trusted workspace gets its own keepalive + rehydration against its
+    // own cron file + bridge.
+    const keepaliveStops = new Map<string, () => void>();
+    const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
+      const trusted = runtime.primary
+        ? isPrimaryWorkspaceTrusted()
+        : runtime.trusted;
+      if (!trusted) return;
+      if (keepaliveStops.has(runtime.workspaceCwd)) return;
+      const keepalive = startScheduledTaskKeepalive({
+        bridge: runtime.bridge,
+        boundWorkspace: runtime.workspaceCwd,
+        intervalMs: keepaliveIntervalMs,
+        reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
+        onTasksRead: (tasks) =>
+          registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
+      });
+      scheduledActivity.set(runtime, () => keepalive.activeWork);
+      rehydrateWorkspace(runtime);
+      keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
+    };
+    for (const runtime of workspaceRegistry.list()) {
+      startKeepaliveForWorkspace(runtime);
+    }
+
+    // Park a combined stop fn on `app.locals` (same pattern as `fsFactory` /
+    // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
+    // run-qwen-serve.ts can invoke it without threading it back through the
+    // createServeApp return type. Stopping all is idempotent per keepalive.
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive = () => {
+      runtimeStopsClosing = true;
+      for (const stop of keepaliveStops.values()) stop();
+      keepaliveStops.clear();
+    };
+    (
+      app.locals as {
+        stopScheduledTaskKeepaliveForWorkspace?: (workspaceCwd: string) => void;
       }
-    })();
+    ).stopScheduledTaskKeepaliveForWorkspace = (workspaceCwd) => {
+      keepaliveStops.get(workspaceCwd)?.();
+      keepaliveStops.delete(workspaceCwd);
+    };
+    (
+      app.locals as {
+        startScheduledTaskKeepaliveForWorkspace?: (
+          runtime: WorkspaceRuntime,
+        ) => void;
+      }
+    ).startScheduledTaskKeepaliveForWorkspace = startKeepaliveForWorkspace;
+  }
+
+  registerPermissionRoutes(app, {
+    bridge: primaryBridge,
+    workspaceRegistry,
+    daemonLog,
+    mutate,
+    sendPermissionVoteError,
+    conversationRuntimeActivity,
+  });
+
+  registerSseEventsRoutes(app, {
+    bridge: primaryBridge,
+    workspaceRegistry,
+    daemonLog,
+    writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
+    sendBridgeError,
+    virtualSubagentSessions,
+    resolveSubagentSessionRuntime,
+    conversationRuntimeActivity,
   });
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
@@ -4905,27 +4143,251 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  acpHandleRef.current = mountAcpHttp(app, bridge, {
-    boundWorkspace,
-    workspace,
-    fsFactory,
+  acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
+    enabled: acpHttpEnabledAtBoot,
+    boundWorkspace: primaryBoundWorkspace,
+    daemonEnv: daemonEnvAtBoot,
+    // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
+    // mounts a per-runtime ACP dispatcher for each registered workspace.
+    workspaceRegistry,
+    isPrimaryWorkspaceTrusted,
+    archiveCoordinator,
+    requestedSessionIdAdmission,
+    workspace: primaryWorkspace,
+    fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,
     token: opts.token,
+    // The WS upgrade bypasses Express middleware, so it needs the same
+    // listener-scoped credentials the REST gate uses — otherwise the
+    // `qwen-bearer.*` subprotocol would be a way around the scoping.
+    credentials,
+    // Mirror the REST CORS allowlist onto the WS CSRF wall so an
+    // explicitly permitted origin (e.g. the extension's
+    // `chrome-extension://<id>`) can open the reverse tool channel.
+    allowedOrigins:
+      opts.allowOrigins && opts.allowOrigins.length > 0
+        ? parseAllowOriginPatterns(opts.allowOrigins)
+        : undefined,
+    hostname: opts.hostname,
     sessionShellCommandEnabled,
+    workspaceRememberLane,
+    ...(liveConversationWorkspaceForRoutes
+      ? {
+          liveSessionIsolation: {
+            materializeConversationDirectory: (sessionId: string) =>
+              liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+                sessionId,
+              ),
+            isSessionActive: (sessionId: string) =>
+              liveCoordinator.isActiveSession(sessionId),
+          },
+        }
+      : {}),
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     checkRate: rateLimiter?.checkRate,
+    clientMcpOverWs: opts.clientMcpOverWs === true,
+    // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
+    // on `mcp_register` it records the WS registrar's sender in the shared
+    // registry and adds an SDK-type runtime MCP server in the ACP child
+    // (originator = the connection id). Only meaningful when
+    // `clientMcpOverWs` is on; the WS layer never builds a provider otherwise.
+    ...(opts.clientMcpOverWs === true
+      ? {
+          clientMcpProviderFactory: (connectionId: string) =>
+            createClientMcpServerProvider(
+              primaryRuntime.clientMcpSenderRegistry,
+              primaryBridge,
+              connectionId,
+            ),
+        }
+      : {}),
+    // Plan C CDP tunnel (issue #5626): the `/cdp` branch + `cdp_*` routing
+    // activate only when the flag is on and a registry is supplied.
+    cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
+    ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.
     extraWsRoutes: [
+      ...(liveVoiceSurfaceAvailable
+        ? [
+            {
+              path: '/live/web',
+              onConnection: (ws, req) => {
+                if (!liveVoiceEnabled) {
+                  ws.close(4003, 'Live Voice is disabled.');
+                  return;
+                }
+                // Same bar as `/voice/stream`: an untrusted workspace never
+                // gets a microphone channel into the daemon.
+                if (!isPrimaryWorkspaceTrusted()) {
+                  ws.close(4003, 'Workspace is not trusted.');
+                  return;
+                }
+                liveCoordinator.attachBrowserHost(ws, {
+                  takeover:
+                    new URL(
+                      req.url ?? '/',
+                      'http://localhost',
+                    ).searchParams.get('takeover') === '1',
+                });
+              },
+            } satisfies ExtraWsRoute,
+          ]
+        : []),
+      ...(liveNativeHostAvailable
+        ? [
+            {
+              path: '/live/host',
+              onConnection: (ws, req) => {
+                if (!liveVoiceEnabled) {
+                  ws.close(4003, 'Live Voice is disabled.');
+                  return;
+                }
+                const header = req.headers['x-qwen-live-nonce'];
+                liveCoordinator.attachHost(
+                  ws,
+                  typeof header === 'string' ? header : undefined,
+                );
+              },
+            } satisfies ExtraWsRoute,
+          ]
+        : []),
       {
         path: '/voice/stream',
-        onConnection: createVoiceWsConnectionHandler(boundWorkspace),
+        onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
+          env: primaryRuntimeEffectiveEnv,
+          isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+          acquireVoiceLease: acquirePrimaryVoiceLease,
+        }),
       },
+      createTerminalWsHandler(webTerminalRegistry, (selector) => {
+        const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+          workspaceRegistry,
+          selector,
+        );
+        if (
+          !runtime ||
+          (runtime.primary ? !isPrimaryWorkspaceTrusted() : !runtime.trusted)
+        ) {
+          return undefined;
+        }
+        return {
+          workspaceCwd: runtime.workspaceCwd,
+          env: getRuntimeEffectiveEnv(runtime.env) ?? daemonEnvAtBoot,
+          ...(runtime.routeFileSystemFactory.sshWorkspace
+            ? {
+                command: sshCommand(
+                  runtime.routeFileSystemFactory.sshWorkspace,
+                  `cd ${quoteSshArgument(runtime.routeFileSystemFactory.sshWorkspace.directory)} && exec "\${SHELL:-/bin/sh}" -l`,
+                  true,
+                ),
+              }
+            : {}),
+        };
+      }),
     ],
+    workspaceVoiceConnection: (runtime, ws, req) =>
+      createVoiceWsConnectionHandler(runtime.workspaceCwd, {
+        env: getRuntimeEffectiveEnv(runtime.env),
+        isWorkspaceTrusted: () => runtime.trusted,
+        acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
+      })(ws, req),
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
   }
+  runtimeStopReady = !!(
+    deps.managedChildProcesses &&
+    deps.workspaceRuntimeRemoval &&
+    acpHandleRef.current &&
+    deps.manageScheduledTaskSessions &&
+    workspaceRegistry
+      .listManaged()
+      .some(
+        (runtime) =>
+          typeof runtime.bridge.stopWorkspaceRuntime === 'function' &&
+          typeof runtime.bridge.getRuntimeStopCompletion === 'function' &&
+          typeof runtime.bridge.getRuntimeStopSnapshot === 'function',
+      )
+  );
+  if (deps.managedChildProcesses) {
+    reclaimIdleAcp = createIdleAcpReclaimer({
+      registry: workspaceRegistry,
+      processes: deps.managedChildProcesses.registry,
+      policy: deps.managedChildProcesses.policy,
+      ownsBridge:
+        deps.managedChildProcesses.ownsBridge ??
+        ((candidate) => candidate === defaultBridgeForAdmission),
+      getActivity: (runtime) => {
+        if (
+          !deps.workspaceRuntimeRemoval ||
+          !acpHandleRef.current ||
+          !supportsWorkspaceRuntimeLifecycle(runtime.bridge)
+        )
+          return undefined;
+        return readWorkspaceActivity(
+          runtime,
+          deps.workspaceRuntimeRemoval.getActivity(runtime),
+          acpHandleRef.current.getWorkspaceActivity(runtime.workspaceId),
+        );
+      },
+    });
+    app.locals['reclaimIdleAcp'] = reclaimIdleAcp;
+  }
+
+  // Local Control: the LAN listener serves THIS app, so the service is built
+  // here where the credential store and the CORS allowlist it has to mutate
+  // both live. Published on `app.locals` alongside `acpHandle` — the same
+  // channel `runQwenServe` already uses to reach into the constructed app for
+  // lifecycle work (drain, dispose).
+  const localControlService = new LocalControlService({
+    app,
+    credentials,
+    originAllowlist,
+    daemonLog,
+    // Resolved through the ref on each call rather than captured so Local
+    // Control cannot attach to a stale ACP mount.
+    attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
+    detachWebSocket: (server) => acpHandleRef.current?.detachServer(server),
+    getPort,
+    tlsPaths:
+      opts.tlsCert && opts.tlsKey
+        ? { cert: opts.tlsCert, key: opts.tlsKey }
+        : undefined,
+  });
+  app.locals['localControlService'] = localControlService;
+
+  const remoteAccessService = new RemoteAccessService({
+    app,
+    credentials,
+    getPort,
+    attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
+    detachWebSocket: (server) => acpHandleRef.current?.detachServer(server),
+    tlsPaths:
+      opts.tlsCert && opts.tlsKey
+        ? { cert: opts.tlsCert, key: opts.tlsKey }
+        : undefined,
+  });
+  app.locals['remoteAccessService'] = remoteAccessService;
+  registerRemoteAccessRoutes(app, {
+    service: remoteAccessService,
+    primaryHostname: opts.hostname,
+    trustedLoopbackMode,
+    mutate,
+    isDraining: deps.isChannelControlDraining,
+  });
+
+  registerWorkspaceLocalControlRoutes(app, {
+    service: localControlService,
+    daemonLog,
+    mutate,
+    safeBody,
+    isDaemonDraining: deps.isChannelControlDraining,
+    webShellAvailable: Boolean(webShellDir),
+    primaryBindHostname: opts.hostname,
+    trustedLoopbackMode,
+  });
 
   // Web Shell SPA deep-link fallback — registered AFTER every API route (and
   // just before the error handler) so real routes, including their bearerAuth
@@ -4933,1029 +4395,97 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir);
+    mountWebShellSpaFallback(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+      deps.managedLocalWeb !== undefined,
+    );
   }
 
-  // Final error handler. `express.json()` throws `SyntaxError` (with
-  // `status: 400`) on malformed body — without this 4-arg middleware
-  // Express renders an HTML error page, which trips SDK clients that
-  // expect a JSON body on every response. Anything else bubbling out
-  // is a programmer error; log it and return a JSON 500 (matches the
-  // route-level `sendBridgeError` shape so clients have one error
-  // contract to parse).
-  app.use(
-    (
-      err: unknown,
-      _req: import('express').Request,
-      res: import('express').Response,
-      _next: import('express').NextFunction,
-    ) => {
-      if (sendJsonBodyParserError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-      );
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    },
-  );
+  installFinalErrorHandler(app);
 
   if (rateLimiter) {
     setRateLimiter(app, rateLimiter);
   }
 
-  return app;
-}
-
-function sendJsonBodyParserError(
-  res: import('express').Response,
-  err: unknown,
-): boolean {
-  if (
-    err instanceof SyntaxError &&
-    'status' in err &&
-    (err as { status: number }).status === 400
-  ) {
-    res.status(400).json({ error: 'Invalid JSON in request body' });
-    return true;
-  }
-  // body-parser raises a typed error with `status: 413` when a
-  // request body exceeds the `express.json({ limit: '10mb' })`
-  // ceiling. Without this branch it falls through to the 500 path
-  // and clients see a misleading "Internal server error" instead
-  // of a clear "payload too large" — which is the kind of error
-  // they can actually act on (chunk the request, raise the limit).
-  if (
-    err &&
-    typeof err === 'object' &&
-    'status' in err &&
-    (err as { status: number }).status === 413
-  ) {
-    res.status(413).json({ error: 'Request body too large (max 10 MB)' });
-    return true;
-  }
-  return false;
-}
-
-/**
- * Keys stripped by `safeBody` to defend against prototype-pollution
- * Routes downstream of `safeBody` spread
- * the filtered result into objects passed to the bridge / ACP SDK;
- * without this scrub a client could set
- * `{"__proto__": {"polluted": true}}` and pollute
- * `Object.prototype` via downstream spreads.
- *
- * **Cross-reference for route maintainers:** the POST `/session`
- * route distinguishes "absent" from "present" via `'cwd' in body`
- * against `safeBody`'s output. The semantics rely on this set NOT
- * overlapping with user-payload keys. If you ever add a key here
- * that a route's presence-check cares about (highly unlikely — this
- * set is the JS prototype-attack triple, plus a route would have
- * to deliberately name a property after one of these), the
- * presence-check needs to move to the pre-`safeBody` `req.body`
- * (with its own pollution guard) or `safeBody` needs to return a
- * separate "raw-keys" set alongside the filtered object.
- */
-const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
-  '__proto__',
-  'constructor',
-  'prototype',
-]);
-
-const CLIENT_ID_HEADER = 'x-qwen-client-id';
-const MAX_CLIENT_ID_LENGTH = 128;
-const MAX_TOOL_NAME_LENGTH = 256;
-const MAX_SERVER_NAME_LENGTH = 256;
-const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
-const INVALID_PERMISSION_OUTCOME_ERROR =
-  '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
-
-type PermissionVoteResponse = Parameters<
-  AcpSessionBridge['respondToPermission']
->[1];
-
-/**
- * Coerce `req.body` into a safe `Record<string, unknown>` for route
- * handlers.
- *
- * Strips the `PROTOTYPE_POLLUTION_KEYS` set before returning. Uses an
- * `Object.create(null)` target so the returned object itself has no
- * prototype either, blocking second-order spread-into-default-
- * prototype attacks.
- */
-function safeBody(req: import('express').Request): Record<string, unknown> {
-  const raw = req.body;
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return Object.create(null) as Record<string, unknown>;
-  }
-  const out = Object.create(null) as Record<string, unknown>;
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
-    out[key] = value;
-  }
-  return out;
-}
-
-function parseOptionalWorkspaceCwd(
-  body: Record<string, unknown>,
-  boundWorkspace: string,
-  res: import('express').Response,
-): string | undefined {
-  const hasCwd = 'cwd' in body;
-  if (hasCwd && typeof body['cwd'] !== 'string') {
-    res
-      .status(400)
-      .json({ error: '`cwd` must be a string absolute path when provided' });
-    return undefined;
-  }
-  if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
-    res.status(400).json({
-      error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
-    });
-    return undefined;
-  }
-  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
-  if (!path.isAbsolute(cwd)) {
-    res
-      .status(400)
-      .json({ error: '`cwd` must be an absolute path when provided' });
-    return undefined;
-  }
-  return cwd;
-}
-
-/**
- * Returns true iff the GET / POST caller is the same client that
- * originally started the device flow. Both-undefined is treated as a
- * match (anonymous-start -> anonymous-reattach is the legitimate case).
- *
- * **Threat model:** this is BEST-EFFORT ATTRIBUTION, not authentication.
- * `X-Qwen-Client-Id` is a syntactic header, not bound to a server-
- * validated identity — the bearer token IS the auth boundary. This gate
- * prevents accidental cross-client reads in well-behaved multi-SDK setups.
- */
-function callerIsDeviceFlowInitiator(
-  view: Pick<DeviceFlowPublicView, 'initiatorClientId'>,
-  callerClientId: string | undefined,
-): boolean {
-  return (
-    (view.initiatorClientId === undefined && callerClientId === undefined) ||
-    (view.initiatorClientId !== undefined &&
-      callerClientId !== undefined &&
-      callerClientId === view.initiatorClientId)
-  );
-}
-
-/**
- * Translate the registry's redacted `DeviceFlowPublicView` into the
- * wire shape for start responses. Splitting "start response" from
- * "state body" preserves the `attached` field without polluting GET.
- */
-function toDeviceFlowStartResponseBody(
-  view: DeviceFlowPublicView,
-  attached: boolean,
-  callerClientId?: string,
-): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    deviceFlowId: view.deviceFlowId,
-    providerId: view.providerId,
-    status: view.status,
-    expiresAt: view.expiresAt ?? 0,
-    intervalMs: view.intervalMs ?? 0,
-    attached,
+  let appDrainComplete = false;
+  const disposeSkillsConfigStatus = async () => {
+    await Promise.all([
+      trustedSkillsConfigStatus.dispose?.(),
+      untrustedSkillsConfigStatus.dispose?.(),
+    ]);
   };
-  // Only the original starter sees the verification material.
-  if (callerIsDeviceFlowInitiator(view, callerClientId)) {
-    body['userCode'] = view.userCode ?? '';
-    body['verificationUri'] = view.verificationUri ?? '';
-    if (view.verificationUriComplete) {
-      body['verificationUriComplete'] = view.verificationUriComplete;
-    }
-  }
-  // Only echo `initiatorClientId` back when the caller matches.
-  if (
-    view.initiatorClientId &&
-    callerClientId !== undefined &&
-    callerClientId === view.initiatorClientId
-  ) {
-    body['initiatorClientId'] = view.initiatorClientId;
-  }
-  return body;
-}
-
-function toDeviceFlowStateBody(
-  view: DeviceFlowPublicView,
-  callerClientId?: string,
-): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    deviceFlowId: view.deviceFlowId,
-    providerId: view.providerId,
-    status: view.status,
-    createdAt: view.createdAt,
-  };
-  if (view.errorKind) body['errorKind'] = view.errorKind;
-  if (view.hint) body['hint'] = view.hint;
-  if (view.expiresAt !== undefined) body['expiresAt'] = view.expiresAt;
-  if (view.intervalMs !== undefined) body['intervalMs'] = view.intervalMs;
-  if (view.lastPolledAt !== undefined) body['lastPolledAt'] = view.lastPolledAt;
-  // Only echo verification fields to the original starter.
-  if (callerIsDeviceFlowInitiator(view, callerClientId)) {
-    if (view.userCode) body['userCode'] = view.userCode;
-    if (view.verificationUri) body['verificationUri'] = view.verificationUri;
-    if (view.verificationUriComplete) {
-      body['verificationUriComplete'] = view.verificationUriComplete;
-    }
-    if (view.initiatorClientId) {
-      body['initiatorClientId'] = view.initiatorClientId;
-    }
-  }
-  return body;
-}
-
-function requireSessionId(
-  req: import('express').Request,
-  res: import('express').Response,
-): string | null {
-  const sessionId = req.params['id'];
-  if (!sessionId) {
-    res.status(400).json({ error: '`sessionId` route parameter is required' });
-    return null;
-  }
-  return sessionId;
-}
-
-function parseClientIdHeader(
-  req: import('express').Request,
-  res: import('express').Response,
-): string | undefined | null {
-  const raw = req.get(CLIENT_ID_HEADER);
-  if (raw === undefined || raw === '') return undefined;
-  if (raw.length > MAX_CLIENT_ID_LENGTH || !CLIENT_ID_RE.test(raw)) {
-    res.status(400).json({
-      error:
-        '`X-Qwen-Client-Id` must be a non-empty token of 128 characters or fewer',
-      code: 'invalid_client_id',
-    });
-    return null;
-  }
-  return raw;
-}
-
-/**
- * Decide whether a permission vote arrived from a loopback peer.
- *
- * Per RFC 1122 the entire `127.0.0.0/8` block is loopback (and the
- * IPv4-mapped IPv6 form `::ffff:127.0.0.0/104` mirrors that). IPv6
- * loopback is `::1` (single literal).
- *
- * **Security**: reads `req.socket.remoteAddress` only — does NOT
- * consult `X-Forwarded-For` or any HTTP header (forgeable). Fail-
- * CLOSED: unrecognized shapes return `false`.
- */
-export function detectFromLoopback(req: {
-  socket?: { remoteAddress?: string | undefined };
-}): boolean {
-  const addr = req.socket?.remoteAddress;
-  if (typeof addr !== 'string') return false;
-  // IPv6 loopback (single literal).
-  if (addr === '::1') return true;
-  // IPv4 loopback: 127.0.0.0/8.
-  if (addr.startsWith('127.')) return true;
-  // IPv4-mapped IPv6 loopback: ::ffff:127.0.0.0/104.
-  if (addr.startsWith('::ffff:127.')) return true;
-  return false;
-}
-
-/**
- * Validate that a server name from a route parameter is a non-empty
- * alphanumeric string within the length limit and not a reserved JS
- * property name. Emits a 400 JSON response and returns `false` on
- * validation failure.
- */
-function validateMcpRuntimeServerName(
-  name: unknown,
-  res: import('express').Response,
-): name is string {
-  if (typeof name !== 'string' || name.length === 0) {
-    res.status(400).json({
-      error: 'Server name is required and must be a non-empty string',
-      code: 'invalid_server_name',
-    });
-    return false;
-  }
-  if (name.length > MAX_SERVER_NAME_LENGTH) {
-    res.status(400).json({
-      error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
-      code: 'invalid_server_name',
-    });
-    return false;
-  }
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
-    res.status(400).json({
-      error:
-        'Server name must contain only alphanumeric characters, underscores, and hyphens',
-      code: 'invalid_server_name',
-    });
-    return false;
-  }
-  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
-    res.status(400).json({
-      error: 'Server name must not be a reserved JS property name',
-      code: 'invalid_server_name',
-    });
-    return false;
-  }
-  return true;
-}
-
-/**
- * Workspace-level mutation routes validate the parsed `X-Qwen-Client-Id`
- * against `bridge.knownClientIds()` so the `originatorClientId` stamped
- * onto fan-out events is grounded in a known identity. Returns the
- * validated client id (or `undefined` when no header was supplied),
- * `null` when a 400 has already been emitted.
- */
-function parseAndValidateWorkspaceClientId(
-  req: import('express').Request,
-  res: import('express').Response,
-  bridge: AcpSessionBridge,
-): string | undefined | null {
-  const raw = parseClientIdHeader(req, res);
-  if (raw === null || raw === undefined) return raw;
-  if (!bridge.knownClientIds().has(raw)) {
-    res.status(400).json({
-      error: `Client id "${raw}" is not registered for this workspace`,
-      code: 'invalid_client_id',
-      clientId: raw,
-    });
-    return null;
-  }
-  return raw;
-}
-
-function parsePermissionVoteBody(
-  req: import('express').Request,
-  res: import('express').Response,
-): PermissionVoteResponse | undefined {
-  const body = safeBody(req);
-  const outcome = body['outcome'];
-  if (!isValidOutcome(outcome)) {
-    res.status(400).json({ error: INVALID_PERMISSION_OUTCOME_ERROR });
-    return undefined;
-  }
-  return {
-    ...(body as object),
-    outcome,
-  } as PermissionVoteResponse;
-}
-
-function isValidOutcome(
-  raw: unknown,
-): raw is { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } {
-  if (typeof raw !== 'object' || raw === null) return false;
-  const obj = raw as Record<string, unknown>;
-  if (obj['outcome'] === 'cancelled') return true;
-  // `optionId` must be a non-empty string. An empty string is technically a
-  // string but isn't a meaningful selection — letting it through would
-  // forward malformed votes to the bridge and the agent would reject the
-  // unknown option opaquely.
-  return (
-    obj['outcome'] === 'selected' &&
-    typeof obj['optionId'] === 'string' &&
-    (obj['optionId'] as string).length > 0
-  );
-}
-
-/** Range bounds for the `?maxQueued=N` query param on `/session/:id/events`. */
-const MIN_QUERY_MAX_QUEUED = 16;
-const MAX_QUERY_MAX_QUEUED = 2048;
-
-/**
- * Parse the optional `?maxQueued=N` query param on
- * `GET /session/:id/events`. Returns:
- *   - `undefined` — param absent, EventBus uses its default cap (256).
- *   - a positive integer in `[16, 2048]` — caller wants a custom cap.
- *   - `null` — malformed value; the function ALREADY sent a 400 JSON
- *     response and the route must short-circuit. (Pre-handshake 400
- *     is safer than half-opening an SSE stream and emitting a
- *     `stream_error` frame the client has to parse — `EventSource`
- *     auto-reconnects on the latter.)
- *
- * Cap range rationale: lower bound 16 (smaller is useless for any
- * replay backlog); upper bound 2048 (so a single subscriber can't
- * pin ~1 MB of queue memory just by asking).
- */
-function parseMaxQueuedQuery(
-  raw: unknown,
-  res: import('express').Response,
-): number | undefined | null {
-  // Absent param → undefined (use bus default). Present-but-empty
-  // (`?maxQueued=` typed explicitly) → fail-CLOSED 400 — the API
-  // documents fail-closed for any malformed value before opening
-  // SSE, and an empty string is unambiguously malformed (real values
-  // are positive integers in [16, 2048]).
-  if (raw === undefined) return undefined;
-  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
-    // Sanitize via JSON.stringify so an attacker-controlled value
-    // containing `\n` / `\r` / other control chars can't inject extra
-    // log lines into stderr (line-based shipper like
-    // journald/Loki/Splunk would otherwise treat the injected line as
-    // a fresh entry). Matches the `workspace_mismatch` log style in
-    // `sendBridgeError`.
-    writeStderrLine(
-      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
-        `(not a decimal integer)`,
-    );
-    res.status(400).json({
-      error: '`maxQueued` must be a decimal integer',
-      code: 'invalid_max_queued',
-    });
-    return null;
-  }
-  const n = Number.parseInt(raw, 10);
-  if (
-    !Number.isFinite(n) ||
-    n < MIN_QUERY_MAX_QUEUED ||
-    n > MAX_QUERY_MAX_QUEUED
-  ) {
-    writeStderrLine(
-      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
-        `(outside [${MIN_QUERY_MAX_QUEUED}, ${MAX_QUERY_MAX_QUEUED}])`,
-    );
-    res.status(400).json({
-      error: `\`maxQueued\` must be in [${MIN_QUERY_MAX_QUEUED}, ${MAX_QUERY_MAX_QUEUED}]`,
-      code: 'invalid_max_queued',
-    });
-    return null;
-  }
-  return n;
-}
-
-/**
- * Wrap an attacker-controllable string for safe interpolation into a
- * stderr log line. `JSON.stringify` escapes control characters
- * (`\n`, `\r`, etc.) and wraps the result in quotes — any injection
- * attempt surfaces as visible-as-quoted-noise rather than a
- * forged log line. Truncated AFTER stringify to keep the budget
- * predictable even for control-heavy inputs.
- */
-function safeLogValue(raw: unknown): string {
-  return JSON.stringify(String(raw)).slice(0, 82);
-}
-
-function parseLastEventId(raw: unknown): number | undefined {
-  // Stricter than Number.parseInt: only accept pure decimal digits to avoid
-  // values like "1abc" or "1.5e10z" silently parsing to 1.
-  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
-    // BX9_I: log a breadcrumb for the operator when a non-empty
-    // header is rejected. The client resumed from event 0 instead
-    // of where they meant to — without this line, the loss of
-    // every event buffered during their disconnect was invisible.
-    // Skip the log for missing / empty headers (the common case of
-    // "first connect, no resume").
-    if (typeof raw === 'string' && raw.length > 0) {
-      writeStderrLine(
-        `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
-          `(not a decimal integer)`,
+  serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
+  if (!deps.serveAppLifecycle)
+    serveAppLifecycle.setAppDrain(async () => {
+      if (appDrainComplete) return;
+      const pendingDrains = [
+        stopHostedCsiSessions?.() ?? Promise.resolve(),
+        (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
+        workspaceManagementHandle.sealAndWait(),
+        (
+          app.locals as {
+            sealAndWaitLiveCoordinator?: () => Promise<void>;
+          }
+        ).sealAndWaitLiveCoordinator?.() ?? Promise.resolve(),
+        archiveCoordinator.sealMaintenanceAndWait(),
+        conversationRuntimeActivity?.sealAndWait() ?? Promise.resolve(),
+      ];
+      const cleanupErrors: unknown[] = [];
+      const stopAppResource = (stop: (() => void) | undefined) => {
+        try {
+          stop?.();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      };
+      const locals = app.locals as {
+        stopMcpAppSandbox?: () => void;
+        stopScheduledTaskKeepalive?: () => void;
+        stopWorkspaceGitState?: () => void;
+        stopExtensionGenerationReconciler?: () => void;
+        stopSessionAgentOrchestrators?: () => void;
+        stopHostedMountHandbacks?: () => void;
+      };
+      stopAppResource(locals.stopMcpAppSandbox);
+      stopAppResource(locals.stopScheduledTaskKeepalive);
+      stopAppResource(locals.stopWorkspaceGitState);
+      stopAppResource(locals.stopExtensionGenerationReconciler);
+      stopAppResource(locals.stopSessionAgentOrchestrators);
+      stopAppResource(locals.stopHostedMountHandbacks);
+      stopAppResource(stopSubscriptionAuth);
+      stopAppResource(() => deviceFlowRegistry.dispose());
+      stopAppResource(() => rateLimiter?.setDraining(true));
+      stopAppResource(() => rateLimiter?.dispose());
+      stopAppResource(() => agentHostRateLimiter?.dispose());
+      stopAppResource(
+        (app.locals as { stopAgentHostRestore?: () => void })
+          .stopAgentHostRestore,
       );
-    }
-    return undefined;
-  }
-  const n = Number.parseInt(raw, 10);
-  // Reject values that lose precision as a JS `number`. The bus's monotonic
-  // ids are bounded by `Number.MAX_SAFE_INTEGER` (2^53 - 1); a client that
-  // tries to resume from beyond that is either malicious or broken.
-  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) {
-    writeStderrLine(
-      `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
-        `(exceeds Number.MAX_SAFE_INTEGER)`,
-    );
-    return undefined;
-  }
-  return n;
-}
-
-function sendPermissionVoteErrorImpl(
-  res: import('express').Response,
-  err: unknown,
-  ctx: { route: string; sessionId?: string },
-  daemonLog?: DaemonLogger,
-): void {
-  // BkwQI: voter's `optionId` wasn't in the option set the agent
-  // originally offered (e.g. forging `ProceedAlways*` when the
-  // prompt's `hideAlwaysAllow` policy suppressed it). 400, not
-  // 404 — the requestId IS known, but the chosen option isn't.
-  if (err instanceof InvalidPermissionOptionError) {
-    res.status(400).json({
-      error: err.message,
-      code: 'invalid_option_id',
-      requestId: err.requestId,
-      optionId: err.optionId,
-    });
-    return;
-  }
-  // Designated voter mismatch / `local-only` remote
-  // rejection. 403 because the request is well-formed and the voter
-  // was authenticated; the policy refuses their vote.
-  if (err instanceof PermissionForbiddenError) {
-    res.status(403).json({
-      error: err.message,
-      code: 'permission_forbidden',
-      requestId: err.requestId,
-      sessionId: err.sessionId,
-      reason: err.reason,
-    });
-    return;
-  }
-  // Operator configured a permission policy whose
-  // implementation has not landed in this build yet. 501 (not 500)
-  // so the SDK can render "your daemon is older than your settings
-  // expect; upgrade" rather than a generic Internal Server Error.
-  if (err instanceof PermissionPolicyNotImplementedError) {
-    res.status(501).json({
-      error: err.message,
-      code: 'permission_policy_not_implemented',
-      policy: err.policy,
-    });
-    return;
-  }
-  // Agent declared an `allowedOptionIds` set that
-  // includes the cancel-vote sentinel. This is a contract violation
-  // between agent and daemon (not a client mistake), so 500 is the
-  // right shape; structured `code` lets the SDK distinguish from
-  // unrelated 500s.
-  if (err instanceof CancelSentinelCollisionError) {
-    res.status(500).json({
-      error: err.message,
-      code: 'cancel_sentinel_collision',
-      requestId: err.requestId,
-      sentinel: err.sentinel,
-    });
-    return;
-  }
-  sendBridgeErrorImpl(res, err, ctx, daemonLog);
-}
-
-function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
-  // SSE format: id (optional), event (optional), data, blank line.
-  // The `id:` line is intentionally omitted when `event.id` is absent —
-  // terminal/synthetic frames (e.g. daemon-side `stream_error`) must not
-  // burn a slot in the per-session monotonic sequence the client uses for
-  // `Last-Event-ID` reconnect tracking.
-  //
-  // We always emit the payload as a single `data:` line. The EventSource
-  // spec also allows a frame to span multiple `data:` lines (which a
-  // conformant parser joins with `\n`); we don't emit that form because
-  // our payload is JSON without embedded newlines after `JSON.stringify`.
-  // The SDK parser at `sdk-typescript/src/daemon/sse.ts` handles the
-  // multi-line variant on the receive side — input/output asymmetry is
-  // intentional.
-  //
-  // `_meta.serverTimestamp`: EventBus stamps normal session frames when they
-  // are published so SSE and load/replay share the same event time. Keep this
-  // fallback for synthetic frames that do not pass through EventBus.
-  const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
-  const existingServerTimestamp = existingMeta?.['serverTimestamp'];
-  const serverTimestamp =
-    typeof existingServerTimestamp === 'number' &&
-    Number.isFinite(existingServerTimestamp)
-      ? existingServerTimestamp
-      : Date.now();
-  const stamped = {
-    ...event,
-    _meta: { ...(existingMeta ?? {}), serverTimestamp },
-  };
-  const dataJson = JSON.stringify(stamped);
-  const idLine =
-    'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
-  return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;
-}
-
-type OmitId<T> = Omit<T, 'id'>;
-
-type BridgeErrorContext = {
-  route?: string;
-  sessionId?: string;
-  [key: string]: string | number | boolean | undefined;
-};
-
-function bridgeErrorExtraContext(
-  ctx: BridgeErrorContext | undefined,
-): Record<string, string | number | boolean> {
-  const extra: Record<string, string | number | boolean> = {};
-  for (const [key, value] of Object.entries(ctx ?? {})) {
-    if (key === 'route' || key === 'sessionId' || value === undefined) {
-      continue;
-    }
-    extra[key] = value;
-  }
-  return extra;
-}
-
-/**
- * Map a thrown bridge error to an HTTP response.
- *
- * `ctx` is operator-facing: route + sessionId folded into the stderr
- * log line so a bare `ECONNRESET` / `ENOMEM` stack trace is
- * attributable to a specific session and request without having to
- * timestamp-correlate against client logs. Pass via the route handlers
- * — see how they call `sendBridgeError(res, err, { route: 'POST
- * /session/:id/prompt', sessionId })`. Optional so test/dev call
- * sites that don't care about the log can omit it.
- */
-function sendBridgeErrorImpl(
-  res: import('express').Response,
-  err: unknown,
-  ctx?: BridgeErrorContext,
-  daemonLog?: DaemonLogger,
-): void {
-  if (err instanceof WorkspaceInitConflictError) {
-    // The target file already exists with non-
-    // whitespace content and the caller did not pass `force: true`.
-    // Body carries the resolved path + size so SDK clients can render
-    // a "file already exists; pass force: true to overwrite" prompt
-    // without re-stat'ing the workspace.
-    res.status(409).json({
-      error: err.message,
-      code: 'workspace_init_conflict',
-      path: err.path,
-      existingSize: err.existingSize,
-    });
-    return;
-  }
-  if (err instanceof WorkspaceInitPathEscapeError) {
-    // The configured `context.fileName` resolves outside the bound
-    // workspace. 400 because this is a fixable misconfiguration.
-    res.status(400).json({
-      error: err.message,
-      code: 'workspace_init_path_escape',
-      filename: err.filename,
-      boundWorkspace: err.boundWorkspace,
-    });
-    return;
-  }
-  if (err instanceof WorkspaceInitSymlinkError) {
-    // Either the target file is a symlink, or a parent directory is
-    // a symlink that escapes the workspace.
-    res.status(400).json({
-      error: err.message,
-      code: 'workspace_init_symlink',
-      target: err.target,
-      kind: err.kind,
-    });
-    return;
-  }
-  if (err instanceof WorkspaceInitRaceError) {
-    // Race-condition: EEXIST after absence check or ENOENT after
-    // content check (concurrent writer). Distinct
-    // `code: 'workspace_init_race'` for dashboard classification.
-    res.status(400).json({
-      error: err.message,
-      code: 'workspace_init_race',
-      target: err.target,
-      kind: err.kind,
-    });
-    return;
-  }
-  if (err instanceof McpServerNotFoundError) {
-    // Stable 404 for "MCP server name not in config".
-    res.status(404).json({
-      error: err.message,
-      code: 'mcp_server_not_found',
-      serverName: err.serverName,
-    });
-    return;
-  }
-  if (err instanceof McpServerRestartFailedError) {
-    // 502 because the MCP server failed to come back online.
-    res.status(502).json({
-      error: err.message,
-      code: 'mcp_server_restart_failed',
-      errorKind: 'protocol_error',
-      serverName: err.serverName,
-      mcpStatus: err.mcpStatus,
-    });
-    return;
-  }
-  if (err instanceof BranchWhilePromptActiveError) {
-    res.status(409).json({
-      error: err.message,
-      code: 'branch_while_prompt_active',
-      sessionId: err.sessionId,
-    });
-    return;
-  }
-  if (err instanceof TrustGateError) {
-    // Trust-folder rejection. 403 because the workspace's trust posture
-    // forbids the privileged mode.
-    res.status(403).json({
-      error: err.message,
-      code: 'trust_gate',
-      errorKind: 'auth_env_error',
-    });
-    return;
-  }
-  if (err instanceof SessionNotFoundError) {
-    res.status(404).json({ error: err.message, sessionId: err.sessionId });
-    return;
-  }
-  if (err instanceof InvalidClientIdError) {
-    res.status(400).json({
-      error: err.message,
-      code: 'invalid_client_id',
-      sessionId: err.sessionId,
-      clientId: err.clientId,
-    });
-    return;
-  }
-  if (err instanceof SessionShellDisabledError) {
-    res.status(403).json({
-      error: err.message,
-      code: 'session_shell_disabled',
-      errorKind: 'session_shell_disabled',
-    });
-    return;
-  }
-  if (err instanceof SessionShellClientRequiredError) {
-    res.status(403).json({
-      error: err.message,
-      code: 'client_id_required',
-      errorKind: 'client_id_required',
-    });
-    return;
-  }
-  if (err instanceof WorkspaceMismatchError) {
-    // Single-workspace mode: the daemon binds to one workspace at
-    // boot; cross-workspace POSTs are rejected here.
-    // 400 (not 404 — the daemon is "fine", the client just picked
-    // the wrong daemon for their workspace). Body includes both
-    // paths so orchestrator-aware clients can route to the right
-    // daemon / spawn a new one.
-    //
-    // Operator log line: unlike SessionNotFoundError (per-session
-    // 404 with rich URL context), workspace_mismatch indicates an
-    // orchestration / deployment drift (operator booted with the
-    // wrong workspace, or client is routing to the wrong daemon).
-    // Without a breadcrumb the daemon's log looks healthy while
-    // every client request silently 400s. Limited to authenticated
-    // requests by the upstream bearer-token gate, so probing-DoS
-    // log noise stays bounded.
-    // SECURITY: `err.requested` is derived from the request body
-    // (`req.workspaceCwd` → `canonicalizeWorkspace` → here). `path.resolve`
-    // + `realpathSync.native` both preserve control characters inside
-    // path segments — they only normalize separators / `..` / `.` and
-    // walk symlinks. A body like `{"cwd": "/legit/path\nqwen serve:
-    // FAKE LOG LINE"}` would otherwise emit two valid-looking daemon
-    // log lines, weaponizing line-based log shippers (Splunk / Loki /
-    // journald → SIEM). `JSON.stringify` escapes control chars and
-    // wraps in quotes so any injection attempt surfaces as
-    // visible-as-quoted-noise rather than forged-line. `err.bound` is
-    // safe (canonicalized at boot from operator-controlled
-    // `--workspace` / `process.cwd()`) but quoted symmetrically for
-    // readability.
-    writeStderrLine(
-      `qwen serve: workspace_mismatch (POST /session): ` +
-        `daemon bound to ${JSON.stringify(err.bound)}, ` +
-        `rejected ${JSON.stringify(err.requested)}`,
-    );
-    res.status(400).json({
-      error: err.message,
-      code: 'workspace_mismatch',
-      boundWorkspace: err.bound,
-      requestedWorkspace: err.requested,
-    });
-    return;
-  }
-  if (err instanceof InvalidSessionScopeError) {
-    // Same wire shape as the route-layer 400 (`server.ts` validates
-    // body['sessionScope'] before calling the bridge). A direct embed
-    // / test caller bypassing the route would otherwise see a generic
-    // 500 — the typed translation keeps both layers in agreement so
-    // SDK clients can branch on `code` regardless of which layer
-    // surfaced the rejection.
-    res.status(400).json({
-      error: err.message,
-      code: 'invalid_session_scope',
-    });
-    return;
-  }
-  if (err instanceof InvalidSessionMetadataError) {
-    res.status(400).json({
-      error: err.message,
-      code: 'invalid_metadata',
-      field: err.field,
-    });
-    return;
-  }
-  if (err instanceof SessionLimitExceededError) {
-    // 503 Service Unavailable + `Retry-After` is the canonical
-    // "we'd serve you, but we're full right now" shape. The hint
-    // is intentionally conservative (5s) because a session that
-    // finishes a prompt frees a slot quickly under normal load;
-    // a client that backs off too aggressively wastes capacity.
-    res.set('Retry-After', '5');
-    res.status(503).json({
-      error: err.message,
-      code: 'session_limit_exceeded',
-      limit: err.limit,
-    });
-    return;
-  }
-  if (err instanceof PromptQueueFullError) {
-    res.set('Retry-After', '5');
-    res.status(503).json({
-      error: err.message,
-      code: 'prompt_queue_full',
-      sessionId: err.sessionId,
-      limit: err.limit,
-      pendingCount: err.pendingCount,
-    });
-    return;
-  }
-  if (err instanceof RestoreInProgressError) {
-    // Match `SessionLimitExceededError`'s 5s hint (above) — the
-    // underlying restore can take up to `initTimeoutMs` (default
-    // 10s) on the agent side, so a 1s retry hint pushed clients
-    // into tight loops that kept hitting the same 409.
-    res.set('Retry-After', '5');
-    res.status(409).json({
-      error: err.message,
-      code: 'restore_in_progress',
-      sessionId: err.sessionId,
-      activeAction: err.activeAction,
-      requestedAction: err.requestedAction,
-    });
-    return;
-  }
-  if (err instanceof SessionBusyError) {
-    res.set('Retry-After', '5');
-    res.status(409).json({
-      error: err.message,
-      code: 'session_busy',
-      sessionId: err.sessionId,
-    });
-    return;
-  }
-  if (err instanceof InvalidRewindTargetError) {
-    res.status(400).json({
-      error: err.message,
-      code: 'invalid_rewind_target',
-      sessionId: err.sessionId,
-    });
-    return;
-  }
-  // Errors from the ACP child with `data.errorKind` carry structured
-  // error semantics. Map known kinds to stable HTTP status codes.
-  if (err && typeof err === 'object') {
-    const data = (err as { data?: unknown }).data;
-    if (data && typeof data === 'object') {
-      const kind = (data as { errorKind?: unknown }).errorKind;
-      if (kind === 'mcp_budget_would_exceed') {
-        const d = data as { serverName?: string };
-        res.status(409).json({
-          error: errorMessage(err),
-          code: 'mcp_budget_would_exceed',
-          serverName: d.serverName,
-        });
-        return;
+      stopAppResource(() => webTerminalRegistry.dispose());
+      const drains = await Promise.allSettled(pendingDrains);
+      stopAppResource(() => acpHandleRef.current?.dispose());
+      const bridgeDrains = await Promise.allSettled(
+        workspaceRegistry
+          .listManaged()
+          .map((runtime) => runtime.bridge.shutdown()),
+      );
+      const errors = [
+        ...cleanupErrors,
+        ...[...drains, ...bridgeDrains]
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          )
+          .map((result) => result.reason as unknown),
+      ];
+      if (errors.length > 0) {
+        throw new AggregateError(errors, 'Serve app drain is incomplete.');
       }
-      if (kind === 'mcp_server_spawn_failed') {
-        const d = data as {
-          errorKind: string;
-          serverName?: string;
-          exitCode?: number | null;
-          stderr?: string;
-          timeout?: boolean;
-        };
-        res.status(502).json({
-          error: errorMessage(err),
-          code: 'mcp_server_spawn_failed',
-          serverName: d.serverName,
-          exitCode: d.exitCode,
-          stderr: d.stderr,
-          ...(d.timeout !== undefined ? { timeout: d.timeout } : {}),
-        });
-        return;
-      }
-      if (kind === 'invalid_config') {
-        const d = data as { serverName?: string; reason?: string };
-        res.status(400).json({
-          error: errorMessage(err),
-          code: 'invalid_config',
-          serverName: d.serverName,
-          reason: d.reason,
-        });
-        return;
-      }
-      if (kind === 'acp_channel_unavailable') {
-        res.status(503).json({
-          error: errorMessage(err),
-          code: 'acp_channel_unavailable',
-        });
-        return;
-      }
-    }
-  }
-  // 5xx is the kind of error operators need to see in their daemon log
-  // — bridge ENOMEM, agent stack trace, unexpected throw, etc. Without
-  // logging here every 500 disappears once the caller consumes the
-  // response body. When `daemonLog` is provided, route through the
-  // structured daemon logger (which tees to stderr + log file). When
-  // absent (tests, direct embeds), fall back to the legacy stderr-only
-  // `writeStderrLine` path.
-  recordDaemonBridgeError(err);
-  const extraContext = bridgeErrorExtraContext(ctx);
-  recordDaemonError(undefined, err, {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-  });
-  emitDaemonLog('Daemon bridge error.', {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-    ...extraContext,
-    'error.type': err instanceof Error ? err.name : typeof err,
-    'error.message': (err instanceof Error ? err.message : String(err)).slice(
-      0,
-      1024,
-    ),
-  });
-  if (daemonLog) {
-    daemonLog.error(
-      err instanceof Error ? err.message : String(err),
-      err instanceof Error ? err : undefined,
-      {
-        ...(ctx?.route ? { route: ctx.route } : {}),
-        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
-        ...extraContext,
-      },
-    );
-  } else {
-    const ctxParts = [
-      ctx?.route,
-      ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
-      ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
-    ].filter(Boolean);
-    const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
-    writeStderrLine(
-      `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-    );
-  }
-  res.status(500).json(errorPayload(err));
-}
+      appDrainComplete = true;
+    });
 
-/**
- * Coerce an arbitrary thrown value to a useful string. Plain `String(err)`
- * yields `[object Object]` for JSON-RPC-shaped errors (`{code, message,
- * data}`) which are exactly what the ACP SDK forwards from the agent. Try
- * the `message` field first, fall back to JSON-stringify, then `String`.
- */
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (err && typeof err === 'object') {
-    const maybe = (err as { message?: unknown }).message;
-    if (typeof maybe === 'string' && maybe.length > 0) return maybe;
-    try {
-      return JSON.stringify(err);
-    } catch {
-      /* fall through */
-    }
-  }
-  return String(err);
-}
-
-/**
- * Build the JSON body for a 5xx response. The ACP SDK forwards
- * JSON-RPC-shaped errors like `{code: -32000, message: "Internal error",
- * data: {reason: "model quota exceeded"}}` — discarding `code`/`data`
- * collapses every distinct failure (quota / rate-limit / auth /
- * crash) to the same opaque `"Internal error"` string at the client.
- * Forward both fields so callers can triage from response body alone.
- * `error` stays as the human-readable string for backward compatibility
- * with clients that only consumed `error` in the original shape.
- *
- * BSA0G acknowledged: forwarding `data` verbatim leaks per-error
- * detail (file paths in upstream tool failures, partial API response
- * snippets, etc.) to every authenticated SSE subscriber that
- * observes 5xx responses. In Stage 1's single-user / small-team
- * trust model (every authenticated client is the same human or
- * collaborators they trust) this is acceptable — and the triage
- * value of the rich error is high. Stage 2 multi-tenant deployments
- * will need an opt-in `--redact-errors` flag (or per-deployment
- * policy hook) that strips `data` and replaces it with an
- * error-class identifier.
- */
-function errorPayload(err: unknown): {
-  error: string;
-  code?: unknown;
-  data?: unknown;
-} {
-  const out: { error: string; code?: unknown; data?: unknown } = {
-    error: errorMessage(err),
-  };
-  if (err && typeof err === 'object') {
-    const obj = err as Record<string, unknown>;
-    if ('code' in obj) out.code = obj['code'];
-    if ('data' in obj) out.data = obj['data'];
-  }
-  return out;
+  return app;
 }

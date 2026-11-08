@@ -1,18 +1,35 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  ModelRefreshControl,
+  ModelRefreshError,
+  type ModelRefreshState,
+} from '../ModelRefreshControl';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
+import { dp } from './dialogStyles';
 import styles from './ModelDialog.module.css';
 
-export type ModelDialogMode = 'main' | 'fast' | 'voice';
+export type ModelDialogMode =
+  | 'main'
+  | 'fast'
+  | 'voice'
+  | 'vision'
+  | 'advisor'
+  | 'image';
 
 interface ModelDialogProps {
+  modelRefresh?: ModelRefreshState;
   mode?: ModelDialogMode;
+  loading?: boolean;
+  error?: Error;
   onSelect: (modelId: string) => void;
   models?: ModelDialogModel[];
   currentModelId?: string;
+  filterModel?: (model: ModelDialogModel) => boolean;
 }
 
-interface ModelDialogModel {
+export interface ModelDialogModel {
   id: string;
   baseModelId?: string;
   label?: string;
@@ -72,14 +89,6 @@ function getModelKey(model: ModelDialogModel): string {
   ].join('\0');
 }
 
-function getModelSelectId(
-  model: ModelDialogModel,
-  isFastMode: boolean,
-): string {
-  if (!isFastMode) return model.id;
-  return model.baseModelId ?? model.id.replace(/\([^()]+\)$/, '');
-}
-
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className={styles.detailRow}>
@@ -90,60 +99,137 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 export function ModelDialog({
+  modelRefresh,
   mode = 'main',
+  loading = false,
+  error,
   onSelect,
   models,
   currentModelId,
+  filterModel,
 }: ModelDialogProps) {
   const connection = useConnection();
   const currentModel = currentModelId ?? connection.currentModel ?? '';
-  const availableModels = useMemo(
-    () => models ?? ((connection.models ?? []) as ModelDialogModel[]),
-    [models, connection.models],
-  );
+  const availableModels = useMemo(() => {
+    const candidates =
+      models ?? ((connection.models ?? []) as ModelDialogModel[]);
+    return filterModel ? candidates.filter(filterModel) : candidates;
+  }, [models, connection.models, filterModel]);
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
   const isFastMode = mode === 'fast';
   const isVoiceMode = mode === 'voice';
-  const selectedIdx = availableModels.findIndex((m) => m.id === currentModel);
-  const selectedModel =
-    selectedIdx >= 0 ? availableModels[selectedIdx] : availableModels[0];
+  const isVisionMode = mode === 'vision';
+  const currentIdx = availableModels.findIndex((m) => m.id === currentModel);
+  const initialIndex =
+    currentIdx >= 0
+      ? currentIdx
+      : (isFastMode || mode === 'advisor' || mode === 'image') && currentModel
+        ? -1
+        : 0;
+  const [activeIndex, setActiveIndex] = useState(initialIndex);
+  // Follow the current model until the user first navigates: models arrive
+  // asynchronously, and the current model itself can change while the dialog
+  // is open (e.g. another client sharing the session switches models) — the
+  // highlight, detail panel and Enter must track it. Once the user has moved
+  // the highlight themselves, it is theirs and must not be stolen.
+  const userNavigatedRef = useRef(false);
+  useEffect(() => {
+    if (userNavigatedRef.current || availableModels.length === 0) return;
+    setActiveIndex(initialIndex);
+  }, [availableModels.length, initialIndex]);
+
+  const moveHighlight = (index: number) => {
+    userNavigatedRef.current = true;
+    setActiveIndex(index);
+  };
+
+  // Keep the highlight in bounds if the model list refreshes/shrinks while open,
+  // so aria-activedescendant, the detail panel and Enter all stay in sync.
+  useEffect(() => {
+    if (activeIndex >= availableModels.length && availableModels.length > 0) {
+      setActiveIndex(availableModels.length - 1);
+    }
+  }, [availableModels.length, activeIndex]);
+
+  const selectedModel = availableModels[activeIndex];
+
+  const confirm = (index: number) => {
+    const model = availableModels[index];
+    if (model && !loading && !error) onSelect(model.id);
+  };
+
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: availableModels.length,
+    activeIndex,
+    onActiveIndexChange: moveHighlight,
+    onConfirm: confirm,
+  });
 
   useEffect(() => {
-    const el = listRef.current?.children[selectedIdx] as
+    const el = listRef.current?.children[activeIndex] as
       | HTMLElement
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [selectedIdx]);
+  }, [activeIndex]);
 
   return (
     <div className={styles.layout}>
       <div
-        className={styles.list}
+        className={`${styles.list} ${keyboardMode ? styles.keyboardOnly : ''}`}
         ref={listRef}
         role="listbox"
+        tabIndex={0}
+        aria-activedescendant={
+          activeIndex >= 0 && availableModels.length > 0
+            ? `model-opt-${activeIndex}`
+            : undefined
+        }
         aria-label={
           isFastMode
             ? t('model.setFast')
             : isVoiceMode
               ? t('model.setVoice')
-              : t('model.select')
+              : isVisionMode
+                ? t('model.setVision')
+                : mode === 'advisor'
+                  ? t('model.setAdvisor')
+                  : mode === 'image'
+                    ? t('model.setImage')
+                    : t('model.select')
         }
+        data-web-shell-model-dialog
       >
         {availableModels.length === 0 ? (
-          <div className={styles.empty}>{t('model.none')}</div>
+          <div className={styles.empty} role={error ? 'alert' : 'status'}>
+            {error?.message ??
+              t(loading ? 'settings.models.loading' : 'model.none')}
+          </div>
         ) : null}
         {availableModels.map((model, index) => {
-          const selected = model.id === currentModel;
+          const selected = index === activeIndex;
+          // Only the first id match is the "current" one. `currentModel` is just
+          // an id string, so when two providers expose the same model id we
+          // cannot tell them apart here — mark one, consistent with the initial
+          // highlight (which also lands on `currentIdx`, the first match).
+          const isCurrent = index === currentIdx;
           const authType = getAuthType(model);
           return (
-            <button
+            <div
               key={getModelKey(model)}
-              type="button"
+              id={`model-opt-${index}`}
               role="option"
-              aria-selected={selected}
-              className={`${styles.row} ${selected ? styles.selected : ''}`}
-              onClick={() => onSelect(getModelSelectId(model, isFastMode))}
+              // aria-selected marks the actual current model; the roving
+              // keyboard highlight is conveyed by aria-activedescendant + the
+              // visual `.selected` class, not by aria-selected.
+              aria-selected={isCurrent}
+              className={`${styles.row} ${selected ? styles.selected : ''} ${
+                isCurrent ? dp('dialog-current') : ''
+              }`}
+              data-web-shell-model-option
+              data-model-id={model.id}
+              onClick={() => confirm(index)}
+              onMouseMove={() => moveHighlight(index)}
             >
               <span className={styles.number}>{index + 1}.</span>
               {authType ? (
@@ -151,9 +237,9 @@ export function ModelDialog({
               ) : null}
               <span className={styles.label}>{getModelName(model)}</span>
               {model.isRuntime ? (
-                <span className={styles.badge}>Runtime</span>
+                <span className={styles.badge}>{t('common.runtime')}</span>
               ) : null}
-            </button>
+            </div>
           );
         })}
       </div>
@@ -184,6 +270,12 @@ export function ModelDialog({
             ) : null}
           </div>
         </>
+      ) : null}
+      {modelRefresh?.refresh ? (
+        <div className={styles.toolbar}>
+          <ModelRefreshControl state={modelRefresh} />
+          <ModelRefreshError state={modelRefresh} />
+        </div>
       ) : null}
     </div>
   );

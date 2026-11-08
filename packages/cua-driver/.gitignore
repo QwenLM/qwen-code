@@ -1,0 +1,9 @@
+# Vendored fork of trycua/cua → libs/cua-driver.
+#
+# Upstream relied on the cua monorepo root .gitignore to ignore Rust build
+# output (`target/`). That root is gone in this vendored copy, so re-declare
+# the generated artifacts here to keep `cargo build` output out of git.
+target/
+*.pyc
+__pycache__/
+.DS_Store

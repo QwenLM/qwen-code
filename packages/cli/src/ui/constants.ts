@@ -27,3 +27,50 @@ export const TOOL_STATUS = {
   CANCELED: '-',
   ERROR: 'x',
 } as const;
+
+// Variation Selector 15 (U+FE0E) is zero-width in string-width but forces
+// the terminal to render the preceding glyph in narrow (1-column) text
+// presentation. This ensures CJK terminals (which would otherwise render
+// East-Asian-Width "Ambiguous" glyphs as 2 columns) agree with Ink's
+// layout engine (which always measures them as 1 column).
+const _VS15 = '\uFE0E';
+export const ICON = {
+  DIAMOND: `◆${_VS15}`,
+  CIRCLE_FILLED: `●${_VS15}`,
+  TRIANGLE: `△${_VS15}`,
+  CIRCLE_EMPTY: `○${_VS15}`,
+  BULLSEYE: `◎${_VS15}`,
+  REFERENCE: `※${_VS15}`,
+  THEREFORE: `∴${_VS15}`,
+  BECAUSE: `∵${_VS15}`,
+  STAR: `★${_VS15}`,
+  SPARKLE: `✳${_VS15}`,
+  RADIO_FILLED: `◉${_VS15}`,
+  CIRCLE_LEFT_HALF: `◐${_VS15}`,
+  CHECK: `✓${_VS15}`,
+  CROSS: `✖${_VS15}`,
+} as const;
+
+// cli-spinners' `dots`, the frames ink's responding spinner animates. Shared so
+// a frame or rate change cannot land in one renderer only.
+export const SPINNER_FRAMES = [
+  '⠋',
+  '⠙',
+  '⠹',
+  '⠸',
+  '⠼',
+  '⠴',
+  '⠦',
+  '⠧',
+  '⠇',
+  '⠏',
+];
+
+export const SPINNER_INTERVAL_MS = 80;
+
+/**
+ * The frame drawn while a call is parked on a confirmation: ink's
+ * `LoadingIndicator` passes it as `nonRespondingDisplay`, so both renderers stop
+ * animating and show this one instead. Shared so the value cannot drift.
+ */
+export const WAITING_SPINNER_FRAME = '⠏';

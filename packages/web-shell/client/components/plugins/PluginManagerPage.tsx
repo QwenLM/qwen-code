@@ -1,0 +1,249 @@
+import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
+import { ArrowLeftIcon } from 'lucide-react';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { AgentsManagerPage } from '../agents/AgentsManagerPage';
+import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
+import type { ManagedExtensionsManagerPageProps } from '../managed/ManagedExtensionsManagerPage';
+import { McpManagerPage } from '../mcp/McpManagerPage';
+import {
+  ManagedMcpManagerPage,
+  type ManagedMcpManagerPageProps,
+} from '../managed/ManagedMcpManagerPage';
+import { SkillsManagerPage } from '../skills/SkillsManagerPage';
+import { Button } from '../ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
+import { useI18n } from '../../i18n';
+import { workspaceLabel } from '../../utils/workspace';
+import type { EmbeddedManagerPage } from './manager-page';
+
+type PluginTab = 'extensions' | 'mcp' | 'skills' | 'agents';
+
+interface PluginManagerPageProps {
+  onClose: () => void;
+  onUseSkill: (name: string) => void;
+  showBackButton?: boolean;
+  initialFocusRef?: Ref<HTMLButtonElement>;
+  initialTab?: PluginTab;
+  skillsWorkspaceCwd?: string;
+  onSkillsWorkspaceChange?: (cwd: string) => void;
+  managedSkills?: boolean;
+  managedExtensions?: Omit<ManagedExtensionsManagerPageProps, 'onClose'>;
+  managedMcp?: ManagedMcpManagerPageProps;
+}
+
+export function PluginManagerPage({
+  onClose,
+  onUseSkill,
+  showBackButton = false,
+  initialFocusRef,
+  initialTab = 'extensions',
+  skillsWorkspaceCwd,
+  onSkillsWorkspaceChange,
+  managedSkills = false,
+  managedExtensions,
+  managedMcp,
+}: PluginManagerPageProps) {
+  const { t } = useI18n();
+  const workspace = useWorkspace();
+  const workspaces = useMemo(() => {
+    const listed = (workspace.capabilities?.workspaces ?? []).filter(
+      (entry) => entry.kind !== 'live',
+    );
+    if (listed.length > 0) return listed;
+    return workspace.workspaceCwd
+      ? [
+          {
+            id: 'primary',
+            cwd: workspace.workspaceCwd,
+            primary: true,
+            trusted: true,
+          },
+        ]
+      : [];
+  }, [workspace.capabilities?.workspaces, workspace.workspaceCwd]);
+  const defaultWorkspaceCwd =
+    workspaces.find(
+      (entry) => entry.cwd === workspace.workspaceCwd && entry.trusted,
+    )?.cwd ??
+    workspaces.find((entry) => entry.primary && entry.trusted)?.cwd ??
+    workspaces.find((entry) => entry.trusted)?.cwd;
+  const splitSkillsRuntimeAvailable =
+    workspace.capabilities?.features?.includes(
+      'workspace_skills_config_runtime',
+    ) === true;
+  const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
+    () => skillsWorkspaceCwd ?? defaultWorkspaceCwd,
+  );
+  const [activeTab, setActiveTab] = useState<PluginTab>(initialTab);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [pageRevision, setPageRevision] = useState(0);
+  const skillsWorkspace = splitSkillsRuntimeAvailable
+    ? selectedWorkspaceCwd
+    : workspace.workspaceCwd;
+
+  useEffect(() => {
+    if (
+      selectedWorkspaceCwd &&
+      workspaces.some(
+        (entry) => entry.cwd === selectedWorkspaceCwd && entry.trusted,
+      )
+    ) {
+      return;
+    }
+    setSelectedWorkspaceCwd(defaultWorkspaceCwd);
+  }, [defaultWorkspaceCwd, selectedWorkspaceCwd, workspaces]);
+
+  useEffect(() => {
+    if (activeTab === 'skills' && skillsWorkspace)
+      onSkillsWorkspaceChange?.(skillsWorkspace);
+  }, [activeTab, onSkillsWorkspaceChange, skillsWorkspace]);
+
+  const resetToRoot = useCallback(() => {
+    setDetailOpen(false);
+    setPageRevision((revision) => revision + 1);
+  }, []);
+  const embedded = useMemo<EmbeddedManagerPage>(
+    () => ({
+      onRoot: resetToRoot,
+      onDetailChange: setDetailOpen,
+      onBack: showBackButton ? onClose : undefined,
+    }),
+    [onClose, resetToRoot, showBackButton],
+  );
+
+  const handleTabChange = (value: string) => {
+    const nextTab = value as PluginTab;
+    setActiveTab(nextTab);
+    setDetailOpen(false);
+    setPageRevision((revision) => revision + 1);
+  };
+
+  const workspaceSelect = (disabled: boolean) =>
+    ((activeTab === 'mcp' && !managedMcp) ||
+      (activeTab === 'skills' && splitSkillsRuntimeAvailable)) &&
+    workspaces.length > 1 ? (
+      <Select
+        value={selectedWorkspaceCwd}
+        disabled={disabled}
+        onValueChange={(cwd) => {
+          setSelectedWorkspaceCwd(cwd);
+          setDetailOpen(false);
+          setPageRevision((revision) => revision + 1);
+        }}
+      >
+        <SelectTrigger
+          className="h-8 w-48"
+          aria-label={t('sidebar.workspaceSelectLabel')}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {workspaces.map((entry) => (
+            <SelectItem
+              key={entry.id}
+              value={entry.cwd}
+              disabled={!entry.trusted}
+            >
+              {workspaceLabel(entry)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    ) : null;
+
+  return (
+    <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
+      {!detailOpen ? (
+        <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex flex-wrap items-center justify-between gap-3 border-b bg-background px-5 py-3">
+          <div className="flex items-center gap-2">
+            {showBackButton ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onClose}
+                aria-label={t('plugins.backToChat')}
+              >
+                <ArrowLeftIcon />
+              </Button>
+            ) : null}
+            <TabsList className="h-8" aria-label={t('plugins.sections')}>
+              <TabsTrigger
+                ref={activeTab === 'extensions' ? initialFocusRef : undefined}
+                value="extensions"
+              >
+                {t('plugins.extensions')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'mcp' ? initialFocusRef : undefined}
+                value="mcp"
+              >
+                {t('plugins.mcp')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'skills' ? initialFocusRef : undefined}
+                value="skills"
+              >
+                {t('plugins.skills')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'agents' ? initialFocusRef : undefined}
+                value="agents"
+              >
+                {t('plugins.agents')}
+              </TabsTrigger>
+            </TabsList>
+          </div>
+          {workspaceSelect(false)}
+        </div>
+      ) : null}
+
+      <TabsContent value={activeTab} className="mt-0">
+        {activeTab === 'skills' && managedSkills && (
+          <p className="my-2 text-sm text-muted-foreground">
+            {t('managed.creationSkillsFromSettings')}
+          </p>
+        )}
+        {activeTab === 'extensions' ? (
+          <ExtensionsManagerPage
+            key={`extensions-${pageRevision}`}
+            managed={managedExtensions}
+            onClose={onClose}
+            embedded={embedded}
+          />
+        ) : activeTab === 'skills' ? (
+          <SkillsManagerPage
+            key={`skills-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
+            onClose={onClose}
+            onUseSkill={onUseSkill}
+            embedded={embedded}
+            workspaceCwd={skillsWorkspace}
+            workspaceControl={workspaceSelect(true)}
+          />
+        ) : activeTab === 'agents' ? (
+          <AgentsManagerPage
+            key={`agents-${pageRevision}`}
+            onClose={onClose}
+            embedded={embedded}
+          />
+        ) : managedMcp ? (
+          <ManagedMcpManagerPage {...managedMcp} />
+        ) : (
+          <McpManagerPage
+            key={`mcp-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
+            onClose={onClose}
+            embedded={embedded}
+            workspaceCwd={selectedWorkspaceCwd}
+            workspaceControl={workspaceSelect(true)}
+          />
+        )}
+      </TabsContent>
+    </Tabs>
+  );
+}

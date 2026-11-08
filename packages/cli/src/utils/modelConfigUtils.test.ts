@@ -7,10 +7,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AuthType,
+  ModelsConfig,
   resolveModelConfig,
   type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import {
+  collectProviderModelsForProtocol,
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
 } from './modelConfigUtils.js';
@@ -34,6 +36,244 @@ vi.mock('./stdioHelpers.js', () => ({
 }));
 
 describe('modelConfigUtils', () => {
+  describe('model API selection', () => {
+    const chat: ProviderModelConfig = {
+      id: 'shared-model',
+      baseUrl: 'https://shared.example/v1',
+      wireApi: 'chat-completions',
+      envKey: 'CHAT_KEY',
+    };
+    const responses: ProviderModelConfig = {
+      ...chat,
+      wireApi: 'responses',
+      envKey: 'RESPONSES_KEY',
+      generationConfig: { reasoning: { effort: 'xhigh' } },
+    };
+
+    beforeEach(async () => {
+      const original = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      vi.mocked(resolveModelConfig).mockImplementation(
+        original.resolveModelConfig,
+      );
+    });
+
+    afterEach(() => vi.resetAllMocks());
+
+    it.each(['openai', 'custom'])(
+      'resolves Responses stored under %s',
+      (providerId) => {
+        const result = resolveCliGenerationConfig({
+          argv: {},
+          settings: {
+            model: {
+              name: responses.id,
+              generationConfig: {
+                contextWindowSize: 272000,
+              } as Record<string, unknown>,
+            },
+            modelProviders: {
+              anthropic: [
+                { id: 'claude-model', baseUrl: 'https://anthropic.example' },
+              ],
+              [providerId]: [responses],
+            },
+            providerProtocol: { custom: AuthType.USE_OPENAI },
+          },
+          selectedAuthType: AuthType.USE_OPENAI,
+          env: { RESPONSES_KEY: 'responses-key' },
+        });
+
+        expect(result.generationConfig).toMatchObject({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          model: responses.id,
+          reasoning: { effort: 'xhigh' },
+        });
+        expect(result.generationConfig).not.toHaveProperty('wireApi');
+        expect(result.apiKey).toBe('responses-key');
+        expect(result.registryBaseUrl).toBe(responses.baseUrl);
+        expect(result.sources['apiKey']).toMatchObject({
+          kind: 'env',
+          envKey: 'RESPONSES_KEY',
+        });
+        expect(result.warnings.join('\n')).toContain(
+          `from modelProviders.${providerId}`,
+        );
+      },
+    );
+
+    it('does not reinterpret the CLI default model as an explicit wire selection', () => {
+      const initial = resolveCliGenerationConfig({
+        argv: {},
+        settings: {},
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_API_KEY: 'default-key' },
+      });
+      const modelProviders: Settings['modelProviders'] = {
+        openai: [
+          {
+            id: initial.model,
+            wireApi: 'responses',
+            baseUrl: 'https://proxy.example/v1',
+            envKey: 'PROXY_KEY',
+          },
+        ],
+      };
+      const resolved = resolveCliGenerationConfig({
+        argv: {},
+        settings: { modelProviders },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_API_KEY: 'default-key' },
+      });
+      expect(resolved.sources['model']?.kind).toBe('default');
+      const models = new ModelsConfig({
+        initialAuthType: resolved.authType,
+        generationConfig: resolved.generationConfig,
+        generationConfigSources: resolved.sources,
+        modelProvidersConfig: modelProviders,
+      });
+      expect(models.getCurrentAuthType()).toBe(AuthType.USE_OPENAI);
+      expect(models.getCurrentRegistryBaseUrl()).toBeUndefined();
+    });
+
+    it('keeps the selected wire when no model selection exists to derive one from', () => {
+      // No model.name, no --model, no model env var: the wire resolver's
+      // no-model branch would let an unrelated wireApi:'responses' entry flip an
+      // `openai` selection to openai-responses, which has no DEFAULT_MODELS
+      // entry — the session would then run a wire and fallback model id that
+      // no config file contains.
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: {
+          modelProviders: {
+            openai: [
+              {
+                id: 'gpt-5',
+                wireApi: 'responses',
+                baseUrl: 'https://api.example/v1',
+                envKey: 'RESPONSES_KEY',
+              },
+            ],
+          },
+        },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_API_KEY: 'openai-key' },
+      });
+      expect(result.generationConfig.authType).toBe(AuthType.USE_OPENAI);
+    });
+
+    it.each([
+      [AuthType.USE_OPENAI, 'chat-key'],
+      [AuthType.USE_OPENAI_RESPONSES, 'responses-key'],
+    ] as const)(
+      'retains exact %s route with duplicate model and URL',
+      (authType, key) => {
+        const result = resolveCliGenerationConfig({
+          argv: {},
+          settings: {
+            model: { name: chat.id, baseUrl: chat.baseUrl },
+            modelProviders: { openai: [responses, chat] },
+          },
+          selectedAuthType: authType,
+          env: { CHAT_KEY: 'chat-key', RESPONSES_KEY: 'responses-key' },
+        });
+        expect(result.generationConfig.authType).toBe(authType);
+        expect(result.apiKey).toBe(key);
+      },
+    );
+
+    it('uses the saved endpoint before an API match at another endpoint', () => {
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: {
+          model: { name: responses.id, baseUrl: responses.baseUrl },
+          modelProviders: {
+            openai: [
+              { ...chat, baseUrl: 'https://other.example/v1' },
+              responses,
+            ],
+          },
+        },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { CHAT_KEY: 'chat-key', RESPONSES_KEY: 'responses-key' },
+      });
+      expect(result.generationConfig.authType).toBe(
+        AuthType.USE_OPENAI_RESPONSES,
+      );
+      expect(result.apiKey).toBe('responses-key');
+      expect(result.warnings).toEqual([]);
+    });
+
+    it('does not apply the saved endpoint to a CLI model selection', () => {
+      const result = resolveCliGenerationConfig({
+        argv: { model: chat.id },
+        settings: {
+          model: { name: responses.id, baseUrl: responses.baseUrl },
+          modelProviders: {
+            openai: [
+              responses,
+              { ...chat, baseUrl: 'https://chat.example/v1' },
+            ],
+          },
+        },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { CHAT_KEY: 'chat-key', RESPONSES_KEY: 'responses-key' },
+      });
+      expect(result.generationConfig.authType).toBe(AuthType.USE_OPENAI);
+      expect(result.apiKey).toBe('chat-key');
+    });
+
+    it('resolves a QWEN_MODEL selection before changing its effective API', () => {
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: { modelProviders: { openai: [responses] } },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { QWEN_MODEL: responses.id, RESPONSES_KEY: 'responses-key' },
+      });
+      expect(result.model).toBe(responses.id);
+      expect(result.generationConfig.authType).toBe(
+        AuthType.USE_OPENAI_RESPONSES,
+      );
+      expect(result.apiKey).toBe('responses-key');
+    });
+
+    it('filters a mixed provider bucket by each effective API', () => {
+      const providers = { openai: [responses, chat] };
+      expect(
+        collectProviderModelsForProtocol(
+          providers,
+          undefined,
+          AuthType.USE_OPENAI,
+        ),
+      ).toEqual([chat]);
+      expect(
+        collectProviderModelsForProtocol(
+          providers,
+          undefined,
+          AuthType.USE_OPENAI_RESPONSES,
+        ),
+      ).toEqual([responses]);
+    });
+
+    it('rejects invalid API configuration before resolving credentials', () => {
+      expect(() =>
+        resolveCliGenerationConfig({
+          argv: {},
+          settings: {
+            model: { name: responses.id },
+            modelProviders: {
+              openai: [{ ...responses, wireApi: 'response' }],
+            } as unknown as Settings['modelProviders'],
+          },
+          selectedAuthType: AuthType.USE_OPENAI,
+          env: {},
+        }),
+      ).toThrow(/api/i);
+      expect(resolveModelConfig).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getAuthTypeFromEnv', () => {
     const originalEnv = process.env;
 
@@ -53,6 +293,19 @@ describe('modelConfigUtils', () => {
       process.env['OPENAI_BASE_URL'] = 'https://api.openai.com';
 
       expect(getAuthTypeFromEnv()).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('uses an injected env instead of process.env when provided', () => {
+      process.env['OPENAI_API_KEY'] = 'process-key';
+      process.env['OPENAI_MODEL'] = 'process-model';
+      process.env['OPENAI_BASE_URL'] = 'https://process.example';
+
+      expect(
+        getAuthTypeFromEnv({
+          GEMINI_API_KEY: 'runtime-key',
+          GEMINI_MODEL: 'runtime-model',
+        }),
+      ).toBe(AuthType.USE_GEMINI);
     });
 
     it('should return USE_OPENAI when the model is given via QWEN_MODEL', () => {
@@ -99,6 +352,49 @@ describe('modelConfigUtils', () => {
       process.env['GOOGLE_MODEL'] = 'vertex-model';
 
       expect(getAuthTypeFromEnv()).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should return USE_VERTEX_AI for keyless Vertex AI env vars', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should preserve keyed Vertex AI precedence', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_API_KEY: 'test-key',
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should not infer keyless Vertex AI without a model', () => {
+      expect(
+        getAuthTypeFromEnv({ GOOGLE_CLOUD_PROJECT: 'test-project' }),
+      ).toBeUndefined();
+    });
+
+    it('should not infer keyless Vertex AI without a project', () => {
+      expect(
+        getAuthTypeFromEnv({ GOOGLE_MODEL: 'vertex-model' }),
+      ).toBeUndefined();
+    });
+
+    it('should prefer keyless Vertex AI over a complete Anthropic env', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+          ANTHROPIC_API_KEY: 'test-key',
+          ANTHROPIC_MODEL: 'anthropic-model',
+          ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
     });
 
     it('should return undefined when Google env vars are incomplete', () => {
@@ -167,6 +463,74 @@ describe('modelConfigUtils', () => {
         ...overrides,
       } as Settings;
     }
+
+    it('loads none as an explicit reasoning disable', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.8-max',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: { effort: 'xhigh' },
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBe(false);
+      expect(result.warnings).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Ignoring invalid model.reasoningEffort'),
+        ]),
+      );
+    });
+
+    it.each([
+      'https://api.deepseek.com/v1',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    ])(
+      'distinguishes global none from a DeepSeek off preset on %s',
+      async (baseUrl) => {
+        const actual = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core')
+        >('@qwen-code/qwen-code-core');
+        for (const reasoningEffort of [undefined, 'none'] as const) {
+          vi.mocked(resolveModelConfig).mockImplementationOnce(
+            actual.resolveModelConfig,
+          );
+          const result = resolveCliGenerationConfig({
+            argv: {},
+            settings: makeMockSettings({
+              model: { name: 'deepseek-flash', reasoningEffort },
+              modelProviders: {
+                [AuthType.USE_OPENAI]: [
+                  {
+                    id: 'deepseek-flash',
+                    baseUrl,
+                    generationConfig: { reasoning: false },
+                  },
+                ],
+              },
+            }),
+            selectedAuthType: AuthType.USE_OPENAI,
+            env: {},
+          });
+          expect(result.generationConfig.reasoning).toBe(false);
+          expect(result.sources['reasoning']).toMatchObject(
+            reasoningEffort === 'none'
+              ? { kind: 'settings', settingsPath: 'model.reasoningEffort' }
+              : { kind: 'modelProviders' },
+          );
+        }
+      },
+    );
 
     it('should resolve config from argv with highest precedence', () => {
       const argv = {
@@ -415,6 +779,135 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('finds a custom-id provider via providerProtocol (honors its envKey/metadata)', () => {
+      const argv = { model: 'qwen3.7-max' };
+      const modelProvider: ProviderModelConfig = {
+        id: 'qwen3.7-max',
+        name: 'Idealab Max',
+        envKey: 'IDEALAB_KEY',
+        generationConfig: { samplingParams: { temperature: 0.5 } },
+      };
+      // Stored under the custom key `idealab`, NOT under `openai`.
+      const settings = makeMockSettings({
+        modelProviders: {
+          idealab: [modelProvider],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: 'openai',
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'qwen3.7-max', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      // Without the reverse lookup, modelProviders['openai'] is empty and the
+      // custom provider's envKey would be lost.
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({ modelProvider }),
+      );
+    });
+
+    it('warns when a provider id has models but no resolvable protocol', () => {
+      const settings = makeMockSettings({
+        model: { name: 'some-model' },
+        modelProviders: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as Settings['modelProviders'],
+        // No providerProtocol entry for `idealab`.
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'some-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(
+        result.warnings.some(
+          (w) => w.includes('idealab') && w.includes('providerProtocol'),
+        ),
+      ).toBe(true);
+    });
+
+    it('warns when providerProtocol maps to an unknown protocol', () => {
+      const settings = makeMockSettings({
+        model: { name: 'some-model' },
+        modelProviders: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: 'not-a-protocol',
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'some-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'providerProtocol["idealab"] = "not-a-protocol" is not a known protocol',
+          ),
+        ]),
+      );
+    });
+
+    it('warns when a custom provider maps to qwen-oauth', () => {
+      const settings = makeMockSettings({
+        model: { name: 'some-model' },
+        modelProviders: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: AuthType.QWEN_OAUTH,
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'some-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'modelProviders provider "idealab" maps to "qwen-oauth"',
+          ),
+        ]),
+      );
+    });
+
     it('should find modelProvider from settings.model.name when argv.model is not provided', () => {
       const argv = {};
       const modelProvider: ProviderModelConfig = {
@@ -489,7 +982,7 @@ describe('modelConfigUtils', () => {
           },
         });
 
-        resolveCliGenerationConfig({
+        const result = resolveCliGenerationConfig({
           argv: {},
           settings,
           selectedAuthType: AuthType.USE_OPENAI,
@@ -501,6 +994,7 @@ describe('modelConfigUtils', () => {
         expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
           expect.objectContaining({ modelProvider: ideaLab }),
         );
+        expect(result.registryBaseUrl).toBe(ideaLab.baseUrl);
       });
 
       it('falls back to the first id match when no baseUrl is persisted (backward compat)', () => {
@@ -805,6 +1299,53 @@ describe('modelConfigUtils', () => {
       expect(result.warnings[0]).toContain(
         'modelProviders.openai[].generationConfig',
       );
+    });
+
+    it('names the custom provider in ignored generationConfig warnings', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'qwen3.6-27b',
+        name: 'qwen3.6-27b',
+        generationConfig: {},
+      };
+      const settings = makeMockSettings({
+        model: {
+          name: 'qwen3.6-27b',
+          generationConfig: {
+            contextWindowSize: 192000,
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          idealab: [modelProvider],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: AuthType.USE_OPENAI,
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.6-27b',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.warnings[0]).toContain(
+        'provider model "qwen3.6-27b" from modelProviders.idealab',
+      );
+      expect(result.warnings[0]).toContain(
+        'modelProviders.idealab[].generationConfig',
+      );
+      expect(result.warnings[0]).not.toContain('modelProviders.openai');
     });
 
     it('should not warn for top-level generationConfig on runtime models', () => {

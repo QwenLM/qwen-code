@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SettingScope } from '../../config/settings.js';
 import {
   formatClaudeMcpImportResult,
@@ -14,6 +14,16 @@ import {
 } from './importConfigCommand.js';
 import { CommandKind } from './types.js';
 import type { ClaudeMcpImportResult } from '../../config/claudeMcpImport.js';
+import { importClaudeMcpServers } from '../../config/claudeMcpImport.js';
+
+vi.mock('../../config/claudeMcpImport.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/claudeMcpImport.js')>();
+  return {
+    ...actual,
+    importClaudeMcpServers: vi.fn(),
+  };
+});
 
 describe('importConfigCommand', () => {
   it('is a built-in command available in all execution modes', () => {
@@ -63,6 +73,34 @@ describe('importConfigCommand', () => {
 
   it('keeps an explicit all source when importing to project scope', () => {
     expect(resolveImportSourceForScope('all', 'project', true)).toBe('all');
+  });
+
+  it('rejects project imports before reading or writing config', async () => {
+    const action = importConfigCommand.action;
+    if (!action) throw new Error('Expected import-config action.');
+
+    const result = await action(
+      {
+        executionPolicy: {
+          allowSessionReset: false,
+          allowWorkspaceSettingsWrite: false,
+          persistModelSelection: false,
+          blockedBuiltinCommandNames: [],
+        },
+        services: {
+          settings: {} as never,
+          config: { getTargetDir: vi.fn(() => '/managed/child') } as never,
+          logger: null,
+        },
+      } as never,
+      '--scope project',
+    );
+
+    expect(importClaudeMcpServers).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content: expect.stringContaining('not available'),
+    });
   });
 
   it('formats imported and skipped servers', () => {

@@ -33,6 +33,7 @@ describe('voice model guards', () => {
       false,
     );
     expect(isTranscribableVoiceModel(model({ baseUrl: '' }))).toBe(false);
+    expect(isTranscribableVoiceModel(model({ imageOnly: true }))).toBe(false);
   });
 
   it('isSelectableVoiceModel accepts ids with a real ASR transport', () => {

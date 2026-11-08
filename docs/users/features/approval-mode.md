@@ -19,9 +19,9 @@ Qwen Code offers five distinct permission modes that allow you to flexibly contr
 ### Quick Reference Guide
 
 - **Start in Plan Mode**: Great for understanding before making changes
-- **Work in Ask Permissions Mode**: The balanced choice for most development work
+- **Auto Mode (default)**: The default out-of-the-box experience — an LLM classifier auto-approves safe actions and blocks risky ones, minimizing interruptions while keeping a safety net
+- **Switch to Ask Permissions**: When you want manual approval for every file edit and shell command
 - **Switch to Auto-Edit**: When you're making lots of safe code changes
-- **Try Auto Mode**: When you want fewer interruptions but still want safety on shell commands and network calls — an LLM classifier evaluates each call
 - **Use YOLO sparingly**: Only for trusted automation in controlled environments
 
 > [!tip]
@@ -269,9 +269,10 @@ settings.json. See [auto-mode.md](./auto-mode.md#configuring-hints).
 - **Fail-closed**: when the classifier API is unreachable, the action is
   blocked rather than allowed. After two consecutive unavailable calls,
   the next tool call falls back to manual approval.
-- **Loop guard**: after three consecutive policy blocks, the next call
-  also falls back to manual approval so the agent isn't stuck cycling on
-  a dead-end approach.
+- **Loop guard**: after three consecutive blocks — classifier policy blocks
+  and deterministic destructive-command blocks both count — the call that
+  reaches the third block also falls back to manual approval so the agent
+  isn't stuck cycling on a dead-end approach.
 
 ### Example
 
@@ -300,6 +301,12 @@ reason inline and decide whether to switch to Ask Permissions Mode for that step
         "deny": ["Any network call to intranet.example.com"],
       },
       "environment": ["Open-source monorepo; commits are signed"],
+      // Optional: route ALL shell commands (including read-only ones like
+      // ls, cat) through the classifier for defense-in-depth.
+      // "classifyAllShell": true,
+      // Optional: send MCP tool calls to the classifier by name only
+      // (arguments are forwarded by default).
+      // "mcp": { "forwardArguments": false },
     },
   },
 }

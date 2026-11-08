@@ -22,9 +22,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'thought.text.delta':
       return terminalLine('thought', event.text, '2');
     case 'tool.update':
+      // Lifecycle name-only events carry no status; rendering one would emit
+      // "tool undefined <name>" for every tool call.
+      if (event.nameOnly) return '';
       return terminalLine(
         `tool ${event.status}`,
-        `${event.title}${event.details ? ` ${event.details}` : ''}`,
+        `${event.title ?? event.toolName ?? event.toolKind ?? 'Tool'}${event.details ? ` ${event.details}` : ''}`,
         '38;5;75',
       );
     case 'shell.output':
@@ -56,6 +59,14 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return terminalLine(
         'session',
         `metadata: ${event.displayName ?? '(no display name)'}`,
+        '36',
+      );
+    case 'session.source.changed':
+      return '';
+    case 'session.artifact.changed':
+      return terminalLine(
+        'artifact',
+        `${event.change.action} ${event.change.artifact?.title ?? event.change.artifactId}`,
         '36',
       );
     case 'session.approval_mode.changed':
@@ -103,7 +114,9 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',
-        `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
+        event.scope === 'managed'
+          ? (event.source ?? 'managed_memory')
+          : `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
         '36',
       );
     case 'workspace.agent.changed':
@@ -124,10 +137,22 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.key} changed (scope: ${event.scope})`,
         '36',
       );
+    case 'workspace.trust.change.requested':
+      return terminalLine(
+        'trust',
+        `${event.desiredState} ${event.workspaceCwd}`,
+        '33',
+      );
     case 'workspace.initialized':
       return terminalLine(
         'workspace',
         `init ${event.action} ${event.path}`,
+        '36',
+      );
+    case 'workspace.github.setup.completed':
+      return terminalLine(
+        'github',
+        `setup ${event.releaseTag} (${event.workflows.length} workflows)`,
         '36',
       );
     case 'workspace.mcp.budget_warning':
@@ -156,6 +181,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.serverName} restart refused: ${event.reason}`,
         '33',
       );
+    case 'workspace.mcp.server_changed':
+      return terminalLine('mcp', `${event.serverName} ${event.action}`, '36');
     case 'workspace.extensions.changed':
       if (event.status === 'failed') {
         return terminalLine(
@@ -218,6 +245,10 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return '';
     case 'user.image.delta':
       return `[image: ${sanitizeTerminalText(event.mimeType)}]`;
+    case 'user.file.delta':
+      return `[file: ${sanitizeTerminalText(event.name)}]`;
+    case 'user.resource_link.delta':
+      return `[file: ${sanitizeTerminalText(event.resourceLink.name)}]`;
     default:
       return assertNever(event);
   }
@@ -228,7 +259,16 @@ export function transcriptBlockToTerminalText(
 ): string {
   switch (block.kind) {
     case 'user':
-      return terminalLine('qwen', block.text, '38;5;42');
+      return terminalLine(
+        'qwen',
+        [
+          block.text,
+          ...(block.resourceLinks ?? []).map((link) => `[file: ${link.name}]`),
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        '38;5;42',
+      );
     case 'assistant':
       return sanitizeTerminalText(block.text).replace(/\r?\n/g, '\r\n');
     case 'thought':

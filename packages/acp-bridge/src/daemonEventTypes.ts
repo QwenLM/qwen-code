@@ -23,3 +23,27 @@
  * silently break browser-side dedup. `data: { sessionId, messages: string[] }`.
  */
 export const MID_TURN_MESSAGE_INJECTED_EVENT = 'mid_turn_message_injected';
+
+/**
+ * Published when a prompt is accepted into the per-session FIFO queue
+ * (i.e. a previous prompt is still running, so this one must wait).
+ * The first prompt on an idle session does NOT publish this event —
+ * it starts immediately without queueing.
+ * `data: { sessionId, promptId, text, queuedAt }`.
+ */
+export const PENDING_PROMPT_ADDED_EVENT = 'pending_prompt_added';
+
+/**
+ * Published when a queued prompt begins dispatch (reaches the head of the
+ * FIFO). `data: { sessionId, promptId, text }`.
+ */
+export const PENDING_PROMPT_STARTED_EVENT = 'pending_prompt_started';
+
+/**
+ * Published when a pending prompt settles (completed normally or
+ * explicitly removed). `data: { sessionId, promptId, state:
+ * 'completed' | 'removed' }`. Errors during prompt execution still
+ * produce `'completed'` — the terminal SSE event (`turn_error`)
+ * carries the actual error detail.
+ */
+export const PENDING_PROMPT_COMPLETED_EVENT = 'pending_prompt_completed';

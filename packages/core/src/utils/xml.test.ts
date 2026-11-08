@@ -5,15 +5,46 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { escapeSystemReminderTags, escapeXml } from './xml.js';
+import {
+  escapeSystemReminderTags,
+  escapeXml,
+  escapeXmlElementText,
+  escapeXmlWithinBudget,
+} from './xml.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('xml utils', () => {
+  it.each([
+    ['&', 5, '&amp;', false],
+    ['&', 4, '', true],
+    ['a&b', 6, 'a&amp;', true],
+    ['x🙂', 2, 'x', true],
+    ['x🙂', 3, 'x🙂', false],
+    ['ok', 0, '', true],
+    ['ok', -1, '', true],
+    ['', 0, '', false],
+  ] as const)('bounds XML text %j at %i', (value, budget, text, truncated) => {
+    expect(escapeXmlWithinBudget(value, budget)).toEqual({ text, truncated });
+  });
+
   describe('escapeXml', () => {
     it('escapes XML metacharacters for element and attribute contexts', () => {
-      expect(escapeXml(`a&b <tag attr="x">'y'</tag>`)).toBe(
-        'a&amp;b &lt;tag attr=&quot;x&quot;&gt;&apos;y&apos;&lt;/tag&gt;',
+      // TWO of each metacharacter: with a single `&`, a
+      // `.replace(/&/g, …)` → `.replace('&', …)` mutation shipped green
+      // across the whole package (measured: 19,546 tests passed), and a
+      // path holding two — a TMPDIR under `o&brien` with a basename like
+      // `out&err.log` — would then put a raw `&` into a model-facing XML
+      // envelope. The other four were already pinned globally; `&` was not.
+      expect(escapeXml(`a&b&c <tag attr="x">'y'</tag>`)).toBe(
+        'a&amp;b&amp;c &lt;tag attr=&quot;x&quot;&gt;&apos;y&apos;&lt;/tag&gt;',
       );
     });
+  });
+
+  it('preserves quotes in element text while escaping structural characters', () => {
+    expect(escapeXmlElementText(`a&b <tag> "quoted" 'literal'`)).toBe(
+      `a&amp;b &lt;tag&gt; "quoted" 'literal'`,
+    );
   });
 
   describe('escapeSystemReminderTags', () => {
@@ -80,7 +111,9 @@ describe('xml utils', () => {
       const input = `<${'\t'.repeat(50000)}${'<'.repeat(50000)}`;
       const start = Date.now();
       expect(escapeSystemReminderTags(input)).toBe(input);
-      expect(Date.now() - start).toBeLessThan(1000);
+      expectWithinLatencyBudget(Date.now() - start, 1000, {
+        poolMultiplier: 20,
+      });
     });
 
     it('does not rewrite large HTML/JSX content that lacks system-reminder tags', () => {

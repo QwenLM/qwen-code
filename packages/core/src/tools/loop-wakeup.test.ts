@@ -12,6 +12,7 @@ import { Storage } from '../config/storage.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import type { Config } from '../config/config.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
 // The scheduling math (clamp / wasClamped / second-precise fire time) is
 // covered in cronScheduler.test.ts `session wakeups`. These tests cover the
@@ -44,6 +45,22 @@ describe('LoopWakeupTool', () => {
 
   it('has the correct name', () => {
     expect(tool.name).toBe('loop_wakeup');
+  });
+
+  it('documents the fallback-heartbeat semantics for monitor/background work', () => {
+    expect(tool.description).toContain('fallback heartbeat');
+    expect(tool.description).toContain('<task-notification>');
+    expect(tool.description).toContain('terminal `<task-notification>`');
+    expect(tool.description).not.toContain('per stdout line');
+    const params = tool.schema.parametersJsonSchema as {
+      properties: { delaySeconds: { description: string } };
+    };
+    const delay = params.properties.delaySeconds.description;
+    // Both sides of the rule: long fallback when something else wakes you,
+    // short poll only when you are the sole watcher.
+    expect(delay).toContain('1200-1800s');
+    expect(delay).toContain('60-270s');
+    expect(delay).toContain('Monitor');
   });
 
   it('uses ask permission because it schedules future model input', async () => {
@@ -87,7 +104,9 @@ describe('LoopWakeupTool', () => {
       reason: 'CI is still running',
     });
 
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await todoWorkChainContext.run('work-chain-1', () =>
+      invocation.execute(new AbortController().signal),
+    );
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Session-only one-shot');
@@ -98,6 +117,7 @@ describe('LoopWakeupTool', () => {
     expect(scheduler.list()[0]).toMatchObject({
       cronExpr: '@wakeup',
       prompt: 'continue loop',
+      todoWorkChainId: 'work-chain-1',
     });
     expect(scheduler.size).toBe(1);
   });

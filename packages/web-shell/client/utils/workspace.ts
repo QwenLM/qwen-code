@@ -1,0 +1,138 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type {
+  DaemonCapabilities,
+  DaemonSessionSummary,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
+
+const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
+
+export function isAgentCollaborationEnabledForWorkspace(
+  capabilities: DaemonCapabilities | undefined,
+  cwd: string | undefined,
+): boolean {
+  if (!capabilities?.features?.includes(AGENT_COLLABORATION_FEATURE)) {
+    return false;
+  }
+  const workspaces = capabilities.workspaces;
+  if (
+    !workspaces?.some((entry) => entry.agentCollaborationEnabled !== undefined)
+  ) {
+    return true;
+  }
+  if (!cwd) {
+    return workspaces.some((entry) => entry.agentCollaborationEnabled === true);
+  }
+  return (
+    workspaces.find((entry) => entry.cwd === cwd)?.agentCollaborationEnabled ===
+    true
+  );
+}
+
+/**
+ * Last path segment of an absolute workspace cwd, for a compact per-workspace
+ * label (e.g. `/home/me/projects/api` → `api`). Falls back to the full path when
+ * it has no segments.
+ */
+export function workspaceBasename(cwd: string): string {
+  const parts = cwd.split(/[\\/]+/).filter(Boolean);
+  return parts.at(-1) ?? cwd;
+}
+
+export function sshWorkspaceLabel(
+  ssh: NonNullable<DaemonWorkspaceCapability['ssh']>,
+): string {
+  return `${ssh.host}${ssh.port === undefined ? '' : `:${ssh.port}`}:${ssh.directory}`;
+}
+
+export function workspaceLabel(
+  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>,
+): string {
+  return (
+    workspace.displayName?.trim() ||
+    (workspace.ssh
+      ? sshWorkspaceLabel(workspace.ssh)
+      : workspaceBasename(workspace.cwd))
+  );
+}
+
+export function workspaceLabelForCwd(
+  cwd: string,
+  workspaces:
+    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>[]
+    | undefined,
+): string {
+  const workspace = workspaces?.find((entry) => entry.cwd === cwd);
+  return workspace ? workspaceLabel(workspace) : workspaceBasename(cwd);
+}
+
+/**
+ * Suffix the parent directory onto labels that collide inside one list.
+ * Two daemons — or one daemon with two checkouts — frequently register the
+ * same basename (`qwen-code` everywhere); the menu must tell them apart by
+ * the workspace's own location, not only by tooltip or host badge.
+ */
+export function disambiguateWorkspaceLabels<
+  T extends { label: string; cwd: string },
+>(entries: readonly T[]): T[] {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    counts.set(entry.label, (counts.get(entry.label) ?? 0) + 1);
+  }
+  return entries.map((entry) => {
+    if ((counts.get(entry.label) ?? 0) < 2) return entry;
+    const parent = entry.cwd
+      .split(/[\\/]+/)
+      .filter(Boolean)
+      .at(-2);
+    return parent ? { ...entry, label: `${entry.label} (${parent})` } : entry;
+  });
+}
+
+/**
+ * True when the daemon advertises more than one registered workspace — i.e. the
+ * multi-workspace session surfaces (per-workspace labels/tags) should show.
+ * A single-workspace daemon omits `workspaces` (or lists just the primary), so
+ * every workspace-scoped affordance stays hidden and the UI is unchanged.
+ */
+export function hasMultipleWorkspaces(
+  capabilities: DaemonCapabilities | undefined,
+): boolean {
+  return (capabilities?.workspaces?.length ?? 0) > 1;
+}
+
+/**
+ * Whether a session belongs to a workspace other than the primary one. Both cwds
+ * are daemon-canonicalized, so a raw string compare is correct. Returns false
+ * when either cwd is unknown (treat as primary) so single-workspace never tags.
+ */
+export function isNonPrimaryWorkspaceSession(
+  workspaceCwd: string | undefined,
+  primaryCwd: string | undefined,
+): boolean {
+  return !!workspaceCwd && !!primaryCwd && workspaceCwd !== primaryCwd;
+}
+
+/**
+ * Merge the primary workspace's sessions with the sessions collected from other
+ * workspaces into one list, keyed by `sessionId` (primary wins on the unlikely
+ * id collision). Returns the primary list unchanged (same reference) when there
+ * are no other-workspace sessions, so the single-workspace path is a no-op.
+ */
+export function mergeSessionsById(
+  primary: DaemonSessionSummary[],
+  others: DaemonSessionSummary[],
+): DaemonSessionSummary[] {
+  if (others.length === 0) return primary;
+  const byId = new Map<string, DaemonSessionSummary>();
+  for (const session of primary) byId.set(session.sessionId, session);
+  for (const session of others) {
+    if (!byId.has(session.sessionId)) byId.set(session.sessionId, session);
+  }
+  return [...byId.values()];
+}

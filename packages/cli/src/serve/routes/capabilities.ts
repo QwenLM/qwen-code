@@ -1,0 +1,196 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Application } from 'express';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import {
+  getServeProtocolVersions,
+  hostedPersonaServeFeatures,
+} from '../capabilities.js';
+import type { getAdvertisedServeFeatures } from '../capabilities.js';
+import { MAX_UPLOAD_BYTES } from '../fs/index.js';
+import {
+  MAX_SKILL_ARCHIVE_BYTES,
+  MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+  MAX_SKILL_ARCHIVE_ENTRIES,
+  MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+} from '../workspace-skill-management.js';
+import {
+  advertisedMaxPendingPromptsPerSession,
+  advertisedMaxSessions,
+} from '../server/serve-features.js';
+import {
+  CAPABILITIES_SCHEMA_VERSION,
+  type CapabilitiesEnvelope,
+  type HostedHarnessCapabilities,
+  type ServeOptions,
+} from '../types.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
+
+interface RegisterCapabilitiesRoutesDeps {
+  qwenCodeVersion?: string;
+  mode: ServeOptions['mode'];
+  currentServeFeatures: () => ReturnType<typeof getAdvertisedServeFeatures>;
+  boundWorkspace: string;
+  workspaceRegistry: WorkspaceRegistry;
+  permissionPolicy: AcpSessionBridge['permissionPolicy'];
+  maxSessionsPerWorkspace: ServeOptions['maxSessions'];
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
+  maxTotalSessions: ServeOptions['maxTotalSessions'];
+  maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
+  sessionRestoreTimeoutMs: number;
+  languageCodes: string[];
+  daemonEnv: Readonly<NodeJS.ProcessEnv>;
+  agentCollaborationEnabledFor?: (workspaceCwd: string) => boolean;
+  hostedHarness?: HostedHarnessCapabilities;
+}
+
+function workflowsEnabledForRuntime(
+  runtime: WorkspaceRuntime | undefined,
+  daemonEnv: Readonly<NodeJS.ProcessEnv>,
+): boolean {
+  if (
+    !runtime ||
+    !runtime.trusted ||
+    runtime.routeFileSystemFactory.sshWorkspace
+  )
+    return false;
+  const env =
+    runtime.env.mode === 'runtime-overlay'
+      ? (runtime.env.effectiveEnv ?? {})
+      : (runtime.env.effectiveEnv ?? daemonEnv);
+  if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+  return (
+    env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
+    runtime.env.workflowsEnabledBySettings === true
+  );
+}
+
+export function registerCapabilitiesRoutes(
+  app: Application,
+  deps: RegisterCapabilitiesRoutesDeps,
+): void {
+  const configuredPollIntervalMs = Number(
+    deps.daemonEnv['QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS'],
+  );
+  const sessionLiveStatePollIntervalMs =
+    Number.isSafeInteger(configuredPollIntervalMs) &&
+    configuredPollIntervalMs >= 1_000 &&
+    configuredPollIntervalMs <= 2_147_483_647
+      ? configuredPollIntervalMs
+      : 5_000;
+  app.get('/capabilities', (_req, res) => {
+    const entries = deps.workspaceRegistry
+      .listAllEntries()
+      .filter(
+        (entry) =>
+          !entry.internal ||
+          (entry.state === 'active' && entry.current !== undefined),
+      );
+    const activePrimary = entries.find(
+      (entry) => entry.primary && entry.state === 'active',
+    )?.current?.runtime;
+    const multipleAdmissionPools = entries.length > 1;
+    const features = deps.hostedHarness
+      ? hostedPersonaServeFeatures()
+      : deps.currentServeFeatures();
+    const runtimeRemoval = features.includes('workspace_runtime_removal');
+    const envelope: CapabilitiesEnvelope = {
+      v: CAPABILITIES_SCHEMA_VERSION,
+      ...(deps.hostedHarness ? { hostedHarness: deps.hostedHarness } : {}),
+      protocolVersions: getServeProtocolVersions(),
+      ...(deps.qwenCodeVersion
+        ? { qwenCodeVersion: deps.qwenCodeVersion }
+        : {}),
+      mode: deps.mode,
+      features,
+      sessionLiveStatePollIntervalMs,
+      modelServices: [],
+      // Surface the primary workspace so clients can omit `cwd` on
+      // `POST /session`; multi-workspace clients use `workspaces[]`.
+      workspaceCwd: deps.boundWorkspace,
+      // Advertise supported transport families so SDK clients can
+      // auto-negotiate the best available transport via negotiateTransport().
+      transports: ['rest'],
+      // Active mediation policy under the `policy` namespace.
+      policy: {
+        permission:
+          activePrimary?.bridge.permissionPolicy ?? deps.permissionPolicy,
+      },
+      limits: {
+        maxRegisteredWorkspaces: deps.maxRegisteredWorkspaces,
+        ...(deps.maxChannelControlWorkspaces !== undefined
+          ? { maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces }
+          : {}),
+        maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
+          deps.maxPendingPromptsPerSession,
+        ),
+        sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
+        ...(features.includes('workspace_file_upload')
+          ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
+          : {}),
+        ...(features.includes('skill_archive_install') ||
+        features.includes('skill_zip_file_source')
+          ? {
+              maxSkillArchiveBytes: MAX_SKILL_ARCHIVE_BYTES,
+              maxSkillArchiveExpandedBytes: MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+              maxSkillArchiveEntries: MAX_SKILL_ARCHIVE_ENTRIES,
+              maxSkillArchiveManifestBytes: MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+            }
+          : {}),
+        ...(multipleAdmissionPools || deps.maxTotalSessions !== undefined
+          ? {
+              maxSessionsPerWorkspace: advertisedMaxSessions(
+                deps.maxSessionsPerWorkspace,
+              ),
+              maxTotalSessions:
+                deps.maxTotalSessions === undefined ||
+                deps.maxTotalSessions === 0 ||
+                deps.maxTotalSessions === Number.POSITIVE_INFINITY
+                  ? null
+                  : deps.maxTotalSessions,
+            }
+          : {}),
+      },
+      workspaces: entries.map((entry) => ({
+        id: entry.workspaceId,
+        cwd: entry.workspaceCwd,
+        ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
+          ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
+          : {}),
+        ...(entry.displayName !== undefined
+          ? { displayName: entry.displayName }
+          : {}),
+        primary: entry.primary,
+        trusted:
+          entry.state === 'active' && entry.current?.runtime.trusted === true,
+        ...(features.includes('agent_collaboration_v1')
+          ? {
+              agentCollaborationEnabled:
+                entry.state === 'active' &&
+                entry.current?.runtime.trusted === true &&
+                deps.agentCollaborationEnabledFor?.(entry.workspaceCwd) ===
+                  true,
+            }
+          : {}),
+        workflowsEnabled: workflowsEnabledForRuntime(
+          entry.state === 'active' ? entry.current?.runtime : undefined,
+          deps.daemonEnv,
+        ),
+        ...(runtimeRemoval ? { removable: entry.removable } : {}),
+        ...(entry.current?.runtime.provenance === 'live-conversation'
+          ? { kind: 'live' as const }
+          : {}),
+      })),
+      supportedLanguages: deps.languageCodes,
+    };
+    res.status(200).json(envelope);
+  });
+}

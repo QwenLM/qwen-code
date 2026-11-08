@@ -1,0 +1,734 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  measureToolOutput,
+  getToolOutputProvenance,
+  updateToolOutputBudget,
+  type ToolOutputBudgetSource,
+} from './tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
+import type { Part } from '@google/genai';
+import type { Config } from '../config/config.js';
+import type { ToolArtifact } from './tools.js';
+import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+  type ToolResultBoundaryStage,
+} from './tool-result-boundary-diagnostics.js';
+import {
+  normalizeToolResultCallId,
+  persistAndTruncateToolResult,
+} from './truncation.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+  type ToolOutputRecovery,
+} from './tool-output-recovery.js';
+import { canonicalToolName, ToolNames } from './tool-names.js';
+
+const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
+const TOOL_OUTPUT_TRUNCATED_NOTICE = 'Tool output truncated.';
+
+export interface ToolResponseBudgetEntry {
+  callId: string;
+  toolName: string;
+  responseParts: Part[];
+  persistedOutputFiles?: string[];
+  artifacts?: ToolArtifact[];
+}
+
+const associatedFinalizerResponses = new WeakSet<Part[]>();
+
+function consumeAssociatedFinalizerEntries(
+  entries: ToolResponseBudgetEntry[],
+): Set<number> {
+  const associated = new Set<number>();
+  for (let index = 0; index < entries.length; index++) {
+    const responseParts = entries[index].responseParts;
+    if (associatedFinalizerResponses.has(responseParts)) {
+      associated.add(index);
+      associatedFinalizerResponses.delete(responseParts);
+    }
+  }
+  return associated;
+}
+
+function associateFinalizerEntries(
+  entries: ToolResponseBudgetEntry[],
+  indexes: ReadonlySet<number>,
+): void {
+  for (const index of indexes) {
+    associatedFinalizerResponses.add(entries[index].responseParts);
+  }
+}
+
+function observeFinalizerEntries(
+  config: Config,
+  stage: Extract<
+    ToolResultBoundaryStage,
+    'finalizer_input' | 'finalizer_output'
+  >,
+  entries: ToolResponseBudgetEntry[],
+  mutatedEntryIndexes: ReadonlySet<number>,
+  promptIds?: ReadonlyMap<string, string>,
+  entryIndexes?: ReadonlySet<number>,
+): void {
+  for (let index = 0; index < entries.length; index++) {
+    if (entryIndexes && !entryIndexes.has(index)) continue;
+    const entry = entries[index];
+    try {
+      observeToolResultBoundary({
+        stage,
+        sessionId: config.getSessionId?.(),
+        promptId: promptIds?.get(entry.callId),
+        toolCallId: entry.callId,
+        toolName: entry.toolName,
+        mutated: mutatedEntryIndexes.has(index),
+        artifacts: [
+          toolResultBoundaryArtifact(
+            entry.persistedOutputFiles,
+            entry.artifacts,
+          ),
+        ],
+        values: () => toolResultPartDiagnosticValues(entry.responseParts),
+      });
+    } catch {
+      // Diagnostics must not affect response finalization.
+    }
+  }
+}
+
+type TextSlot = {
+  entryIndex: number;
+  partIndex: number;
+  field: 'text' | 'output' | 'error';
+  text: string;
+  protectedPrefix?: string;
+  recovery?: ToolOutputRecovery;
+};
+
+function recoveryOf(
+  entry: ToolResponseBudgetEntry,
+  part: Part,
+): ToolOutputRecovery {
+  const recovery = getToolOutputRecovery(part);
+  return {
+    ...recovery,
+    persistedOutputFiles:
+      entry.persistedOutputFiles ?? recovery?.persistedOutputFiles,
+  };
+}
+
+function recoveryHeader(files: string[] | undefined): string {
+  return files?.length
+    ? files.length === 1
+      ? `Tool output truncated. Persisted tool-output artifact: ${files[0]}`
+      : `Tool output truncated. Persisted tool-output artifacts:\n${files.map((file) => `- ${file}`).join('\n')}`
+    : TOOL_OUTPUT_TRUNCATED_NOTICE;
+}
+
+function minimumRecoveryBudget(slot: TextSlot): number {
+  const text = slot.recovery?.text;
+  return (
+    recoveryHeader(slot.recovery?.persistedOutputFiles).length +
+    (text ? text.length + 2 : 0) +
+    3
+  );
+}
+
+function isBudgetExemptOutputName(name: string | undefined): boolean {
+  const canonical = canonicalToolName(name ?? '');
+  return (
+    canonical === ToolNames.SEARCH_MEMORY || canonical === ToolNames.TOOL_SEARCH
+  );
+}
+
+/**
+ * Whether `enforceFunctionResponseBudget` shortens text in this part. Derived
+ * from `collectTextSlots` itself, so a caller that charges a batch of results
+ * against a token headroom holds out exactly the text the budget will not
+ * shorten — exempt output, empty output, output the plan-mode lifecycle prefix
+ * covers entirely, and nested media (which is not text) are counted as input
+ * instead. A hand-written mirror of those rules drifts from them silently.
+ *
+ * The synthetic entry is the send boundary's own: `enforceFunctionResponseBudget`
+ * collects with `includeTopLevelText = false` and one entry named
+ * `tool-response-batch`, so the entry-level exemption never applies and the
+ * skip is decided by each part's own tool name.
+ */
+export function isBudgetShrinkablePart(part: Part): boolean {
+  return (
+    collectTextSlots(
+      [{ callId: '', toolName: '', responseParts: [part] }],
+      false,
+    ).length > 0
+  );
+}
+
+function collectTextSlots(
+  entries: ToolResponseBudgetEntry[],
+  includeTopLevelText = true,
+  excludeBudgetExemptOutput = true,
+): TextSlot[] {
+  const slots: TextSlot[] = [];
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+    const entry = entries[entryIndex];
+    const entryName = canonicalToolName(entry.toolName);
+    if (
+      entryName === ToolNames.SEARCH_MEMORY ||
+      entryName === ToolNames.TOOL_SEARCH
+    )
+      continue;
+    const parts = entry.responseParts;
+    for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+      const part = parts[partIndex];
+      if (entry.persistedOutputFiles !== undefined) {
+        setToolOutputRecovery(part, recoveryOf(entry, part));
+      }
+      if (includeTopLevelText && typeof part.text === 'string') {
+        const recovery = recoveryOf(entry, part);
+        slots.push({
+          entryIndex,
+          partIndex,
+          field: 'text',
+          text: part.text,
+          recovery,
+        });
+      }
+      const response = part.functionResponse?.response;
+      const output = response?.['output'];
+      const error = response?.['error'];
+      const responseName = canonicalToolName(
+        part.functionResponse?.name ?? entry.toolName,
+      );
+      const budgetExemptOutput =
+        excludeBudgetExemptOutput && isBudgetExemptOutputName(responseName);
+      if (typeof output === 'string' && !budgetExemptOutput) {
+        const protectedPrefix = excludeBudgetExemptOutput
+          ? getPlanModeLifecyclePrefix(
+              part.functionResponse?.name ?? entry.toolName,
+              output,
+            )
+          : undefined;
+        const budgetedOutput = protectedPrefix
+          ? output.slice(protectedPrefix.length)
+          : output;
+        if (budgetedOutput.length > 0) {
+          const recovery = recoveryOf(entry, part);
+          slots.push({
+            entryIndex,
+            partIndex,
+            field: 'output',
+            text: budgetedOutput,
+            ...(protectedPrefix ? { protectedPrefix } : {}),
+            recovery,
+          });
+        }
+      }
+      if (typeof error === 'string') {
+        const recovery = recoveryOf(entry, part);
+        slots.push({
+          entryIndex,
+          partIndex,
+          field: 'error',
+          text: error,
+          recovery,
+        });
+      }
+    }
+  }
+  return slots;
+}
+
+function allocateTextBudget(lengths: number[], budget: number): number[] {
+  const allocations = new Array<number>(lengths.length).fill(0);
+  let remaining = Math.max(0, Math.floor(budget));
+  let active = lengths.map((_, index) => index);
+
+  while (active.length > 0) {
+    const share = Math.floor(remaining / active.length);
+    const fixed = active.filter((index) => lengths[index] <= share);
+    if (fixed.length === 0) {
+      for (const index of active) {
+        allocations[index] = share;
+      }
+      let remainder = remaining - share * active.length;
+      for (const index of active) {
+        if (remainder === 0) break;
+        allocations[index]++;
+        remainder--;
+      }
+      break;
+    }
+
+    const fixedSet = new Set(fixed);
+    for (const index of fixed) {
+      allocations[index] = lengths[index];
+      remaining -= lengths[index];
+    }
+    active = active.filter((index) => !fixedSet.has(index));
+  }
+
+  return allocations;
+}
+
+function sliceStartWithoutBrokenSurrogate(
+  text: string,
+  length: number,
+): string {
+  let end = Math.min(Math.max(0, length), text.length);
+  if (end > 0) {
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end--;
+  }
+  return text.slice(0, end);
+}
+
+function sliceEndWithoutBrokenSurrogate(text: string, length: number): string {
+  let start = Math.max(0, text.length - Math.max(0, length));
+  if (start < text.length) {
+    const first = text.charCodeAt(start);
+    if (first >= 0xdc00 && first <= 0xdfff) start++;
+  }
+  return text.slice(start);
+}
+
+function fitText(
+  text: string,
+  maxChars: number,
+  persistedOutputFiles: string[] | undefined,
+  recovery?: ToolOutputRecovery,
+): string {
+  if (text.length <= maxChars) return text;
+  if (maxChars <= 0) return '';
+
+  const preserved = recovery?.text ?? '';
+  const preservedSize = preserved ? preserved.length + 2 : 0;
+  const pointer = recoveryHeader(persistedOutputFiles);
+  // A pointer too long to deliver in full is dropped rather than sent as a
+  // partial path, so the preview is budgeted against the notice that is sent.
+  const header =
+    pointer.length + preservedSize + 3 <= maxChars
+      ? pointer
+      : TOOL_OUTPUT_TRUNCATED_NOTICE;
+  if (header.length > maxChars) {
+    return sliceStartWithoutBrokenSurrogate(
+      TOOL_OUTPUT_TRUNCATED_NOTICE,
+      maxChars,
+    );
+  }
+
+  const separator = '\n\n';
+  const marker = '\n...\n';
+  let body = text;
+  // Remove only producer-owned data, never recognize handles in tool text.
+  for (const owned of [
+    pointer,
+    preserved,
+    ...(recovery?.persistedOutputFiles ?? []),
+  ]) {
+    if (owned) body = body.split(owned).join('');
+  }
+  const preservedBlock = preserved ? `${separator}${preserved}` : '';
+  const previewBudget =
+    maxChars - header.length - preservedBlock.length - separator.length;
+  if (previewBudget <= 0) {
+    return header;
+  }
+  if (body.length <= previewBudget) {
+    return `${header}${preservedBlock}${separator}${body}`;
+  }
+  if (previewBudget <= marker.length) {
+    return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+      body,
+      previewBudget,
+    )}`;
+  }
+
+  const contentBudget = previewBudget - marker.length;
+  const headBudget = Math.floor(contentBudget / 5);
+  const tailBudget = contentBudget - headBudget;
+  return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+    body,
+    headBudget,
+  )}${marker}${sliceEndWithoutBrokenSurrogate(body, tailBudget)}`;
+}
+
+function replaceTextSlots(
+  entries: ToolResponseBudgetEntry[],
+  slots: TextSlot[],
+  allocations: number[],
+): ToolResponseBudgetEntry[] {
+  const result = entries.map((entry) => ({
+    ...entry,
+    responseParts: [...entry.responseParts],
+  }));
+
+  for (let index = 0; index < slots.length; index++) {
+    const slot = slots[index];
+    if (slot.text.length <= allocations[index]) continue;
+    const entry = result[slot.entryIndex];
+    const part = entry.responseParts[slot.partIndex];
+    const files =
+      entry.persistedOutputFiles ?? slot.recovery?.persistedOutputFiles;
+    const recovery = { ...slot.recovery, persistedOutputFiles: files };
+    // The header path is the entry's persisted artifact — data this module
+    // wrote, never a string recovered from model-visible text.
+    const replacement = fitText(
+      slot.text,
+      allocations[index],
+      files,
+      slot.recovery,
+    );
+
+    const updated = { ...part };
+    if (slot.field === 'text') {
+      updated.text = replacement;
+    } else {
+      const functionResponse = part.functionResponse;
+      if (!functionResponse) continue;
+      updated.functionResponse = {
+        ...functionResponse,
+        response: {
+          ...functionResponse.response,
+          [slot.field]: slot.protectedPrefix
+            ? `${slot.protectedPrefix}${replacement}`
+            : replacement,
+        },
+      };
+    }
+    setToolOutputRecovery(updated, recovery);
+    entry.responseParts[slot.partIndex] = updated;
+  }
+
+  return result;
+}
+
+export function toolResponseTextLength(parts: Part[]): number {
+  return collectTextSlots(
+    [{ callId: '', toolName: '', responseParts: parts }],
+    true,
+    false,
+  ).reduce((total, slot) => total + slot.text.length, 0);
+}
+
+export function minimumFunctionResponseContent(parts: Part[]): {
+  parts: Part[];
+  budgetedChars: number;
+} {
+  const entries = [{ callId: '', toolName: '', responseParts: parts }];
+  const slots = collectTextSlots(entries, false);
+  const allocations = slots.map((slot) =>
+    slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length
+      ? Math.min(slot.text.length, minimumRecoveryBudget(slot))
+      : 0,
+  );
+  return {
+    parts: replaceTextSlots(entries, slots, allocations)[0].responseParts,
+    budgetedChars: allocations.reduce((sum, value) => sum + value, 0),
+  };
+}
+
+export function enforceFunctionResponseBudget(
+  entries: ToolResponseBudgetEntry[],
+  budget: number,
+  allowZeroBudget = false,
+  stampProvenance = true,
+): ToolResponseBudgetEntry[] {
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && !allowZeroBudget)
+  )
+    return entries;
+  const slots = collectTextSlots(entries, false);
+  const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
+  if (total <= budget) return entries;
+
+  const allocations = allocateTextBudget(
+    slots.map((slot) => slot.text.length),
+    budget,
+  );
+  if (
+    slots.some(
+      (slot, index) =>
+        slot.text.length > allocations[index] &&
+        (slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length) &&
+        allocations[index] < minimumRecoveryBudget(slot),
+    )
+  )
+    return entries;
+  const reduced = replaceTextSlots(entries, slots, allocations);
+  for (let index = 0; index < reduced.length; index++)
+    for (
+      let partIndex = 0;
+      partIndex < reduced[index].responseParts.length;
+      partIndex++
+    ) {
+      const part = reduced[index].responseParts[partIndex];
+      // Attribute this fallback to the model send policy, including when a
+      // Hosted Skill applies it before saving its model-facing result.
+      if (stampProvenance && part !== entries[index].responseParts[partIndex])
+        updateToolOutputBudget([part], budget, 'send_guard');
+    }
+  return reduced;
+}
+
+export async function finalizeToolResponses(
+  config: Config,
+  entries: ToolResponseBudgetEntry[],
+  promptIds?: ReadonlyMap<string, string>,
+  observeBoundary = true,
+  associateBoundary = false,
+  budgetOverride?: number,
+  includeTopLevelText = true,
+  budgetSource: ToolOutputBudgetSource = 'batch',
+  logResultSize = true,
+): Promise<ToolResponseBudgetEntry[]> {
+  const shouldAssociateBoundary = observeBoundary && associateBoundary;
+  const associatedEntryIndexes = observeBoundary
+    ? consumeAssociatedFinalizerEntries(entries)
+    : new Set<number>();
+  const observationIndexes = (mutatedEntryIndexes: ReadonlySet<number>) =>
+    new Set(
+      entries.flatMap((_, index) =>
+        mutatedEntryIndexes.has(index) || !associatedEntryIndexes.has(index)
+          ? [index]
+          : [],
+      ),
+    );
+  const observeUnchangedEntries = () => {
+    if (!observeBoundary) return;
+    const unchanged = new Set<number>();
+    const indexes = observationIndexes(unchanged);
+    observeFinalizerEntries(
+      config,
+      'finalizer_input',
+      entries,
+      unchanged,
+      promptIds,
+      indexes,
+    );
+    observeFinalizerEntries(
+      config,
+      'finalizer_output',
+      entries,
+      unchanged,
+      promptIds,
+      indexes,
+    );
+  };
+  const budget =
+    budgetOverride ??
+    config.getToolOutputBatchBudget?.() ??
+    Number.POSITIVE_INFINITY;
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && budgetOverride === undefined)
+  ) {
+    observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
+    return entries;
+  }
+
+  const slots = collectTextSlots(entries, includeTopLevelText);
+  const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
+  if (total <= budget) {
+    observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
+    return entries;
+  }
+
+  const allocations = allocateTextBudget(
+    slots.map((slot) => slot.text.length),
+    budget,
+  );
+  if (
+    slots.some(
+      (slot, index) =>
+        slot.text.length > allocations[index] &&
+        // `fitText` spends the allocation on the notice and its separator
+        // first, so anything below notice + '\n\n' + one character would
+        // persist an artifact and then send a contentless notice.
+        (budgetOverride !== undefined ||
+          slot.recovery?.text ||
+          slot.recovery?.persistedOutputFiles?.length) &&
+        allocations[index] < minimumRecoveryBudget(slot),
+    )
+  ) {
+    // Compaction owns headroom too small for a meaningful tool result.
+    observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
+    return entries;
+  }
+  const entriesToPersist = new Set<number>();
+  for (let index = 0; index < slots.length; index++) {
+    if (slots[index].text.length > allocations[index]) {
+      entriesToPersist.add(slots[index].entryIndex);
+    }
+  }
+
+  const indexes = observationIndexes(entriesToPersist);
+  if (observeBoundary)
+    observeFinalizerEntries(
+      config,
+      'finalizer_input',
+      entries,
+      entriesToPersist,
+      promptIds,
+      indexes,
+    );
+
+  const withPersistence = [...entries];
+  const normalizedCallIds = entries.map((entry) =>
+    normalizeToolResultCallId(entry.callId),
+  );
+  const normalizedCallIdCounts = new Map<string, number>();
+  for (const callId of normalizedCallIds) {
+    if (!callId) continue;
+    normalizedCallIdCounts.set(
+      callId,
+      (normalizedCallIdCounts.get(callId) ?? 0) + 1,
+    );
+  }
+  const reservedCallIds = new Set(
+    normalizedCallIds.filter((callId): callId is string => !!callId),
+  );
+  const usedCallIds = new Set<string>();
+  for (const entryIndex of entriesToPersist) {
+    const entry = withPersistence[entryIndex];
+    const previousFiles =
+      entry.persistedOutputFiles ??
+      entry.responseParts
+        .map(getToolOutputRecovery)
+        .find((recovery) => recovery?.persistedOutputFiles !== undefined)
+        ?.persistedOutputFiles;
+    if (previousFiles !== undefined) {
+      withPersistence[entryIndex] = {
+        ...entry,
+        persistedOutputFiles: previousFiles,
+      };
+      continue;
+    }
+    const content = slots
+      .filter((slot) => slot.entryIndex === entryIndex)
+      .map((slot) => slot.text)
+      .join('\n\n');
+    try {
+      const normalizedCallId = normalizedCallIds[entryIndex];
+      let persistenceCallId = entry.callId;
+      if (normalizedCallId) {
+        if (
+          normalizedCallIdCounts.get(normalizedCallId) === 1 &&
+          !usedCallIds.has(normalizedCallId)
+        ) {
+          persistenceCallId = normalizedCallId;
+        } else {
+          let suffix = 1;
+          let candidate = `${normalizedCallId}-${suffix}`;
+          while (reservedCallIds.has(candidate) || usedCallIds.has(candidate)) {
+            suffix++;
+            candidate = `${normalizedCallId}-${suffix}`;
+          }
+          persistenceCallId = candidate;
+        }
+        usedCallIds.add(persistenceCallId);
+      }
+      const persisted = await persistAndTruncateToolResult(
+        persistenceCallId,
+        entry.toolName,
+        content,
+        config,
+        promptIds?.get(entry.callId),
+      );
+      withPersistence[entryIndex] = {
+        ...entry,
+        persistedOutputFiles: persisted.outputFile
+          ? [persisted.outputFile]
+          : [],
+      };
+    } catch {
+      withPersistence[entryIndex] = {
+        ...entry,
+        persistedOutputFiles: [],
+      };
+    }
+  }
+
+  const finalized = replaceTextSlots(withPersistence, slots, allocations);
+  for (let index = 0; index < finalized.length; index++) {
+    if (!entriesToPersist.has(index)) continue;
+    const entry = finalized[index];
+    for (
+      let partIndex = 0;
+      partIndex < entry.responseParts.length;
+      partIndex++
+    ) {
+      const part = entry.responseParts[partIndex];
+      if (part !== entries[index].responseParts[partIndex])
+        updateToolOutputBudget([part], budget, budgetSource);
+    }
+    if (!logResultSize) continue;
+    try {
+      // Measurement is part of the observation: an estimator throw must not
+      // fail the finalizer it only observes.
+      const before = measureToolOutput(entries[index].responseParts, config);
+      const after = measureToolOutput(entry.responseParts, config);
+      const provenance = entry.responseParts
+        .map(getToolOutputProvenance)
+        .find(Boolean);
+      logToolResultSize(
+        config,
+        new ToolResultSizeEvent(
+          provenance?.toolName ?? entry.toolName,
+          provenance?.toolType ??
+            (entry.toolName.startsWith('mcp__') ? 'mcp' : 'native'),
+          'batch',
+          before.chars,
+          after.chars,
+          before.estimatedTokens,
+          after.estimatedTokens,
+          true,
+          budget,
+          budgetSource,
+          entry.callId,
+          promptIds?.get(entry.callId),
+        ),
+      );
+    } catch {
+      /* Telemetry is observational. */
+    }
+  }
+  if (observeBoundary)
+    observeFinalizerEntries(
+      config,
+      'finalizer_output',
+      finalized,
+      entriesToPersist,
+      promptIds,
+      indexes,
+    );
+  if (shouldAssociateBoundary) {
+    associateFinalizerEntries(finalized, new Set(finalized.keys()));
+  }
+  const finalizedTotal = collectTextSlots(
+    finalized,
+    includeTopLevelText,
+  ).reduce((sum, slot) => sum + slot.text.length, 0);
+  debugLogger.info(
+    `Tool response budget (${budget} chars): reduced ${entriesToPersist.size} result(s) from ${total} to ${finalizedTotal} chars.`,
+  );
+  return finalized;
+}

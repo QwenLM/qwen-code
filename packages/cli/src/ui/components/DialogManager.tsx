@@ -10,6 +10,7 @@ import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
+import { ProjectHooksApprovalDialog } from './hooks/ProjectHooksApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
@@ -30,6 +31,8 @@ import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
 import { ArenaStatusDialog } from './arena/ArenaStatusDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
+import { EffortDialog } from './EffortDialog.js';
+import { OutputStyleDialog } from './OutputStyleDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -53,11 +56,13 @@ import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { SkillReviewDialog } from './SkillReviewDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -144,6 +149,16 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isProjectHooksApprovalDialogOpen && uiState.pendingProjectHooks) {
+    return (
+      <ProjectHooksApprovalDialog
+        lines={uiState.pendingProjectHooks.lines}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={listDialogHeight}
+        onSelect={uiActions.handleProjectHooksApprovalSelect}
+      />
+    );
+  }
   if (uiState.shellConfirmationRequest) {
     return (
       <ShellConfirmationDialog
@@ -156,6 +171,7 @@ export const DialogManager = ({
   if (uiState.loopDetectionConfirmationRequest) {
     return (
       <LoopDetectionConfirmation
+        cause={uiState.loopDetectionConfirmationRequest.cause}
         onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
       />
     );
@@ -188,8 +204,11 @@ export const DialogManager = ({
     );
   }
   if (uiState.providerUpdateRequest) {
+    // Keyed per prompt so a queued prompt opens on its default choice
+    // instead of the row highlighted in the previous one.
     return (
       <ProviderUpdatePrompt
+        key={uiState.providerUpdateRequest.id}
         entries={uiState.providerUpdateRequest.entries}
         onConfirm={uiState.providerUpdateRequest.onConfirm}
       />
@@ -268,7 +287,13 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isAdvisorModelMode={uiState.isAdvisorModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
+        isVisionModelMode={uiState.isVisionModelMode}
+        isCompactionModelMode={uiState.isCompactionModelMode}
+        isImageModelMode={uiState.isImageModelMode}
+        persistScope={uiState.modelDialogPersistScope}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }
@@ -290,10 +315,15 @@ export const DialogManager = ({
               uiActions.openModelDialog({ fastModelMode: true });
               return;
             }
+            if (settingName === 'visionModel') {
+              uiActions.openModelDialog({ visionModelMode: true });
+              return;
+            }
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
           availableTerminalHeight={listDialogHeight}
+          width={mainAreaWidth}
           config={config}
         />
       </Box>
@@ -336,6 +366,28 @@ export const DialogManager = ({
           currentMode={currentMode}
           onSelect={uiActions.handleApprovalModeSelect}
           availableTerminalHeight={constrainedDialogHeight}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isEffortDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        <EffortDialog
+          currentEffort={config.getReasoningEffort()}
+          efforts={getReasoningEffortsForConfig(config)}
+          onSelect={uiActions.handleEffortSelect}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isOutputStyleDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        <OutputStyleDialog
+          currentStyleName={config.getOutputStyle()?.name}
+          styles={uiState.outputStyleChoices}
+          onSelect={uiActions.handleOutputStyleSelect}
         />
       </Box>
     );
@@ -541,6 +593,19 @@ export const DialogManager = ({
         fileHistoryService={config.getFileHistoryService()}
         fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
         onClose={uiActions.closeDiffDialog}
+      />
+    );
+  }
+
+  if (uiState.isSkillReviewDialogOpen && uiState.skillReviewPending) {
+    return (
+      <SkillReviewDialog
+        key={uiState.skillReviewPending.taskId}
+        skills={uiState.skillReviewPending.skills}
+        onAccept={uiActions.acceptPendingSkill}
+        onReject={uiActions.rejectPendingSkill}
+        onClose={uiActions.closeSkillReviewDialog}
+        onDismiss={uiActions.dismissSkillReviewDialog}
       />
     );
   }

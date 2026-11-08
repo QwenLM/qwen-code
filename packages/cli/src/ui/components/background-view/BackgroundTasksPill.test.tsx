@@ -6,8 +6,15 @@
 
 import { describe, it, expect } from 'vitest';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
-import { getPillLabel, hasPendingApproval } from './BackgroundTasksPill.js';
-import type { BackgroundApproval } from '@qwen-code/qwen-code-core';
+import {
+  getPillLabel,
+  hasLargeWorkflow,
+  hasPendingApproval,
+} from './BackgroundTasksPill.js';
+import type {
+  BackgroundApproval,
+  WorkflowApproval,
+} from '@qwen-code/qwen-code-core';
 
 function approval(callId: string): BackgroundApproval {
   return {
@@ -75,6 +82,33 @@ function monitorEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
     droppedLines: 0,
     ...overrides,
   } as DialogEntry;
+}
+
+function workflowEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  return {
+    kind: 'workflow',
+    runId: 'wf-1',
+    description: 'demo',
+    meta: null,
+    status: 'running',
+    startTime: 0,
+    pendingApprovals: [],
+    ...overrides,
+  } as DialogEntry;
+}
+
+function workflowApproval(approvalId: string): WorkflowApproval {
+  return {
+    approvalId,
+    subagentId: 'sub-1',
+    callId: 'call-1',
+    name: 'Shell',
+    description: 'run',
+    confirmationDetails: {
+      type: 'exec',
+    } as WorkflowApproval['confirmationDetails'],
+    at: 0,
+  };
 }
 
 describe('getPillLabel', () => {
@@ -167,6 +201,13 @@ describe('getPillLabel', () => {
     );
   });
 
+  it.each(['pausing', 'paused'] as const)(
+    'keeps an active %s workflow out of the done tally',
+    (status) => {
+      expect(getPillLabel([workflowEntry({ status })])).toBe('1 workflow');
+    },
+  );
+
   it('uses generic done form when all entries are terminal', () => {
     expect(
       getPillLabel([agentEntry({ agentId: 'a', status: 'completed' })]),
@@ -235,13 +276,51 @@ describe('hasPendingApproval', () => {
     ).toBe(true);
   });
 
-  it('ignores non-agent kinds', () => {
-    // Only agent entries carry pendingApprovals; shells/dreams never do.
+  it('is true when a workflow has at least one parked approval', () => {
+    expect(
+      hasPendingApproval([
+        workflowEntry({
+          pendingApprovals: [workflowApproval('wfap-1')],
+        }),
+      ]),
+    ).toBe(true);
+  });
+
+  it('ignores kinds that cannot carry approvals', () => {
     expect(
       hasPendingApproval([
         shellEntry({ shellId: 'bg_a' }),
         dreamEntry({ dreamId: 'd-a' }),
       ]),
     ).toBe(false);
+  });
+});
+
+describe('hasLargeWorkflow', () => {
+  const sizeWarning = {
+    axis: 'agents' as const,
+    scheduledAgents: 40,
+    totalTokens: 0,
+    projectedTokens: 2_800_000,
+    agentCap: 15,
+    tokenCap: 1_500_000,
+    capFromGuideline: true,
+    at: 0,
+  };
+
+  it('is true for an active workflow flagged as large', () => {
+    expect(hasLargeWorkflow([workflowEntry({ sizeWarning })])).toBe(true);
+    expect(
+      hasLargeWorkflow([workflowEntry({ status: 'paused', sizeWarning })]),
+    ).toBe(true);
+  });
+
+  // The marker asks the user to consider stopping a run; a settled run has
+  // nothing left to stop.
+  it('is false once the flagged run settled, and without a flag', () => {
+    expect(
+      hasLargeWorkflow([workflowEntry({ status: 'completed', sizeWarning })]),
+    ).toBe(false);
+    expect(hasLargeWorkflow([workflowEntry(), agentEntry()])).toBe(false);
   });
 });

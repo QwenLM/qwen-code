@@ -6,17 +6,23 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
-  HookEventName,
   CommandHookConfig,
   HttpHookConfig,
   FunctionHookConfig,
   FunctionHookCallback,
   HookConfig,
   HookExecutionResult,
+  HookEventName,
 } from './types.js';
 import { HookType } from './types.js';
+import { getHookMatcherTarget, getToolMatcherTargets } from './hookPlanner.js';
+import { matchesHookPattern } from './hook-matcher.js';
 
 const debugLogger = createDebugLogger('SESSION_HOOKS_MANAGER');
+
+function isToolMatcherEvent(event: HookEventName): boolean {
+  return getHookMatcherTarget(event)?.kind === 'toolName';
+}
 
 /**
  * Generate a unique hook ID
@@ -36,6 +42,14 @@ export interface SessionHookEntry {
   sequential?: boolean;
   /** Optional skill root path for skill-scoped hooks */
   skillRoot?: string;
+  /**
+   * Registered from repository-controlled configuration — a project
+   * skill's frontmatter — and therefore executed only while the folder is
+   * trusted: the event handler re-reads `Config.isTrustedFolder()` at fire
+   * time, so a trust revoked mid-session silences the hook without a
+   * restart, and a trust granted again lets it fire.
+   */
+  trustGated?: boolean;
 }
 
 /**
@@ -51,6 +65,8 @@ interface SessionHooksStorage {
  */
 export class SessionHooksManager {
   private readonly sessions: Map<string, SessionHooksStorage> = new Map();
+
+  constructor(private readonly onHooksChanged?: (sessionId: string) => void) {}
 
   /**
    * Get or create session storage
@@ -116,6 +132,7 @@ export class SessionHooksManager {
     const eventHooks = storage.hooks.get(event) || [];
     eventHooks.push(entry);
     storage.hooks.set(event, eventHooks);
+    this.onHooksChanged?.(sessionId);
 
     debugLogger.debug(
       `Added function hook ${hookId} for session ${sessionId} on event ${event}`,
@@ -137,7 +154,11 @@ export class SessionHooksManager {
     event: HookEventName,
     matcher: string,
     hook: CommandHookConfig | HttpHookConfig,
-    options?: { sequential?: boolean; skillRoot?: string },
+    options?: {
+      sequential?: boolean;
+      skillRoot?: string;
+      trustGated?: boolean;
+    },
   ): string {
     const hookId = generateHookId();
 
@@ -148,12 +169,14 @@ export class SessionHooksManager {
       config: hook,
       sequential: options?.sequential,
       skillRoot: options?.skillRoot,
+      ...(options?.trustGated ? { trustGated: true } : {}),
     };
 
     const storage = this.getSessionStorage(sessionId);
     const eventHooks = storage.hooks.get(event) || [];
     eventHooks.push(entry);
     storage.hooks.set(event, eventHooks);
+    this.onHooksChanged?.(sessionId);
 
     debugLogger.debug(
       `Added session hook ${hookId} for session ${sessionId} on event ${event}`,
@@ -190,6 +213,7 @@ export class SessionHooksManager {
     }
 
     eventHooks.splice(index, 1);
+    this.onHooksChanged?.(sessionId);
     debugLogger.debug(
       `Removed hook ${hookId} from session ${sessionId} on event ${event}`,
     );
@@ -213,6 +237,7 @@ export class SessionHooksManager {
       const index = eventHooks.findIndex((entry) => entry.hookId === hookId);
       if (index !== -1) {
         eventHooks.splice(index, 1);
+        this.onHooksChanged?.(sessionId);
         debugLogger.debug(
           `Removed hook ${hookId} from session ${sessionId} on event ${event}`,
         );
@@ -245,7 +270,7 @@ export class SessionHooksManager {
    * Returns true when any session (or just `sessionId`, when provided) has at
    * least one hook registered for `event`. Used as the fast-path skip check by
    * the turn engine so it knows to actually fire the event for session-scoped
-   * hooks like `/goal`.
+   * hooks, such as a skill's.
    */
   hasHooksForEvent(event: HookEventName, sessionId?: string): boolean {
     if (sessionId !== undefined) {
@@ -271,47 +296,13 @@ export class SessionHooksManager {
     target: string,
   ): SessionHookEntry[] {
     const hooks = this.getHooksForEvent(sessionId, event);
-    return hooks.filter((entry) => this.matchesPattern(entry.matcher, target));
-  }
 
-  /**
-   * Check if a target matches a pattern
-   * Supports: exact match, '*' wildcard, '|' for alternatives, regex syntax
-   *
-   * Matching priority:
-   * 1. '*' - matches everything
-   * 2. Pipe-separated alternatives (e.g., 'Write|Edit|Read')
-   * 3. Regex syntax (e.g., '^Bash.*', 'Write|Edit')
-   * 4. Exact match (fallback)
-   */
-  private matchesPattern(pattern: string, target: string): boolean {
-    if (pattern === '*') {
-      return true;
-    }
-
-    // Handle pipe-separated alternatives
-    if (
-      pattern.includes('|') &&
-      !pattern.startsWith('^') &&
-      !pattern.startsWith('(')
-    ) {
-      const alternatives = pattern.split('|').map((s) => s.trim());
-      return alternatives.some((alt) => this.matchesPattern(alt, target));
-    }
-
-    // Try regex match
-    try {
-      const regex = new RegExp(`^${pattern}$`);
-      return regex.test(target);
-    } catch {
-      // Invalid regex, fall back to exact match
-      debugLogger.debug(
-        `Invalid regex pattern "${pattern}", falling back to exact match`,
-      );
-    }
-
-    // Exact match (fallback)
-    return pattern === target;
+    const aliases = isToolMatcherEvent(event)
+      ? getToolMatcherTargets(target)
+      : undefined;
+    return hooks.filter((entry) =>
+      matchesHookPattern(entry.matcher, target, { aliases }),
+    );
   }
 
   /**
@@ -340,6 +331,7 @@ export class SessionHooksManager {
    */
   clearSessionHooks(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.onHooksChanged?.(sessionId);
     debugLogger.debug(`Cleared all hooks for session ${sessionId}`);
   }
 

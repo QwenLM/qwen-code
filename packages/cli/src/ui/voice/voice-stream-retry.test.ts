@@ -95,4 +95,35 @@ describe('openVoiceStreamWithRetry', () => {
     await expect(openVoiceStreamWithRetry(open)).rejects.toBe(error);
     expect(open).toHaveBeenCalledTimes(1);
   });
+
+  it('cancels the retry delay when the runtime is disposed', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const open = vi
+        .fn<() => Promise<VoiceStreamSession>>()
+        .mockRejectedValueOnce(new Error('early connect failed'))
+        .mockResolvedValueOnce(session());
+
+      const result = openVoiceStreamWithRetry(open, {
+        abortSignal: controller.signal,
+      });
+      const assertion = result.then(
+        () => {
+          throw new Error('Expected aborted retry to reject.');
+        },
+        (error: unknown) => {
+          expect(error).toEqual(new Error('Voice stream opening was aborted.'));
+        },
+      );
+      await vi.waitFor(() => expect(open).toHaveBeenCalledOnce());
+      controller.abort();
+
+      await assertion;
+      expect(open).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

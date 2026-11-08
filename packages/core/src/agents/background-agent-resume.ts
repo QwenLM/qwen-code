@@ -6,8 +6,8 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Content, FunctionDeclaration, Part } from '@google/genai';
-import type { Config } from '../config/config.js';
+import type { Content, Part } from '@google/genai';
+import type { ApprovalModeValue, Config } from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -17,39 +17,74 @@ import {
 } from './runtime/agent-events.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
+import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
+  buildAgentTranscriptAttach,
+  getAgentJsonlPath,
+  getAgentMetaPath,
   getSubagentSessionDir,
+  normalizeResumedAgentDepth,
   readAgentMeta,
   patchAgentMeta,
+  getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
+  type AgentMeta,
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
-import { getInitialChatHistory } from '../utils/environmentContext.js';
-import { getGitBranch } from '../utils/gitUtils.js';
-import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
+import {
+  buildAvailableSkillsReminder,
+  buildDeferredToolsReminder,
+  buildMcpServerInstructionsReminder,
+  getInitialChatHistory,
+} from '../core/environmentContext.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
+import type { PermissionMode, StopHookOutput } from '../hooks/types.js';
+import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../hooks/stopHookCap.js';
+import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
-import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import {
+  createApprovalModeOverride,
+  stampBackgroundPromptPolicy,
+} from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
+  buildForkExecutionAllowlist,
+  registerForkDisplayImageForCache,
+  resolveForkExecutionAllowedTools,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
-import type {
-  AgentCompletionStats,
-  AgentTask,
-  AgentTaskRegistration,
+import {
+  MAX_RETAINED_TERMINAL_AGENTS,
+  type AgentCompletionStats,
+  type AgentTask,
+  type AgentTaskRegistration,
+  type ResidentBackgroundAgent,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from './runtime/agent-core.js';
+import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
+import {
+  buildInheritedForkExecutionToolNames,
+  extractParentToolNames,
+} from './runtime/agent-core.js';
+import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
+import { ToolMode } from '../tools/code-mode.js';
+import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { PromptConfig, ToolConfig } from './runtime/agent-types.js';
+import { isDirectToolBridgeAvailable } from '../tools/tool-search.js';
+import type {
+  AgentExternalInput,
+  PromptConfig,
+  ToolConfig,
+} from './runtime/agent-types.js';
 import type {
   AgentBootstrapRecordPayload,
   NotificationRecordPayload,
@@ -64,24 +99,76 @@ export const DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE =
 
 const LEGACY_FORK_RESUME_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its bootstrap transcript is missing.';
-const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
-  'Fork background task cannot be safely resumed because its launch-time runtime constraints are missing.';
-
-type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+const CURRENT_FORK_RUNTIME_BLOCKED_REASON =
+  'Fork background task cannot be safely resumed because the current parent system prompt or tool surface is unavailable.';
+const FORK_RESUME_CAPABILITY_NOTICE = `<system-reminder>
+This fork was resumed in a new runtime. The current system instruction, tool declarations, MCP connections, and skill listing are authoritative. Earlier capability listings in the conversation history are obsolete; do not invoke a tool or skill unless it is available in the current runtime.
+</system-reminder>`;
+const MISSING_TRANSCRIPT_BLOCKED_REASON =
+  'Background task transcript is missing or unreadable.';
+const TRANSCRIPT_IDENTITY_BLOCKED_REASON =
+  'Background task transcript does not match its retained identity.';
+const WORKING_DIRECTORY_BLOCKED_REASON =
+  'Background task working directory does not match the restored session.';
+const WORKTREE_ISOLATION_BLOCKED_REASON =
+  'Background task worktree isolation cannot be reconstructed after session restore.';
+const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
+  'Background task isolation metadata is incompatible.';
+const CONTAINER_EXECUTION_BLOCKED_REASON =
+  'Container background tasks cannot be resumed. Start a new container agent to continue.';
 
 /**
  * Returns true when the subagent's effective tool surface will include the
- * Skill tool. Mirrors `AgentCore.willHaveSkillTool()` for the resume path
- * where no AgentCore instance exists yet.
+ * Skill tool — the same answer `SubagentManager.createAgentHeadless()` reaches
+ * for the agent, so a resumed agent is shown the skill listing exactly when
+ * its Config holds a SkillManager (#12424).
+ *
+ * An empty list is normalized the way the launch path normalizes it: `tools: []`
+ * is the definition layer's "inherit everything" marker, while the `ToolConfig`
+ * layer reads it as deny-all. A non-array value, which only unvalidated SDK
+ * `initialize.agents` JSON can produce, follows launch too: a nullish or empty
+ * one leaves `toolConfig` unset for `createAgentHeadless` to default to
+ * `['*']`, while a non-empty string is walked per character, so `"*"` stays
+ * the wildcard and `"read_file"` becomes nine entries naming no tool. The same
+ * ingress can produce a non-array `disallowedTools`, which launch resolves one
+ * character at a time into entries that name no tool, so it denies nothing
+ * there and is dropped here. Names are otherwise matched as written — the
+ * launch path also resolves display names through `convertToRuntimeConfig` and
+ * this helper does not, so a definition that uses one can still drift.
+ * Pre-existing, and outside #12424's measured scope.
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
+  codeModeOnly = false,
 ): boolean {
-  const tools = subagentConfig?.tools;
-  if (!tools || tools.length === 0 || tools.includes('*')) {
-    return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-  }
-  return tools.includes(ToolNames.SKILL);
+  // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
+  // and `resolveToolNames`' `for...of` walks a bare string per character,
+  // preserving each one. Nullish and `''` are falsy in that test, so both take
+  // the wildcard path; the cast admits the scalar only unvalidated SDK
+  // `initialize.agents` JSON produces.
+  const tools = subagentConfig?.tools as string[] | string | null | undefined;
+  const allowList = Array.isArray(tools)
+    ? tools
+    : tools != null && tools.length > 0
+      ? [...tools]
+      : undefined;
+  const disallowedTools = subagentConfig?.disallowedTools;
+  return toolConfigAllowsSkill(
+    {
+      tools: allowList?.length ? allowList : ['*'],
+      // Launch reads `config.disallowedTools?.length`, which a non-empty string
+      // satisfies, and hands it to `resolveToolNames`, whose `for...of` walks
+      // the string per character and preserves every character as-is: the
+      // launched agent's blocklist is `['s','k','i','l','l']` for `"skill"`,
+      // which denies nothing. Dropping the scalar here mirrors that, and keeps
+      // `matchesAgentToolBlocklist` off a value whose `.length` passes its
+      // guard but which has no `.some`.
+      disallowedTools: Array.isArray(disallowedTools)
+        ? disallowedTools
+        : undefined,
+    },
+    codeModeOnly,
+  );
 }
 
 interface TranscriptRecovery {
@@ -92,8 +179,6 @@ interface TranscriptRecovery {
     history: Content[];
     taskPrompt: string;
     runtimeHistory: Content[];
-    systemInstruction?: string | Content;
-    tools?: Array<string | FunctionDeclaration>;
   };
 }
 
@@ -104,8 +189,14 @@ interface ResolvedResumeTarget {
   unavailableReason?: string;
 }
 
+interface CurrentForkRuntime {
+  systemInstruction: string | Content;
+  toolNames: string[];
+  executionToolNames: string[];
+}
+
 interface ResumeOperation {
-  continuationMessages: string[];
+  continuationInputs: AgentExternalInput[];
   promise: Promise<AgentTask | undefined>;
 }
 
@@ -113,22 +204,6 @@ interface RestorePausedEntryOptions {
   error?: string;
   resumeBlockedReason?: string;
   suppressRegisterCallback?: boolean;
-}
-
-function approvalModeToPermissionMode(mode?: string): PermissionMode {
-  switch (mode) {
-    case 'yolo':
-      return PermissionMode.Yolo;
-    case 'auto-edit':
-      return PermissionMode.AutoEdit;
-    case 'auto':
-      return PermissionMode.Auto;
-    case 'plan':
-      return PermissionMode.Plan;
-    case 'default':
-    default:
-      return PermissionMode.Default;
-  }
 }
 
 function normalizeApprovalMode(
@@ -170,18 +245,23 @@ function reconcileResumedApprovalMode(
 function persistBackgroundCancellation(
   metaPath: string,
   persistedStatus: 'running' | 'cancelled',
+  sessionWorkflow: boolean,
+  stats?: AgentCompletionStats,
+  recentActivities?: AgentTask['recentActivities'],
 ): void {
   patchAgentMeta(metaPath, {
     status: persistedStatus,
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
+    ...(sessionWorkflow
+      ? getAgentMetaTerminalSummary(stats, recentActivities)
+      : {}),
   });
 }
 
 function isWhitespaceOnlyAssistant(record: ChatRecord): boolean {
-  if (record.type !== 'assistant' || !record.message?.parts?.length) {
-    return false;
-  }
+  if (record.type !== 'assistant') return false;
+  if (!record.message?.parts?.length) return true;
   const hasFunctionCall = record.message.parts.some(
     (part) => !!part.functionCall,
   );
@@ -209,29 +289,22 @@ function reconstructHistory(
 ): ChatRecord[] {
   if (records.length === 0) return [];
 
-  const recordsByUuid = new Map<string, ChatRecord[]>();
+  // First record per uuid (preserves the historical `?.[0]` selection — this
+  // path does not aggregate duplicate-uuid records).
+  const firstByUuid = new Map<string, ChatRecord>();
   for (const record of records) {
-    const existing = recordsByUuid.get(record.uuid) ?? [];
-    existing.push(record);
-    recordsByUuid.set(record.uuid, existing);
+    if (!firstByUuid.has(record.uuid)) firstByUuid.set(record.uuid, record);
   }
 
-  let currentUuid: string | null =
-    leafUuid ?? records[records.length - 1]!.uuid;
-  const uuidChain: string[] = [];
-  const visited = new Set<string>();
+  // Gap detection is intentionally OFF here. Unlike the interactive `/resume`
+  // (sessionService) and ACP replay (HistoryReplayer) paths, this background
+  // transcript recovery has no surface to render a gap marker on, so detecting
+  // gaps only to drop them would be an inconsistent half-measure. The walk
+  // truncates at a broken parent link either way; here it just truncates.
+  const { uuids } = buildOrderedUuidChain(records, { leafUuid });
 
-  while (currentUuid && !visited.has(currentUuid)) {
-    visited.add(currentUuid);
-    uuidChain.push(currentUuid);
-    const recordsForUuid = recordsByUuid.get(currentUuid);
-    if (!recordsForUuid?.length) break;
-    currentUuid = recordsForUuid[0]!.parentUuid;
-  }
-
-  uuidChain.reverse();
-  return uuidChain
-    .map((uuid) => recordsByUuid.get(uuid)?.[0])
+  return uuids
+    .map((uuid) => firstByUuid.get(uuid))
     .filter((record): record is ChatRecord => !!record);
 }
 
@@ -289,7 +362,10 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
   const stableForBranch = [...filtered];
   while (stableForBranch.length > 0) {
     const last = stableForBranch[stableForBranch.length - 1]!;
-    if (isWhitespaceOnlyAssistant(last)) {
+    if (
+      isWhitespaceOnlyAssistant(last) ||
+      (last.type === 'system' && last.subtype === 'agent_session_ready')
+    ) {
       stableForBranch.pop();
       continue;
     }
@@ -333,14 +409,6 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
               (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
                 .history,
             ),
-            systemInstruction: structuredClone(
-              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
-                .systemInstruction,
-            ),
-            tools: structuredClone(
-              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
-                .tools,
-            ),
             taskPrompt: (
               launchPromptRecord!.systemPayload as NotificationRecordPayload
             ).displayText,
@@ -356,12 +424,13 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
 }
 
 function getCompletionStats(
-  subagent: AgentHeadless,
+  subagent: SubagentExecutor,
   liveToolCallCount: number,
 ): AgentCompletionStats {
   const summary = subagent.getExecutionSummary();
   return {
     totalTokens: summary.totalTokens,
+    outputTokens: summary.outputTokens,
     toolUses: liveToolCallCount,
     durationMs: summary.totalDurationMs,
   };
@@ -369,8 +438,37 @@ function getCompletionStats(
 
 function buildRecoveredNotice(count: number): string {
   return count === 1
-    ? 'Recovered 1 interrupted background agent. Open Background tasks and press r to resume.'
-    : `Recovered ${count} interrupted background agents. Open Background tasks and press r to resume.`;
+    ? 'Restored 1 background agent from this session. Open Background tasks to inspect it.'
+    : `Restored ${count} background agents from this session. Open Background tasks to inspect them.`;
+}
+
+function buildRecoveredModelNotice(
+  count: number,
+  listAgentsAvailable: boolean,
+  bridgeAvailable: boolean,
+): string {
+  const restored = `${count} background agent${count === 1 ? ' was' : 's were'} restored from this session.`;
+  // Without list_agents the model has no way to learn the restored agents'
+  // ids, so offer no instruction it cannot follow.
+  if (!listAgentsAvailable) return restored;
+  return (
+    `${restored} Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
+    'and send_message with a task_id to continue one.' +
+    (bridgeAvailable
+      ? ` In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}`
+      : '')
+  );
+}
+
+interface RecoverableAgentSidecar {
+  fileName: string;
+  metaPath: string;
+  meta: AgentMeta;
+}
+
+function recoveryTimestamp(meta: AgentMeta): number {
+  const parsed = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export class BackgroundAgentResumeService {
@@ -393,56 +491,170 @@ export class BackgroundAgentResumeService {
       throw error;
     }
 
-    const registry = this.config.getBackgroundTaskRegistry();
-    const recovered: AgentTask[] = [];
-
+    const sidecars: RecoverableAgentSidecar[] = [];
     for (const fileName of files) {
       if (!fileName.endsWith(META_FILE_SUFFIX)) continue;
       const metaPath = path.join(dir, fileName);
       try {
         const meta = readAgentMeta(metaPath);
-        if (!meta || meta.status !== 'running') continue;
+        if (
+          !meta ||
+          typeof meta.agentId !== 'string' ||
+          meta.agentId.length === 0 ||
+          meta.parentSessionId !== sessionId ||
+          path.basename(
+            getAgentMetaPath(projectDir, sessionId, meta.agentId),
+          ) !== fileName ||
+          (meta.status !== 'running' && meta.status !== 'completed') ||
+          (meta.isBackgrounded !== undefined &&
+            typeof meta.isBackgrounded !== 'boolean') ||
+          meta.isBackgrounded === false ||
+          (meta.status === 'completed' && meta.isBackgrounded !== true)
+        ) {
+          continue;
+        }
+        sidecars.push({ fileName, metaPath, meta });
+      } catch (error) {
+        debugLogger.warn(
+          `[BackgroundAgentResume] Failed to read background agent metadata from ${metaPath}:`,
+          error,
+        );
+      }
+    }
+
+    sidecars.sort((a, b) => {
+      if (a.meta.status !== b.meta.status) {
+        return a.meta.status === 'running' ? -1 : 1;
+      }
+      if (a.meta.status === 'completed') {
+        return recoveryTimestamp(b.meta) - recoveryTimestamp(a.meta);
+      }
+      return a.fileName.localeCompare(b.fileName);
+    });
+
+    const registry = this.config.getBackgroundTaskRegistry();
+    const recovered: AgentTask[] = [];
+    let completedCount = registry
+      .getAll()
+      .filter((entry) => entry.notified === true).length;
+
+    for (const { metaPath, meta } of sidecars) {
+      if (
+        meta.status === 'completed' &&
+        completedCount >= MAX_RETAINED_TERMINAL_AGENTS
+      ) {
+        continue;
+      }
+      try {
         if (registry.get(meta.agentId)) continue;
         const subagentName = meta.subagentName ?? meta.agentType;
-        if (!subagentName) continue;
-        const target = await this.resolveResumeTarget(subagentName);
+        if (typeof subagentName !== 'string' || !subagentName) continue;
+        const target = await this.resolveResumeTarget(
+          subagentName,
+          meta.executor,
+          meta.model,
+          meta.persistedCliFlags?.model,
+        );
 
-        const outputFile = path.join(
-          dir,
-          fileName.slice(0, -META_FILE_SUFFIX.length) + '.jsonl',
+        const outputFile = getAgentJsonlPath(
+          projectDir,
+          sessionId,
+          meta.agentId,
         );
         const records = await jsonl.read<ChatRecord>(outputFile);
         const recovery = recoverTranscript(records);
         const parsedStartTime = Date.parse(meta.createdAt);
+        const parsedEndTime = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
+        const projectRoot = path.resolve(this.config.getProjectRoot());
+        let retainedStateBlockedReason: string | undefined;
+        if (records.length === 0) {
+          retainedStateBlockedReason = MISSING_TRANSCRIPT_BLOCKED_REASON;
+        } else if (
+          records.some(
+            (record) =>
+              record.sessionId !== sessionId ||
+              (record.agentId !== undefined && record.agentId !== meta.agentId),
+          )
+        ) {
+          retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
+        } else if (meta.resumeBlockedReason) {
+          retainedStateBlockedReason = meta.resumeBlockedReason;
+        } else if (
+          meta.isolation === 'container' ||
+          meta.executionBackend !== undefined
+        ) {
+          retainedStateBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
+        } else if (
+          meta.isolation !== undefined &&
+          meta.isolation !== 'worktree'
+        ) {
+          retainedStateBlockedReason = INCOMPATIBLE_ISOLATION_BLOCKED_REASON;
+        } else if (meta.isolation === 'worktree') {
+          retainedStateBlockedReason = WORKTREE_ISOLATION_BLOCKED_REASON;
+        } else if (
+          records.some(
+            (record) =>
+              typeof record.cwd === 'string' &&
+              path.resolve(record.cwd) !== projectRoot,
+          )
+        ) {
+          retainedStateBlockedReason = WORKING_DIRECTORY_BLOCKED_REASON;
+        }
 
         const resumeBlockedReason =
+          retainedStateBlockedReason ||
           target.unavailableReason ||
           (target.isFork && !recovery.forkBootstrap
             ? LEGACY_FORK_RESUME_BLOCKED_REASON
-            : target.isFork &&
-                (!recovery.forkBootstrap?.systemInstruction ||
-                  !recovery.forkBootstrap?.tools)
-              ? LEGACY_FORK_CAPABILITIES_BLOCKED_REASON
-              : undefined);
+            : undefined);
+        const persistedSummary = meta.sessionWorkflow
+          ? getAgentMetaTerminalSummary(meta.stats, meta.recentActivities)
+          : {};
 
         const registration: AgentTaskRegistration = {
           agentId: meta.agentId,
           description: meta.description,
           subagentType: target.agentName,
           isBackgrounded: true,
-          status: 'paused',
+          status: meta.status === 'running' ? 'paused' : 'completed',
           startTime: Number.isFinite(parsedStartTime)
             ? parsedStartTime
             : Date.now(),
+          ...(meta.status === 'completed'
+            ? {
+                endTime: Number.isFinite(parsedEndTime)
+                  ? parsedEndTime
+                  : Date.now(),
+              }
+            : {}),
           abortController: new AbortController(),
           prompt: recovery.initialPrompt,
+          toolUseId: meta.toolUseId,
           outputFile,
           metaPath,
           error:
             meta.lastError === resumeBlockedReason ? undefined : meta.lastError,
           resumeBlockedReason,
+          // Restore nesting lineage from the sidecar so a restart-recovered
+          // nested agent keeps its place in the tree display. parentName is
+          // not persisted (the parent is usually gone after a restart); the
+          // UI falls back to its generic orphan annotation.
+          parentAgentId: meta.parentAgentId,
+          depth: meta.depth,
+          model: meta.model ?? meta.persistedCliFlags?.model,
+          ...persistedSummary,
         };
-        const entry = registry.register(registration);
+        if (meta.status === 'completed') {
+          (registration as AgentTask).notified = true;
+          (registration as AgentTask).outputOffset = 0;
+        }
+        const entry = registry.register(registration, {
+          suppressRegisterCallback: meta.status === 'completed',
+          preserveNotificationState: meta.status === 'completed',
+        });
+        if (meta.status === 'completed') {
+          completedCount += 1;
+        }
         recovered.push(entry);
       } catch (error) {
         debugLogger.warn(
@@ -457,22 +669,23 @@ export class BackgroundAgentResumeService {
 
   async resumeBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: AgentExternalInput,
   ): Promise<AgentTask | undefined> {
-    const trimmedMessage = initialMessage?.trim();
+    const normalizedInput =
+      typeof initialInput === 'string' ? initialInput.trim() : initialInput;
     const existingOperation = this.resumeOperations.get(agentId);
     if (existingOperation) {
-      if (trimmedMessage) {
+      if (normalizedInput) {
         const registry = this.config.getBackgroundTaskRegistry();
-        if (!registry.queueMessage(agentId, trimmedMessage)) {
-          existingOperation.continuationMessages.push(trimmedMessage);
+        if (!registry.queueExternalInput(agentId, normalizedInput)) {
+          existingOperation.continuationInputs.push(normalizedInput);
         }
       }
       return existingOperation.promise;
     }
 
     const operation: ResumeOperation = {
-      continuationMessages: trimmedMessage ? [trimmedMessage] : [],
+      continuationInputs: normalizedInput ? [normalizedInput] : [],
       promise: Promise.resolve(undefined),
     };
     operation.promise = this.resumeBackgroundAgentInternal(
@@ -494,18 +707,18 @@ export class BackgroundAgentResumeService {
    *
    * Returns `undefined` (and logs why) when the agent can't be revived: not an
    * in-registry, finished background agent with a persisted transcript, or the
-   * background-agent concurrency cap is full. Cross-session / evicted completed
-   * agents are out of scope (see QwenLM/qwen-code#5540).
+   * background-agent concurrency cap is full. Completed agents restored from
+   * the same parent session use this path after process restart.
    */
   async reviveCompletedBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: AgentExternalInput,
   ): Promise<AgentTask | undefined> {
     // A resume/revive already in flight for this id owns the lifecycle — fold
     // into it. (The status flip below is await-free, so this guards a genuinely
     // concurrent in-flight operation, not a same-tick re-entry.)
     if (this.resumeOperations.has(agentId)) {
-      return this.resumeBackgroundAgent(agentId, initialMessage);
+      return this.resumeBackgroundAgent(agentId, initialInput);
     }
     const registry = this.config.getBackgroundTaskRegistry();
     const entry = registry.get(agentId);
@@ -514,7 +727,8 @@ export class BackgroundAgentResumeService {
       !entry.isBackgrounded ||
       entry.status !== 'completed' ||
       !entry.metaPath ||
-      !entry.outputFile
+      !entry.outputFile ||
+      entry.resumeBlockedReason
     ) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": not a completed ` +
@@ -529,7 +743,7 @@ export class BackgroundAgentResumeService {
     // entry back to paused, so an at-capacity revive fails cleanly instead of
     // stranding the entry as paused.
     try {
-      registry.assertCanStartBackgroundAgent();
+      registry.assertCanStartBackgroundAgent(entry.model);
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
@@ -537,10 +751,19 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
-    if (!readAgentMeta(entry.metaPath)) {
+    const meta = readAgentMeta(entry.metaPath);
+    if (!meta) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
       );
+      return undefined;
+    }
+    if (meta.resumeBlockedReason) {
+      entry.resumeBlockedReason = meta.resumeBlockedReason;
+      return undefined;
+    }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      entry.resumeBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
       return undefined;
     }
     if (!jsonl.exists(entry.outputFile)) {
@@ -576,7 +799,7 @@ export class BackgroundAgentResumeService {
       );
     }
     try {
-      registry.assertCanStartBackgroundAgent();
+      registry.assertCanStartBackgroundAgent(entry.model);
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
@@ -591,9 +814,36 @@ export class BackgroundAgentResumeService {
       pendingApprovals: [...(entry.pendingApprovals ?? [])],
     };
     this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
-    const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
+    const revived = await this.resumeBackgroundAgent(agentId, initialInput);
     if (!revived) {
-      this.restoreCompletedEntry(completedEntry);
+      const failedEntry = registry.get(agentId);
+      // `??` only falls back on null/undefined, so a failed revive that left
+      // the entry with an *empty* array would clobber the pre-revive snapshot
+      // (e.g. the UI Progress section would render empty instead of the
+      // retained activities). Prefer the failed entry's state only when it
+      // actually carries items; otherwise fall back to the completed snapshot.
+      const preferNonEmpty = <T>(
+        next: readonly T[] | undefined,
+        fallback: readonly T[],
+      ): T[] => (next && next.length > 0 ? [...next] : [...fallback]);
+      this.restoreCompletedEntry({
+        ...completedEntry,
+        resumeBlockedReason:
+          failedEntry?.resumeBlockedReason ??
+          completedEntry.resumeBlockedReason,
+        pendingMessages: preferNonEmpty(
+          failedEntry?.pendingMessages,
+          completedEntry.pendingMessages,
+        ),
+        recentActivities: preferNonEmpty(
+          failedEntry?.recentActivities,
+          completedEntry.recentActivities,
+        ),
+        pendingApprovals: preferNonEmpty(
+          failedEntry?.pendingApprovals,
+          completedEntry.pendingApprovals,
+        ),
+      });
     }
     return revived;
   }
@@ -607,6 +857,9 @@ export class BackgroundAgentResumeService {
     if (!existing || existing.status !== 'paused') {
       return existing;
     }
+    if (existing.resumeBlockedReason) {
+      return undefined;
+    }
 
     const metaPath = existing.metaPath;
     const outputFile = existing.outputFile;
@@ -616,6 +869,12 @@ export class BackgroundAgentResumeService {
 
     const meta = readAgentMeta(metaPath);
     if (!meta) {
+      return undefined;
+    }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      this.restorePausedEntry(agentId, {
+        resumeBlockedReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      });
       return undefined;
     }
 
@@ -650,10 +909,40 @@ export class BackgroundAgentResumeService {
 
     let cleanupOwnedMonitorNotifications: (() => void) | undefined;
     let cleanupJsonl: (() => void) | undefined;
+    let agentConfig: Config | undefined;
+    let restoreParentPM: (() => void) | undefined;
+    let subagentDispose: (() => Promise<void>) | undefined;
+    let cleanupRuntime: (() => void) | undefined;
+    let runtimeLifecycleOwned = false;
+    let setupCleaned = false;
+
+    const cleanupPreparedRuntime = () => {
+      if (runtimeLifecycleOwned || setupCleaned) return;
+      setupCleaned = true;
+      if (cleanupRuntime) {
+        cleanupRuntime();
+      } else {
+        cleanupOwnedMonitorNotifications?.();
+        cleanupJsonl?.();
+        if (agentConfig) {
+          void agentConfig
+            .getToolRegistry()
+            .stop()
+            .catch(() => {});
+        }
+        void subagentDispose?.().catch(() => {});
+      }
+      restoreParentPM?.();
+    };
 
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
-      const target = await this.resolveResumeTarget(subagentName);
+      const target = await this.resolveResumeTarget(
+        subagentName,
+        meta.executor,
+        meta.model,
+        meta.persistedCliFlags?.model,
+      );
       if (!target.subagentConfig && !target.isFork) {
         const reason =
           target.unavailableReason ||
@@ -663,6 +952,20 @@ export class BackgroundAgentResumeService {
           lastUpdatedAt: new Date().toISOString(),
         });
         this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        return undefined;
+      }
+
+      const currentForkRuntime = target.isFork
+        ? await this.resolveCurrentForkRuntime()
+        : undefined;
+      if (target.isFork && !currentForkRuntime) {
+        patchAgentMeta(metaPath, {
+          lastError: undefined,
+          lastUpdatedAt: new Date().toISOString(),
+        });
+        this.restorePausedEntry(agentId, {
+          resumeBlockedReason: CURRENT_FORK_RUNTIME_BLOCKED_REASON,
+        });
         return undefined;
       }
 
@@ -686,12 +989,21 @@ export class BackgroundAgentResumeService {
       // continuing to read the parent's. Reusing `this.config`
       // directly here would short-circuit that isolation. See the
       // matching wrapper in `agent.ts:createApprovalModeOverride`.
-      const { config: agentConfig, cleanup: restoreParentPM } =
-        await createApprovalModeOverride(
-          this.config,
-          resolvedApprovalMode as ApprovalMode,
-          { persistedCliFlags: meta.persistedCliFlags },
+      const approvalOverride = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode as ApprovalMode,
+        { persistedCliFlags: meta.persistedCliFlags },
+      );
+      const activeAgentConfig = approvalOverride.config;
+      const activeRestoreParentPM = approvalOverride.cleanup;
+      agentConfig = activeAgentConfig;
+      restoreParentPM = activeRestoreParentPM;
+      if (target.isFork) {
+        registerForkDisplayImageForCache(
+          activeAgentConfig,
+          currentForkRuntime!.toolNames,
         );
+      }
       // Mirror the launch path's permission-bubbling gate (agent.ts): an
       // agent whose definition uses `approvalMode: bubble` surfaces
       // confirmations to the parent UI instead of auto-denying, in
@@ -701,9 +1013,7 @@ export class BackgroundAgentResumeService {
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bgConfig = Object.create(agentConfig) as any;
-      bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
+      stampBackgroundPromptPolicy(activeAgentConfig, shouldBubble);
 
       const records = await jsonl.read<ChatRecord>(outputFile);
       const recovery = recoverTranscript(records);
@@ -718,19 +1028,28 @@ export class BackgroundAgentResumeService {
           ]
         : [
             ...(
-              await getInitialChatHistory(bgConfig as Config, undefined, {
+              await getInitialChatHistory(activeAgentConfig, undefined, {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
+                  activeAgentConfig.getToolMode?.() === ToolMode.CodeModeOnly,
                 ),
               })
             )[0],
             ...recovery.history,
           ];
-      const promptMessages = [...operation.continuationMessages];
+      const promptInputs = [...operation.continuationInputs];
       const continuationPrompt =
-        promptMessages.join('\n\n').trim() ||
-        DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
+        promptInputs
+          .map((input) => (typeof input === 'string' ? input : input.text))
+          .join('\n\n')
+          .trim() || DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
+      const initialExternalInputs = promptInputs.some(
+        (input) => typeof input !== 'string',
+      )
+        ? promptInputs
+        : undefined;
+      let pendingInitialExternalInputs = initialExternalInputs;
       const writerInitialPrompt = continuationPrompt;
       if (target.isFork && (!resumeHistory || resumeHistory.length === 0)) {
         const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
@@ -739,6 +1058,7 @@ export class BackgroundAgentResumeService {
           lastUpdatedAt: new Date().toISOString(),
         });
         this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        cleanupPreparedRuntime();
         return undefined;
       }
       if (target.isFork && !recovery.forkBootstrap) {
@@ -748,63 +1068,83 @@ export class BackgroundAgentResumeService {
           lastUpdatedAt: new Date().toISOString(),
         });
         this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        cleanupPreparedRuntime();
         return undefined;
       }
-      if (
-        target.isFork &&
-        (!recovery.forkBootstrap?.systemInstruction ||
-          !recovery.forkBootstrap?.tools)
-      ) {
-        const reason = LEGACY_FORK_CAPABILITIES_BLOCKED_REASON;
-        patchAgentMeta(metaPath, {
-          lastError: undefined,
-          lastUpdatedAt: new Date().toISOString(),
-        });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
-        return undefined;
-      }
+      const forkResumeCapabilityReminder = target.isFork
+        ? await this.buildForkResumeCapabilityReminder(
+            this.config,
+            currentForkRuntime!.toolNames,
+          )
+        : undefined;
 
       const bgEventEmitter = new AgentEventEmitter();
-      // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
-      // the resume `finally` invokes this so per-agent hook entries and
-      // the force-rebuilt ToolRegistry don't leak across the resume
-      // boundary. Stays undefined on the fork-resume path (forks share
-      // the parent's registry + hook lifecycle).
-      let subagentDispose: (() => Promise<void>) | undefined;
-      let subagent: AgentHeadless;
+      const launchModel = meta.model ?? meta.persistedCliFlags?.model;
+      let subagent: SubagentExecutor;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
-          bgConfig as Config,
+          activeAgentConfig,
           bgEventEmitter,
           resumeHistory ?? [],
-          recovery.forkBootstrap!,
+          currentForkRuntime!,
+          meta.executionAllowedTools,
+          meta.disallowedTools,
+          meta.agentId,
+          meta.description,
         );
       } else {
+        const resumeSubagentConfig =
+          launchModel && meta.persistedCliFlags?.authType
+            ? { ...target.subagentConfig!, model: 'inherit' }
+            : target.subagentConfig!;
         const result = await this.config
           .getSubagentManager()
-          .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
+          .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
             eventEmitter: bgEventEmitter,
+            taskName: meta.description,
+            subagentId: meta.agentId,
             promptConfigOverrides: {
               initialMessages: resumeHistory,
             },
+            ...(launchModel
+              ? {
+                  modelConfigOverrides: {
+                    model: launchModel,
+                  },
+                }
+              : {}),
+            ...(meta.persistedCliFlags?.authType
+              ? {
+                  runtimeAuthOverrides: {
+                    authType: meta.persistedCliFlags.authType,
+                    baseUrl: meta.persistedCliFlags.baseUrl,
+                  },
+                }
+              : {}),
           });
         subagent = result.subagent;
+        // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
+        // the resume `finally` invokes this so per-agent hook entries and
+        // the force-rebuilt ToolRegistry don't leak across the resume
+        // boundary. Stays undefined on the fork-resume path (forks share
+        // the parent's registry + hook lifecycle).
         subagentDispose = result.dispose;
       }
 
-      const projectRoot = this.config.getProjectRoot();
-      cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
-        agentId: meta.agentId,
-        agentName: target.agentName,
-        agentColor: target.subagentConfig?.color ?? meta.agentColor,
-        sessionId: meta.parentSessionId,
-        cwd: projectRoot,
-        version: this.config.getCliVersion() || 'unknown',
-        gitBranch: getGitBranch(projectRoot),
-        initialUserPrompt: writerInitialPrompt,
-        appendToExisting: true,
-        initialParentUuid: recovery.lastStableUuid,
-      }).cleanup;
+      const { jsonlPath, options: transcriptAttachOptions } =
+        buildAgentTranscriptAttach(this.config, meta.agentId, {
+          sessionId: meta.parentSessionId,
+          agentName: target.agentName,
+          agentColor: target.subagentConfig?.color ?? meta.agentColor,
+          initialUserPrompt: writerInitialPrompt,
+          appendToExisting: true,
+          initialParentUuid: recovery.lastStableUuid,
+        });
+      cleanupJsonl = attachJsonlTranscriptWriter(
+        bgEventEmitter,
+        jsonlPath,
+        transcriptAttachOptions,
+      ).cleanup;
 
       const nextResumeCount = (meta.resumeCount ?? 0) + 1;
       patchAgentMeta(metaPath, {
@@ -815,6 +1155,11 @@ export class BackgroundAgentResumeService {
         agentColor: target.subagentConfig?.color ?? meta.agentColor,
         resumeCount: nextResumeCount,
         lastError: undefined,
+        // The previous incarnation's terminal summary must not survive into the
+        // restarted run: a crash mid-resume would otherwise leave discovery
+        // restoring run N-1's stats/activities as the interrupted run's state.
+        stats: undefined,
+        recentActivities: undefined,
       });
 
       const pendingMessages = [
@@ -838,11 +1183,11 @@ export class BackgroundAgentResumeService {
       const entry = registry.register(registration, {
         suppressRegisterCallback: true,
       });
-      const lateContinuationMessages = operation.continuationMessages.slice(
-        promptMessages.length,
+      const lateContinuationInputs = operation.continuationInputs.slice(
+        promptInputs.length,
       );
-      for (const message of lateContinuationMessages) {
-        registry.queueMessage(meta.agentId, message);
+      for (const input of lateContinuationInputs) {
+        registry.queueExternalInput(meta.agentId, input);
       }
 
       subagent.setExternalMessageProvider(() =>
@@ -879,7 +1224,12 @@ export class BackgroundAgentResumeService {
 
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
-      contextState.set('task_prompt', continuationPrompt);
+      contextState.set(
+        'task_prompt',
+        forkResumeCapabilityReminder
+          ? `${forkResumeCapabilityReminder}\n\n${continuationPrompt}`
+          : continuationPrompt,
+      );
       const resolvedMode = approvalModeToPermissionMode(resolvedApprovalMode);
       await this.applySubagentStartHook(contextState, {
         agentId: meta.agentId,
@@ -917,55 +1267,178 @@ export class BackgroundAgentResumeService {
         ? registry.bridgeApprovalEvents(meta.agentId, bgEmitter)
         : undefined;
 
-      const runBody = async () => {
+      const canStayResident =
+        !target.isFork &&
+        meta.isolation !== 'worktree' &&
+        (!target.subagentConfig?.hooks ||
+          Object.keys(target.subagentConfig.hooks).length === 0);
+      const needsAutoPermissionLease = () =>
+        activeAgentConfig.getApprovalMode() === 'auto' &&
+        this.config.getApprovalMode() !== 'auto';
+      let runtimeDisposed = false;
+      let disposeRequested = false;
+      let turnRunning = false;
+      let currentAbortController: AbortController | undefined =
+        bgAbortController;
+      let currentTurnPromise: Promise<void> | undefined;
+      let hotResumeCount = nextResumeCount;
+      let residentRegistered = false;
+
+      const runtimeCleanup = () => {
+        if (runtimeDisposed) return;
+        runtimeDisposed = true;
+        registry.unregisterResidentAgent(meta.agentId, residentController);
+        residentRegistered = false;
+        bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
+        bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+        cleanupApprovalBridge?.();
+        cleanupOwnedMonitorNotifications?.();
+        cleanupJsonl?.();
+        void activeAgentConfig
+          .getToolRegistry()
+          .stop()
+          .catch(() => {});
+        void subagentDispose?.().catch(() => {});
+      };
+      cleanupRuntime = runtimeCleanup;
+
+      const requestRuntimeDisposal = () => {
+        if (disposeRequested || runtimeDisposed) return;
+        disposeRequested = true;
+        registry.unregisterResidentAgent(meta.agentId, residentController);
+        residentRegistered = false;
+        currentAbortController?.abort();
+        if (!turnRunning) {
+          runtimeCleanup();
+        }
+      };
+
+      const runBody = async (
+        turnContextState: ContextState,
+        turnAbortController: AbortController,
+        fireStartHook: boolean,
+      ) => {
+        let keepResident = false;
+        let finishingInputs = pendingInitialExternalInputs;
+        pendingInitialExternalInputs = undefined;
+        let shouldFireStartHook = fireStartHook;
+        turnRunning = true;
         try {
-          await subagent.execute(contextState, bgAbortController.signal);
+          while (true) {
+            if (shouldFireStartHook) {
+              await this.applySubagentStartHook(turnContextState, {
+                agentId: meta.agentId,
+                agentType: meta.agentType,
+                resolvedMode,
+                signal: turnAbortController.signal,
+              });
+              const additionalContext = turnContextState.get('hook_context');
+              if (additionalContext) {
+                turnContextState.set(
+                  'task_prompt',
+                  `${String(turnContextState.get('task_prompt'))}\n\n${String(additionalContext)}`,
+                );
+              }
+            }
+            shouldFireStartHook = false;
 
-          let stopHookWarning: string | undefined;
-          if (hookSystem && !bgAbortController.signal.aborted) {
-            stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
-              agentId: meta.agentId,
-              agentType: meta.agentType,
-              transcriptPath: outputFile,
-              resolvedMode,
-              signal: bgAbortController.signal,
-            });
-          }
+            if (finishingInputs) {
+              await subagent.executeExternalInputs(
+                finishingInputs,
+                turnAbortController.signal,
+                { resetStats: false },
+              );
+              finishingInputs = undefined;
+            } else {
+              await subagent.execute(
+                turnContextState,
+                turnAbortController.signal,
+              );
+            }
 
-          const terminateMode = subagent.getTerminateMode();
-          const finalText = appendStopHookBlockingCapWarning(
-            subagent.getFinalText(),
-            stopHookWarning,
-          );
-          const stats = getCompletionStats(subagent, liveToolCallCount);
-          if (terminateMode === AgentTerminateMode.GOAL) {
-            registry.complete(meta.agentId, finalText, stats);
-            patchAgentMeta(metaPath, {
-              status: 'completed',
-              lastUpdatedAt: new Date().toISOString(),
-              lastError: undefined,
-            });
-          } else if (terminateMode === AgentTerminateMode.CANCELLED) {
-            registry.finalizeCancelled(meta.agentId, finalText, stats);
-            persistBackgroundCancellation(
-              metaPath,
-              registry.get(meta.agentId)?.persistedCancellationStatus ??
-                'cancelled',
+            let stopHookWarning: string | undefined;
+            if (hookSystem && !turnAbortController.signal.aborted) {
+              stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
+                agentId: meta.agentId,
+                agentType: meta.agentType,
+                transcriptPath: outputFile,
+                resolvedMode,
+                signal: turnAbortController.signal,
+              });
+            }
+
+            const terminateMode = subagent.getTerminateMode();
+            const modelVisibleText = toModelVisibleSubagentResult(
+              subagent.getFinalText(),
+              terminateMode,
             );
-          } else {
-            const failureText =
-              finalText || `Agent terminated with mode: ${terminateMode}`;
-            registry.fail(
-              meta.agentId,
-              failureText,
-              stats,
-              finalText || undefined,
+            const finalText = appendStopHookBlockingCapWarning(
+              terminateMode === AgentTerminateMode.GOAL
+                ? modelVisibleText ||
+                    '(subagent produced no model-visible output)'
+                : modelVisibleText,
+              stopHookWarning,
             );
-            patchAgentMeta(metaPath, {
-              status: 'failed',
-              lastUpdatedAt: new Date().toISOString(),
-              lastError: failureText,
-            });
+            const stats = getCompletionStats(subagent, liveToolCallCount);
+            if (terminateMode === AgentTerminateMode.GOAL) {
+              const pending = registry.drainMessages(meta.agentId);
+              if (pending.length > 0) {
+                finishingInputs = pending;
+                continue;
+              }
+
+              keepResident = residentRegistered && !needsAutoPermissionLease();
+              if (!keepResident) {
+                registry.unregisterResidentAgent(
+                  meta.agentId,
+                  residentController,
+                );
+                residentRegistered = false;
+              }
+              patchAgentMeta(metaPath, {
+                status: 'completed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: undefined,
+                ...(meta.sessionWorkflow
+                  ? getAgentMetaTerminalSummary(
+                      stats,
+                      registry.get(meta.agentId)?.recentActivities,
+                    )
+                  : {}),
+              });
+              registry.complete(meta.agentId, finalText, stats);
+            } else if (terminateMode === AgentTerminateMode.CANCELLED) {
+              registry.finalizeCancelled(meta.agentId, finalText, stats);
+              persistBackgroundCancellation(
+                metaPath,
+                registry.get(meta.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
+                meta.sessionWorkflow === true,
+                stats,
+                registry.get(meta.agentId)?.recentActivities,
+              );
+            } else {
+              const failureText =
+                finalText || `Agent terminated with mode: ${terminateMode}`;
+              registry.fail(
+                meta.agentId,
+                failureText,
+                stats,
+                finalText || undefined,
+              );
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: failureText,
+                ...(meta.sessionWorkflow
+                  ? getAgentMetaTerminalSummary(
+                      stats,
+                      registry.get(meta.agentId)?.recentActivities,
+                    )
+                  : {}),
+              });
+            }
+            break;
           }
         } catch (error) {
           const errorMessage =
@@ -973,65 +1446,166 @@ export class BackgroundAgentResumeService {
           debugLogger.error(
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
-          if (bgAbortController.signal.aborted) {
-            registry.finalizeCancelled(
-              meta.agentId,
-              errorMessage,
-              getCompletionStats(subagent, liveToolCallCount),
-            );
+          if (turnAbortController.signal.aborted) {
+            const stats = getCompletionStats(subagent, liveToolCallCount);
+            registry.finalizeCancelled(meta.agentId, errorMessage, stats);
             persistBackgroundCancellation(
               metaPath,
               registry.get(meta.agentId)?.persistedCancellationStatus ??
                 'cancelled',
+              meta.sessionWorkflow === true,
+              stats,
+              registry.get(meta.agentId)?.recentActivities,
             );
           } else {
+            const stats = getCompletionStats(subagent, liveToolCallCount);
             const partialResult = subagent.getFinalText() || undefined;
-            registry.fail(
-              meta.agentId,
-              errorMessage,
-              getCompletionStats(subagent, liveToolCallCount),
-              partialResult,
-            );
+            registry.fail(meta.agentId, errorMessage, stats, partialResult);
             patchAgentMeta(metaPath, {
               status: 'failed',
               lastUpdatedAt: new Date().toISOString(),
               lastError: errorMessage,
+              ...(meta.sessionWorkflow
+                ? getAgentMetaTerminalSummary(
+                    stats,
+                    registry.get(meta.agentId)?.recentActivities,
+                  )
+                : {}),
             });
           }
         } finally {
-          bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
-          bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
-          cleanupApprovalBridge?.();
-          cleanupOwnedMonitorNotifications?.();
-          cleanupJsonl?.();
-          // Release the per-subagent ToolRegistry the resumed agent's
-          // wrapper Config built in `createApprovalModeOverride` so any
-          // AgentTool / SkillTool the model instantiated during this
-          // run disposes its change-listeners on shared
-          // SubagentManager / SkillManager. Without this, every resume
-          // accumulates listeners for the rest of the session.
-          void agentConfig
-            .getToolRegistry()
-            .stop()
-            .catch(() => {});
-          // Per-spawn cleanup from `createAgentHeadless`: releases agent-
-          // scope hook entries and stops the per-agent ToolRegistry that
-          // the force rebuild created for `mcpServers`. Distinct from the
-          // parent registry above (no-op when target.isFork).
-          void subagentDispose?.().catch(() => {});
-          // Restore parent PermissionManager's dangerous allow rules if
-          // this override stripped them. See createApprovalModeOverride
-          // strip-lifecycle comment in agent.ts.
-          restoreParentPM();
+          turnRunning = false;
+          activeRestoreParentPM();
+          if (!keepResident || disposeRequested) {
+            runtimeCleanup();
+          }
         }
       };
 
-      const framedRunBody = () => runWithAgentContext(meta.agentId, runBody);
-      void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
+      const runBackgroundTurn = (
+        turnContextState: ContextState,
+        turnAbortController: AbortController,
+        fireStartHook: boolean,
+      ) => {
+        // Restore the persisted launch depth so a resumed nested agent keeps
+        // its original nesting level (and spawn eligibility) instead of
+        // recomputing to depth 0 from this top-level resume frame.
+        const body = () =>
+          runBody(turnContextState, turnAbortController, fireStartHook);
+        const framedRunBody = () =>
+          runWithAgentContext(
+            meta.agentId,
+            body,
+            normalizeResumedAgentDepth(meta.depth),
+          );
+        const invocationRunBody = () =>
+          runWithInvocationContext(undefined, framedRunBody);
+        return target.isFork
+          ? runInForkContext(invocationRunBody)
+          : invocationRunBody();
+      };
+
+      const reportUnexpectedBackgroundError = (error: unknown) => {
+        debugLogger.warn(
+          `[BackgroundAgentResume] Background agent ${meta.agentId} body raised unexpected rejection: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      };
+
+      const residentController: ResidentBackgroundAgent = {
+        continue: (input) => {
+          if (!canStayResident || disposeRequested || runtimeDisposed) {
+            return 'fallback';
+          }
+          if (needsAutoPermissionLease()) {
+            requestRuntimeDisposal();
+            return 'fallback';
+          }
+
+          if (!registry.canStartBackgroundAgent(meta.model)) {
+            return 'capacity_wait';
+          }
+
+          const nextAbortController = new AbortController();
+          let restarted;
+          try {
+            restarted = registry.restartCompletedAgent(
+              meta.agentId,
+              nextAbortController,
+            );
+          } catch (error) {
+            debugLogger.warn(
+              `[BackgroundAgentResume] Could not continue resident background agent ${
+                meta.agentId
+              }: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return registry.canStartBackgroundAgent(meta.model)
+              ? 'fallback'
+              : 'capacity_wait';
+          }
+          if (
+            !restarted ||
+            disposeRequested ||
+            runtimeDisposed ||
+            registry.get(meta.agentId) !== restarted ||
+            restarted.status !== 'running'
+          ) {
+            return 'fallback';
+          }
+
+          liveToolCallCount = 0;
+          currentAbortController = nextAbortController;
+          hotResumeCount += 1;
+          patchAgentMeta(metaPath, {
+            status: 'running',
+            lastUpdatedAt: new Date().toISOString(),
+            lastError: undefined,
+            resumeCount: hotResumeCount,
+            // See the cold-resume patch: the completed run's summary must not
+            // describe the continuation that is starting here.
+            stats: undefined,
+            recentActivities: undefined,
+          });
+
+          const nextContextState = new ContextState();
+          if (typeof input === 'string') {
+            nextContextState.set('task_prompt', input);
+          } else {
+            nextContextState.set('external_inputs_override', [input]);
+          }
+          nextContextState.set('hook_context', '');
+          const previousTurn = currentTurnPromise ?? Promise.resolve();
+          currentTurnPromise = previousTurn
+            .catch(reportUnexpectedBackgroundError)
+            .then(async () => {
+              if (disposeRequested || runtimeDisposed) return;
+              await runBackgroundTurn(
+                nextContextState,
+                nextAbortController,
+                true,
+              );
+            });
+          currentTurnPromise.catch(reportUnexpectedBackgroundError);
+          return 'continued';
+        },
+        dispose: requestRuntimeDisposal,
+      };
+      if (canStayResident && !needsAutoPermissionLease()) {
+        registry.registerResidentAgent(meta.agentId, residentController);
+        residentRegistered = true;
+      }
+
+      currentTurnPromise = runBackgroundTurn(
+        contextState,
+        bgAbortController,
+        false,
+      );
+      runtimeLifecycleOwned = true;
+      currentTurnPromise.catch(reportUnexpectedBackgroundError);
       return entry;
     } catch (error) {
-      cleanupOwnedMonitorNotifications?.();
-      cleanupJsonl?.();
+      cleanupPreparedRuntime();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.warn(
@@ -1073,9 +1647,40 @@ export class BackgroundAgentResumeService {
     return buildRecoveredNotice(count);
   }
 
+  buildRecoveredBackgroundAgentsModelNotice(count: number): string {
+    const registry = this.config.getToolRegistry?.();
+    return buildRecoveredModelNotice(
+      count,
+      !!registry?.getAllToolNames().includes(ToolNames.LIST_AGENTS),
+      !!registry && isDirectToolBridgeAvailable(registry),
+    );
+  }
+
   private async resolveResumeTarget(
     subagentName: string,
+    executor?: AgentMeta['executor'],
+    ...legacyModels: Array<string | undefined>
   ): Promise<ResolvedResumeTarget> {
+    if (resolveAgentExecutionBackend(this.config) === 'container') {
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      };
+    }
+    // Older external runs wrote a synthetic model label instead of provenance.
+    // It can deny replay, but never authorizes selecting an executor.
+    if (
+      executor !== undefined ||
+      legacyModels.some((model) => model?.startsWith('external-acp:'))
+    ) {
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason:
+          'External subagent session cannot be restored from a Qwen transcript. Start a new agent instead.',
+      };
+    }
     if (subagentName === FORK_SUBAGENT_TYPE) {
       return {
         agentName: FORK_AGENT.name,
@@ -1084,9 +1689,37 @@ export class BackgroundAgentResumeService {
       };
     }
 
-    const subagentConfig = await this.config
-      .getSubagentManager()
-      .loadSubagent(subagentName);
+    let subagentConfig: SubagentConfig | null;
+    try {
+      subagentConfig = await this.config
+        .getSubagentManager()
+        .loadSubagent(subagentName);
+      if (
+        subagentConfig &&
+        resolveAgentExecutionBackend(this.config, subagentConfig) ===
+          'container'
+      ) {
+        return {
+          agentName: subagentName,
+          isFork: false,
+          unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+        };
+      }
+    } catch (error) {
+      // loadSubagent throws a recorded executor-block refusal (R10-2/R11) when a
+      // same-named definition failed to load. This is resume *discovery*, not a
+      // dispatch, so surface it as the existing "unavailable" shape — the row
+      // stays listed with a resumeBlockedReason — instead of letting the throw
+      // escape into the per-sidecar catch, which would drop the row entirely.
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason:
+          error instanceof Error
+            ? error.message
+            : `Subagent "${subagentName}" is no longer available.`,
+      };
+    }
     if (!subagentConfig) {
       return {
         agentName: subagentName,
@@ -1095,6 +1728,12 @@ export class BackgroundAgentResumeService {
       };
     }
 
+    if (subagentConfig.executor !== undefined) {
+      return this.resolveResumeTarget(
+        subagentName,
+        subagentConfig.executor.kind,
+      );
+    }
     return {
       agentName: subagentConfig.name,
       isFork: false,
@@ -1145,26 +1784,142 @@ export class BackgroundAgentResumeService {
       },
     );
     if (entry.metaPath) {
+      const meta = readAgentMeta(entry.metaPath);
       patchAgentMeta(entry.metaPath, {
         lastError: undefined,
         status: 'completed',
+        ...(meta?.sessionWorkflow === true
+          ? getAgentMetaTerminalSummary(entry.stats, entry.recentActivities)
+          : {}),
       });
     }
     return restored;
+  }
+
+  private async resolveCurrentForkRuntime(): Promise<
+    CurrentForkRuntime | undefined
+  > {
+    try {
+      const llmClient = this.config.getLlmClient();
+      const generationConfig = llmClient?.getChat().getGenerationConfig();
+      if (!generationConfig?.systemInstruction) {
+        debugLogger.debug(
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent LLM client or system instruction is missing.',
+        );
+        return undefined;
+      }
+
+      const advertisedNames = extractParentToolNames(generationConfig);
+      if (advertisedNames.length === 0) {
+        debugLogger.debug(
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_advertised_tools): parent advertises no inheritable tools after subagent exclusions.',
+        );
+        return undefined;
+      }
+
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const registeredNames = new Set(
+        toolRegistry
+          .getFunctionDeclarationsFiltered(advertisedNames)
+          .map((declaration) => declaration.name)
+          .filter((name): name is string => Boolean(name)),
+      );
+      const toolNames = advertisedNames.filter((name) =>
+        registeredNames.has(name),
+      );
+      if (toolNames.length === 0) {
+        debugLogger.debug(
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_registered_tools): none of the parent advertised tools are present in the live registry.',
+        );
+        return undefined;
+      }
+
+      return {
+        systemInstruction: structuredClone(
+          generationConfig.systemInstruction as string | Content,
+        ),
+        toolNames,
+        executionToolNames: buildInheritedForkExecutionToolNames(
+          toolNames,
+          toolRegistry.getAllToolNames(),
+          // Forks launch only from the main session; the wake-up caller's
+          // ambient allowlist is unrelated to the persisted fork policy.
+          undefined,
+        ),
+      };
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Failed to reconstruct current fork runtime: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
+  private async buildForkResumeCapabilityReminder(
+    agentConfig: Config,
+    toolNames: string[],
+  ): Promise<string> {
+    const reminders = [FORK_RESUME_CAPABILITY_NOTICE];
+    try {
+      const toolRegistry = agentConfig.getToolRegistry();
+      await toolRegistry.warmAll();
+      const mcpInstructions = buildMcpServerInstructionsReminder(toolRegistry);
+      if (mcpInstructions) reminders.push(mcpInstructions);
+
+      if (toolNames.includes(ToolNames.SKILL)) {
+        const skills = await buildAvailableSkillsReminder(agentConfig);
+        if (skills) reminders.push(skills.reminder);
+      }
+
+      const deferredTools = buildDeferredToolsReminder(toolRegistry);
+      if (deferredTools) reminders.push(deferredTools);
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Failed to build current fork capability reminder: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return reminders.join('\n\n');
   }
 
   private async createResumedForkSubagent(
     agentConfig: Config,
     eventEmitter: AgentEventEmitter,
     initialMessages: Content[],
-    bootstrap: NonNullable<TranscriptRecovery['forkBootstrap']>,
+    runtime: CurrentForkRuntime,
+    executionAllowedTools?: string[],
+    disallowedTools?: string[],
+    subagentId?: string,
+    taskName?: string,
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
-      renderedSystemPrompt: structuredClone(bootstrap.systemInstruction!),
+      renderedSystemPrompt: structuredClone(runtime.systemInstruction),
       initialMessages,
     };
     const toolConfig: ToolConfig = {
-      tools: structuredClone(bootstrap.tools!),
+      tools: [...runtime.toolNames],
+      // Combine the ask_user_question restriction (buildForkExecutionAllowlist)
+      // with the display_image restriction (resolveForkExecutionAllowedTools):
+      // a resumed fork keeps the parent's display_image declaration for cache
+      // parity but must not execute it.
+      executionAllowedTools: resolveForkExecutionAllowedTools(
+        runtime.toolNames,
+        buildForkExecutionAllowlist(
+          executionAllowedTools,
+          runtime.executionToolNames,
+          runtime.toolNames,
+        ),
+      ),
+      // Restore the persisted blocklist beside the allowlist: the
+      // invocation-level re-check is the only enforcement a wildcard
+      // allowlist entry (e.g. mcp__*) cannot provide on its own.
+      ...(disallowedTools?.length
+        ? { disallowedTools: [...disallowedTools] }
+        : {}),
     };
 
     return AgentHeadless.create(
@@ -1175,6 +1930,10 @@ export class BackgroundAgentResumeService {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      taskName,
+      subagentId,
     );
   }
 
@@ -1188,6 +1947,9 @@ export class BackgroundAgentResumeService {
     },
   ): Promise<void> {
     const hookSystem = this.config.getHookSystem();
+    // Always set hook_context so ${hook_context} in systemPrompt does not
+    // throw when no hook is configured or the hook returns no additional context.
+    contextState.set('hook_context', '');
     if (!hookSystem) return;
 
     try {
@@ -1209,7 +1971,7 @@ export class BackgroundAgentResumeService {
   }
 
   private async runSubagentStopHookLoop(
-    subagent: AgentHeadless,
+    subagent: SubagentExecutor,
     opts: {
       agentId: string;
       agentType: string;
@@ -1260,7 +2022,10 @@ export class BackgroundAgentResumeService {
           'task_prompt',
           typedStopOutput.getEffectiveReason(),
         );
-        await subagent.execute(continueContext, signal);
+        continueContext.set('hook_context', '');
+        await subagent.execute(continueContext, signal, {
+          resetStats: false,
+        });
 
         if (signal?.aborted) return undefined;
       } catch (hookError) {

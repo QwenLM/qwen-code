@@ -30,6 +30,7 @@ import {
   sleep,
   DEFAULT_CLI_BIN,
   DEFAULT_TOKEN,
+  LISTENING_LINE_RE,
   type SpawnDaemonOptions,
   type SpawnedDaemon,
 } from './_daemon-harness.js';
@@ -336,7 +337,6 @@ export async function spawnDaemonWithTime(
     stderrBuf.value += chunk.toString();
   });
 
-  const LISTENING_RE = /listening on http:\/\/127\.0\.0\.1:(\d+)/;
   const port = await new Promise<number>((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
@@ -361,12 +361,12 @@ export async function spawnDaemonWithTime(
       );
     }, bootTimeoutMs);
     const onData = () => {
-      const m = stdoutBuf.value.match(LISTENING_RE);
-      if (m && !settled) {
-        settled = true;
-        cleanup();
-        resolve(Number(m[1]));
-      }
+      const matchedPort =
+        stdoutBuf.value.match(LISTENING_LINE_RE)?.groups?.['port'];
+      if (!matchedPort || settled) return;
+      settled = true;
+      cleanup();
+      resolve(Number(matchedPort));
     };
     const onExit = (code: number | null) => {
       fail(

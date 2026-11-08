@@ -18,11 +18,20 @@ import {
   vi,
   type MockInstance,
 } from 'vitest';
-import { Storage, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
-import type { BridgeEvent } from './event-bus.js';
-import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  mountWorkspaceAgentsRoutes,
+  mountWorkspaceQualifiedAgentsRoutes,
+  type WorkspaceAgentsRouteDeps,
+} from './workspace-agents.js';
+import {
+  createSingleWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
@@ -96,7 +105,7 @@ function buildBridgeStub(
     setSessionModel: async () => {
       throw new Error('not implemented');
     },
-    killSession: async () => {},
+    killSession: async () => true,
     detachClient: async () => {},
     sessionCount: 0,
     pendingPermissionCount: 0,
@@ -110,14 +119,17 @@ function buildApp(opts: {
   bridge: AcpSessionBridge;
   boundWorkspace: string;
   strictNoToken?: boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
+  qualified?: boolean;
+  trusted?: boolean;
 }) {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   const mutate = createMutationGate({
-    tokenConfigured: !opts.strictNoToken,
+    tokenConfigured: opts.strictNoToken !== true,
     requireAuth: false,
   });
-  mountWorkspaceAgentsRoutes(app, {
+  const deps: WorkspaceAgentsRouteDeps = {
     bridge: opts.bridge,
     boundWorkspace: opts.boundWorkspace,
     mutate,
@@ -147,7 +159,25 @@ function buildApp(opts: {
       }
       return out;
     },
-  });
+    isWorkspaceTrusted: () => opts.trusted !== false,
+    ...(opts.captureGenerationAssertion
+      ? { captureGenerationAssertion: opts.captureGenerationAssertion }
+      : {}),
+  };
+  if (opts.qualified) {
+    mountWorkspaceQualifiedAgentsRoutes(app, {
+      ...deps,
+      workspaceRegistry: createSingleWorkspaceRegistry({
+        workspaceId: 'selected',
+        workspaceCwd: opts.boundWorkspace,
+        primary: true,
+        trusted: opts.trusted !== false,
+        bridge: opts.bridge,
+      } as WorkspaceRuntime),
+    });
+  } else {
+    mountWorkspaceAgentsRoutes(app, deps);
+  }
   return app;
 }
 
@@ -155,7 +185,7 @@ describe('workspace agents routes', () => {
   let tmp: string;
   let workspace: string;
   let globalDir: string;
-  let getGlobalQwenDirSpy: MockInstance<() => string>;
+  let getGlobalQwenDirSpy: MockInstance<typeof Storage.getGlobalQwenDir>;
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-agents-'));
@@ -172,6 +202,97 @@ describe('workspace agents routes', () => {
     getGlobalQwenDirSpy.mockRestore();
     await fs.rm(tmp, { recursive: true, force: true });
   });
+
+  function missingAgentName(prefix = 'missing-agent') {
+    return `${prefix}-${path.basename(tmp)}`;
+  }
+
+  describe.each([false, true])(
+    'backend rejection (qualified=%s)',
+    (qualified) => {
+      const prefix = qualified
+        ? '/workspaces/selected/agents'
+        : '/workspace/agents';
+
+      it.each(['container', 'local', null])(
+        'rejects create and mixed update with executionBackend=%j without writes or events',
+        async (executionBackend) => {
+          const bridge = buildBridgeStub();
+          const app = buildApp({
+            bridge,
+            boundWorkspace: workspace,
+            qualified,
+          });
+          const agentDir = path.join(workspace, QWEN_DIR, 'agents');
+          await fs.mkdir(agentDir, { recursive: true });
+          const original =
+            '---\nname: policy-agent\ndescription: Original\n---\nComplete the requested task.\n';
+          const file = path.join(agentDir, 'policy-agent.md');
+          await fs.writeFile(file, original);
+
+          const create = await request(app).post(prefix).send({
+            name: 'new-policy-agent',
+            description: 'New agent',
+            systemPrompt: 'Complete the requested task.',
+            scope: 'workspace',
+            executionBackend,
+          });
+          expect(create.status).toBe(422);
+          expect(create.body.error).toBe(
+            'Daemon agents do not support executionBackend.',
+          );
+          const update = await request(app)
+            .post(`${prefix}/policy-agent`)
+            .send({
+              description: 'Changed',
+              executionBackend,
+            });
+          expect(update.status).toBe(422);
+          expect(update.body.error).toBe(
+            'Daemon agents do not support executionBackend.',
+          );
+          expect(await fs.readdir(agentDir)).toEqual(['policy-agent.md']);
+          expect(await fs.readFile(file, 'utf8')).toBe(original);
+          expect(bridge.events).toEqual([]);
+        },
+      );
+
+      it('retains a manually authored backend during unrelated edits', async () => {
+        const bridge = buildBridgeStub();
+        const app = buildApp({ bridge, boundWorkspace: workspace, qualified });
+        const agentDir = path.join(workspace, QWEN_DIR, 'agents');
+        await fs.mkdir(agentDir, { recursive: true });
+        const file = path.join(agentDir, 'policy-agent.md');
+        await fs.writeFile(
+          file,
+          '---\nname: policy-agent\ndescription: Original\nexecutionBackend: container\n---\nComplete the requested task.\n',
+        );
+        const update = await request(app)
+          .post(`${prefix}/policy-agent`)
+          .send({ description: 'Changed' });
+        expect(update.status).toBe(200);
+        expect(await fs.readFile(file, 'utf8')).toContain(
+          'executionBackend: container',
+        );
+      });
+
+      it('retains the workspace trust refusal before processing the backend field', async () => {
+        const bridge = buildBridgeStub();
+        const app = buildApp({
+          bridge,
+          boundWorkspace: workspace,
+          qualified,
+          trusted: false,
+        });
+        const response = await request(app)
+          .post(prefix)
+          .send({ scope: 'workspace', executionBackend: 'container' });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe('untrusted_workspace');
+        expect(bridge.events).toEqual([]);
+      });
+    },
+  );
 
   it('lists built-in agents alongside on-disk project agents', async () => {
     const projectAgentsDir = path.join(workspace, QWEN_DIR, 'agents');
@@ -202,6 +323,199 @@ describe('workspace agents routes', () => {
     expect(reviewerEntry?.level).toBe('project');
     // Listings exclude the systemPrompt for bounded payload.
     expect(reviewerEntry?.systemPrompt).toBeUndefined();
+  });
+
+  it('round-trips complete frontmatter metadata through create, list, and detail', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const config = {
+      name: 'complete-agent',
+      description: 'Exercises the complete daemon Agent contract',
+      systemPrompt: 'You are a complete test agent.',
+      scope: 'workspace',
+      tools: ['read_file', 'mcp__github__search'],
+      disallowedTools: ['run_shell_command', 'mcp__slack'],
+      model: 'fast',
+      approvalMode: 'bubble',
+      maxTurns: 12,
+      color: 'cyan',
+      mcpServers: {
+        filesystem: { type: 'stdio', command: 'node', args: ['server.js'] },
+      },
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'run_shell_command',
+            hooks: [{ type: 'command', command: 'echo checking' }],
+          },
+        ],
+      },
+    };
+
+    const create = await request(app).post('/workspace/agents').send(config);
+    expect(create.status).toBe(201);
+    const { scope: _scope, ...persistedConfig } = config;
+    expect(create.body.agent).toMatchObject({
+      ...persistedConfig,
+      level: 'project',
+    });
+
+    const list = await request(app).get('/workspace/agents');
+    const summary = list.body.agents.find(
+      (agent: { name: string }) => agent.name === config.name,
+    );
+    expect(summary).toMatchObject({
+      name: config.name,
+      tools: config.tools,
+      disallowedTools: config.disallowedTools,
+      model: config.model,
+      approvalMode: config.approvalMode,
+      maxTurns: config.maxTurns,
+      color: config.color,
+      mcpServerNames: ['filesystem'],
+      hookEvents: ['PreToolUse'],
+    });
+    expect(summary.systemPrompt).toBeUndefined();
+
+    const detail = await request(app).get(`/workspace/agents/${config.name}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body).toMatchObject({
+      ...persistedConfig,
+      level: 'project',
+    });
+  });
+
+  it('restores selected MCP server secrets before writing an agent', async () => {
+    const settingsDir = path.join(workspace, QWEN_DIR);
+    await fs.mkdir(settingsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(settingsDir, 'settings.json'),
+      JSON.stringify({
+        mcpServers: {
+          private: {
+            command: 'private-server',
+            env: { PRIVATE_TOKEN: 'secret-value' },
+          },
+        },
+      }),
+      'utf8',
+    );
+    const app = buildApp({
+      bridge: buildBridgeStub(),
+      boundWorkspace: workspace,
+    });
+
+    const create = await request(app)
+      .post('/workspace/agents')
+      .send({
+        name: 'private-agent',
+        description: 'Uses a selected private MCP server',
+        systemPrompt: 'Use the private MCP server.',
+        scope: 'workspace',
+        mcpServers: {
+          private: {
+            command: 'private-server',
+            env: { PRIVATE_TOKEN: '__redacted__' },
+          },
+        },
+      });
+
+    expect(create.status).toBe(201);
+    expect(create.body.agent.mcpServers.private.env).toEqual({
+      PRIVATE_TOKEN: '__redacted__',
+    });
+    const onDisk = await fs.readFile(
+      path.join(workspace, QWEN_DIR, 'agents', 'private-agent.md'),
+      'utf8',
+    );
+    expect(onDisk).toContain('PRIVATE_TOKEN: secret-value');
+    expect(onDisk).not.toContain('__redacted__');
+  });
+
+  it('keeps the existing structured agent generation route unchanged', async () => {
+    const bridge = buildBridgeStub();
+    const generateWorkspaceAgent = vi.fn().mockResolvedValue({
+      name: 'generated-agent',
+      description: 'generated description',
+      systemPrompt: 'generated prompt',
+    });
+    bridge.generateWorkspaceAgent = generateWorkspaceAgent;
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+
+    const res = await request(app)
+      .post('/workspace/agents/generate')
+      .send({ description: 'generate an agent' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      name: 'generated-agent',
+      description: 'generated description',
+      systemPrompt: 'generated prompt',
+    });
+    expect(generateWorkspaceAgent).toHaveBeenCalledWith(
+      'generate an agent',
+      undefined,
+    );
+  });
+
+  it('updates advanced agent metadata', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'editable-agent',
+      description: 'before',
+      systemPrompt: 'before prompt',
+      scope: 'workspace',
+    });
+
+    const update = await request(app)
+      .post('/workspace/agents/editable-agent')
+      .send({
+        description: 'after',
+        systemPrompt: 'after prompt',
+        tools: ['read_file', 'mcp__github__search'],
+        disallowedTools: ['run_shell_command'],
+        model: 'fast',
+        approvalMode: 'bubble',
+        maxTurns: 8,
+        color: 'purple',
+        mcpServers: { github: { type: 'http', url: 'https://example.com' } },
+        hooks: { PreToolUse: [] },
+      });
+
+    expect(update.status).toBe(200);
+    expect(update.body.agent).toMatchObject({
+      description: 'after',
+      systemPrompt: 'after prompt',
+      tools: ['read_file', 'mcp__github__search'],
+      disallowedTools: ['run_shell_command'],
+      model: 'fast',
+      approvalMode: 'bubble',
+      maxTurns: 8,
+      color: 'purple',
+      mcpServers: { github: { type: 'http', url: 'https://example.com' } },
+      hooks: { PreToolUse: [] },
+    });
+
+    const clear = await request(app)
+      .post('/workspace/agents/editable-agent')
+      .send({
+        model: null,
+        approvalMode: null,
+        maxTurns: null,
+        color: null,
+        tools: [],
+        disallowedTools: [],
+        mcpServers: {},
+        hooks: {},
+      });
+    expect(clear.status).toBe(200);
+    expect(clear.body.agent).not.toHaveProperty('model');
+    expect(clear.body.agent).not.toHaveProperty('approvalMode');
+    expect(clear.body.agent).not.toHaveProperty('maxTurns');
+    expect(clear.body.agent).not.toHaveProperty('color');
+    expect(clear.body.agent).not.toHaveProperty('mcpServers');
+    expect(clear.body.agent).not.toHaveProperty('hooks');
   });
 
   it('GET /workspace/agents reflects out-of-band agent file changes', async () => {
@@ -238,21 +552,78 @@ describe('workspace agents routes', () => {
     expect(after).toContain('fresh-out-of-band');
   });
 
+  it('rejects a list result when the runtime generation closes in flight', async () => {
+    const bridge = buildBridgeStub();
+    let assertions = 0;
+    const app = buildApp({
+      bridge,
+      boundWorkspace: workspace,
+      captureGenerationAssertion: () => () => {
+        assertions += 1;
+        if (assertions === 2) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+    });
+
+    const res = await request(app).get('/workspace/agents');
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(assertions).toBe(2);
+  });
+
   it('returns the full detail (with systemPrompt) on GET /workspace/agents/:agentType', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).get('/workspace/agents/general-purpose');
+    const create = await request(app).post('/workspace/agents').send({
+      name: 'detail-agent',
+      description: 'detail agent description',
+      systemPrompt: 'you are the detail agent',
+      scope: 'workspace',
+    });
+    expect(create.status).toBe(201);
+
+    const res = await request(app).get('/workspace/agents/detail-agent');
     expect(res.status).toBe(200);
-    expect(res.body.name).toBe('general-purpose');
-    expect(typeof res.body.systemPrompt).toBe('string');
-    expect(res.body.isBuiltin).toBe(true);
-    expect(res.body.level).toBe('builtin');
+    expect(res.body.name).toBe('detail-agent');
+    expect(res.body.systemPrompt).toBe('you are the detail agent');
+    expect(res.body.isBuiltin).toBe(false);
+    expect(res.body.level).toBe('project');
+  });
+
+  it('returns a shadowed user agent when GET specifies global scope', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'shadowed-agent',
+      description: 'project description',
+      systemPrompt: 'project prompt',
+      scope: 'workspace',
+    });
+    await request(app).post('/workspace/agents').send({
+      name: 'shadowed-agent',
+      description: 'user description',
+      systemPrompt: 'user prompt',
+      scope: 'global',
+    });
+
+    const res = await request(app).get(
+      '/workspace/agents/shadowed-agent?scope=global',
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.level).toBe('user');
+    expect(res.body.systemPrompt).toBe('user prompt');
   });
 
   it('returns 404 agent_not_found for unknown agent', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).get('/workspace/agents/no-such-agent');
+    const name = missingAgentName();
+    const res = await request(app).get(`/workspace/agents/${name}`);
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('agent_not_found');
   });
@@ -306,6 +677,38 @@ describe('workspace agents routes', () => {
     expect(onDisk).toContain('name: tester');
   });
 
+  it('rejects agent creation when the runtime closes at commit', async () => {
+    const bridge = buildBridgeStub();
+    let assertions = 0;
+    const app = buildApp({
+      bridge,
+      boundWorkspace: workspace,
+      captureGenerationAssertion: () => () => {
+        assertions += 1;
+        if (assertions === 3) {
+          const error = new Error('generation closed');
+          error.name = 'WorkspaceGenerationClosedError';
+          Object.assign(error, { code: 'workspace_generation_closed' });
+          throw error;
+        }
+      },
+    });
+
+    const res = await request(app).post('/workspace/agents').send({
+      scope: 'workspace',
+      name: 'blocked-agent',
+      description: 'must not persist',
+      systemPrompt: 'must not persist',
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    await expect(
+      fs.access(path.join(workspace, QWEN_DIR, 'agents', 'blocked-agent.md')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(bridge.events).toEqual([]);
+  });
+
   it('creates a user-level agent when scope=global', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
@@ -340,31 +743,22 @@ describe('workspace agents routes', () => {
     expect(second.body.code).toBe('agent_already_exists');
   });
 
-  it('rejects 422 invalid_config when create uses a builtin agent name', async () => {
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).post('/workspace/agents').send({
-      name: 'general-purpose',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'this is a system prompt',
-      scope: 'workspace',
-    });
-    expect(res.status).toBe(422);
-    expect(res.body.code).toBe('invalid_config');
-    expect(res.body.error).toMatch(/built-in/i);
-
-    // BuiltinAgentRegistry.isBuiltinAgent is case-insensitive — both
-    // `Explore` and `explore` must reject so a project-level shadow
-    // can never land regardless of how the client cases the name.
-    const res2 = await request(app).post('/workspace/agents').send({
-      name: 'explore',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'this is a system prompt',
-      scope: 'workspace',
-    });
-    expect(res2.status).toBe(422);
-    expect(res2.body.code).toBe('invalid_config');
-  });
+  it.each(['general-purpose', 'explore'])(
+    'rejects 422 invalid_config when create uses builtin agent name %s',
+    async (name) => {
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).post('/workspace/agents').send({
+        name,
+        description: 'a description longer than ten chars',
+        systemPrompt: 'this is a system prompt',
+        scope: 'workspace',
+      });
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('invalid_config');
+      expect(res.body.error).toMatch(/built-in/i);
+    },
+  );
 
   it('returns 422 invalid_config for missing required fields', async () => {
     const bridge = buildBridgeStub();
@@ -416,8 +810,9 @@ describe('workspace agents routes', () => {
   it('returns 404 agent_not_found when updating an unknown agent', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
+    const name = missingAgentName();
     const res = await request(app)
-      .post('/workspace/agents/no-such-agent')
+      .post(`/workspace/agents/${name}`)
       .send({ description: 'x' });
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('agent_not_found');
@@ -453,23 +848,29 @@ describe('workspace agents routes', () => {
     });
   });
 
-  it('returns 403 agent_readonly when deleting a built-in agent', async () => {
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).delete('/workspace/agents/general-purpose');
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('agent_readonly');
-  });
+  it.each(['', '?scope=workspace'])(
+    'returns 403 agent_readonly when deleting a built-in agent with scope %s',
+    async (scope) => {
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).delete(
+        `/workspace/agents/general-purpose${scope}`,
+      );
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('agent_readonly');
+    },
+  );
 
   it('returns 404 when deleting a missing agent', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).delete('/workspace/agents/no-such-agent');
+    const name = missingAgentName();
+    const res = await request(app).delete(`/workspace/agents/${name}`);
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('agent_not_found');
   });
 
-  it('refuses POST with 401 token_required on no-token loopback strict mode', async () => {
+  it('refuses POST when the injected strict gate fails closed', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({
       bridge,
@@ -551,6 +952,43 @@ describe('workspace agents routes', () => {
     expect(res.status).toBe(422);
     expect(res.body.code).toBe('invalid_config');
     expect(res.body.error).toMatch(/approvalMode/);
+  });
+
+  it('returns 422 invalid_config for unknown permissionMode', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: 'bad-permission-mode',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a bad permission mode test agent',
+      scope: 'workspace',
+      permissionMode: 'invalid',
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/permissionMode/);
+  });
+
+  it('round-trips and clears permissionMode without approvalMode', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const create = await request(app).post('/workspace/agents').send({
+      name: 'permission-mode-agent',
+      description: 'an agent using the compatibility permission mode',
+      systemPrompt: 'you are a permission mode test agent',
+      scope: 'workspace',
+      permissionMode: 'plan',
+    });
+
+    expect(create.status).toBe(201);
+    expect(create.body.agent.permissionMode).toBe('plan');
+
+    const clear = await request(app)
+      .post('/workspace/agents/permission-mode-agent')
+      .send({ permissionMode: null });
+
+    expect(clear.status).toBe(200);
+    expect(clear.body.agent).not.toHaveProperty('permissionMode');
   });
 
   it('strips unknown runConfig keys and rejects malformed values', async () => {
@@ -677,75 +1115,77 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('invalid_agent_type');
   });
 
-  it('returns 500 agent_delete_partial when one level unlink silently fails', async () => {
-    // Windows ignores Unix-style permission bits passed to
-    // `fs.chmod` — the user-agents directory stays writable, the
-    // unlink succeeds, and the partial-delete path this test
-    // exercises is unreachable. SubagentManager's `unlink` import
-    // (`import * as fs from 'fs/promises'`) creates a sealed
-    // namespace object that vitest can't `spyOn`, so a per-platform
-    // mock is also off-limits. The route logic itself is
-    // platform-agnostic; the Ubuntu + macOS runs cover it. Mirrors
-    // the `process.platform === 'win32'` early-return idiom used in
-    // `customBanner.test.ts:232`.
-    if (process.platform === 'win32') return;
+  // Where permission bits do not bind (Windows ignores them; root holding
+  // CAP_DAC_OVERRIDE bypasses them) the user-agents directory stays
+  // writable, the unlink succeeds, and the partial-delete path this test
+  // exercises is unreachable. SubagentManager's `unlink` import
+  // (`import * as fs from 'fs/promises'`) creates a sealed namespace
+  // object that vitest can't `spyOn`, so a per-platform mock is also
+  // off-limits. The route logic itself is platform-agnostic; the Ubuntu +
+  // macOS runs cover it.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'returns 500 agent_delete_partial when one level unlink silently fails',
+    async () => {
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
 
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
+      // Set up a project-level agent.
+      await request(app).post('/workspace/agents').send({
+        name: 'partial-target',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a partial-target agent',
+        scope: 'workspace',
+      });
+      // Set up a user-level shadow with the same name.
+      await request(app).post('/workspace/agents').send({
+        name: 'partial-target',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a partial-target user agent',
+        scope: 'global',
+      });
 
-    // Set up a project-level agent.
-    await request(app).post('/workspace/agents').send({
-      name: 'partial-target',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'you are a partial-target agent',
-      scope: 'workspace',
-    });
-    // Set up a user-level shadow with the same name.
-    await request(app).post('/workspace/agents').send({
-      name: 'partial-target',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'you are a partial-target user agent',
-      scope: 'global',
-    });
+      // Lock the user-level agent's containing directory so the unlink
+      // raises EACCES — `SubagentManager.deleteSubagent` swallows the
+      // error and returns "success" because the project-level unlink
+      // worked. Without this PR's per-level `fs.access` verification,
+      // the route would 204 and publish a misleading `agent_changed`
+      // event for the user-level file that's still on disk.
+      const userAgentsDir = path.join(globalDir, 'agents');
+      const userPath = path.join(userAgentsDir, 'partial-target.md');
+      const originalMode = (await fs.stat(userAgentsDir)).mode;
+      await fs.chmod(userAgentsDir, 0o555); // r-x: blocks unlink
+      try {
+        const res = await request(app).delete(
+          '/workspace/agents/partial-target',
+        );
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('agent_delete_partial');
+        expect(res.body.removedLevels).toEqual(['project']);
+        expect(res.body.remainingLevels).toEqual(['user']);
 
-    // Lock the user-level agent's containing directory so the unlink
-    // raises EACCES — `SubagentManager.deleteSubagent` swallows the
-    // error and returns "success" because the project-level unlink
-    // worked. Without this PR's per-level `fs.access` verification,
-    // the route would 204 and publish a misleading `agent_changed`
-    // event for the user-level file that's still on disk.
-    const userAgentsDir = path.join(globalDir, 'agents');
-    const userPath = path.join(userAgentsDir, 'partial-target.md');
-    const originalMode = (await fs.stat(userAgentsDir)).mode;
-    await fs.chmod(userAgentsDir, 0o555); // r-x: blocks unlink
-    try {
-      const res = await request(app).delete('/workspace/agents/partial-target');
-      expect(res.status).toBe(500);
-      expect(res.body.code).toBe('agent_delete_partial');
-      expect(res.body.removedLevels).toEqual(['project']);
-      expect(res.body.remainingLevels).toEqual(['user']);
+        // Event fan-out: only one event for the level that actually
+        // disappeared. The remaining level (still on disk) must NOT
+        // emit a misleading deleted event.
+        const events = (bridge as unknown as { events: RecordedEvent[] })
+          .events;
+        const deletedEvents = events.filter(
+          (e) =>
+            e.type === 'agent_changed' &&
+            (e.data as { change: string }).change === 'deleted',
+        );
+        expect(deletedEvents).toHaveLength(1);
+        expect((deletedEvents[0]?.data as { level: string }).level).toBe(
+          'project',
+        );
 
-      // Event fan-out: only one event for the level that actually
-      // disappeared. The remaining level (still on disk) must NOT
-      // emit a misleading deleted event.
-      const events = (bridge as unknown as { events: RecordedEvent[] }).events;
-      const deletedEvents = events.filter(
-        (e) =>
-          e.type === 'agent_changed' &&
-          (e.data as { change: string }).change === 'deleted',
-      );
-      expect(deletedEvents).toHaveLength(1);
-      expect((deletedEvents[0]?.data as { level: string }).level).toBe(
-        'project',
-      );
-
-      // Verify the user-level file is still on disk.
-      await expect(fs.access(userPath)).resolves.toBeUndefined();
-    } finally {
-      // Restore permissions so afterEach's rmdir succeeds.
-      await fs.chmod(userAgentsDir, originalMode);
-    }
-  });
+        // Verify the user-level file is still on disk.
+        await expect(fs.access(userPath)).resolves.toBeUndefined();
+      } finally {
+        // Restore permissions so afterEach's rmdir succeeds.
+        await fs.chmod(userAgentsDir, originalMode);
+      }
+    },
+  );
 
   it('DELETE /workspace/agents/:agentType?scope=workspace removes only the project shadow', async () => {
     const bridge = buildBridgeStub();
@@ -943,6 +1383,36 @@ describe('workspace agents routes', () => {
       max_time_minutes: 45,
       max_turns: 10,
     });
+  });
+
+  it('detects unchanged MCP servers and hooks as a no-op', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const mcpServers = {
+      filesystem: { type: 'stdio', command: 'node', args: ['server.js'] },
+    };
+    const hooks = {
+      PreToolUse: [{ matcher: 'read_file', hooks: [] }],
+    };
+    await request(app).post('/workspace/agents').send({
+      name: 'record-noop',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a record-noop agent',
+      scope: 'workspace',
+      mcpServers,
+      hooks,
+    });
+    const eventsBefore = (bridge as unknown as { events: RecordedEvent[] })
+      .events.length;
+
+    const res = await request(app)
+      .post('/workspace/agents/record-noop')
+      .send({ mcpServers, hooks });
+
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(false);
+    const events = (bridge as unknown as { events: RecordedEvent[] }).events;
+    expect(events.length).toBe(eventsBefore);
   });
 
   it('short-circuits no-op updates with changed: false and no event', async () => {

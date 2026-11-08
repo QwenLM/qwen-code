@@ -119,6 +119,89 @@ describe('CronListTool', () => {
     expect(result.returnDisplay).toContain('[durable]');
   });
 
+  it('surfaces a durable task name and its disabled status', async () => {
+    await writeCronTasks(tmpDir, [
+      makeDurableTask({ id: 'off01', name: 'Weekly digest', enabled: false }),
+    ]);
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    // The disabled marker + name let the agent tell a disabled task apart from
+    // an active one and reference it by name.
+    expect(result.llmContent).toContain(
+      'off01 — 0 */2 * * * (recurring) [durable, disabled]: Weekly digest: check deploy',
+    );
+    expect(result.returnDisplay).toContain(
+      '[durable, disabled]: Weekly digest',
+    );
+  });
+
+  it('reports a legacy condition task as disabled while a normal task stays enabled', async () => {
+    // `condition` was removed from DurableCronTask, but a pre-removal version
+    // stamped it on isolated/precondition tasks. Such a task can never fire —
+    // the scheduler skips it — so cron_list must surface it as disabled
+    // (enabled === false) rather than as an active task that silently never
+    // runs. Attach the legacy field off the typed shape.
+    const legacy = {
+      ...makeDurableTask({ id: 'legacy01', prompt: 'guarded' }),
+      condition: 'files_changed',
+    } as DurableCronTask;
+    await writeCronTasks(tmpDir, [
+      legacy,
+      makeDurableTask({ id: 'normal01', prompt: 'runs fine' }),
+    ]);
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    // The legacy condition task is forced disabled...
+    expect(result.llmContent).toContain(
+      'legacy01 — 0 */2 * * * (recurring) [durable, disabled]: guarded',
+    );
+    // ...while an ordinary durable task stays enabled (no disabled marker).
+    expect(result.llmContent).toContain(
+      'normal01 — 0 */2 * * * (recurring) [durable]: runs fine',
+    );
+  });
+
+  it('prints a gated task with its gate and the gate status', async () => {
+    await writeCronTasks(tmpDir, [
+      {
+        ...makeDurableTask({ id: 'gated001', prompt: 'watch the PR' }),
+        gate: 'qwen autofix-pr snapshot --gate 15057',
+        gateStatus: {
+          lastAt: Date.UTC(2026, 9, 21, 5, 7),
+          lastOutcome: 'quiet',
+          quietSinceDelivery: 41,
+          lastDeliveredAt: Date.UTC(2026, 9, 21, 5, 5),
+          consecutiveFailures: 0,
+        },
+      },
+    ]);
+    config._scheduler.create(
+      '*/2 * * * *',
+      'watch the repo',
+      true,
+      './probe.sh',
+    );
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'gated001 — 0 */2 * * * (recurring) [durable]: watch the PR\n' +
+        '    gate: qwen autofix-pr snapshot --gate 15057 — last quiet at 2026-10-21T05:07:00.000Z, quiet ×41, last delivered 2026-10-21T05:05:00.000Z, 0 failures',
+    );
+    expect(result.llmContent).toContain(
+      '[session-only]: watch the repo\n    gate: ./probe.sh — not run yet',
+    );
+    expect(result.returnDisplay).toContain(
+      'gated001 Every 2 hours [durable, gated]',
+    );
+    expect(result.returnDisplay).toContain('[session-only, gated]');
+  });
+
   it('merges file-backed durable jobs with session-only jobs', async () => {
     await writeCronTasks(tmpDir, [makeDurableTask()]);
     config._scheduler.create('*/10 * * * *', 'session task', true);

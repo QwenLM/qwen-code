@@ -13,6 +13,7 @@ import type {
   DiscoveredMCPResource,
 } from './mcp-client.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { mcpSessionMetadataKey } from './mcp-session-config.js';
 import { passesSessionFilter, SessionMcpView } from './session-mcp-view.js';
 import type { ToolRegistry } from './tool-registry.js';
 
@@ -25,6 +26,8 @@ function mkTool(
   serverName: string,
   serverToolName: string,
   trust?: boolean,
+  alwaysLoad = false,
+  visibility?: readonly string[],
 ): DiscoveredMCPTool {
   return new DiscoveredMCPTool(
     // mcpTool stub: tests only inspect `trust` / `name` / `serverName`,
@@ -35,6 +38,18 @@ function mkTool(
     /* description */ 'd',
     /* parameterSchema */ { type: 'object', properties: {} },
     trust,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    alwaysLoad,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    visibility,
   );
 }
 
@@ -101,6 +116,33 @@ function mkRegistries() {
   return { tools, prompts, resources };
 }
 
+/** `new MCPServerConfig('node', …)` with only the named metadata set. */
+function nodeCfg({
+  trust,
+  includeTools,
+  excludeTools,
+}: Pick<MCPServerConfig, 'trust' | 'includeTools' | 'excludeTools'>) {
+  return new MCPServerConfig(
+    'node',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    trust,
+    undefined,
+    includeTools,
+    excludeTools,
+  );
+}
+
+/** The metadata key of `{ command: 'node', ...fields }`. */
+const keyOf = (fields: object = {}) =>
+  mcpSessionMetadataKey({ command: 'node', ...fields } as MCPServerConfig);
+
 describe('passesSessionFilter', () => {
   it('returns true with no filters', () => {
     expect(passesSessionFilter(mkTool('s', 'foo'))).toBe(true);
@@ -121,110 +163,145 @@ describe('passesSessionFilter', () => {
   });
 });
 
+describe('mcpSessionMetadataKey', () => {
+  it('normalizes equivalent filters without erasing include-list presence', () => {
+    const first = keyOf({
+      includeTools: ['beta', 'alpha(args)', 'alpha(args)'],
+      excludeTools: ['zeta', 'zeta'],
+    });
+    const equivalent = keyOf({
+      includeTools: ['alpha', 'beta'],
+      excludeTools: ['zeta'],
+    });
+
+    expect(first).toBe(equivalent);
+    expect(keyOf()).not.toBe(keyOf({ includeTools: [] }));
+  });
+
+  it('participates trust and excludeTools in the key', () => {
+    // Three-state trust: true, false, and absent must all key distinctly,
+    // or a trust-only settings edit would never re-apply.
+    expect(keyOf({ trust: true })).not.toBe(keyOf());
+    expect(keyOf({ trust: false })).not.toBe(keyOf());
+    expect(keyOf({ trust: true })).not.toBe(keyOf({ trust: false }));
+    expect(keyOf({ excludeTools: ['foo'] })).not.toBe(keyOf());
+  });
+
+  it('keys a JSON null include list as absent, distinct from an explicit empty list', () => {
+    const withNull = keyOf({ includeTools: null });
+    expect(withNull).toBe(keyOf());
+    expect(withNull).not.toBe(keyOf({ includeTools: [] }));
+  });
+
+  it('coerces malformed filter shapes instead of throwing', () => {
+    const malformed = [
+      { excludeTools: 'x' },
+      { includeTools: 'foo' },
+      { includeTools: [123] },
+      { excludeTools: 42 },
+    ];
+    for (const fields of malformed) {
+      expect(() => keyOf(fields)).not.toThrow();
+    }
+    // Non-array / non-string entries coerce to the nearest valid form, so
+    // the key stays responsive instead of aborting the reconciliation pass.
+    expect(keyOf({ includeTools: [123] })).toBe(keyOf({ includeTools: [] }));
+    expect(keyOf({ excludeTools: 'x' })).toBe(keyOf());
+  });
+});
+
 describe('SessionMcpView', () => {
   const cfg = new MCPServerConfig('node');
 
-  it('applyTools registers filtered tools, calls remove first', () => {
-    const { tools, prompts, resources } = mkRegistries();
+  /** A view on 'srv' over fresh mock registries, or the given `custom` ones. */
+  function mkView(
+    config: MCPServerConfig = cfg,
+    custom: {
+      tools?: ToolRegistry;
+      prompts?: PromptRegistry;
+      resources?: ResourceRegistry;
+    } = {},
+    sessionId = 'sid',
+  ) {
+    const regs = mkRegistries();
     const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
+      custom.tools ?? regs.tools,
+      custom.prompts ?? regs.prompts,
+      custom.resources ?? regs.resources,
+      sessionId,
       'srv',
-      cfg,
+      config,
     );
+    return { view, ...regs };
+  }
+
+  it('applyTools registers filtered tools, calls remove first', () => {
+    const { view, tools } = mkView();
     view.applyTools([mkTool('srv', 'foo'), mkTool('srv', 'bar')]);
     expect(tools.removeMcpToolsByServer).toHaveBeenCalledWith('srv');
     expect(tools.registerTool).toHaveBeenCalledTimes(2);
   });
 
   it('applyTools per-session trust copy: snapshot tool NOT mutated (V21 C7)', () => {
-    const { tools, prompts, resources } = mkRegistries();
     const snapshotTool = mkTool('srv', 'foo', /*trust*/ false);
-    const viewA = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'A',
-      'srv',
-      new MCPServerConfig(
-        'node',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        /*trust*/ true,
-      ),
-    );
+    const { view: viewA, tools } = mkView(nodeCfg({ trust: true }), {}, 'A');
     viewA.applyTools([snapshotTool]);
     expect(snapshotTool.trust).toBe(false);
     // The registered tool is a clone with session A's trust.
-    const registered = (
-      tools as unknown as { _toolMap: Map<string, DiscoveredMCPTool> }
-    )._toolMap.get(snapshotTool.name);
+    const registered = tools._toolMap.get(snapshotTool.name);
     expect(registered).toBeDefined();
     expect(registered!.trust).toBe(true);
     expect(registered).not.toBe(snapshotTool);
   });
 
-  it('applyTools skips clone when trust matches (allocation pin)', () => {
+  it('preserves App-only visibility through filtered pooled views and clears stale snapshots', () => {
     const { tools, prompts, resources } = mkRegistries();
+    const snapshot = [
+      mkTool('srv', 'token', false, false, ['app']),
+      mkTool('srv', 'excluded', false, false, ['app']),
+    ];
+    const cfg = Object.assign(new MCPServerConfig('node'), {
+      trust: true,
+      excludeTools: ['excluded'],
+    });
+    const view = new SessionMcpView(tools, prompts, resources, 'A', 'srv', cfg);
+    view.applyTools(snapshot);
+    const registered = [...tools._toolMap.values()];
+    expect(registered).toHaveLength(1);
+    expect(registered[0].isModelVisible).toBe(false);
+    expect(registered[0].isAppVisible).toBe(true);
+    expect(registered[0].trust).toBe(true);
+    expect(snapshot[0].trust).toBe(false);
+    view.applyTools([]);
+    expect(tools._toolMap.size).toBe(0);
+  });
+
+  it('applyTools skips clone when trust matches (allocation pin)', () => {
     const snapshotTool = mkTool('srv', 'foo', /*trust*/ true);
-    const viewA = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'A',
-      'srv',
-      new MCPServerConfig(
-        'node',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        /*trust*/ true,
-      ),
-    );
+    const { view: viewA, tools } = mkView(nodeCfg({ trust: true }), {}, 'A');
     viewA.applyTools([snapshotTool]);
-    const registered = (
-      tools as unknown as { _toolMap: Map<string, DiscoveredMCPTool> }
-    )._toolMap.get(snapshotTool.name);
-    expect(registered).toBe(snapshotTool);
+    expect(tools._toolMap.get(snapshotTool.name)).toBe(snapshotTool);
+  });
+
+  it('applyTools projects alwaysLoadTools per session without mutating the shared snapshot', () => {
+    const snapshotTool = mkTool('srv', 'foo', undefined, false);
+    const { view, tools } = mkView(
+      { command: 'node', alwaysLoadTools: true } as MCPServerConfig,
+      {},
+      'A',
+    );
+
+    view.applyTools([snapshotTool]);
+
+    const registered = tools._toolMap.get(snapshotTool.name);
+    expect(registered).toBeDefined();
+    expect(registered!.alwaysLoad).toBe(true);
+    expect(registered).not.toBe(snapshotTool);
+    expect(snapshotTool.alwaysLoad).toBe(false);
   });
 
   it('applyTools filters by includeTools', () => {
-    const { tools, prompts, resources } = mkRegistries();
-    const cfgFiltered = new MCPServerConfig(
-      'node',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      ['only_me'],
-    );
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfgFiltered,
-    );
+    const { view, tools } = mkView(nodeCfg({ includeTools: ['only_me'] }));
     view.applyTools([mkTool('srv', 'only_me'), mkTool('srv', 'not_me')]);
     expect(tools.registerTool).toHaveBeenCalledTimes(1);
   });
@@ -244,15 +321,7 @@ describe('SessionMcpView', () => {
     } as unknown as ToolRegistry & {
       registerTool: ReturnType<typeof vi.fn>;
     };
-    const { prompts, resources } = mkRegistries();
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfg,
-    );
+    const { view } = mkView(cfg, { tools });
 
     expect(() =>
       view.applyTools([
@@ -267,22 +336,13 @@ describe('SessionMcpView', () => {
   });
 
   it('applyPrompts registers all snapshot prompts', () => {
-    const { tools, prompts, resources } = mkRegistries();
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfg,
-    );
+    const { view, prompts } = mkView();
     view.applyPrompts([mkPrompt('p1'), mkPrompt('p2')]);
     expect(prompts.removePromptsByServer).toHaveBeenCalledWith('srv');
     expect(prompts.registerPrompt).toHaveBeenCalledTimes(2);
   });
 
   it('applyPrompts filters and continues when one registration fails', () => {
-    const { tools, resources } = mkRegistries();
     const promptList: string[] = [];
     const prompts = {
       registerPrompt: vi.fn((prompt: DiscoveredMCPPrompt) => {
@@ -297,28 +357,9 @@ describe('SessionMcpView', () => {
     } as unknown as PromptRegistry & {
       registerPrompt: ReturnType<typeof vi.fn>;
     };
-    const cfgFiltered = new MCPServerConfig(
-      'node',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      ['keep', 'bad'],
-    );
-    const view = new SessionMcpView(
-      tools,
+    const { view } = mkView(nodeCfg({ includeTools: ['keep', 'bad'] }), {
       prompts,
-      resources,
-      'sid',
-      'srv',
-      cfgFiltered,
-    );
+    });
 
     expect(() =>
       view.applyPrompts([mkPrompt('keep'), mkPrompt('skip'), mkPrompt('bad')]),
@@ -329,15 +370,7 @@ describe('SessionMcpView', () => {
   });
 
   it('applyResources registers all snapshot resources, calls remove first', () => {
-    const { tools, prompts, resources } = mkRegistries();
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfg,
-    );
+    const { view, resources } = mkView();
     view.applyResources([mkResource('file:///a'), mkResource('file:///b')]);
     expect(resources.removeResourcesByServer).toHaveBeenCalledWith('srv');
     expect(resources.registerResource).toHaveBeenCalledTimes(2);
@@ -346,20 +379,12 @@ describe('SessionMcpView', () => {
   it('applyResources([]) is a no-op so pre-existing resources survive — transient-failure guard', () => {
     // An empty snapshot can mean "resources/list failed" (swallowed to []),
     // not "no resources", so it must not wipe the session's resources.
-    const { tools, prompts, resources } = mkRegistries();
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfg,
-    );
+    const { view, resources } = mkView();
     // Pre-populate from an earlier (successful) snapshot.
     view.applyResources([mkResource('file:///a'), mkResource('file:///b')]);
     expect(resources._list).toHaveLength(2);
-    (resources.removeResourcesByServer as ReturnType<typeof vi.fn>).mockClear();
-    (resources.registerResource as ReturnType<typeof vi.fn>).mockClear();
+    resources.removeResourcesByServer.mockClear();
+    resources.registerResource.mockClear();
 
     // A later empty snapshot (transient failure) must preserve them.
     view.applyResources([]);
@@ -373,35 +398,14 @@ describe('SessionMcpView', () => {
     // allow/deny filter must not drop resources. Here `includeTools` is
     // restricted to a name that matches no resource URI — all resources
     // must still register.
-    const { tools, prompts, resources } = mkRegistries();
-    const cfgFiltered = new MCPServerConfig(
-      'node',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      ['only_this_tool'],
-    );
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfgFiltered,
+    const { view, resources } = mkView(
+      nodeCfg({ includeTools: ['only_this_tool'] }),
     );
     view.applyResources([mkResource('file:///x'), mkResource('file:///y')]);
     expect(resources.registerResource).toHaveBeenCalledTimes(2);
   });
 
   it('applyResources continues when one registration fails', () => {
-    const { tools, prompts } = mkRegistries();
     const registered: string[] = [];
     const resources = {
       registerResource: vi.fn((r: DiscoveredMCPResource) => {
@@ -412,14 +416,7 @@ describe('SessionMcpView', () => {
     } as unknown as ResourceRegistry & {
       registerResource: ReturnType<typeof vi.fn>;
     };
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfg,
-    );
+    const { view } = mkView(cfg, { resources });
     expect(() =>
       view.applyResources([
         mkResource('file:///good1'),
@@ -432,36 +429,12 @@ describe('SessionMcpView', () => {
   });
 
   it('updateConfig changes filter for subsequent applyTools', () => {
-    const { tools, prompts, resources } = mkRegistries();
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfg,
-    );
+    const { view, tools } = mkView();
     view.applyTools([mkTool('srv', 'foo')]);
     expect(tools.registerTool).toHaveBeenCalledTimes(1);
 
     // Tighten filter to exclude foo.
-    view.updateConfig(
-      new MCPServerConfig(
-        'node',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        ['foo'],
-      ),
-    );
+    view.updateConfig(nodeCfg({ excludeTools: ['foo'] }));
     view.applyTools([mkTool('srv', 'foo')]);
     // Second apply removes existing first, then filters out foo.
     expect(tools.removeMcpToolsByServer).toHaveBeenCalledTimes(2);
@@ -469,16 +442,48 @@ describe('SessionMcpView', () => {
     expect(tools.registerTool).toHaveBeenCalledTimes(1);
   });
 
-  it('teardown drops all three registries (idempotent across calls)', () => {
-    const { tools, prompts, resources } = mkRegistries();
-    const view = new SessionMcpView(
-      tools,
-      prompts,
-      resources,
-      'sid',
-      'srv',
-      cfg,
+  it('updateConfig detects metadata mutated in place on the same config object', () => {
+    const mutableConfig = {
+      command: 'node',
+      includeTools: ['foo'],
+    } as MCPServerConfig;
+    const { view, tools } = mkView(mutableConfig);
+
+    (mutableConfig as { includeTools?: string[] }).includeTools = ['bar'];
+
+    expect(view.updateConfig(mutableConfig)).toBe(true);
+    view.applyTools([mkTool('srv', 'foo'), mkTool('srv', 'bar')]);
+    expect(tools.registerTool).toHaveBeenCalledOnce();
+    expect(tools.registerTool).toHaveBeenCalledWith(
+      expect.objectContaining({ serverToolName: 'bar' }),
     );
+  });
+
+  it('applyTools stays total on malformed filter shapes, matching the key', () => {
+    // A malformed include list coerces to an empty allowlist (allow none),
+    // exactly as `mcpSessionMetadataKey` keys it — nothing throws.
+    const { view, tools } = mkView({
+      command: 'node',
+      includeTools: [123],
+    } as unknown as MCPServerConfig);
+    expect(() => view.applyTools([mkTool('srv', 'foo')])).not.toThrow();
+    expect(tools.registerTool).not.toHaveBeenCalled();
+
+    // A malformed exclude list coerces to no exclusions.
+    const excludeMalformed = {
+      command: 'node',
+      excludeTools: 'x',
+    } as unknown as MCPServerConfig;
+    const second = mkView(excludeMalformed);
+    expect(() => second.view.applyTools([mkTool('srv', 'x')])).not.toThrow();
+    expect(second.tools.registerTool).toHaveBeenCalledTimes(1);
+
+    // updateConfig accepts the same malformed shapes without throwing.
+    expect(() => view.updateConfig(excludeMalformed)).not.toThrow();
+  });
+
+  it('teardown drops all three registries (idempotent across calls)', () => {
+    const { view, tools, prompts, resources } = mkView();
     view.applyTools([mkTool('srv', 'foo')]);
     view.applyPrompts([mkPrompt('p1')]);
     view.applyResources([mkResource('file:///a')]);

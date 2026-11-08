@@ -11,10 +11,8 @@ import type {
   SlashCommand,
   SlashCommandActionReturn,
 } from './types.js';
-import { getCurrentGeminiMdFilename } from '@qwen-code/qwen-code-core';
+import { getCurrentMemoryFilename } from '@qwen-code/qwen-code-core';
 import { CommandKind } from './types.js';
-import { Text } from 'ink';
-import React from 'react';
 import { t } from '../../i18n/index.js';
 
 export const initCommand: SlashCommand = {
@@ -36,35 +34,38 @@ export const initCommand: SlashCommand = {
       };
     }
     const targetDir = context.services.config.getTargetDir();
-    const contextFileName = getCurrentGeminiMdFilename();
+    const contextFileName = getCurrentMemoryFilename();
     const contextFilePath = path.join(targetDir, contextFileName);
 
     try {
       if (fs.existsSync(contextFilePath)) {
         // If file exists but is empty (or whitespace), continue to initialize
+        let existing = '';
         try {
-          const existing = fs.readFileSync(contextFilePath, 'utf8');
-          if (existing && existing.trim().length > 0) {
-            // File exists and has content - ask for confirmation to overwrite
-            if (!context.overwriteConfirmed) {
-              return {
-                type: 'confirm_action',
-                // TODO: Move to .tsx file to use JSX syntax instead of React.createElement
-                // For now, using React.createElement to maintain .ts compatibility for PR review
-                prompt: React.createElement(
-                  Text,
-                  null,
-                  `A ${contextFileName} file already exists in this directory. Do you want to regenerate it?`,
-                ),
-                originalInvocation: {
-                  raw: context.invocation?.raw || '/init',
-                },
-              };
-            }
-            // User confirmed overwrite, continue with regeneration
-          }
+          existing = fs.readFileSync(contextFilePath, 'utf8');
         } catch {
           // If we fail to read, conservatively proceed to (re)create the file
+        }
+        if (existing && existing.trim().length > 0) {
+          // File exists and has content - ask for confirmation to overwrite
+          if (!context.overwriteConfirmed) {
+            const [{ Text }, { default: React }] = await Promise.all([
+              import('ink'),
+              import('react'),
+            ]);
+            return {
+              type: 'confirm_action',
+              prompt: React.createElement(
+                Text,
+                null,
+                `A ${contextFileName} file already exists in this directory. Do you want to regenerate it?`,
+              ),
+              originalInvocation: {
+                raw: context.invocation?.raw || '/init',
+              },
+            };
+          }
+          // User confirmed overwrite, continue with regeneration
         }
       }
 

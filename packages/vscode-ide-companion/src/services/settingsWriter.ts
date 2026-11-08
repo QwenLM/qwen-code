@@ -7,6 +7,7 @@
  * Handles bidirectional sync between VSCode Settings and ~/.qwen/settings.json.
  */
 
+import { logger } from '../utils/logger.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -15,12 +16,16 @@ import {
   CUSTOM_API_KEY_ENV_PREFIX,
   Storage,
   applyProviderInstallPlan,
+  getDefaultBaseUrlForProtocol,
+  preserveModelProviderPlaceholders,
+  type ProviderProtocolConfig,
   resolveMetadataKey,
   stripRuntimeSnapshotPrefix,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   CODING_PLAN_ENV_KEY,
   CodingPlanRegion,
@@ -190,7 +195,7 @@ function readSettings(): Record<string, unknown> {
     // caller's catch will see this; refusing to overwrite a malformed file
     // is the whole point — better than silently destroying user state by
     // treating it as `{}`.
-    console.error(
+    logger.error(
       `[settingsWriter] Failed to parse ${settingsPath}; refusing to overwrite a malformed file.`,
       err,
     );
@@ -345,13 +350,18 @@ export function writeCodingPlanConfig(
   const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
   providerMetadata['coding-plan'] = {
     region: codingRegion,
+    baseUrl: planConfig.baseUrl,
     version: planConfig.version,
   };
   delete settings.codingPlan;
 
-  // Default model
-  const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
-  settings.model = { name: defaultModelId };
+  // Default model. Write name and its paired baseUrl key-by-key so model
+  // settings the CLI owns (reasoningEffort, maxSessionTurns, …) survive; ''
+  // is the tombstone the model resolver expects when no baseUrl is known.
+  const defaultModel = planConfig.template[0];
+  const model = ensureNestedObject(settings, 'model');
+  model.name = defaultModel?.id ?? 'qwen3.5-plus';
+  model.baseUrl = defaultModel?.baseUrl ?? '';
 
   writeSettings(settings);
 
@@ -407,9 +417,14 @@ export function writeModelProvidersConfig(params: {
   const nonTarget = existing.filter((e) => e.envKey !== 'OPENAI_API_KEY');
   providers[AuthType.USE_OPENAI] = [...modelArray, ...nonTarget];
 
-  // Active model
+  // Active model. Same per-key write and paired baseUrl as the provider entry
+  // above, so the pair stays consistent and sibling model keys survive.
   if (params.activeModel) {
-    settings.model = { name: params.activeModel };
+    const model = ensureNestedObject(settings, 'model');
+    model.name = params.activeModel;
+    model.baseUrl =
+      params.modelProviders[params.activeModel] ||
+      getDefaultBaseUrlForProtocol(AuthType.USE_OPENAI);
   }
 
   for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
@@ -432,14 +447,41 @@ export function writeModelProvidersConfig(params: {
  * Create a ProviderSettingsAdapter backed by ~/.qwen/settings.json.
  * Reads/writes use the low-level helpers already in this module.
  */
+export function resolveProviderSettings(
+  settings: Record<string, unknown>,
+): Record<string, unknown> {
+  const storedEnv = settings['env'];
+  const env = Object.fromEntries(
+    Object.entries({
+      ...(storedEnv &&
+      typeof storedEnv === 'object' &&
+      !Array.isArray(storedEnv)
+        ? storedEnv
+        : {}),
+      ...process.env,
+    }).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string',
+    ),
+  );
+  return resolveEnvVarsInObject(settings, env);
+}
+
 function createFileSettingsAdapter(): ProviderSettingsAdapter {
   let data = readSettings();
+  const originalProviders = structuredClone(
+    data['modelProviders'] ?? {},
+  ) as ModelProvidersConfig;
+  const resolvedProviders =
+    (resolveProviderSettings(data)['modelProviders'] as ModelProvidersConfig) ??
+    {};
+  let writeProviders: ModelProvidersConfig = {};
+  let rawWriteProviders: ModelProvidersConfig = {};
   let backupData: Record<string, unknown> | null = null;
 
   return {
     getValue(key: string): unknown {
       const parts = key.split('.');
-      let current: unknown = data;
+      let current: unknown = resolveProviderSettings(data);
       for (const part of parts) {
         if (current == null || typeof current !== 'object') return undefined;
         current = (current as Record<string, unknown>)[part];
@@ -448,6 +490,27 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
     },
 
     setValue(key: string, value: unknown): void {
+      if (
+        key.startsWith('modelProviders.') &&
+        key.split('.').length === 2 &&
+        Array.isArray(value)
+      ) {
+        const provider = key.slice('modelProviders.'.length);
+        // Pruning filters the latest write view; install patches instead carry
+        // models resolved before env rotation. Compare against their own view.
+        const fromWriteView = value.every((model) =>
+          writeProviders[provider]?.includes(model),
+        );
+        value = preserveModelProviderPlaceholders(
+          value,
+          provider,
+          fromWriteView ? writeProviders : resolvedProviders,
+          fromWriteView ? rawWriteProviders : originalProviders,
+          resolveProviderSettings(data)['providerProtocol'] as
+            | ProviderProtocolConfig
+            | undefined,
+        );
+      }
       // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
       if (key === 'model.name' && typeof value === 'string') {
         value = stripRuntimeSnapshotPrefix(value);
@@ -497,7 +560,24 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
     },
 
     getModelProviders(): ModelProvidersConfig {
-      return (data.modelProviders ?? {}) as ModelProvidersConfig;
+      return (resolveProviderSettings(data)['modelProviders'] ??
+        {}) as ModelProvidersConfig;
+    },
+
+    getModelProvidersForWrite() {
+      const resolved = resolveProviderSettings(data);
+      writeProviders = (resolved['modelProviders'] ??
+        {}) as ModelProvidersConfig;
+      rawWriteProviders = structuredClone(
+        data['modelProviders'] ?? {},
+      ) as ModelProvidersConfig;
+      return {
+        modelProviders: writeProviders,
+        providerProtocol: resolved['providerProtocol'] as
+          | ProviderProtocolConfig
+          | undefined,
+        shadowedProviders: [],
+      };
     },
 
     persist(): void {
@@ -568,7 +648,7 @@ export function snapshotSettingsForRollback(): Record<string, unknown> | null {
     // Log only the error's class name (not its message) — consistent with the
     // providerMatchesCredentials guard, so the security stance holds even
     // though this catch is filesystem errors rather than user-defined fns.
-    console.warn(
+    logger.warn(
       '[settingsWriter] snapshotSettingsForRollback failed; credential rollback disabled:',
       err instanceof Error ? err.constructor.name : typeof err,
     );
@@ -604,7 +684,7 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
   try {
     settings = readSettings();
   } catch (error) {
-    console.error(
+    logger.error(
       '[settingsWriter] readQwenSettingsForVSCode failed; returning null:',
       error,
     );
@@ -723,7 +803,7 @@ export function clearPersistedAuth(): void {
 
     writeSettings(settings);
   } catch (error) {
-    console.error(
+    logger.error(
       '[settingsWriter] Failed to clear persisted auth credentials:',
       error,
     );

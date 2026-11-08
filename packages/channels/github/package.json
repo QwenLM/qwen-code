@@ -1,0 +1,39 @@
+{
+  "name": "@qwen-code/channel-github",
+  "version": "0.27.0",
+  "description": "GitHub polling channel adapter for Qwen Code",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/channels/github"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./web-origin": {
+      "types": "./dist/web-origin.d.ts",
+      "default": "./dist/web-origin.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "@octokit/rest": "^21.1.1",
+    "@qwen-code/channel-base": "0.27.0",
+    "https-proxy-agent": "^7.0.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

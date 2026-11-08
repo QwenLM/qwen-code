@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import {
   ClientSideConnection,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from '@agentclientprotocol/sdk';
 import type {
   Client,
@@ -13,6 +15,53 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
+  ChannelPromptCancelledError,
+  parseBackgroundResponseContext,
+  resolvePromptImages,
+  type AvailableCommand,
+  type ChannelAgentBridge,
+  type ChannelBtwResult,
+  type ChannelAgentBridgePromptOptions,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ChannelToolDefinition,
+  type ToolCallEvent,
+} from './ChannelAgentBridge.js';
+import {
+  CHANNEL_LOOP_MCP_SERVER_NAME,
+  CHANNEL_LOOP_MCP_TOOLS,
+  CLIENT_MCP_MESSAGE_METHOD,
+  CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  ChannelLoopMcpServer,
+  SESSION_MCP_RUNTIME_ADD_METHOD,
+  SESSION_MCP_RUNTIME_REMOVE_METHOD,
+  selectChannelToolsForSession,
+  type JsonRpcMessage,
+} from './ChannelLoopTools.js';
+import { sanitizeLogText } from './sanitize.js';
+export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
+
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
+  'craft/claimTodoStopGuardContinuation';
+/**
+ * Opt-in trace of the session→owner resolution the channel tool surface
+ * depends on. An unresolvable session silently narrows `tools/list` to no
+ * tools, which is invisible in the model transcript, so operators need a
+ * switch that costs nothing when unset.
+ */
+const CHANNEL_TOOL_DIAG_ENV = 'QWEN_CHANNEL_TOOL_DIAG';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
@@ -20,26 +69,84 @@ export interface AcpBridgeOptions {
   model?: string;
 }
 
-export interface AvailableCommand {
-  name: string;
-  description: string;
-  input?: { hint: string } | null;
+export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
+export const ACP_START_TIMEOUT_MS = 30 * 1000;
+/**
+ * Bound for the session-scoped channel_loop MCP runtime add/remove. The add is
+ * not a local write: the child discovers the server inside the call and drives
+ * `initialize`/`tools/list` back into this bridge, so a stalled child would
+ * otherwise hang session creation (and with it every later message for that
+ * chat) with no stderr line.
+ */
+export const CHANNEL_TOOL_BIND_TIMEOUT_MS = 30 * 1000;
+export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
+const ACP_EVENT_LOOP_STALL_RE =
+  /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
+
+/**
+ * Read a command's aliases off a raw wire `available_commands_update` entry. ACP
+ * carries them in `_meta` (its only extension point); a top-level `altNames` is
+ * also accepted for forward-compat. Returns undefined when absent so the field
+ * stays optional and entries without aliases are left byte-identical.
+ */
+export function readAvailableCommandAltNames(
+  raw: unknown,
+): string[] | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const record = raw as Record<string, unknown>;
+  const meta = record['_meta'];
+  const fromMeta =
+    typeof meta === 'object' && meta !== null
+      ? (meta as Record<string, unknown>)['altNames']
+      : undefined;
+  const source = Array.isArray(record['altNames'])
+    ? record['altNames']
+    : Array.isArray(fromMeta)
+      ? fromMeta
+      : undefined;
+  if (!source) return undefined;
+  const names = source.filter((n): n is string => typeof n === 'string');
+  return names.length > 0 ? names : undefined;
 }
 
-export interface ToolCallEvent {
-  sessionId: string;
-  toolCallId: string;
-  kind: string;
-  title: string;
-  status: string;
-  rawInput?: Record<string, unknown>;
-}
-
-export class AcpBridge extends EventEmitter {
+export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private child: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;
   private _availableCommands: AvailableCommand[] = [];
+  private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
+  private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private readonly channelTools: ChannelToolDefinition[] = [];
+  /** Channel instance that owns each session, for adapter-tool scoping. */
+  private readonly sessionOwners = new Map<string, string>();
+  private readonly knownSessionIds = new Set<string>();
+  private readonly sessionBindingTokens = new Map<string, object | undefined>();
+  private readonly toolCallKindsBySession = new Map<
+    string,
+    Map<string, string>
+  >();
+  /**
+   * Sessions this bridge bound the channel_loop MCP server to. The binding is
+   * the session's channel-tool identity: a `client_mcp/message` frame is served
+   * only for a session in this ledger, never because the frame names one.
+   */
+  private readonly channelLoopMcpBoundSessions = new Set<string>();
+  /**
+   * Ownership token of the bind attempt that added each session to the bound
+   * ledger. A bind can outlive a discard/reload of its session, so a failed
+   * attempt must only release a claim it still owns.
+   */
+  private readonly channelLoopMcpBindClaims = new Map<string, object>();
+  /** In-flight per-session bindings, so one session binds once. */
+  private readonly channelLoopMcpBindings = new Map<string, Promise<boolean>>();
+  private readonly pendingPermissions = new Map<
+    string,
+    {
+      sessionId: string;
+      resolve: (response: RequestPermissionResponse) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -52,6 +159,10 @@ export class AcpBridge extends EventEmitter {
 
   async start(): Promise<void> {
     const { cliEntryPath, cwd } = this.options;
+    // Private-parent capability: marks this bridge as a trusted ACP parent of
+    // the spawned child so trusted prompt metadata (e.g. the classifier's
+    // display projection) survives the child's untrusted-caller strip.
+    const privateParentCapability = randomBytes(32).toString('base64url');
 
     const args = [
       ...process.execArgv.filter((a) => !/^--inspect(-brk)?($|=)/.test(a)),
@@ -65,14 +176,19 @@ export class AcpBridge extends EventEmitter {
     this.child = spawn(process.execPath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        QWEN_CODE_DISABLE_CRON: '1',
+        [ACP_PRIVATE_PARENT_CAPABILITY_ENV]: privateParentCapability,
+      },
       shell: false,
     });
 
     this.child.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString().trim();
       if (msg) {
-        process.stderr.write(`[AcpBridge] ${msg}\n`);
+        process.stderr.write(`[AcpBridge] ${sanitizeLogText(msg, 4096)}\n`);
+        this.maybeKillOnEventLoopStall(msg);
       }
     });
 
@@ -80,6 +196,16 @@ export class AcpBridge extends EventEmitter {
       process.stderr.write(
         `[AcpBridge] Process exited (code=${code}, signal=${signal})\n`,
       );
+      // Do not emit sessionDied here: a full ACP process exit is handled by
+      // channel start crash recovery, which reloads the persisted sessions.
+      this.resolvePendingPermissions();
+      this.knownSessionIds.clear();
+      this.sessionBindingTokens.clear();
+      this.sessionOwners.clear();
+      this.channelLoopMcpBoundSessions.clear();
+      this.channelLoopMcpBindClaims.clear();
+      this.channelLoopMcpBindings.clear();
+      this.toolCallKindsBySession.clear();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -107,84 +233,403 @@ export class AcpBridge extends EventEmitter {
 
         requestPermission: async (
           params: RequestPermissionRequest,
-        ): Promise<RequestPermissionResponse> => {
-          // Auto-approve for now; Phase 5 will add interactive approval
-          const options = Array.isArray(params.options) ? params.options : [];
-          const optionId =
-            options.find((o) => o.optionId === 'proceed_once')?.optionId ||
-            options[0]?.optionId ||
-            'proceed_once';
-          return { outcome: { outcome: 'selected', optionId } };
-        },
+        ): Promise<RequestPermissionResponse> => this.requestPermission(params),
+
+        extMethod: async (
+          method: string,
+          params: Record<string, unknown>,
+        ): Promise<Record<string, unknown>> =>
+          this.handleExtMethod(method, params),
 
         extNotification: async (): Promise<void> => {},
       }),
       stream,
     );
 
-    await this.connection.initialize({
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {},
-    });
+    try {
+      await withTimeout(
+        this.connection.initialize({
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {},
+          _meta: {
+            [ACP_PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
+          },
+        }),
+        ACP_START_TIMEOUT_MS,
+        `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
+      );
+    } catch (error) {
+      this.stop();
+      throw error;
+    }
   }
 
-  async newSession(cwd: string): Promise<string> {
+  registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void {
+    if (!this.channelLoopToolHandlers.includes(handler)) {
+      this.channelLoopToolHandlers.push(handler);
+    }
+    this.ensureChannelToolServer();
+    this.bindKnownSessions();
+  }
+
+  registerChannelTool(tool: ChannelToolDefinition): void {
+    if (!this.addChannelTool(tool)) return;
+    this.ensureChannelToolServer();
+    this.bindKnownSessions();
+  }
+
+  /**
+   * Shared registration guard: one tool per name per owning channel, and never
+   * a name the built-in channel_loop_* tools already own. Two instances of the
+   * same channel type register the same names, so the owner scopes the entry
+   * instead of the second registration being dropped.
+   */
+  private addChannelTool(tool: ChannelToolDefinition): boolean {
+    if (
+      CHANNEL_LOOP_MCP_TOOLS.some((loopTool) => loopTool.name === tool.name)
+    ) {
+      process.stderr.write(
+        `[AcpBridge] Channel tool "${sanitizeLogText(tool.name, 64)}" ignored: name is reserved for the built-in channel loop tools\n`,
+      );
+      return false;
+    }
+    if (
+      this.channelTools.some(
+        (existing) =>
+          existing.name === tool.name && existing.owner === tool.owner,
+      )
+    ) {
+      process.stderr.write(
+        `[AcpBridge] Channel tool "${sanitizeLogText(tool.name, 64)}" ignored: already registered for owner "${sanitizeLogText(tool.owner ?? '', 64)}"\n`,
+      );
+      return false;
+    }
+    this.channelTools.push(tool);
+    return true;
+  }
+
+  /**
+   * Adapter tools one bound session may see. Visibility follows the session's
+   * channel: a session this bridge bound the server to sees its owner's tools
+   * plus the ownerless ones; a session that never bound it sees nothing.
+   */
+  private channelToolsForSession(sessionId: string): ChannelToolDefinition[] {
+    if (
+      sessionId.length === 0 ||
+      !this.channelLoopMcpBoundSessions.has(sessionId)
+    ) {
+      return [];
+    }
+    return selectChannelToolsForSession(
+      this.channelTools,
+      this.sessionOwners.get(sessionId),
+    );
+  }
+
+  /**
+   * Channel-tool identity for one `client_mcp/message` frame. The frame's
+   * `sessionId` is a carrier, not a credential: it resolves only when this
+   * bridge itself bound the channel_loop server to that session, so an id the
+   * bridge never bound resolves to nothing and no channel tool can run.
+   *
+   * This is a membership check, not a transport check: every id in the bound
+   * ledger resolves, so a bound session that named another bound session would
+   * be treated as that one. The child injects the id into its own reverse
+   * frames and the model cannot set it, which is what makes the ledger — not
+   * the frame — the authority on which chat a call may touch.
+   */
+  private boundSessionId(params: Record<string, unknown>): string | undefined {
+    const sessionId = params['sessionId'];
+    return typeof sessionId === 'string' &&
+      this.channelLoopMcpBoundSessions.has(sessionId)
+      ? sessionId
+      : undefined;
+  }
+
+  /** Bind the channel_loop server to every session this bridge already knows. */
+  private bindKnownSessions(): void {
+    for (const sessionId of this.knownSessionIds) {
+      if (!this.channelLoopMcpBoundSessions.has(sessionId)) {
+        void this.registerChannelLoopMcpServer(sessionId);
+      }
+    }
+  }
+
+  private ensureChannelToolServer(): ChannelLoopMcpServer {
+    return (this.channelLoopMcpServer ??= new ChannelLoopMcpServer(
+      {
+        create: (sessionId, input) =>
+          this.resolveChannelLoopToolHandler(sessionId).create(
+            sessionId,
+            input,
+          ),
+        list: (sessionId) =>
+          this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
+        cancel: (sessionId, id) =>
+          this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
+      },
+      {
+        extraTools: (sessionId) => this.channelToolsForSession(sessionId),
+        loopToolsEnabled: () => this.channelLoopToolHandlers.length > 0,
+      },
+    ));
+  }
+
+  private async applySessionApprovalMode(
+    conn: ClientSideConnection,
+    sessionId: string,
+    approvalMode: string | undefined,
+  ): Promise<void> {
+    if (!approvalMode) return;
+    try {
+      await conn.setSessionMode({ sessionId, modeId: approvalMode });
+    } catch (error) {
+      await conn
+        .extMethod('qwen/control/session/close', { sessionId })
+        .catch((closeError: unknown) => {
+          process.stderr.write(
+            `[AcpBridge] Failed to close session ${sanitizeLogText(sessionId, 128)} after approval mode error: ${sanitizeLogText(closeError instanceof Error ? closeError.message : String(closeError), 512)}\n`,
+          );
+        });
+      throw error;
+    }
+  }
+
+  async newSession(
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
     const conn = this.ensureConnection();
     const response = await conn.newSession({ cwd, mcpServers: [] });
+    await this.applySessionApprovalMode(
+      conn,
+      response.sessionId,
+      options?.approvalMode,
+    );
+    this.knownSessionIds.add(response.sessionId);
+    this.sessionBindingTokens.set(response.sessionId, bindingToken);
+    if (options?.sourceId) {
+      this.sessionOwners.set(response.sessionId, options.sourceId);
+    }
+    await this.registerChannelLoopMcpServer(response.sessionId);
     return response.sessionId;
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<string> {
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
     const conn = this.ensureConnection();
-    const response = await conn.loadSession({
+    await conn.unstable_resumeSession({
       sessionId,
       cwd,
       mcpServers: [],
     });
-    return response.sessionId;
+    await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
+    this.knownSessionIds.add(sessionId);
+    this.sessionBindingTokens.set(sessionId, bindingToken);
+    if (options?.sourceId) {
+      this.sessionOwners.set(sessionId, options.sourceId);
+    }
+    await this.registerChannelLoopMcpServer(sessionId);
+    return sessionId;
   }
 
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
+    // A binding skipped at session creation (MCP budget, one transient
+    // runtime-add failure) must not cost the session every channel tool for its
+    // lifetime. Retry it on the next turn, fire-and-forget so a slow or skipped
+    // bind never delays the prompt; registerChannelLoopMcpServer is idempotent
+    // and deduplicates concurrent attempts.
+    if (
+      this.knownSessionIds.has(sessionId) &&
+      !this.channelLoopMcpBoundSessions.has(sessionId)
+    ) {
+      void this.registerChannelLoopMcpServer(sessionId);
+    }
 
     const chunks: string[] = [];
+    let slashCommandOutput = '';
+    // A turn notice rides the reply, so it keeps its own buffer that response
+    // boundaries never clear.
+    let turnNotice = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) chunks.push(chunk);
     };
+    const onSlashCommandOutput = (sid: string, chunk: string) => {
+      if (sid === sessionId) slashCommandOutput = chunk;
+    };
+    const onTurnNotice = (sid: string, notice: string) => {
+      if (sid === sessionId) turnNotice = notice;
+    };
+    const clearChunks = (sid: string) => {
+      if (sid === sessionId) {
+        chunks.length = 0;
+        slashCommandOutput = '';
+      }
+    };
     this.on('textChunk', onChunk);
+    this.on('slashCommandOutput', onSlashCommandOutput);
+    this.on('turnNotice', onTurnNotice);
+    this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
-    if (options?.imageBase64 && options.imageMimeType) {
+    for (const image of resolvePromptImages(options)) {
       prompt.push({
         type: 'image',
-        data: options.imageBase64,
-        mimeType: options.imageMimeType,
+        data: image.data,
+        mimeType: image.mimeType,
       });
     }
     prompt.push({ type: 'text', text });
 
     try {
-      await conn.prompt({
+      const result = await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          ...(options?.outputMode === 'per_task'
+            ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
+            : {}),
+          ...(options?.displayText !== undefined
+            ? {
+                [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+              }
+            : {}),
+        },
       });
+      if (
+        options?.outputMode === 'per_task' &&
+        result?.stopReason === 'cancelled'
+      ) {
+        throw new ChannelPromptCancelledError();
+      }
+      const taskResult = result?._meta?.[CHANNEL_TASK_RESULT_META_KEY];
+      if (options?.outputMode === 'per_task') {
+        options.onTaskResult?.({
+          partial:
+            result?._meta?.[CHANNEL_TASK_RESULT_PARTIAL_META_KEY] === true,
+        });
+      }
+      const body =
+        options?.outputMode === 'per_task' &&
+        typeof taskResult === 'string' &&
+        taskResult.trim()
+          ? taskResult
+          : chunks.join('') || slashCommandOutput;
+      return turnNotice && body
+        ? `${turnNotice}\n\n${body}`
+        : turnNotice || body;
     } finally {
       this.off('textChunk', onChunk);
+      this.off('slashCommandOutput', onSlashCommandOutput);
+      this.off('turnNotice', onTurnNotice);
+      this.off('responseBoundary', clearChunks);
     }
+  }
 
-    return chunks.join('');
+  async btw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult> {
+    if (!this.knownSessionIds.has(sessionId)) {
+      throw new Error(`Unknown ACP session ${sessionId}`);
+    }
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    const response = await withAbortSignal(
+      this.ensureConnection().extMethod(CHANNEL_BTW_METHOD, {
+        sessionId,
+        question,
+      }),
+      signal,
+    );
+    if (
+      response['sessionId'] !== sessionId ||
+      (response['answer'] !== null && typeof response['answer'] !== 'string')
+    ) {
+      throw new Error('Invalid BTW response from ACP agent');
+    }
+    return {
+      sessionId,
+      answer: response['answer'] as string | null,
+    };
   }
 
   async cancelSession(sessionId: string): Promise<void> {
     const conn = this.ensureConnection();
-    await conn.cancel({ sessionId });
+    try {
+      await conn.cancel({ sessionId });
+    } finally {
+      this.resolvePendingPermissions(sessionId);
+    }
+  }
+
+  async discardSession(
+    sessionId: string,
+    expectedBindingToken?: object,
+  ): Promise<void> {
+    if (
+      expectedBindingToken !== undefined &&
+      this.sessionBindingTokens.get(sessionId) !== expectedBindingToken
+    ) {
+      return;
+    }
+    if (!this.knownSessionIds.delete(sessionId)) return;
+    this.sessionBindingTokens.delete(sessionId);
+    this.sessionOwners.delete(sessionId);
+    this.toolCallKindsBySession.delete(sessionId);
+    this.channelLoopMcpBindings.delete(sessionId);
+    this.channelLoopMcpBindClaims.delete(sessionId);
+    const wasBound = this.channelLoopMcpBoundSessions.delete(sessionId);
+    this.resolvePendingPermissions(sessionId);
+
+    const conn = this.connection;
+    if (!conn || !this.isConnected) return;
+    if (wasBound) {
+      await this.removeChannelLoopMcpServer(conn, sessionId);
+    }
+    await conn.extMethod('qwen/control/session/close', { sessionId });
+  }
+
+  async respondToPermission(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean> {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) {
+      return false;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingPermissions.delete(requestId);
+    pending.resolve(response);
+    this.emit('permissionResolved', {
+      requestId,
+      outcome: response.outcome,
+    });
+    return true;
   }
 
   stop(): void {
+    this.resolvePendingPermissions();
+    this.knownSessionIds.clear();
+    this.sessionBindingTokens.clear();
+    this.sessionOwners.clear();
+    this.channelLoopMcpBoundSessions.clear();
+    this.channelLoopMcpBindClaims.clear();
+    this.channelLoopMcpBindings.clear();
+    this.toolCallKindsBySession.clear();
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -209,31 +654,127 @@ export class AcpBridge extends EventEmitter {
 
     switch (type) {
       case 'agent_message_chunk': {
+        const meta = update['_meta'] as Record<string, unknown> | undefined;
+        if (typeof meta?.['parentToolCallId'] === 'string') {
+          break;
+        }
         const content = update['content'] as
           | { type?: string; text?: string }
           | undefined;
+        if (meta?.['qwenDiscreteMessage'] === true) {
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            meta[CHANNEL_TASK_OUTPUT_META_KEY] !== true
+          ) {
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (
+              content?.type === 'text' &&
+              (content.text || context?.turnComplete)
+            ) {
+              this.emit(
+                'backgroundResponse',
+                sessionId,
+                content.text ?? '',
+                context,
+              );
+            }
+          } else if (
+            meta['source'] === 'vision_bridge_notice' &&
+            content?.type === 'text' &&
+            content.text
+          ) {
+            this.emit('textChunk', sessionId, content.text);
+          }
+          break;
+        }
         if (content?.type === 'text' && content.text) {
-          this.emit('textChunk', sessionId, content.text);
+          if (meta?.[CHANNEL_TURN_NOTICE_META_KEY] === true) {
+            // Keep notices outside the text buffer cleared by tool boundaries.
+            this.emit('turnNotice', sessionId, content.text);
+            break;
+          }
+          this.emit(
+            meta?.['source'] === 'slash_command'
+              ? 'slashCommandOutput'
+              : 'textChunk',
+            sessionId,
+            content.text,
+          );
         }
         break;
       }
-      case 'tool_call': {
+      case 'tool_call':
+      case 'tool_call_update': {
+        const toolCallId = (update['toolCallId'] as string) || '';
+        if (!toolCallId) break;
+        const explicitKind =
+          typeof update['kind'] === 'string' ? update['kind'] : '';
+        const meta = update['_meta'] as Record<string, unknown> | undefined;
+        if (
+          meta?.['toolLifecycle'] !== undefined &&
+          update['status'] === undefined &&
+          update['content'] === undefined
+        )
+          break;
+        if (
+          type === 'tool_call_update' &&
+          !explicitKind &&
+          update['status'] === 'in_progress' &&
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
+        ) {
+          // Matches the DaemonChannelBridge guard: kindless in_progress frames
+          // carrying only shell or subagent progress are heartbeats, not phase
+          // changes, and must not restore the slot kind onto the reaction/card.
+          break;
+        }
+        let sessionKinds = this.toolCallKindsBySession.get(sessionId);
+        const kind = explicitKind || sessionKinds?.get(toolCallId);
+        if (!kind) break;
+        if (type === 'tool_call' || explicitKind) {
+          const kinds = sessionKinds ?? new Map<string, string>();
+          kinds.set(toolCallId, kind);
+          this.toolCallKindsBySession.set(sessionId, kinds);
+          sessionKinds = kinds;
+        }
         const event: ToolCallEvent = {
           sessionId,
-          toolCallId: update['toolCallId'] as string,
-          kind: (update['kind'] as string) || '',
+          toolCallId,
+          kind,
           title: (update['title'] as string) || '',
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
+        if (
+          type === 'tool_call' &&
+          (event.status === 'pending' || event.status === 'in_progress')
+        ) {
+          this.emitResponseBoundary(sessionId);
+        }
         this.emit('toolCall', event);
+        if (event.status === 'completed' || event.status === 'failed') {
+          sessionKinds?.delete(toolCallId);
+          if (sessionKinds?.size === 0) {
+            this.toolCallKindsBySession.delete(sessionId);
+          }
+        }
+        break;
+      }
+      case 'plan': {
+        this.emitResponseBoundary(sessionId);
         break;
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          this._availableCommands = update[
-            'availableCommands'
-          ] as AvailableCommand[];
+          this._availableCommands = (
+            update['availableCommands'] as AvailableCommand[]
+          ).map((cmd) => {
+            const altNames = readAvailableCommandAltNames(cmd);
+            return altNames ? { ...cmd, altNames } : cmd;
+          });
         }
         break;
       }
@@ -251,4 +792,398 @@ export class AcpBridge extends EventEmitter {
     }
     return this.connection;
   }
+
+  private requestPermission(
+    request: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    const requestId = `acp-permission-${randomUUID()}`;
+    const sessionId =
+      typeof request.sessionId === 'string' && request.sessionId.length > 0
+        ? request.sessionId
+        : request.toolCall.toolCallId;
+
+    return new Promise<RequestPermissionResponse>((resolve) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingPermissions.get(requestId);
+        if (!pending) {
+          return;
+        }
+        process.stderr.write(
+          `[AcpBridge] permission request ${sanitizeLogText(requestId, 128)} timed out after ${ACP_PERMISSION_RESPONSE_TIMEOUT_MS}ms (session=${sanitizeLogText(pending.sessionId, 128)})\n`,
+        );
+        this.pendingPermissions.delete(requestId);
+        const response: RequestPermissionResponse = {
+          outcome: { outcome: 'cancelled' },
+        };
+        pending.resolve(response);
+        this.emit('permissionResolved', {
+          requestId,
+          outcome: response.outcome,
+        });
+      }, ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
+      timeout.unref?.();
+      this.pendingPermissions.set(requestId, { sessionId, resolve, timeout });
+      this.emitResponseBoundary(sessionId);
+      this.emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request,
+      });
+    });
+  }
+
+  private emitResponseBoundary(sessionId: string): void {
+    this.emit('responseBoundary', sessionId);
+  }
+
+  private resolvePendingPermissions(sessionId?: string): void {
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'cancelled' },
+    };
+    for (const [requestId, pending] of this.pendingPermissions) {
+      if (sessionId !== undefined && pending.sessionId !== sessionId) {
+        continue;
+      }
+      clearTimeout(pending.timeout);
+      this.pendingPermissions.delete(requestId);
+      pending.resolve(response);
+      this.emit('permissionResolved', {
+        requestId,
+        outcome: response.outcome,
+      });
+    }
+  }
+
+  private maybeKillOnEventLoopStall(stderr: string): void {
+    const match = ACP_EVENT_LOOP_STALL_RE.exec(stderr);
+    if (!match) return;
+
+    const maxMs = Number(match[1]);
+    if (!Number.isFinite(maxMs) || maxMs < ACP_EVENT_LOOP_STALL_RESTART_MS) {
+      return;
+    }
+
+    const child = this.child;
+    if (!child || child.killed || child.exitCode !== null) {
+      return;
+    }
+
+    process.stderr.write(
+      `[AcpBridge] ACP agent event loop stalled for ${Math.round(maxMs)}ms; killing child process to trigger restart\n`,
+    );
+    child.kill('SIGKILL');
+  }
+
+  /**
+   * Bind the channel_loop SDK MCP server to ONE session through the child's
+   * session-scoped runtime-add. The child then drives that server through the
+   * session's own `sendSdkMcpMessage`, so its reverse frames carry the session
+   * id, and the binding here is what makes that id trustworthy.
+   */
+  private async registerChannelLoopMcpServer(
+    sessionId: string,
+  ): Promise<boolean> {
+    if (!this.connection || !this.channelLoopMcpServer) return false;
+    const inFlight = this.channelLoopMcpBindings.get(sessionId);
+    if (inFlight) return inFlight;
+    if (this.channelLoopMcpBoundSessions.has(sessionId)) return true;
+    const binding = this.bindChannelLoopMcpServer(sessionId).finally(() => {
+      if (this.channelLoopMcpBindings.get(sessionId) === binding) {
+        this.channelLoopMcpBindings.delete(sessionId);
+      }
+    });
+    this.channelLoopMcpBindings.set(sessionId, binding);
+    return binding;
+  }
+
+  private async bindChannelLoopMcpServer(sessionId: string): Promise<boolean> {
+    // Claim the binding before the runtime-add can answer: the child discovers
+    // the newly added server inside that call, so its `tools/list` frame can
+    // arrive before the add resolves, and it must already resolve here.
+    this.channelLoopMcpBoundSessions.add(sessionId);
+    // The claim is ownership-checked: a discard can drop it and a reload can
+    // bind the same session again while this attempt is still in flight, so a
+    // late failure must not erase the newer attempt's claim.
+    const claim: object = {};
+    this.channelLoopMcpBindClaims.set(sessionId, claim);
+    try {
+      const result = await withTimeout(
+        this.connection!.extMethod(SESSION_MCP_RUNTIME_ADD_METHOD, {
+          sessionId,
+          name: CHANNEL_LOOP_MCP_SERVER_NAME,
+          originatorClientId: 'channel',
+          config: {
+            type: 'sdk',
+            [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+          },
+        }),
+        CHANNEL_TOOL_BIND_TIMEOUT_MS,
+        `channel loop MCP bind timed out after ${CHANNEL_TOOL_BIND_TIMEOUT_MS}ms`,
+      );
+      if (isSkippedMcpRegistration(result)) {
+        this.releaseChannelLoopMcpBindClaim(sessionId, claim);
+        process.stderr.write(
+          `[AcpBridge] Channel loop MCP server binding for session ${sanitizeLogText(sessionId, 128)} skipped${formatSkippedRegistrationReason(result)}\n`,
+        );
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.releaseChannelLoopMcpBindClaim(sessionId, claim);
+      process.stderr.write(
+        `[AcpBridge] Failed to bind channel loop MCP server to session ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Release a failed bind's optimistic claim, but only while this attempt
+   * still owns it: a newer bind for the same session may have claimed it.
+   */
+  private releaseChannelLoopMcpBindClaim(
+    sessionId: string,
+    claim: object,
+  ): void {
+    if (this.channelLoopMcpBindClaims.get(sessionId) !== claim) return;
+    this.channelLoopMcpBindClaims.delete(sessionId);
+    this.channelLoopMcpBoundSessions.delete(sessionId);
+  }
+
+  private async removeChannelLoopMcpServer(
+    conn: ClientSideConnection,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      await withTimeout(
+        conn.extMethod(SESSION_MCP_RUNTIME_REMOVE_METHOD, {
+          sessionId,
+          name: CHANNEL_LOOP_MCP_SERVER_NAME,
+          originatorClientId: 'channel',
+        }),
+        CHANNEL_TOOL_BIND_TIMEOUT_MS,
+        `channel loop MCP unbind timed out after ${CHANNEL_TOOL_BIND_TIMEOUT_MS}ms`,
+      );
+    } catch (error) {
+      process.stderr.write(
+        `[AcpBridge] Failed to remove channel loop MCP server from session ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+    }
+  }
+
+  private async handleExtMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (method === CLIENT_MCP_MESSAGE_METHOD) {
+      return this.handleClientMcpMessage(params);
+    }
+    if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
+      return { messages: [], hasQueuedPrompt: false };
+    }
+    if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+      const sessionId =
+        typeof params['sessionId'] === 'string' ? params['sessionId'] : '';
+      return {
+        claimed: this.knownSessionIds.has(sessionId),
+        hasQueuedPrompt: false,
+      };
+    }
+    throw RequestError.methodNotFound(method);
+  }
+
+  private async handleClientMcpMessage(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.channelLoopMcpServer) {
+      throw new Error('Channel loop MCP server is not registered.');
+    }
+    const server = params['server'];
+    if (server !== CHANNEL_LOOP_MCP_SERVER_NAME) {
+      throw new Error(`Unknown client MCP server: ${String(server)}`);
+    }
+    const payload = params['payload'];
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('Invalid client MCP payload.');
+    }
+    const sessionId = this.boundSessionId(params);
+    const rawSessionId = params['sessionId'];
+    const carriedSessionId =
+      sessionId === undefined &&
+      typeof rawSessionId === 'string' &&
+      rawSessionId.length > 0
+        ? rawSessionId
+        : undefined;
+    const response = await this.channelLoopMcpServer.handleMessage(
+      payload as JsonRpcMessage,
+      { sessionId, carriedSessionId },
+    );
+    this.logChannelToolDiagnostic(params, sessionId, response);
+    if (!response) {
+      return { payload: { jsonrpc: '2.0', id: 0, result: {} } };
+    }
+    return { payload: response };
+  }
+
+  /**
+   * `QWEN_CHANNEL_TOOL_DIAG=1` trace of one `client_mcp/message` frame: which
+   * method it is, which session id the frame carried, whether this bridge had
+   * bound that session, and what the reply contained. Off by default because
+   * the read runs per frame on a hot path.
+   */
+  private logChannelToolDiagnostic(
+    params: Record<string, unknown>,
+    sessionId: string | undefined,
+    response: JsonRpcMessage | undefined,
+  ): void {
+    if (process.env[CHANNEL_TOOL_DIAG_ENV] !== '1') return;
+    const payload = params['payload'];
+    const message =
+      typeof payload === 'object' && payload !== null
+        ? (payload as Record<string, unknown>)
+        : undefined;
+    const method =
+      typeof message?.['method'] === 'string'
+        ? (message['method'] as string)
+        : '<none>';
+    if (method !== 'tools/list' && method !== 'tools/call') return;
+    const rawSessionId = params['sessionId'];
+    const carried =
+      typeof rawSessionId === 'string' && rawSessionId.length > 0
+        ? rawSessionId
+        : undefined;
+    // A known-but-unbound session is exactly the state this switch exists to
+    // explain, so resolve the owner from the id the frame carried too. An id
+    // in neither ledger acquires nothing (fail closed).
+    const ownerId =
+      sessionId ??
+      (carried !== undefined && this.knownSessionIds.has(carried)
+        ? carried
+        : undefined);
+    const owner =
+      ownerId === undefined ? undefined : this.sessionOwners.get(ownerId);
+    const result = response?.['result'];
+    const resultRecord =
+      typeof result === 'object' && result !== null
+        ? (result as Record<string, unknown>)
+        : undefined;
+    const listed = resultRecord?.['tools'];
+    const rpcError = response?.['error'];
+    let detail: string;
+    if (method === 'tools/list') {
+      detail = `tools=${Array.isArray(listed) ? listed.length : '?'}`;
+    } else {
+      // The tool name is what separates a loop-handler failure from a platform
+      // failure; the JSON-RPC error arm never carries a result, so read it
+      // alongside the result arm or a failed call looks like a success.
+      const toolName = readToolCallName(message);
+      detail =
+        `tool=${toolName === undefined ? '<none>' : sanitizeLogText(toolName, 64)}` +
+        ` isError=${resultRecord?.['isError'] === true || rpcError !== undefined}` +
+        ` rpcError=${rpcError === undefined ? 'none' : sanitizeLogText(describeRpcError(rpcError), 256)}`;
+    }
+    process.stderr.write(
+      `[AcpBridge] channel-tool-diag method=${method} sessionId=${
+        carried === undefined ? '<absent>' : sanitizeLogText(carried, 128)
+      } bound=${sessionId !== undefined} known=${
+        carried !== undefined && this.knownSessionIds.has(carried)
+      } owner=${owner === undefined ? '<none>' : sanitizeLogText(owner, 64)} ${detail}\n`,
+    );
+  }
+
+  private resolveChannelLoopToolHandler(
+    sessionId: string,
+  ): ChannelLoopToolHandler {
+    if (
+      this.channelLoopToolHandlers.length === 1 &&
+      !this.channelLoopToolHandlers[0]!.canHandle
+    ) {
+      return this.channelLoopToolHandlers[0]!;
+    }
+    const handler = this.channelLoopToolHandlers.find(
+      (candidate) => candidate.canHandle?.(sessionId) === true,
+    );
+    if (handler) return handler;
+    throw new Error(
+      this.channelLoopToolHandlers.length === 0
+        ? 'No channel loop tool handler is registered.'
+        : `No channel loop handler matched session ${sessionId}.`,
+    );
+  }
+}
+
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function withAbortSignal<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) throw createAbortError();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(createAbortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function createAbortError(): Error {
+  const error = new Error('BTW request aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+/** Tool name a `tools/call` payload names, for the diagnostic trace. */
+function readToolCallName(
+  message: Record<string, unknown> | undefined,
+): string | undefined {
+  const callParams = message?.['params'];
+  if (typeof callParams !== 'object' || callParams === null) return undefined;
+  const name = (callParams as Record<string, unknown>)['name'];
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
+}
+
+/** Stringify a JSON-RPC error reply for the diagnostic trace. */
+function describeRpcError(error: unknown): string {
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function isSkippedMcpRegistration(result: unknown): boolean {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    (result as { skipped?: unknown }).skipped === true
+  );
+}
+
+function formatSkippedRegistrationReason(result: unknown): string {
+  if (typeof result !== 'object' || result === null) return '.';
+  const reason = (result as { reason?: unknown }).reason;
+  return typeof reason === 'string' && reason.length > 0
+    ? `: ${sanitizeLogText(reason, 256)}`
+    : '.';
 }

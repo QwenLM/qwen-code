@@ -1,0 +1,174 @@
+.section {
+  display: flex;
+  flex-direction: column;
+}
+
+.headerRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.header {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 4px 5px 8px;
+  border: none;
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.headerRow:hover,
+.headerRow:focus-within {
+  background: var(--sidebar-accent);
+}
+
+.headerDisabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.headerDisabled .header {
+  cursor: not-allowed;
+}
+
+.headerContent {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chevron {
+  display: inline-flex;
+  align-items: center;
+}
+
+.folderIcon {
+  display: block;
+}
+
+.folderIconWrap {
+  position: relative;
+  display: inline-flex;
+  width: 16px;
+  height: 15px;
+  align-items: center;
+}
+
+.folderRemoteBadge {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 8px;
+  height: 8px;
+  padding: 1px;
+  border-radius: 50%;
+  background: var(--sidebar-background);
+  color: var(--agent-blue-500);
+  stroke-width: 2;
+}
+
+.chevronOpen {
+  color: var(--sidebar-foreground);
+}
+
+.name {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  font-size: 10px;
+  color: var(--muted-foreground);
+  background: var(--sidebar-accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* Trusted sessions use the sidebar's shared row with its own left indent;
+   read-only rows apply the same indent below. */
+.sessions {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+}
+
+.empty {
+  padding: 4px 8px 4px 26px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.error {
+  padding: 4px 8px 4px 26px;
+  color: var(--error-color);
+  font-size: 13px;
+}
+
+.sessionItemReadOnly {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 26px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  cursor: default;
+}
+
+.sessionName {
+  position: relative;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.sessionName[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
+.sessionNameInner {
+  display: inline-block;
+  min-width: max-content;
+}
+
+.sessionItemReadOnly:hover .sessionNameInner {
+  animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+@keyframes sessionTitleScroll {
+  to {
+    transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionItemReadOnly:hover .sessionNameInner {
+    animation: none;
+  }
+}

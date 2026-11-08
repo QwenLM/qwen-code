@@ -8,162 +8,57 @@ import type { Config } from '../config/config.js';
 import {
   runForkedAgent,
   type ForkedAgentResult,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
-  isAutoMemPath,
 } from './paths.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
-import type {
-  PermissionCheckContext,
-  PermissionDecision,
-} from '../permissions/types.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
+import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import {
-  escapeShellArg,
-  getShellConfiguration,
-  stripShellWrapper,
-} from '../utils/shell-utils.js';
+  MEMORY_CATEGORY_SECTION,
+  MEMORY_FRONTMATTER_EXAMPLE,
+  TYPES_SECTION_INDIVIDUAL,
+  WHAT_NOT_TO_SAVE_SECTION,
+} from './prompt.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
-
-type MemoryScopedPermissionManager = Pick<
-  PermissionManager,
-  | 'evaluate'
-  | 'findMatchingDenyRule'
-  | 'hasMatchingAskRule'
-  | 'hasRelevantRules'
-  | 'isToolEnabled'
->;
-
-function isScopedTool(toolName: string): boolean {
-  return (
-    toolName === ToolNames.SHELL ||
-    toolName === ToolNames.EDIT ||
-    toolName === ToolNames.WRITE_FILE
-  );
-}
-
-function mergePermissionDecision(
-  scopedDecision: PermissionDecision,
-  baseDecision: PermissionDecision,
-): PermissionDecision {
-  const priority: Record<PermissionDecision, number> = {
-    deny: 4,
-    ask: 3,
-    allow: 2,
-    default: 1,
-  };
-  return priority[baseDecision] > priority[scopedDecision]
-    ? baseDecision
-    : scopedDecision;
-}
-
-async function evaluateScopedDecision(
-  ctx: PermissionCheckContext,
-  projectRoot: string,
-): Promise<PermissionDecision> {
-  switch (ctx.toolName) {
-    case ToolNames.SHELL: {
-      if (!ctx.command) {
-        return 'deny';
-      }
-      const isReadOnly = await isShellCommandReadOnlyAST(
-        stripShellWrapper(ctx.command),
-      );
-      return isReadOnly ? 'allow' : 'deny';
-    }
-    case ToolNames.EDIT:
-    case ToolNames.WRITE_FILE:
-      return ctx.filePath && isAutoMemPath(ctx.filePath, projectRoot)
-        ? 'allow'
-        : 'deny';
-    default:
-      return 'default';
-  }
-}
-
-function getScopedDenyRule(
-  ctx: PermissionCheckContext,
-  projectRoot: string,
-): string | undefined {
-  switch (ctx.toolName) {
-    case ToolNames.SHELL:
-      return 'ManagedAutoMemory(run_shell_command: read-only only)';
-    case ToolNames.EDIT:
-      return `ManagedAutoMemory(edit: only within ${getAutoMemoryRoot(projectRoot)})`;
-    case ToolNames.WRITE_FILE:
-      return `ManagedAutoMemory(write_file: only within ${getAutoMemoryRoot(projectRoot)})`;
-    default:
-      return undefined;
-  }
-}
-
-function createMemoryScopedAgentConfig(
-  config: Config,
-  projectRoot: string,
-): Config {
-  const basePm = config.getPermissionManager?.();
-  const scopedPm: MemoryScopedPermissionManager = {
-    hasRelevantRules(ctx: PermissionCheckContext): boolean {
-      return isScopedTool(ctx.toolName) || !!basePm?.hasRelevantRules(ctx);
-    },
-    hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
-      return basePm?.hasMatchingAskRule(ctx) ?? false;
-    },
-    findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
-      const scoped = getScopedDenyRule(ctx, projectRoot);
-      if (scoped) {
-        return scoped;
-      }
-      return basePm?.findMatchingDenyRule(ctx);
-    },
-    async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
-      const scopedDecision = await evaluateScopedDecision(ctx, projectRoot);
-      if (!basePm) {
-        return scopedDecision;
-      }
-      const baseDecision = basePm.hasRelevantRules(ctx)
-        ? await basePm.evaluate(ctx)
-        : 'default';
-      return mergePermissionDecision(scopedDecision, baseDecision);
-    },
-    async isToolEnabled(toolName: string): Promise<boolean> {
-      // Registry-level check: is this tool type allowed at all?
-      // Scoped tools (SHELL/EDIT/WRITE_FILE) are enabled — per-invocation
-      // restrictions are enforced in evaluate().
-      if (isScopedTool(toolName)) {
-        return true;
-      }
-      if (basePm) {
-        return basePm.isToolEnabled(toolName);
-      }
-      return true;
-    },
-  };
-
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
-}
 
 const DREAM_AGENT_SYSTEM_PROMPT = `You are performing a managed memory dream — a reflective pass over durable memory files.
 
 Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.
 
 Rules:
-- Merge semantically duplicate entries — if the same fact appears in multiple files, consolidate into one file and delete the rest.
+- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory as protected read-only records. Never modify, overwrite, rename, merge into, or delete them.
+- Leave \`${AUTO_MEMORY_PINNED_DIRNAME}/\` out of consolidation analysis; do not list, read, or compare its files during Dream.
+- Merge semantically duplicate entries among writable topic files — if the same fact appears in multiple writable files, consolidate into one file and delete the rest.
 - Preserve all durable information; do not delete content that is still accurate.
 - Fix contradicted or stale facts only when the evidence is clear from the existing memory content or recent transcript signal.
-- Update the MEMORY.md index to accurately reflect surviving files.
-- Keep the MEMORY.md index concise: one line per file in the format \`- [Title](relative/path.md) — one-line hook\`.
-- If nothing needs consolidation, do nothing and say so.`;
+- Keep each file independently retrievable: one coherent fact, rule, preference, or reference per file.
+- Keep the body near or below 1,200 characters; preserve the complete fact or rule.
+- Use description for what the memory says and usage_scenarios for future tasks where it would help.
+- Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter; keep each keyword and usage_scenario at most 64 characters and keywords unique case-insensitively.
+- Use discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words and put at most 2 exact identifiers last.
+- Do not edit MEMORY.md. The runtime rebuilds it after your work.
+- If nothing needs consolidation, do nothing and say so.
+
+${TYPES_SECTION_INDIVIDUAL.join('\n')}
+
+${MEMORY_CATEGORY_SECTION.join('\n')}
+
+${WHAT_NOT_TO_SAVE_SECTION.join('\n')}
+
+Memory file format reference:
+${MEMORY_FRONTMATTER_EXAMPLE.join('\n')}`;
 
 export function getTranscriptDir(projectRoot: string): string {
   return path.join(new Storage(projectRoot).getProjectDir(), 'chats');
@@ -176,9 +71,38 @@ function quoteShellPathWithTrailingSeparator(dirPath: string): string {
 export function buildConsolidationTaskPrompt(
   memoryRoot: string,
   transcriptDir: string,
+  options: {
+    runtimeManagedOperations?: boolean;
+    keywordVocabularySnapshot?: string;
+  } = {},
 ): string {
   const quotedTranscriptDir =
     quoteShellPathWithTrailingSeparator(transcriptDir);
+  const runtimeManagedOperations = options.runtimeManagedOperations ?? false;
+  const deletionInstructions = runtimeManagedOperations
+    ? [
+        '## Phase 4 — Schedule safe deletions',
+        '',
+        `If files must be removed, write \`${memoryRoot}/${DREAM_OPERATIONS_FILENAME}\` only after every replacement file is complete and valid.`,
+        'Use paths relative to the memory directory and this exact JSON shape:',
+        '`{"version":1,"delete":["project/old.md","feedback/long.md"],"operations":[{"type":"dedupe","sources":["project/old.md"],"target":"project/canonical.md"},{"type":"split","source":"feedback/long.md","targets":["feedback/rule-a.md","feedback/rule-b.md"]}]}`',
+        '- `delete` contains every old file the runtime should remove',
+        '- `dedupe` records redundant source files merged into a surviving target',
+        '- `split` records one old source replaced by at least two surviving targets',
+        '- Every `dedupe` source and `split` source must also appear in `delete`; the runtime rejects the whole manifest otherwise',
+        '- Omit unrelated operation types; use an empty operations array for plain stale-file deletion',
+        '- Never schedule `MEMORY.md`, the operations file, an absolute path, or a path outside the memory directory',
+        `- Do not edit \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\`; the runtime validates operations, deletes scheduled files, and rebuilds it`,
+      ]
+    : [
+        '## Phase 4 — Prune and index',
+        '',
+        '- Delete redundant or stale files only after every replacement file is complete and valid',
+        `- Update \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to contain one concise line per surviving memory`,
+        '- Remove pointers to deleted files and add pointers to newly created files',
+        `- Do not intentionally remove existing index entries for valid \`${AUTO_MEMORY_PINNED_DIRNAME}/\` files; normal index limits still apply`,
+        '- Never create `.dream-operations.json`; manual `/dream` has no background runtime to apply it',
+      ];
 
   return [
     `Memory directory: \`${memoryRoot}\``,
@@ -190,6 +114,7 @@ export function buildConsolidationTaskPrompt(
     '- List the memory directory to see what files exist',
     `- Read \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to understand the current index`,
     '- Skim topic subdirectories (`user/`, `project/`, `feedback/`, `reference/`)',
+    `- Skip \`${AUTO_MEMORY_PINNED_DIRNAME}/\` during Dream; do not list or read files there`,
     '- If `logs/` or `sessions/` subdirectories exist, review recent entries there',
     '',
     '## Phase 2 — Gather recent signal',
@@ -207,16 +132,24 @@ export function buildConsolidationTaskPrompt(
     'For each topic directory:',
     '- Identify duplicate or near-duplicate `.md` files (same fact expressed differently)',
     '- Merge duplicates: write the canonical version into one file, delete the redundant files',
+    `- Exclude \`${AUTO_MEMORY_PINNED_DIRNAME}/\` from duplicate, stale, and contradiction analysis; never use a pinned file as a merge target or deletion candidate`,
     '- Fix stale or contradicted facts when clear from the existing content',
     '- Convert relative dates (for example: "yesterday", "last week") to absolute dates when preserving them',
+    '- Backfill missing `description`, `category`, `usage_scenarios`, and `keywords` from the complete body.',
     '',
-    '## Phase 4 — Prune and index',
+    ...MEMORY_CATEGORY_SECTION,
     '',
-    `Update \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to reflect surviving files.`,
-    'Each entry: `- [Title](relative/path.md) — one-line hook`',
-    'Keep the index under roughly 200 lines and ~25KB.',
-    'Remove pointers to deleted, stale, wrong, or superseded files. Add pointers to any newly created files.',
-    'If an index line is too verbose, shorten it and move the detail back into the memory file itself.',
+    '- Remove duplicate, generic, or corpus-wide hub keywords.',
+    '- Keep 2-6 discriminative retrieval terms or short phrases, each at most 64 characters and unique case-insensitively; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+    '- Refresh `description`, `category`, `usage_scenarios`, and `keywords` whenever the body meaning changes',
+    '- Inspect memories over roughly 1,200 characters and remove repetition or incidental detail',
+    '- Strongly compress or split memories over 2,400 characters',
+    '- Split only at semantic retrieval boundaries, never at a fixed character position',
+    '- Preserve the complete rule or fact, including `Why:` and `How to apply:` when present',
+    '',
+    options.keywordVocabularySnapshot?.trim() ?? '',
+    '',
+    ...deletionInstructions,
     '',
     '---',
     '',
@@ -228,31 +161,44 @@ export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
   abortSignal?: AbortSignal,
+  options: { suppressChatRecording?: boolean } = {},
 ): Promise<ForkedAgentResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
-  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot);
+  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
+    allowShell: true,
+    includeUserMemory: false,
+    protectPinnedMemory: true,
+  });
   const result = await runForkedAgent({
     name: 'managed-auto-memory-dreamer',
     config: scopedConfig,
-    taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir),
+    taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir, {
+      runtimeManagedOperations: true,
+      keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(docs, {
+        scopes: ['project'],
+      }),
+    }),
     systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
-    maxTurns: MAX_TURNS,
-    maxTimeMinutes: MAX_TIME_MINUTES,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? MAX_TURNS,
+    maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
       ToolNames.GLOB,
-      ToolNames.LS,
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],
     abortSignal,
+    suppressChatRecording: options.suppressChatRecording,
   });
 
   if (result.status === 'failed') {
-    throw new Error(result.terminateReason || 'Dream agent failed');
+    throw new Error(
+      terminateReasonMessage(result.terminateReason, 'Dream agent failed'),
+    );
   }
 
   if (result.status === 'cancelled') {
@@ -262,7 +208,10 @@ export async function planManagedAutoMemoryDreamByAgent(
     // aborted dream as a normal completion (which would overwrite the
     // user-cancelled record with 'completed' + bump dream metadata).
     throw new Error(
-      result.terminateReason || 'Dream agent cancelled before completion',
+      terminateReasonMessage(
+        result.terminateReason,
+        'Dream agent cancelled before completion',
+      ),
     );
   }
 

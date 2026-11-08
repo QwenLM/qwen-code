@@ -1,0 +1,1500 @@
+import { createDaemonRestRequest } from '../../daemon/rest-request.js';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
+import { StandaloneContext } from '../../config/standalone';
+import {
+  useStatusReport,
+  useWorkspace,
+  type DaemonMetricsSeriesBucket,
+  type DaemonStatusReport,
+  type DaemonStatusReportLevel,
+  type DaemonStatusReportSection,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  getAllowedDaemonOrigin,
+  getDaemonToken,
+  isDaemonMixedContent,
+  navigateToDaemon,
+} from '../../config/daemon';
+import {
+  forgetRemoteConnection,
+  formatOriginHost,
+  readRemoteConnections,
+  rememberRemoteConnection,
+  startRemoteConnectionAdd,
+} from '../../config/remote-connections';
+import { useI18n } from '../../i18n';
+import { ErrorBoundary } from '../ErrorBoundary';
+import { DaemonConnectionHelp } from '../DaemonConnectionHelp';
+import { RemoteAccessSettingsCard } from '../RemoteAccessSettingsCard';
+import { Button } from '../ui/button';
+import { Input } from '../ui/input';
+import { Label } from '../ui/label';
+import { SvgLineChart, type ChartSeries } from './SvgLineChart';
+import { UsageDashboardTab } from './UsageDashboardTab';
+import styles from './DaemonStatusDialog.module.css';
+import { XIcon } from 'lucide-react';
+
+// The cheap in-memory summary is polled continuously; the expensive detail
+// (per-session, workspace diagnostics, auth — the daemon may spawn the ACP
+// child and aggregate several diagnostic surfaces to build it) is fetched only
+// on open and on an explicit refresh, so parking the dialog open never rehits
+// that path. Both surface as one dashboard: the summary/full split is a daemon
+// cost boundary, not something the operator should have to think about.
+const REFRESH_INTERVAL_MS = 5000;
+
+// The dashboard splits into tabs once it carries live charts: monitoring
+// (charts you watch), configuration (static cards you glance at), and
+// diagnostics (sessions/workspace you open when something is wrong) are
+// different intents — and 6 cards + 7 charts + diagnostics overflow one 70vh
+// scroll. Status badge / refresh / issues stay global above the tabs.
+type DaemonTab = 'overview' | 'usage' | 'metrics' | 'diagnostics';
+const DAEMON_TABS: ReadonlyArray<{ id: DaemonTab; labelKey: string }> = [
+  { id: 'overview', labelKey: 'daemon.tab.overview' },
+  { id: 'usage', labelKey: 'daemon.tab.usage' },
+  { id: 'metrics', labelKey: 'daemon.tab.metrics' },
+  { id: 'diagnostics', labelKey: 'daemon.tab.diagnostics' },
+];
+const CONNECTION_STATUS_KEYS = {
+  idle: 'daemon.connection.status.idle',
+  connecting: 'daemon.connection.status.connecting',
+  connected: 'daemon.connection.status.connected',
+  error: 'daemon.connection.status.error',
+} as const;
+
+function formatUptime(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function formatDurationMs(ms: number): string {
+  ms = Math.max(0, ms); // clamp clock-skew negatives to a "0ms" contract
+  if (ms >= 60_000) return formatUptime(ms);
+  if (ms >= 1000) return `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)}s`;
+  return `${ms}ms`;
+}
+
+function formatBytes(bytes: number): string {
+  // Adaptive unit: sub-MB windows (idle-pipe keep-alive traffic) would read a
+  // misleading "0.0 MB", so drop to KB/B and show a nonzero value. RSS/heap are
+  // always ≥ 1 MB, so those charts stay in MB/GB unchanged.
+  const kb = bytes / 1024;
+  if (kb < 1) return `${Math.round(bytes)} B`;
+  const mb = kb / 1024;
+  if (mb < 1) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+// Compact counts for chart peaks/current values: thousands collapse to "12.3k"
+// so token burn and request counts stay legible in the narrow legend.
+function formatCount(value: number): string {
+  const n = Math.round(value);
+  if (n >= 10_000) {
+    return `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)}k`;
+  }
+  return n.toLocaleString();
+}
+
+function formatPercent(value: number): string {
+  return `${value.toFixed(value >= 100 || value === 0 ? 0 : 1)}%`;
+}
+
+function channelWorkerState(
+  worker: DaemonStatusReport['runtime']['channelWorker'],
+): string {
+  if (worker.exitCode != null) {
+    return `${worker.state} (exit ${worker.exitCode})`;
+  }
+  if (worker.signal) return `${worker.state} (${worker.signal})`;
+  return worker.state;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+interface WorkspaceProblemCell {
+  label: string;
+  status: 'warning' | 'error';
+  message?: string;
+}
+
+// A section's status is the worst of its individual checks, but the summary
+// chips only carry counts — so a "warning preflight" reads as opaque. Pull the
+// individual warning/error entries out of the raw section data so the dashboard
+// can say *what* is wrong (e.g. "auth: No auth method configured"). Section
+// payloads differ but consistently carry status cells under these keys.
+const SECTION_CELL_KEYS = [
+  'cells',
+  'servers',
+  'errors',
+  'skills',
+  'tools',
+  'providers',
+  'hooks',
+  'extensions',
+  'budgets',
+] as const;
+
+function extractProblemCells(data: unknown): WorkspaceProblemCell[] {
+  if (!isRecord(data)) return [];
+  const problems: WorkspaceProblemCell[] = [];
+  for (const key of SECTION_CELL_KEYS) {
+    const arr = data[key];
+    if (!Array.isArray(arr)) continue;
+    for (const item of arr) {
+      if (!isRecord(item)) continue;
+      const status = item['status'];
+      if (status !== 'warning' && status !== 'error') continue;
+      const label = String(
+        item['kind'] ?? item['name'] ?? item['serverName'] ?? key,
+      );
+      const message =
+        typeof item['error'] === 'string'
+          ? item['error']
+          : typeof item['hint'] === 'string'
+            ? item['hint']
+            : undefined;
+      problems.push({ label, status, message });
+    }
+  }
+  return problems;
+}
+
+function levelClass(
+  level: DaemonStatusReportLevel | 'unavailable',
+): string | undefined {
+  switch (level) {
+    case 'ok':
+      return styles.levelOk;
+    case 'warning':
+      return styles.levelWarning;
+    case 'error':
+      return styles.levelError;
+    default:
+      return styles.levelUnavailable;
+  }
+}
+
+function Row({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className={styles.row}>
+      <span className={styles.rowLabel}>{label}</span>
+      <span className={styles.rowValue}>{value}</span>
+    </div>
+  );
+}
+
+// Self-documenting metric: an ⓘ affordance next to a chart title whose hover /
+// focus reveals a plain-language explanation (what it measures, its unit, and
+// what's normal). The button's `aria-label` carries the text to assistive tech,
+// so the visual bubble is `aria-hidden` to avoid a double read. Purpose: cut the
+// "what does this mean / why two 'errors'?" support questions the dense metrics
+// tab otherwise generates.
+function InfoHint({ text }: { text: string }) {
+  return (
+    <span className={styles.infoHint}>
+      <button type="button" className={styles.infoHintButton} aria-label={text}>
+        <span aria-hidden="true">ⓘ</span>
+      </button>
+      <span aria-hidden="true" className={styles.infoHintTip}>
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function Card({
+  title,
+  help,
+  children,
+}: {
+  title: string;
+  help?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={styles.card}>
+      {/* Keep the ⓘ a SIBLING of the heading, not a child: the accessible-name
+          algorithm folds a descendant button's `aria-label` (the whole help
+          sentence) into the heading name, so a nested hint would make screen
+          readers announce "Model API health Each failed attempt = 1 error…"
+          in the heading rotor. The flex header preserves the visual inline
+          layout. Cards without help keep the bare heading. */}
+      {help ? (
+        <div className={styles.cardHeader}>
+          <h3 className={styles.cardTitle}>{title}</h3>
+          <InfoHint text={help} />
+        </div>
+      ) : (
+        <h3 className={styles.cardTitle}>{title}</h3>
+      )}
+      {children}
+    </section>
+  );
+}
+
+function WorkspaceSectionRow({
+  name,
+  section,
+}: {
+  name: string;
+  section: DaemonStatusReportSection;
+}) {
+  const { t } = useI18n();
+  const summaryEntries = Object.entries(section.summary ?? {});
+  const problemCells = extractProblemCells(section.data);
+  return (
+    <div className={styles.workspaceRow}>
+      <div className={styles.workspaceRowHead}>
+        <span className={`${styles.badge} ${levelClass(section.status)}`}>
+          {t(`daemon.level.${section.status}`)}
+        </span>
+        <span className={styles.workspaceName}>{name}</span>
+        <span className={styles.workspaceDuration}>
+          {formatDurationMs(section.durationMs)}
+        </span>
+      </div>
+      {section.error && (
+        <div className={styles.workspaceError}>{section.error.message}</div>
+      )}
+      {/* Name the individual checks that pushed this section to warning/error,
+          so the badge is self-explanatory. */}
+      {problemCells.map((cell, index) => (
+        <div key={`${cell.label}-${index}`} className={styles.workspaceCell}>
+          <span className={`${styles.badge} ${levelClass(cell.status)}`}>
+            {t(`daemon.level.${cell.status}`)}
+          </span>
+          <span className={styles.workspaceCellLabel}>{cell.label}</span>
+          {cell.message && (
+            <span className={styles.workspaceCellMessage}>{cell.message}</span>
+          )}
+        </div>
+      ))}
+      {summaryEntries.length > 0 && (
+        <div className={styles.workspaceSummary}>
+          {summaryEntries.map(([key, value]) => (
+            <span key={key} className={styles.summaryChip}>
+              {key}: {value === null ? t('common.na') : String(value)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FullDetail({ report }: { report: DaemonStatusReport }) {
+  const { t } = useI18n();
+  const full = report.full;
+  if (!full) return null;
+  const workspaceEntries = Object.entries(full.workspace).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  return (
+    <>
+      <Card title={t('daemon.full.sessions.title')}>
+        {full.sessions.length === 0 ? (
+          <div className={styles.empty}>{t('daemon.full.sessions.empty')}</div>
+        ) : (
+          full.sessions.map((session) => (
+            <div key={session.sessionId} className={styles.sessionRow}>
+              <div className={styles.sessionName}>
+                {session.displayName || session.sessionId}
+              </div>
+              <div className={styles.sessionMeta}>
+                <span>
+                  {t('common.clients', { count: session.clientCount })}
+                </span>
+                <span>
+                  {t('daemon.full.session.pendingPrompts', {
+                    count: session.pendingPromptCount,
+                  })}
+                </span>
+                <span>
+                  {t('daemon.full.session.pendingPermissions', {
+                    count: session.pendingPermissionCount,
+                  })}
+                </span>
+                {session.hasActivePrompt && (
+                  <span className={styles.activePrompt}>
+                    {t('daemon.full.session.prompting')}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+      </Card>
+      <Card title={t('daemon.full.workspace.title')}>
+        {workspaceEntries.length === 0 ? (
+          <div className={styles.empty}>{t('daemon.full.workspace.empty')}</div>
+        ) : (
+          workspaceEntries.map(([name, section]) => (
+            <WorkspaceSectionRow key={name} name={name} section={section} />
+          ))
+        )}
+      </Card>
+      <Card title={t('daemon.full.auth.title')}>
+        <Row
+          label={t('daemon.full.auth.providers')}
+          value={
+            full.auth.supportedDeviceFlowProviders.join(', ') ||
+            t('daemon.none')
+          }
+        />
+        <Row
+          label={t('daemon.full.auth.pending')}
+          value={full.auth.pendingDeviceFlowCount}
+        />
+        <Row
+          label={t('daemon.full.acp.title')}
+          value={full.acpConnections.length}
+        />
+      </Card>
+    </>
+  );
+}
+
+// Bottleneck-analysis dashboard: the daemon samples load, throughput, latency,
+// resource pressure, and token burn into one time-bucketed series, so these
+// charts share an x-axis. Lining up "N tasks running at once" (concurrency)
+// against event-loop lag, queue wait, memory, and API latency shows *where* a
+// busy daemon is actually stalling.
+function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
+  const { t } = useI18n();
+  if (series.length === 0) {
+    return (
+      <Card title={t('daemon.charts.title')}>
+        <div className={styles.empty}>{t('daemon.charts.empty')}</div>
+      </Card>
+    );
+  }
+  const col = (pick: (b: DaemonMetricsSeriesBucket) => number): number[] =>
+    series.map(pick);
+  // Bucket timestamps drive the hover tooltip's time header.
+  const times = series.map((b) => b.t);
+  const chart = (
+    titleKey: string,
+    format: (v: number) => string,
+    lines: ChartSeries[],
+    helpKey: string,
+  ): ReactNode => (
+    <Card title={t(titleKey)} help={t(helpKey)}>
+      <SvgLineChart
+        series={lines}
+        timestamps={times}
+        format={format}
+        ariaLabel={t(titleKey)}
+        peakLabel={t('daemon.charts.peak')}
+      />
+    </Card>
+  );
+  return (
+    <div className={`${styles.grid} ${styles.chartsGrid}`}>
+      {chart(
+        'daemon.charts.concurrency',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.activePrompts'),
+            values: col((b) => b.activePrompts),
+            color: 'var(--primary)',
+          },
+          {
+            label: t('daemon.charts.queuedPrompts'),
+            values: col((b) => b.queuedPrompts),
+            color: 'var(--warning-color)',
+          },
+          {
+            label: t('daemon.charts.activeSessions'),
+            values: col((b) => b.activeSessions),
+            color: 'var(--muted-foreground)',
+          },
+        ],
+        'daemon.charts.concurrency.help',
+      )}
+      {chart(
+        'daemon.charts.requests',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.reqTotal'),
+            values: col((b) => b.requests),
+            color: 'var(--success-color)',
+          },
+          {
+            label: t('daemon.charts.reqErrors'),
+            values: col((b) => b.errors),
+            color: 'var(--error-color)',
+          },
+          {
+            label: t('daemon.charts.reqRejected'),
+            values: col((b) => b.rateLimitRejected),
+            color: 'var(--warning-color)',
+          },
+        ],
+        'daemon.charts.requests.help',
+      )}
+      {chart(
+        'daemon.charts.apiLatency',
+        formatDurationMs,
+        [
+          {
+            label: 'p50',
+            values: col((b) => b.latencyP50Ms),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: 'p95',
+            values: col((b) => b.latencyP95Ms),
+            color: 'var(--warning-color)',
+          },
+        ],
+        'daemon.charts.apiLatency.help',
+      )}
+      {chart(
+        'daemon.charts.llmLatency',
+        formatDurationMs,
+        [
+          {
+            label: 'p50',
+            values: col((b) => b.llmApiP50Ms),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: 'p95',
+            values: col((b) => b.llmApiP95Ms),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.llmLatency.help',
+      )}
+      {/* Model API health: provider-side errors vs. the automatic retries that
+          absorb them. `?? 0` guards a report from a daemon predating these
+          fields (older daemon, newer web shell) so the chart reads clean zero
+          rather than gapping. */}
+      {chart(
+        'daemon.charts.apiHealth',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.apiErrors'),
+            values: col((b) => b.llmApiErrors ?? 0),
+            color: 'var(--error-color)',
+          },
+          {
+            label: t('daemon.charts.apiRetries'),
+            values: col((b) => b.llmApiRetries ?? 0),
+            color: 'var(--warning-color)',
+          },
+        ],
+        'daemon.charts.apiHealth.help',
+      )}
+      {chart(
+        'daemon.charts.promptLatency',
+        formatDurationMs,
+        [
+          {
+            label: t('daemon.charts.queueWait'),
+            values: col((b) => b.promptQueueWaitP95Ms),
+            color: 'var(--warning-color)',
+          },
+          {
+            label: t('daemon.charts.promptDuration'),
+            values: col((b) => b.promptDurationP95Ms),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.promptLatency.help',
+      )}
+      {chart(
+        'daemon.charts.eventLoop',
+        formatDurationMs,
+        [
+          {
+            label: t('daemon.charts.eventLoopLag'),
+            values: col((b) => b.eventLoopLagP99Ms),
+            color: 'var(--error-color)',
+          },
+        ],
+        'daemon.charts.eventLoop.help',
+      )}
+      {chart(
+        'daemon.charts.cpu',
+        formatPercent,
+        [
+          {
+            label: t('daemon.charts.cpuDaemon'),
+            values: col((b) => b.cpuPercent),
+            color: 'var(--muted-foreground)',
+          },
+          {
+            label: t('daemon.charts.cpuChild'),
+            values: col((b) => b.childCpuPercent),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.cpu.help',
+      )}
+      {chart(
+        'daemon.charts.memory',
+        formatBytes,
+        [
+          {
+            label: t('daemon.charts.rssDaemon'),
+            values: col((b) => b.rssBytes),
+            color: 'var(--muted-foreground)',
+          },
+          {
+            label: t('daemon.charts.heap'),
+            values: col((b) => b.heapUsedBytes),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: t('daemon.charts.rssChild'),
+            values: col((b) => b.childRssBytes),
+            color: 'var(--primary)',
+          },
+        ],
+        'daemon.charts.memory.help',
+      )}
+      {chart(
+        'daemon.charts.pipe',
+        formatBytes,
+        [
+          {
+            label: t('daemon.charts.pipeIn'),
+            values: col((b) => b.pipeInBytes),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: t('daemon.charts.pipeOut'),
+            values: col((b) => b.pipeOutBytes),
+            color: 'var(--success-color)',
+          },
+        ],
+        'daemon.charts.pipe.help',
+      )}
+      {chart(
+        'daemon.charts.connections',
+        formatCount,
+        [
+          {
+            label: 'SSE',
+            values: col((b) => b.sseConnections),
+            color: 'var(--primary)',
+          },
+          {
+            label: 'WS',
+            values: col((b) => b.wsConnections),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: 'ACP',
+            values: col((b) => b.acpConnections),
+            color: 'var(--muted-foreground)',
+          },
+        ],
+        'daemon.charts.connections.help',
+      )}
+      {chart(
+        'daemon.charts.tokens',
+        formatCount,
+        [
+          {
+            label: t('daemon.charts.tokensIn'),
+            values: col((b) => b.tokensIn),
+            color: 'var(--agent-blue-400)',
+          },
+          {
+            label: t('daemon.charts.tokensOut'),
+            values: col((b) => b.tokensOut),
+            color: 'var(--success-color)',
+          },
+        ],
+        'daemon.charts.tokens.help',
+      )}
+    </div>
+  );
+}
+
+function DaemonStatusDialogInner({
+  onChangeTarget,
+  onAddConnection = onChangeTarget,
+  connectionsOnly = false,
+}: {
+  onChangeTarget: (daemonOrigin: string, token?: string) => boolean | void;
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
+  connectionsOnly?: boolean;
+}) {
+  const { t, language } = useI18n();
+  const workspace = useWorkspace();
+  // Switching targets navigates the page, which only the standalone shell
+  // owns; embedders keep a read-only view of the connection.
+  const standalone = useContext(StandaloneContext);
+  const [connectionAddress, setConnectionAddress] = useState(
+    connectionsOnly ? '' : workspace.baseUrl,
+  );
+  const [connectionToken, setConnectionToken] = useState('');
+  const [connectionError, setConnectionError] = useState('');
+  const [connectBusy, setConnectBusy] = useState(false);
+  const [savedConnections, setSavedConnections] = useState(
+    readRemoteConnections,
+  );
+  // The same-target probe outlives this component unless it is retired: the
+  // parent mounts the dialog only while the panel is open, so a response
+  // landing after the operator closed it — or after they edited the address —
+  // would switch targets and reload the page out from under a session they had
+  // already returned to. Same contract as the boot gate's retireProbe.
+  const probeControllerRef = useRef<AbortController | null>(null);
+  const probeTimerRef = useRef<number | null>(null);
+  const retireConnectionProbe = useCallback(() => {
+    probeControllerRef.current?.abort();
+    probeControllerRef.current = null;
+    // Clear the 10 s abort timer too: an abort alone leaves it armed, and a
+    // fetch stub or transport that ignores the signal would keep it alive for
+    // the full window after the operator has gone.
+    if (probeTimerRef.current !== null) {
+      window.clearTimeout(probeTimerRef.current);
+      probeTimerRef.current = null;
+    }
+    setConnectBusy(false);
+  }, []);
+  useEffect(() => {
+    return retireConnectionProbe;
+  }, [retireConnectionProbe]);
+  const [activeTab, setActiveTab] = useState<DaemonTab>('overview');
+  // WAI-ARIA tabs keyboard support: roving tabindex (only the active tab is in
+  // the tab order) + Arrow/Home/End moving focus and selection across the
+  // tablist, so keyboard-only users can switch tabs without tabbing through all
+  // the panel content in between.
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const handleTabKeyDown = (
+    e: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ): void => {
+    let next: number;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      next = (index + 1) % DAEMON_TABS.length;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      next = (index - 1 + DAEMON_TABS.length) % DAEMON_TABS.length;
+    } else if (e.key === 'Home') {
+      next = 0;
+    } else if (e.key === 'End') {
+      next = DAEMON_TABS.length - 1;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    setActiveTab(DAEMON_TABS[next].id);
+    tabRefs.current[next]?.focus();
+  };
+  // Two independent fetches: the summary drives the always-live top cards and
+  // rides the auto-refresh interval; the full report backs the detail sections
+  // and is only pulled on open (autoLoad) and on manual refresh.
+  const summary = useStatusReport({
+    autoLoad: !connectionsOnly,
+    detail: 'summary',
+  });
+  const full = useStatusReport({
+    autoLoad: !connectionsOnly,
+    detail: 'full',
+  });
+  // `reload` is a stable callback; depend on it (not the hook object, which is
+  // a fresh spread each render) so the poll interval is installed once rather
+  // than torn down and reinstalled on every data update.
+  const summaryReload = summary.reload;
+  const fullReload = full.reload;
+
+  // Skip a tick when the tab is backgrounded (matching the sidebar poll) or
+  // when the previous poll is still outstanding: useDaemonResource discards
+  // stale completions but does not abort, and the client timeout is 30s, so a
+  // degraded daemon could otherwise accumulate overlapping calls.
+  const summaryPollInFlightRef = useRef(false);
+  useEffect(() => {
+    if (connectionsOnly) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.hidden || summaryPollInFlightRef.current) return;
+      summaryPollInFlightRef.current = true;
+      void summaryReload().finally(() => {
+        summaryPollInFlightRef.current = false;
+      });
+    }, REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [connectionsOnly, summaryReload]);
+
+  const refreshAll = useCallback(() => {
+    void summaryReload();
+    void fullReload();
+  }, [summaryReload, fullReload]);
+
+  // Prefer the continuously-refreshed summary for the top cards; fall back to
+  // the full report so the dashboard still renders if only that has landed.
+  const report = summary.report ?? full.report;
+  const fullReport = full.report;
+  const loading = summary.loading || full.loading;
+  const availability = useDaemonAvailability();
+  const unavailable = availability !== 'available';
+  const error = unavailable
+    ? new Error(
+        t(
+          availability === 'auth-required'
+            ? 'daemon.connection.authRequired'
+            : 'daemon.connection.unavailable',
+        ),
+      )
+    : (summary.error ?? full.error);
+
+  // Rendered on the dashboard and on the load-failure screen alike: an
+  // unreachable daemon, a rejected token or a still-booting runtime is exactly
+  // when the operator needs to re-enter a token or pick another target. While
+  // reachable, only a failing summary with cached data marks the dashboard
+  // link as errored; without a report, any load error does.
+  const connectionFailed =
+    unavailable ||
+    (connectionsOnly
+      ? workspace.status === 'error'
+      : report
+        ? Boolean(summary.error && summary.report)
+        : Boolean(error));
+  const savedConnectionList = savedConnections.length > 0 && (
+    <div
+      role="group"
+      aria-label={t('daemon.connection.saved')}
+      className="mt-3 flex flex-col gap-2"
+    >
+      <Label className="text-[13px] font-normal text-muted-foreground">
+        {t('daemon.connection.saved')}
+      </Label>
+      {savedConnections.map((origin) => (
+        <div key={origin} className="flex min-w-0 gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-w-0 flex-1 justify-start truncate"
+            title={origin}
+            onClick={() => onChangeTarget(origin, getDaemonToken(origin))}
+          >
+            {formatOriginHost(origin)}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title={t('daemon.connection.forget', { address: origin })}
+            aria-label={t('daemon.connection.forget', { address: origin })}
+            onClick={() => setSavedConnections(forgetRemoteConnection(origin))}
+          >
+            <XIcon aria-hidden="true" />
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
+  const connectionCard = (
+    <Card title={t('daemon.connection.title')}>
+      <Row label={t('daemon.connection.target')} value={workspace.baseUrl} />
+      <Row
+        label={t('daemon.connection.state')}
+        value={
+          connectionFailed
+            ? t('daemon.connection.status.error')
+            : t(CONNECTION_STATUS_KEYS[workspace.status])
+        }
+      />
+      {standalone && savedConnectionList}
+      {standalone && (
+        <form
+          className="mt-3 flex flex-col gap-2"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            const daemonOrigin = getAllowedDaemonOrigin(
+              connectionAddress.trim(),
+            );
+            if (!daemonOrigin) {
+              setConnectionError(t('daemon.connection.invalid'));
+              return;
+            }
+            if (isDaemonMixedContent(daemonOrigin)) {
+              retireConnectionProbe();
+              setConnectionError(t('daemon.connection.mixedContent'));
+              return;
+            }
+            const token =
+              connectionToken.trim() || getDaemonToken(daemonOrigin);
+            // A changed target keeps the write-then-navigate switch
+            // (the boot gate probes there; a not-yet-allowed origin
+            // would be CSP-blocked from here anyway). On the current
+            // target the typed token would overwrite the stored
+            // credential before the page reloads, so probe it first —
+            // a non-success response must not destroy the working token.
+            if (daemonOrigin !== workspace.baseUrl) {
+              const switched = onAddConnection(daemonOrigin, token);
+              // A switch the credential cannot ride along on is refused rather
+              // than landing the shell on the new target unauthenticated.
+              setConnectionError(
+                switched === false
+                  ? t('daemon.connection.switchUnavailable')
+                  : '',
+              );
+              return;
+            }
+            setConnectBusy(true);
+            const controller = new AbortController();
+            probeControllerRef.current = controller;
+            const timeout = window.setTimeout(() => controller.abort(), 10_000);
+            probeTimerRef.current = timeout;
+            // Retiring nulls the ref synchronously, so this check runs
+            // before the microtask callbacks below can act on a submit
+            // the operator has already abandoned. The 10s self-abort
+            // leaves the ref pointing at this controller, so it still
+            // reports "the daemon did not answer".
+            const owned = (): boolean =>
+              probeControllerRef.current === controller;
+            void createDaemonRestRequest(
+              daemonOrigin,
+              token,
+              undefined,
+              true,
+            )('/capabilities', {
+              headers: token ? { Authorization: `Bearer ${token}` } : {},
+              signal: controller.signal,
+            })
+              .then((response) => {
+                if (!owned()) return;
+                if (!response.ok) {
+                  setConnectionError(
+                    response.status === 401
+                      ? t('daemon.connection.authFailed')
+                      : response.status === 403
+                        ? t('daemon.connection.policyBlocked')
+                        : t('daemon.connection.notReady'),
+                  );
+                  return;
+                }
+                rememberRemoteConnection(daemonOrigin);
+                setSavedConnections(readRemoteConnections());
+                if (connectionsOnly) {
+                  setConnectionAddress('');
+                  setConnectionToken('');
+                  setConnectionError('');
+                  return;
+                }
+                const changed = onChangeTarget(daemonOrigin, token);
+                setConnectionError(
+                  changed === false
+                    ? t('daemon.connection.reloadUnavailable')
+                    : '',
+                );
+              })
+              .catch(() => {
+                if (!owned()) return;
+                // Fetch hides CORS failures behind the same error as network
+                // failures. Preserve the credential and offer both checks.
+                setConnectionError(t('daemon.connection.unreachable'));
+              })
+              .finally(() => {
+                window.clearTimeout(timeout);
+                // Only release the ref if it still names this attempt: a
+                // newer probe may already own it.
+                if (probeTimerRef.current === timeout) {
+                  probeTimerRef.current = null;
+                }
+                if (!owned()) return;
+                probeControllerRef.current = null;
+                setConnectBusy(false);
+              });
+          }}
+        >
+          <Label
+            htmlFor="daemon-connection-address"
+            className="text-[13px] font-normal text-muted-foreground"
+          >
+            {t('daemon.connection.address')}
+          </Label>
+          <Input
+            id="daemon-connection-address"
+            type="url"
+            inputMode="url"
+            autoComplete="url"
+            aria-invalid={connectionError ? true : undefined}
+            aria-describedby={
+              connectionError ? 'daemon-connection-address-error' : undefined
+            }
+            value={connectionAddress}
+            onChange={(event) => {
+              // Editing the address abandons the submit that armed the
+              // probe: a late response must not switch to (and reload
+              // onto) a target the operator has already typed over.
+              retireConnectionProbe();
+              setConnectionAddress(event.target.value);
+              setConnectionToken('');
+              setConnectionError('');
+            }}
+          />
+          {connectionError && (
+            <p
+              id="daemon-connection-address-error"
+              role="alert"
+              className="text-xs text-destructive"
+            >
+              {connectionError}
+            </p>
+          )}
+          <Label
+            htmlFor="daemon-connection-token"
+            className="text-[13px] font-normal text-muted-foreground"
+          >
+            {t('daemon.connection.token')}
+          </Label>
+          <Input
+            id="daemon-connection-token"
+            type="password"
+            autoComplete="off"
+            value={connectionToken}
+            onChange={(event) => setConnectionToken(event.target.value)}
+          />
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            className="mt-1 w-full"
+            disabled={connectBusy}
+          >
+            {connectBusy
+              ? t(
+                  connectionsOnly
+                    ? 'daemon.connection.status.adding'
+                    : 'daemon.connection.status.connecting',
+                )
+              : t(
+                  connectionsOnly
+                    ? 'daemon.connection.add'
+                    : 'daemon.connection.connect',
+                )}
+          </Button>
+          <DaemonConnectionHelp
+            language={language}
+            expanded={Boolean(connectionError)}
+          />
+        </form>
+      )}
+    </Card>
+  );
+
+  if (connectionsOnly) {
+    return (
+      <div className={styles.dialog}>
+        <RemoteAccessSettingsCard />
+        {connectionCard}
+      </div>
+    );
+  }
+
+  if (!report) {
+    return (
+      <div className={styles.dialog}>
+        <div className={styles.empty}>
+          {error
+            ? `${t('daemon.loadFailed')}: ${error.message}`
+            : t('daemon.loading')}
+        </div>
+        {error && <div className={styles.grid}>{connectionCard}</div>}
+      </div>
+    );
+  }
+
+  // The daemon only appends workspace/preflight/MCP issues (and rolls them into
+  // `status`) for detail=full, so the summary can read "ok" with an empty issue
+  // list while a loaded full report is failing. Drive the badge and issue list
+  // off the full report whenever it is available; keep the live counters on the
+  // summary. The rollup then refreshes on open/manual rather than every 5s,
+  // which only ever over-reports (safe) between full fetches.
+  const rollupReport = fullReport ?? report;
+
+  const { daemon, runtime, security, limits, capabilities } = report;
+  const acp = runtime.transport.acp;
+  const rateRejected = Object.values(
+    runtime.rateLimit.rejectedSinceStart,
+  ).reduce((sum, count) => sum + count, 0);
+  const limitValue = (value: number | null) =>
+    value === null ? t('daemon.limits.unlimited') : value;
+
+  return (
+    <div className={styles.dialog}>
+      <div className={styles.toolbar}>
+        <span
+          role="status"
+          aria-label={`${t('daemon.title')}: ${t(
+            `daemon.level.${rollupReport.status}`,
+          )}`}
+          className={`${styles.badge} ${levelClass(rollupReport.status)}`}
+        >
+          {t(`daemon.level.${rollupReport.status}`)}
+        </span>
+        <span className={styles.updatedAt}>
+          {t('daemon.updatedAt', {
+            time: new Date(report.generatedAt).toLocaleTimeString(),
+          })}
+        </span>
+        {/* While reachable, flag only when the summary owning the visible
+            counters/timestamp is the failing, stale source: it errored AND
+            still has (now-stale) data on screen. When the summary never loaded
+            and the cards are rendering from the full fallback, or when only the
+            full fetch failed (surfaced in the diagnostics section), the banner
+            would misrepresent an otherwise-usable dashboard. */}
+        {(unavailable || (summary.error && summary.report)) && (
+          <span className={styles.refreshError}>
+            {unavailable ? error?.message : t('daemon.loadFailed')}
+          </span>
+        )}
+        <div className={styles.toolbarActions}>
+          <button
+            type="button"
+            className={styles.refreshButton}
+            onClick={refreshAll}
+            disabled={loading}
+          >
+            {t('daemon.refresh')}
+          </button>
+        </div>
+      </div>
+
+      {rollupReport.issues.length > 0 && (
+        <Card title={t('daemon.issues.title')}>
+          {rollupReport.issues.map((issue, index) => (
+            <div key={`${issue.code}-${index}`} className={styles.issueRow}>
+              <span
+                className={`${styles.badge} ${
+                  issue.severity === 'error'
+                    ? styles.levelError
+                    : styles.levelWarning
+                }`}
+              >
+                {issue.severity === 'error'
+                  ? t('daemon.level.error')
+                  : t('daemon.level.warning')}
+              </span>
+              <span className={styles.issueMessage}>{issue.message}</span>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      <div
+        className={styles.tabs}
+        role="tablist"
+        aria-label={t('daemon.title')}
+      >
+        {DAEMON_TABS.map((tab, index) => (
+          <button
+            key={tab.id}
+            ref={(el) => {
+              tabRefs.current[index] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`daemon-tab-${tab.id}`}
+            aria-selected={tab.id === activeTab}
+            aria-controls={`daemon-tabpanel-${tab.id}`}
+            tabIndex={tab.id === activeTab ? 0 : -1}
+            className={`${styles.tab} ${
+              tab.id === activeTab ? styles.tabActive : ''
+            }`}
+            onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(e) => handleTabKeyDown(e, index)}
+          >
+            {t(tab.labelKey)}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'overview' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-overview"
+          aria-labelledby="daemon-tab-overview"
+          tabIndex={0}
+          className={styles.grid}
+        >
+          {connectionCard}
+          <Card title={t('daemon.overview.title')}>
+            {daemon.qwenCodeVersion && (
+              <Row
+                label={t('daemon.overview.version')}
+                value={daemon.qwenCodeVersion}
+              />
+            )}
+            <Row label={t('daemon.overview.pid')} value={daemon.pid} />
+            <Row label={t('daemon.overview.mode')} value={daemon.mode} />
+            <Row
+              label={t('daemon.overview.uptime')}
+              value={formatUptime(daemon.uptimeMs)}
+            />
+            {/* The workspace path is long; give it its own full-width row and
+              keep it to a single line — front-truncated so the meaningful tail
+              (…/parent/workspace) stays visible, full path on hover. */}
+            <div className={styles.pathRow}>
+              <span className={styles.rowLabel}>
+                {t('daemon.overview.workspace')}
+              </span>
+              <span
+                className={styles.pathValue}
+                title={daemon.workspaceCwd}
+                // Front-truncate (ellipsis at the start) via CSS `direction:rtl`
+                // so the meaningful tail stays visible; `bdi` keeps the path's
+                // own characters in logical order despite the rtl context.
+              >
+                <bdi>{daemon.workspaceCwd}</bdi>
+              </span>
+            </div>
+          </Card>
+
+          <Card title={t('daemon.runtime.title')}>
+            {/* The counters below read as plausible zeros while the daemon
+              runtime is still coming up or has failed; call that out so they
+              are not mistaken for a healthy idle daemon. */}
+            {runtime.error ? (
+              <div className={styles.workspaceError}>
+                {t('daemon.runtime.startFailed')}: {runtime.error}
+              </div>
+            ) : runtime.loading ? (
+              <div className={styles.empty}>
+                {t('daemon.runtime.startingUp')}
+              </div>
+            ) : null}
+            <Row
+              label={t('daemon.runtime.activeSessions')}
+              value={runtime.sessions.active}
+            />
+            {/* Activity counters (daemons predating this omit the sub-object). */}
+            {runtime.activity && (
+              <>
+                <Row
+                  label={t('daemon.runtime.activePrompts')}
+                  value={runtime.activity.activePrompts}
+                />
+                <Row
+                  label={t('daemon.runtime.idle')}
+                  value={
+                    runtime.activity.idleSinceMs === null
+                      ? t('daemon.runtime.noActivity')
+                      : formatDurationMs(runtime.activity.idleSinceMs)
+                  }
+                />
+              </>
+            )}
+            <Row
+              label={t('daemon.runtime.pendingPermissions')}
+              value={runtime.permissions.pending}
+            />
+            <Row
+              label={t('daemon.runtime.permissionPolicy')}
+              value={runtime.permissions.policy}
+            />
+            <Row
+              label={t('daemon.runtime.channel')}
+              value={
+                runtime.channel.live
+                  ? t('daemon.runtime.channelLive')
+                  : t('daemon.runtime.channelDown')
+              }
+            />
+            {/* Surface why a channel worker is unhealthy instead of leaving the
+              operator with a bare "down" — these fields are already fetched. */}
+            {runtime.channelWorker.enabled && (
+              <>
+                <Row
+                  label={t('daemon.runtime.channelWorker')}
+                  value={channelWorkerState(runtime.channelWorker)}
+                />
+                {runtime.channelWorker.error && (
+                  <div className={styles.workspaceError}>
+                    {runtime.channelWorker.error}
+                  </div>
+                )}
+                {(runtime.channelWorker.restartCount ?? 0) > 0 && (
+                  <Row
+                    label={t('daemon.runtime.channelWorkerRestarts')}
+                    value={runtime.channelWorker.restartCount}
+                  />
+                )}
+              </>
+            )}
+            <Row
+              label={t('daemon.runtime.memory')}
+              value={`${formatBytes(runtime.process.rss)} / ${formatBytes(
+                runtime.process.heapUsed,
+              )}`}
+            />
+          </Card>
+
+          <Card title={t('daemon.transport.title')}>
+            <Row
+              label={t('daemon.transport.restSse')}
+              value={runtime.transport.restSseActive}
+            />
+            {acp.enabled ? (
+              <>
+                <Row
+                  label={t('daemon.transport.acpConnections')}
+                  value={acp.connections}
+                />
+                <Row
+                  label={t('daemon.transport.acpStreams')}
+                  value={`${acp.sessionStreams} / ${acp.sseStreams} / ${acp.wsStreams}`}
+                />
+                <Row
+                  label={t('daemon.transport.pendingRequests')}
+                  value={acp.pendingClientRequests}
+                />
+              </>
+            ) : (
+              <div className={styles.empty}>
+                {t('daemon.transport.acpDisabled')}
+              </div>
+            )}
+            <Row
+              label={t('daemon.transport.rateLimitRejected')}
+              value={
+                runtime.rateLimit.enabled ? rateRejected : t('common.disabled')
+              }
+            />
+          </Card>
+
+          <Card title={t('daemon.security.title')}>
+            <Row
+              label={t('daemon.security.token')}
+              value={
+                security.tokenConfigured
+                  ? t('daemon.security.configured')
+                  : t('daemon.security.notConfigured')
+              }
+            />
+            <Row
+              label={t('daemon.security.requireAuth')}
+              value={
+                security.requireAuth
+                  ? t('common.enabled')
+                  : t('common.disabled')
+              }
+            />
+            <Row
+              label={t('daemon.security.loopback')}
+              value={
+                security.loopbackBind
+                  ? t('common.enabled')
+                  : t('common.disabled')
+              }
+            />
+            <Row
+              label={t('daemon.security.allowOrigin')}
+              value={security.allowOriginMode}
+            />
+            <Row
+              label={t('daemon.security.shell')}
+              value={
+                security.sessionShellCommandEnabled
+                  ? t('common.enabled')
+                  : t('common.disabled')
+              }
+            />
+          </Card>
+
+          <Card title={t('daemon.limits.title')}>
+            <Row
+              label={t('daemon.limits.maxSessions')}
+              value={limitValue(limits.maxSessions)}
+            />
+            <Row
+              label={t('daemon.limits.maxPendingPrompts')}
+              value={limitValue(limits.maxPendingPromptsPerSession)}
+            />
+            <Row
+              label={t('daemon.limits.maxConnections')}
+              value={limitValue(limits.listenerMaxConnections)}
+            />
+            <Row
+              label={t('daemon.limits.eventRing')}
+              value={limits.eventRingSize}
+            />
+            <Row
+              label={t('daemon.limits.promptDeadline')}
+              value={
+                limits.promptDeadlineMs === null
+                  ? t('daemon.limits.unlimited')
+                  : formatDurationMs(limits.promptDeadlineMs)
+              }
+            />
+            <Row
+              label={t('daemon.limits.sessionIdle')}
+              value={formatDurationMs(limits.sessionIdleTimeoutMs)}
+            />
+          </Card>
+
+          <Card
+            title={
+              capabilities.features.length
+                ? t('daemon.capabilities.titleCount', {
+                    count: capabilities.features.length,
+                  })
+                : t('daemon.capabilities.title')
+            }
+          >
+            {capabilities.features.length === 0 ? (
+              <span className={styles.empty}>{t('daemon.none')}</span>
+            ) : (
+              <div className={styles.featureChips}>
+                {[...capabilities.features].sort().map((feature) => (
+                  <span key={feature} className={styles.featureChip}>
+                    {feature}
+                  </span>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* Aggregate token-usage dashboard (today's totals + 6-month heatmap).
+          Mounts only when active so the heavy aggregate loads on demand; a
+          crash in the payload is contained here, not the whole dialog. */}
+      {activeTab === 'usage' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-usage"
+          aria-labelledby="daemon-tab-usage"
+          tabIndex={0}
+        >
+          <ErrorBoundary
+            label="daemon-usage"
+            fallback={
+              <div className={styles.empty}>{t('daemon.usage.failed')}</div>
+            }
+          >
+            <UsageDashboardTab />
+          </ErrorBoundary>
+        </div>
+      )}
+
+      {/* Time-series charts for bottleneck analysis. Driven by the
+          continuously-refreshed summary report so the curves advance on every
+          poll; the daemon retains the history, so it survives dialog close. */}
+      {activeTab === 'metrics' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-metrics"
+          aria-labelledby="daemon-tab-metrics"
+          tabIndex={0}
+        >
+          <MetricsCharts series={report.runtime.metrics?.series ?? []} />
+        </div>
+      )}
+
+      {/* Contain a crash in the detail sections (e.g. a partial detail=full
+          payload) to this region so the healthy summary cards above stay live,
+          rather than letting the outer boundary replace the whole dialog. */}
+      {activeTab === 'diagnostics' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-diagnostics"
+          aria-labelledby="daemon-tab-diagnostics"
+          tabIndex={0}
+        >
+          <ErrorBoundary
+            label="daemon-status-detail"
+            fallback={
+              <div className={styles.empty}>{t('daemon.details.failed')}</div>
+            }
+          >
+            {fullReport?.full ? (
+              <FullDetail report={fullReport} />
+            ) : full.loading ? (
+              <div className={styles.empty}>{t('daemon.details.loading')}</div>
+            ) : full.error ? (
+              <div className={styles.empty}>
+                {t('daemon.details.failed')}: {full.error.message}
+              </div>
+            ) : (
+              // Fetch resolved but the daemon omitted the `full` section — don't
+              // hang on the loading placeholder forever.
+              <div className={styles.empty}>{t('daemon.details.failed')}</div>
+            )}
+          </ErrorBoundary>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A malformed or partial daemon response — most likely exactly when the daemon
+// is sick and this dashboard is most needed — must not white-screen the whole
+// web shell. Contain any render throw to the dialog; the function-form fallback
+// surfaces the actual render error (distinct from a network failure). Because
+// the parent only mounts the dialog while open, closing and re-opening remounts
+// the boundary, so a transient bad payload recovers on the next open.
+export function DaemonStatusDialog({
+  onChangeTarget = navigateToDaemon,
+}: {
+  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
+} = {}) {
+  const { t } = useI18n();
+  return (
+    <ErrorBoundary
+      label="daemon-status"
+      fallback={(error) => (
+        <div className={styles.dialog}>
+          <div className={styles.empty}>
+            {t('daemon.loadFailed')}: {error.message}
+          </div>
+        </div>
+      )}
+    >
+      <DaemonStatusDialogInner onChangeTarget={onChangeTarget} />
+    </ErrorBoundary>
+  );
+}
+
+export function DaemonConnectionsSettings({
+  onChangeTarget = navigateToDaemon,
+  onAddConnection = startRemoteConnectionAdd,
+}: {
+  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
+} = {}) {
+  const { t } = useI18n();
+  return (
+    <ErrorBoundary
+      label="daemon-connections"
+      fallback={(error) => (
+        <div className={styles.empty}>
+          {t('daemon.loadFailed')}: {error.message}
+        </div>
+      )}
+    >
+      <DaemonStatusDialogInner
+        connectionsOnly
+        onChangeTarget={onChangeTarget}
+        onAddConnection={onAddConnection}
+      />
+    </ErrorBoundary>
+  );
+}

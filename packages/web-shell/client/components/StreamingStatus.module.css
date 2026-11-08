@@ -5,24 +5,41 @@
   gap: 6px;
   padding: 4px 0;
   font-size: 14px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .spinner {
-  color: var(--text-primary);
+  color: var(--foreground);
 }
 
 .label {
-  color: var(--assist-color);
+  color: var(--streaming-label-color);
 }
 
 .meta {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 13px;
+}
+
+.streamingMeta {
+  color: var(--foreground);
+}
+
+.label + .streamingMeta::before {
+  content: '(';
+}
+
+.label + .streamingMeta::after {
+  content: ')';
 }
 
 @media (max-width: 700px) {
   .label {
     display: none;
+  }
+
+  .label + .streamingMeta::before,
+  .label + .streamingMeta::after {
+    content: none;
   }
 }

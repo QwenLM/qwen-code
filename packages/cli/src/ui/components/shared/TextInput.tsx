@@ -20,7 +20,7 @@ import { renderSoftwareCursor } from '../../utils/software-cursor.js';
 export interface TextInputProps {
   value: string;
   onChange: (text: string) => void;
-  onSubmit?: () => void;
+  onSubmit?: (text: string) => void;
   /** Called when Tab is pressed; if provided, prevents the default tab-insertion behaviour. */
   onTab?: (key: Key) => void;
   /** Called when ↑ is pressed; if provided, prevents cursor-up in the buffer. */
@@ -106,7 +106,7 @@ export function TextInput({
 
   const handleSubmit = () => {
     if (!onSubmit) return;
-    onSubmit();
+    onSubmit(buffer.text);
   };
 
   useKeypress(

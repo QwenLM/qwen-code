@@ -1,0 +1,615 @@
+import { randomUUID } from 'node:crypto';
+import { ChannelOutputTurn, sanitizeSenderName } from '@qwen-code/channel-base';
+import type {
+  ChannelOutputMode,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
+  ChannelUserInputRequestContext,
+  SessionTarget,
+  UserInputPresentationResult,
+} from '@qwen-code/channel-base';
+import { escapeDingTalkMarkdown } from './markdown.js';
+import { stripPartialImageMarker } from './outbound-image.js';
+import type { QuestionCardController } from './question-card-controller.js';
+import type { PermissionCardController } from './permission-card-controller.js';
+import type { DingtalkPresentationPhase } from './presentation-phase.js';
+import {
+  isChinesePresentationLanguage,
+  markPartialOutput,
+} from './presentation-phase.js';
+import {
+  CONTENT_LIMIT,
+  TRUNCATION_MARKER,
+  type StatusCardController,
+} from './status-card-controller.js';
+
+interface RunPresentation {
+  runId: string;
+  ownerId: string;
+  target: { chatId: string; isGroup: boolean };
+  baseContext: ChannelOutputSegmentContext;
+  statusContext?: ChannelOutputSegmentContext;
+  projectionChain: Promise<void>;
+  activeSegmentId?: string;
+  senderPrefix?: string;
+  senderRawPrefix?: string;
+  sourceLabel?: string;
+  sendFallback?: DingtalkInteractionPresenterOptions['sendFallback'];
+  cardDelivered?: { text: string; chatId: string; sessionId: string };
+  output: ChannelOutputTurn;
+  lastOutputContext?: ChannelOutputSegmentContext;
+  terminal: boolean;
+}
+
+interface SegmentPresentation {
+  run: RunPresentation;
+  context: ChannelOutputSegmentContext;
+  content: string;
+  preview: string;
+  visible: boolean;
+}
+
+export interface DingtalkInteractionPresenterOptions {
+  outputMode?: ChannelOutputMode;
+  statusCards?: StatusCardController;
+  questionCards?: QuestionCardController;
+  permissionCards?: PermissionCardController;
+  /**
+   * Effective Qwen display language. When set to a non-Chinese language the
+   * terminal card copy renders in English; unset keeps the historical
+   * Simplified Chinese copy.
+   */
+  language?: string;
+  prepareOutput?(chatId: string, text: string): Promise<string>;
+  sendFallback?(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ): Promise<void>;
+}
+
+export interface DingtalkCardSender {
+  senderName: string;
+}
+
+function escapeSenderMarkdownText(text: string): string {
+  return text.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+}
+
+function formatSenderPrefixes(sender: DingtalkCardSender): {
+  senderPrefix: string;
+  senderRawPrefix: string;
+} {
+  const senderName = sanitizeSenderName(sender.senderName);
+  return {
+    senderPrefix: `@${escapeSenderMarkdownText(senderName)}`,
+    senderRawPrefix: `@${senderName}`,
+  };
+}
+
+export class DingtalkInteractionPresenter {
+  private readonly runs = new Map<string, RunPresentation>();
+  private readonly segments = new Map<string, SegmentPresentation>();
+  private readonly terminalSegmentIds = new Set<string>();
+
+  constructor(private readonly options: DingtalkInteractionPresenterOptions) {}
+
+  registerRun(
+    runId: string,
+    ownerId: string,
+    target: { chatId: string; isGroup: boolean },
+    sessionId = '',
+    sender?: DingtalkCardSender,
+    sourceLabel?: string,
+    sendFallback?: DingtalkInteractionPresenterOptions['sendFallback'],
+  ): void {
+    this.runs.set(runId, {
+      runId,
+      ownerId,
+      target,
+      baseContext: {
+        channelName: 'dingtalk',
+        sessionId,
+        runId,
+        segmentId: runId,
+        owner: { kind: 'channel_user', id: ownerId },
+        target: {
+          channelName: 'dingtalk',
+          chatId: target.chatId,
+          senderId: ownerId,
+          isGroup: target.isGroup,
+        },
+        sourceLabel,
+      },
+      projectionChain: Promise.resolve(),
+      output: new ChannelOutputTurn(this.options.outputMode),
+      ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
+      ...(sourceLabel ? { sourceLabel } : {}),
+      ...(sendFallback ? { sendFallback } : {}),
+      terminal: false,
+    });
+  }
+
+  startStatusCard(runId: string): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    const statusContext = this.ensureStatusContext(run);
+    void this.enqueue(run, () => {
+      const statusCards = this.options.statusCards;
+      const target = this.cardTarget(statusContext.target);
+      statusCards?.replace(
+        statusContext,
+        target,
+        this.withSourcePrefix(run, ''),
+      );
+    });
+  }
+
+  updateStatusCardPhase(runId: string, phase: DingtalkPresentationPhase): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    void this.enqueue(run, () =>
+      this.options.statusCards?.updateRunPhase(runId, phase),
+    );
+  }
+
+  appendOutput(segment: ChannelOutputSegmentContext, chunk: string): void {
+    const run = this.runs.get(segment.runId);
+    if (
+      !run ||
+      run.terminal ||
+      run.ownerId !== segment.owner.id ||
+      run.target.chatId !== segment.target.chatId ||
+      run.target.isGroup !== segment.target.isGroup ||
+      !chunk ||
+      this.terminalSegmentIds.has(segment.segmentId)
+    ) {
+      return;
+    }
+    const existing = this.segments.get(segment.segmentId);
+    if (existing && existing.run !== run) return;
+    const presentation = existing ?? {
+      run,
+      context: segment,
+      content: '',
+      preview: '',
+      visible: false,
+    };
+    presentation.content += chunk;
+    presentation.preview = this.boundContent(presentation.preview + chunk);
+    presentation.visible ||= chunk.trim().length > 0;
+    this.segments.set(segment.segmentId, presentation);
+    run.activeSegmentId = segment.segmentId;
+    if (!run.output.shouldPreview(presentation.visible ? 'visible' : ''))
+      return;
+    void this.enqueue(run, () => {
+      const statusContext = this.ensureStatusContext(run, segment);
+      this.options.statusCards?.replace(
+        statusContext,
+        this.cardTarget(statusContext.target),
+        this.withSourcePrefix(run, presentation.preview),
+      );
+    });
+  }
+
+  closeOutput(
+    segmentId: string,
+    text: string,
+    reason: ChannelOutputSegmentEndReason,
+    segment?: ChannelOutputSegmentContext,
+  ): Promise<boolean> {
+    let presentation = this.segments.get(segmentId);
+    if (!presentation && segment && text) {
+      this.appendOutput(segment, text);
+      presentation = this.segments.get(segmentId);
+    }
+    if (!presentation) return Promise.resolve(false);
+    const run = presentation.run;
+    if (run.terminal) return Promise.resolve(false);
+    this.segments.delete(segmentId);
+    this.addTerminalSegment(segmentId);
+    if (run.activeSegmentId === segmentId) {
+      run.activeSegmentId = undefined;
+    }
+    return this.enqueue(run, async () => {
+      const decision = run.output.close(text || presentation.content, reason);
+      if (decision.kind === 'skip') return true;
+      const statusCards = this.options.statusCards;
+      const statusContext = this.ensureStatusContext(run, presentation.context);
+      if (decision.kind === 'failed') {
+        statusCards?.ensure(
+          statusContext,
+          this.cardTarget(statusContext.target),
+        );
+        statusCards?.fail(
+          statusContext.segmentId,
+          this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
+        );
+        await this.redeliverCardDeliveredContent(run);
+        return statusCards !== undefined;
+      }
+      if (decision.kind === 'cancelled') {
+        return statusCards !== undefined;
+      }
+      if (decision.kind === 'preview') {
+        const deliveredViaCard =
+          statusCards !== undefined &&
+          (await statusCards.isCardLive(statusContext.segmentId)) &&
+          (await statusCards.flushPending(statusContext.segmentId));
+        if (deliveredViaCard) {
+          run.cardDelivered = {
+            text: stripPartialImageMarker(decision.text),
+            chatId: presentation.context.target.chatId,
+            sessionId: presentation.context.sessionId,
+          };
+        }
+        run.lastOutputContext = presentation.context;
+        return true;
+      }
+      if (!decision.rotate) {
+        statusCards?.ensure(
+          statusContext,
+          this.cardTarget(statusContext.target),
+        );
+      }
+      let output = this.options.prepareOutput
+        ? await this.options.prepareOutput(
+            presentation.context.target.chatId,
+            decision.text,
+          )
+        : decision.text;
+      const partial = segment?.partial ?? presentation.context.partial;
+      if (partial) output = markPartialOutput(output, this.options.language);
+      const completed =
+        statusCards !== undefined &&
+        (await statusCards.complete(
+          statusContext.segmentId,
+          this.withSenderPrefix(run, output),
+          undefined,
+          partial,
+        ));
+      if (decision.rotate) run.statusContext = undefined;
+      if (completed) return true;
+      const fallbackText = stripPartialImageMarker(output);
+      if (!fallbackText || !(run.sendFallback ?? this.options.sendFallback))
+        return false;
+      await this.sendFallback(
+        run,
+        presentation.context.target.chatId,
+        fallbackText,
+        presentation.context.sessionId,
+      );
+      statusCards?.abandon(statusContext.segmentId);
+      return true;
+    });
+  }
+
+  presentInput(
+    context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.runs.get(context.runId);
+    if (
+      !run ||
+      run.terminal ||
+      run.ownerId !== context.owner.id ||
+      run.target.chatId !== context.target.chatId ||
+      run.target.isGroup !== context.target.isGroup
+    ) {
+      return Promise.resolve({ kind: 'unsupported' });
+    }
+    const questionCards = this.options.questionCards;
+    if (!questionCards) return Promise.resolve({ kind: 'unsupported' });
+    return questionCards.present(context, this.cardTarget(context.target));
+  }
+
+  presentPermission(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.runs.get(context.runId);
+    if (
+      !run ||
+      run.terminal ||
+      run.ownerId !== context.owner.id ||
+      run.target.chatId !== context.target.chatId ||
+      run.target.isGroup !== context.target.isGroup
+    ) {
+      return Promise.resolve({ kind: 'unsupported' });
+    }
+    const permissionCards = this.options.permissionCards;
+    if (!permissionCards) return Promise.resolve({ kind: 'unsupported' });
+    return permissionCards.present(context, this.cardTarget(context.target));
+  }
+
+  private terminalCopy(): {
+    failed: string;
+    stopped: string;
+    cancelled: string;
+  } {
+    if (
+      this.options.language !== undefined &&
+      !isChinesePresentationLanguage(this.options.language)
+    ) {
+      return {
+        failed: 'Processing failed, please try again later.',
+        stopped: 'Task stopped',
+        cancelled: 'Task cancelled',
+      };
+    }
+    return {
+      failed: '本次处理失败，请稍后重试。',
+      stopped: '任务已停止',
+      cancelled: '任务已取消',
+    };
+  }
+
+  terminalizeRun(
+    runId: string,
+    terminal: 'completed' | 'failed' | 'cancelled',
+    detail = '',
+  ): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    this.options.questionCards?.cancelRun(
+      runId,
+      terminal === 'cancelled' &&
+        (detail === 'cancel_command' || detail === 'clear')
+        ? 'cancelled'
+        : 'expired',
+    );
+    this.options.permissionCards?.cancelRun(runId);
+    run.terminal = true;
+    const activeSegmentId = run.activeSegmentId;
+    run.activeSegmentId = undefined;
+    if (activeSegmentId) {
+      this.segments.delete(activeSegmentId);
+      this.addTerminalSegment(activeSegmentId);
+    }
+    const copy = this.terminalCopy();
+    const finalization = this.enqueue(run, async () => {
+      const finalOutput = run.output.finish(terminal);
+      if (terminal === 'failed') {
+        const statusContext = this.ensureStatusContext(run);
+        this.options.statusCards?.ensure(
+          statusContext,
+          this.cardTarget(statusContext.target),
+        );
+        this.options.statusCards?.fail(
+          statusContext.segmentId,
+          this.withSenderPrefix(run, copy.failed),
+        );
+        await this.redeliverCardDeliveredContent(run);
+      } else if (terminal === 'cancelled') {
+        const statusContext = run.statusContext;
+        if (statusContext) {
+          this.options.statusCards?.replace(
+            statusContext,
+            this.cardTarget(statusContext.target),
+            this.withSenderPrefix(
+              run,
+              detail === 'cancel_command' ? copy.stopped : copy.cancelled,
+            ),
+          );
+        }
+        this.options.statusCards?.cancelRun(
+          runId,
+          detail === 'cancel_command' ? 'cancel_command' : 'dropped',
+        );
+        await this.redeliverCardDeliveredContent(run);
+      } else {
+        // Completing without a final segment (e.g. an empty response after the
+        // last boundary) leaves the eagerly created card running forever.
+        const statusContext = run.statusContext;
+        if (statusContext) {
+          const context = run.lastOutputContext ?? run.baseContext;
+          const output =
+            finalOutput && this.options.prepareOutput
+              ? await this.options.prepareOutput(
+                  context.target.chatId,
+                  finalOutput,
+                )
+              : finalOutput;
+          const completed = await this.options.statusCards?.complete(
+            statusContext.segmentId,
+            output ? this.withSenderPrefix(run, output) : '',
+            (retained) =>
+              retained
+                ? this.withSenderPrefix(
+                    run,
+                    this.withoutRenderedSourcePrefix(run, retained),
+                  )
+                : retained,
+          );
+          if (!completed && output) {
+            await this.sendFallback(
+              run,
+              context.target.chatId,
+              stripPartialImageMarker(output),
+              context.sessionId,
+            );
+          }
+        }
+      }
+    });
+    void finalization.then(
+      () => {
+        if (this.runs.get(runId) === run) this.runs.delete(runId);
+      },
+      () => {
+        if (this.runs.get(runId) === run) this.runs.delete(runId);
+      },
+    );
+  }
+
+  reserveProjection(
+    runId: string,
+  ): ((operation: () => Promise<void>) => Promise<void>) | undefined {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return undefined;
+    let supplyOperation!: (operation: () => Promise<void>) => void;
+    const operation = new Promise<() => Promise<void>>((resolve) => {
+      supplyOperation = resolve;
+    });
+    const result = this.enqueue(run, async () => {
+      const execute = await operation;
+      await execute();
+    });
+    let supplied = false;
+    return (execute) => {
+      if (!supplied) {
+        supplied = true;
+        supplyOperation(execute);
+      }
+      return result;
+    };
+  }
+
+  /**
+   * A failed or cancelled terminal overwrites the single continuity card,
+   * erasing content a boundary already declared delivered there. Send it as
+   * a text message so it survives the overwrite.
+   */
+  private async redeliverCardDeliveredContent(
+    run: RunPresentation,
+  ): Promise<void> {
+    const delivered = run.cardDelivered;
+    if (!delivered || !(run.sendFallback ?? this.options.sendFallback)) return;
+    run.cardDelivered = undefined;
+    await this.sendFallback(
+      run,
+      delivered.chatId,
+      delivered.text,
+      delivered.sessionId,
+    );
+  }
+
+  private enqueue<T>(
+    run: RunPresentation,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
+    const result = run.projectionChain.then(operation);
+    run.projectionChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private boundContent(content: string, limit = CONTENT_LIMIT): string {
+    if (content.length <= limit) return content;
+    if (limit === 0) return '';
+    if (limit <= TRUNCATION_MARKER.length) return content.slice(-limit);
+    return `${TRUNCATION_MARKER}${content.slice(
+      content.length - (limit - TRUNCATION_MARKER.length),
+    )}`;
+  }
+
+  private withSenderPrefix(run: RunPresentation, content: string): string {
+    const prefixes = [
+      run.senderPrefix,
+      run.sourceLabel ? escapeDingTalkMarkdown(run.sourceLabel) : undefined,
+    ].filter((value): value is string => Boolean(value));
+    if (prefixes.length === 0) return this.boundContent(content);
+    const body = this.withoutExistingSenderPrefix(run, content);
+    const prefix = prefixes.join('\n\n');
+    if (!body) return prefix;
+    const separator = '\n\n';
+    const bodyLimit = Math.max(
+      0,
+      CONTENT_LIMIT - prefix.length - separator.length,
+    );
+    return `${prefix}${separator}${this.boundContent(body, bodyLimit)}`;
+  }
+
+  private withSourcePrefix(run: RunPresentation, content: string): string {
+    if (!run.sourceLabel) return this.boundContent(content);
+    const sourceLabel = escapeDingTalkMarkdown(run.sourceLabel);
+    if (!content) return sourceLabel;
+    return `${sourceLabel}\n\n${this.boundContent(
+      content,
+      Math.max(0, CONTENT_LIMIT - sourceLabel.length - 2),
+    )}`;
+  }
+
+  private async sendFallback(
+    run: RunPresentation,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    const sendFallback = run.sendFallback ?? this.options.sendFallback;
+    if (!sendFallback) return;
+    if (run.sourceLabel) {
+      await sendFallback(chatId, text, sessionId, run.sourceLabel);
+      return;
+    }
+    await sendFallback(chatId, text, sessionId);
+  }
+
+  private withoutExistingSenderPrefix(
+    run: RunPresentation,
+    content: string,
+  ): string {
+    const prefixes = new Set([run.senderPrefix, run.senderRawPrefix]);
+    let body = content;
+    while (body) {
+      let removed = false;
+      for (const prefix of prefixes) {
+        if (!prefix) continue;
+        if (body === prefix) return '';
+        if (!body.startsWith(prefix)) continue;
+        const remainder = body.slice(prefix.length);
+        if (/^\s/u.test(remainder)) {
+          body = remainder.replace(/^\s{1,2}/u, '');
+          removed = true;
+          break;
+        }
+      }
+      if (!removed) break;
+    }
+    return body;
+  }
+
+  private withoutRenderedSourcePrefix(
+    run: RunPresentation,
+    content: string,
+  ): string {
+    if (!run.sourceLabel) return content;
+    const rendered = escapeDingTalkMarkdown(run.sourceLabel);
+    if (content === rendered) return '';
+    const prefix = `${rendered}\n\n`;
+    return content.startsWith(prefix) ? content.slice(prefix.length) : content;
+  }
+
+  private ensureStatusContext(
+    run: RunPresentation,
+    segment?: ChannelOutputSegmentContext,
+  ): ChannelOutputSegmentContext {
+    if (run.statusContext) return run.statusContext;
+    run.statusContext = segment
+      ? { ...segment }
+      : { ...run.baseContext, segmentId: `${run.runId}:${randomUUID()}` };
+    return run.statusContext;
+  }
+
+  private cardTarget(target: SessionTarget): {
+    chatId: string;
+    isGroup: boolean;
+  } {
+    const isGroup = target.isGroup === true;
+    return {
+      chatId: isGroup ? target.chatId : target.senderId,
+      isGroup,
+    };
+  }
+
+  private addTerminalSegment(segmentId: string): void {
+    this.terminalSegmentIds.add(segmentId);
+    while (this.terminalSegmentIds.size > 1000) {
+      const oldest = this.terminalSegmentIds.values().next().value;
+      if (oldest === undefined) break;
+      this.terminalSegmentIds.delete(oldest);
+    }
+  }
+}

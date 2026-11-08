@@ -3,16 +3,39 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, expect, it, vi } from 'vitest';
 import { InputFormat } from '@qwen-code/qwen-code-core';
 import { createMinimalSettings } from '../../../config/settings.js';
+import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
+import { CommandKind } from '../../../ui/commands/types.js';
 import type { StreamJsonOutputAdapter } from '../../io/StreamJsonOutputAdapter.js';
 import type { IControlContext } from '../ControlContext.js';
 import type { IPendingRequestRegistry } from './baseController.js';
 import { SystemController } from './systemController.js';
 
-function createContext(): IControlContext {
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  createDebugLogger: () => mockDebugLogger,
+}));
+
+vi.mock('../../../nonInteractiveCliCommands.js', () => ({
+  getAvailableCommands: vi.fn(),
+}));
+
+function createContext(
+  overrides: Partial<IControlContext> = {},
+): IControlContext {
   const abortController = new AbortController();
 
   return {
@@ -25,6 +48,10 @@ function createContext(): IControlContext {
       setSessionSubagents: vi.fn(),
       setApprovalMode: vi.fn(),
       setModel: vi.fn(),
+      setReasoningEffort: vi.fn(),
+      getReasoningEffort: vi.fn().mockReturnValue(undefined),
+      getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
+      getAvailableModels: vi.fn().mockReturnValue([]),
     } as unknown as IControlContext['config'],
     streamJson: {
       send: vi.fn(),
@@ -38,6 +65,7 @@ function createContext(): IControlContext {
     sdkMcpServers: new Set<string>(),
     mcpClients: new Map(),
     inputClosed: false,
+    ...overrides,
   };
 }
 
@@ -51,6 +79,194 @@ function createRegistry(): IPendingRequestRegistry {
 }
 
 describe('SystemController', () => {
+  it('stages explicit false during initialize without claiming durable application', async () => {
+    const context = createContext();
+    context.config.stageInitialWorkflowMode = vi.fn();
+    context.config.isWorkflowModeSupported = vi.fn(() => true);
+    context.config.setWorkflowMode = vi.fn();
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    const response = await controller.handleRequest(
+      { subtype: 'initialize', workflowMode: false },
+      'init-mode',
+    );
+    expect(
+      context.config.stageInitialWorkflowMode,
+    ).toHaveBeenCalledExactlyOnceWith(false);
+    expect(context.config.setWorkflowMode).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      capabilities: { can_set_workflow_mode: true },
+    });
+    expect(response).not.toHaveProperty('requested');
+  });
+
+  it('waits for authoritative initialization for both read and write', async () => {
+    const context = createContext();
+    let ready!: () => void;
+    context.waitForInitialization = () =>
+      new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+    context.config.isWorkflowModeSupported = vi.fn(() => true);
+    const state = { requested: true, available: true, effective: true };
+    context.config.getWorkflowMode = vi.fn(() => state);
+    context.config.setWorkflowMode = vi.fn(async () => state);
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    const get = controller.handleRequest(
+      { subtype: 'get_workflow_mode' },
+      'get-mode',
+    );
+    await Promise.resolve();
+    expect(context.config.getWorkflowMode).not.toHaveBeenCalled();
+    ready();
+    await expect(get).resolves.toEqual(state);
+    const set = controller.handleRequest(
+      { subtype: 'set_workflow_mode', enabled: false },
+      'set-mode',
+    );
+    await Promise.resolve();
+    expect(context.config.setWorkflowMode).not.toHaveBeenCalled();
+    ready();
+    await set;
+    expect(context.config.setWorkflowMode).toHaveBeenCalledExactlyOnceWith(
+      false,
+    );
+    expect(context.config.setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('propagates a rejected initialization without mutating mode', async () => {
+    const context = createContext({
+      waitForInitialization: async () => {
+        throw new Error('recording failed');
+      },
+    });
+    context.config.setWorkflowMode = vi.fn();
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    await expect(
+      controller.handleRequest(
+        { subtype: 'set_workflow_mode', enabled: true },
+        'failed-mode',
+      ),
+    ).rejects.toThrow('recording failed');
+    expect(context.config.setWorkflowMode).not.toHaveBeenCalled();
+  });
+
+  it('returns the committed Workflow mode snapshot without reading a later mutation', async () => {
+    const context = createContext();
+    const committed = { requested: true, available: true, effective: true };
+    context.config.isWorkflowModeSupported = vi.fn(() => true);
+    context.config.setWorkflowMode = vi.fn(async () => committed);
+    context.config.getWorkflowMode = vi.fn(() => ({
+      requested: false,
+      available: true,
+      effective: false,
+    }));
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    await expect(
+      controller.handleRequest(
+        { subtype: 'set_workflow_mode', enabled: true },
+        'committed-mode',
+      ),
+    ).resolves.toEqual(committed);
+    expect(context.config.getWorkflowMode).not.toHaveBeenCalled();
+  });
+
+  it.each(['session switch', 'request cancellation'] as const)(
+    'rejects %s after the Workflow mode setter commits but before its response resumes',
+    async (change) => {
+      const context = createContext();
+      const committed = { requested: true, available: true, effective: true };
+      let sessionId = 'original-session';
+      let completeCommit!: (state: typeof committed) => void;
+      const commit = new Promise<typeof committed>((resolve) => {
+        completeCommit = resolve;
+      });
+      context.config.getSessionId = vi.fn(() => sessionId);
+      context.config.isWorkflowModeSupported = vi.fn(() => true);
+      context.config.setWorkflowMode = vi.fn(() => commit);
+      context.config.getWorkflowMode = vi.fn(() => ({
+        requested: false,
+        available: true,
+        effective: false,
+      }));
+      const registry = createRegistry();
+      let requestAbort!: AbortController;
+      vi.mocked(registry.registerIncomingRequest).mockImplementation(
+        (_id, _name, abortController) => {
+          requestAbort = abortController;
+        },
+      );
+      const controller = new SystemController(
+        context,
+        registry,
+        'SystemController',
+      );
+      const response = controller.handleRequest(
+        { subtype: 'set_workflow_mode', enabled: true },
+        'retired-mode',
+      );
+      await vi.waitFor(() =>
+        expect(context.config.setWorkflowMode).toHaveBeenCalledExactlyOnceWith(
+          true,
+        ),
+      );
+      completeCommit(committed);
+      if (change === 'session switch') sessionId = 'replacement-session';
+      else requestAbort.abort();
+      await expect(response).rejects.toThrow(
+        'Session changed or request aborted',
+      );
+      expect(context.config.getWorkflowMode).not.toHaveBeenCalled();
+    },
+  );
+
+  it('loads supported commands with the session settings for Skill registration', async () => {
+    const context = createContext();
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    vi.mocked(getAvailableCommands).mockResolvedValueOnce([
+      {
+        name: 'demo:analysis',
+        description: 'Analyze a local dataset',
+        kind: CommandKind.FILE,
+      },
+    ]);
+
+    const result = await controller.handleRequest(
+      { subtype: 'supported_commands' },
+      'supported-commands',
+    );
+
+    expect(result).toEqual({
+      subtype: 'supported_commands',
+      commands: ['demo:analysis'],
+    });
+    expect(getAvailableCommands).toHaveBeenCalledWith(
+      context.config,
+      expect.any(AbortSignal),
+      'non_interactive',
+      context.settings,
+    );
+  });
+
   describe('initialize timeout validation', () => {
     it('accepts valid timeout within bounds', async () => {
       const context = createContext();
@@ -202,6 +418,443 @@ describe('SystemController', () => {
       );
 
       expect(context.sdkCanUseToolTimeoutMs).toBeUndefined();
+    });
+  });
+
+  describe('initialize MCP configuration', () => {
+    it('preserves MCP negotiation and App resource limits', async () => {
+      const context = createContext();
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      await controller.handleRequest(
+        {
+          subtype: 'initialize',
+          mcpServers: {
+            automatic: {
+              command: 'node',
+              versionNegotiation: 'auto',
+              appResourceMaxBytes: 4_194_304,
+              appResourceTimeoutMs: 30_000,
+            },
+          },
+        },
+        'mcp-1',
+      );
+
+      expect(context.config.addMcpServers).toHaveBeenCalledWith({
+        automatic: expect.objectContaining({
+          command: 'node',
+          versionNegotiation: 'auto',
+          appResourceMaxBytes: 4_194_304,
+          appResourceTimeoutMs: 30_000,
+        }),
+      });
+    });
+  });
+
+  describe('continue_last_turn', () => {
+    it('delegates to the session callback and merges its payload', async () => {
+      const onContinueLastTurn = vi.fn().mockResolvedValue({
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+      const controller = new SystemController(
+        createContext({ onContinueLastTurn }),
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'continue_last_turn' },
+        'continue-1',
+      );
+
+      expect(onContinueLastTurn).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({
+        subtype: 'continue_last_turn',
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+    });
+
+    it('fails loudly when no session callback is registered', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'continue_last_turn' },
+          'continue-2',
+        ),
+      ).rejects.toThrow(/was not registered on ControlContext/);
+    });
+  });
+
+  describe('set_effort', () => {
+    it('sets effort and returns applied=true when read-back matches', async () => {
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('high');
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'set_effort', effort: 'high' },
+        'effort-1',
+      );
+
+      expect(context.config.setReasoningEffort).toHaveBeenCalledWith('high');
+      expect(result).toEqual({
+        subtype: 'set_effort',
+        effort: 'high',
+        applied: true,
+        override: null,
+      });
+    });
+
+    it('returns applied=false when thinking is disabled (read-back mismatch)', async () => {
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('medium');
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'set_effort', effort: 'high' },
+        'effort-2',
+      );
+
+      expect(result).toEqual({
+        subtype: 'set_effort',
+        effort: 'high',
+        applied: false,
+        override: null,
+      });
+    });
+
+    it('returns the higher-priority wire override', async () => {
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('high');
+      (
+        context.config.getReasoningEffortOverride as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        source: 'samplingParams',
+        field: 'enable_thinking',
+      });
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'set_effort', effort: 'high' },
+        'effort-override',
+      );
+
+      expect(result).toEqual({
+        subtype: 'set_effort',
+        effort: 'high',
+        applied: false,
+        override: {
+          source: 'samplingParams',
+          field: 'enable_thinking',
+        },
+      });
+    });
+
+    it('rejects invalid effort value', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'set_effort', effort: 'banana' },
+          'effort-3',
+        ),
+      ).rejects.toThrow('Invalid effort value');
+    });
+
+    it('rejects empty effort string', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'set_effort', effort: '  ' },
+          'effort-4',
+        ),
+      ).rejects.toThrow('Invalid effort specified');
+    });
+  });
+
+  describe('get_available_models', () => {
+    it('returns models without exposing baseUrl or envKey', async () => {
+      const context = createContext();
+      (
+        context.config.getAvailableModels as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          id: 'qwen-max',
+          label: 'Qwen Max',
+          capabilities: { vision: true },
+          contextWindowSize: 128000,
+          baseUrl: 'https://internal-proxy.corp/v1',
+          envKey: 'SECRET_API_KEY',
+        },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          imageOnly: true,
+        },
+      ]);
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'get_available_models' },
+        'models-1',
+      );
+
+      expect(result).toEqual({
+        subtype: 'get_available_models',
+        models: [
+          {
+            id: 'qwen-max',
+            label: 'Qwen Max',
+            capabilities: { vision: true },
+            contextWindowSize: 128000,
+          },
+        ],
+      });
+    });
+
+    it('returns empty models list when none available', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'get_available_models' },
+        'models-2',
+      );
+
+      expect(result).toEqual({
+        subtype: 'get_available_models',
+        models: [],
+      });
+    });
+  });
+
+  describe('get_usage_info', () => {
+    it('returns dashboard with subtype when range is provided', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'get_usage_info', range: 'week' },
+        'usage-1',
+      );
+
+      expect(result).toHaveProperty('subtype', 'get_usage_info');
+      expect(result).toHaveProperty('generatedAt');
+      expect(result).toHaveProperty('summary');
+    });
+
+    it('returns dashboard without range filter', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'get_usage_info' },
+        'usage-2',
+      );
+
+      expect(result).toHaveProperty('subtype', 'get_usage_info');
+      expect(result).toHaveProperty('generatedAt');
+    });
+  });
+
+  describe('initialize with effort', () => {
+    it('sets effort during initialize when provided', async () => {
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('high');
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'initialize', effort: 'high' },
+        'init-effort-1',
+      );
+
+      expect(context.config.setReasoningEffort).toHaveBeenCalledWith('high');
+      expect(result).toHaveProperty('subtype', 'initialize');
+      expect(result).toHaveProperty('session_id', 'test-session-id');
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: true,
+        override: null,
+      });
+    });
+
+    it('warns when effort not applied during initialize (thinking disabled)', async () => {
+      mockDebugLogger.warn.mockClear();
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('medium');
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'initialize', effort: 'high' },
+        'init-effort-2',
+      );
+
+      expect(context.config.setReasoningEffort).toHaveBeenCalledWith('high');
+      expect(context.config.getReasoningEffort).toHaveBeenCalled();
+      expect(result).toHaveProperty('subtype', 'initialize');
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: false,
+        override: null,
+        reason: 'thinking may be disabled',
+      });
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "[SystemController] Effort 'high' was not applied (thinking may be disabled)",
+      );
+    });
+
+    it('reports the higher-priority override during initialize', async () => {
+      mockDebugLogger.warn.mockClear();
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('high');
+      (
+        context.config.getReasoningEffortOverride as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        source: 'samplingParams',
+        field: 'enable_thinking',
+      });
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'initialize', effort: 'high' },
+        'init-effort-override',
+      );
+
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: false,
+        override: {
+          source: 'samplingParams',
+          field: 'enable_thinking',
+        },
+        reason: 'samplingParams.enable_thinking takes precedence',
+      });
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "[SystemController] Effort 'high' was not applied (samplingParams.enable_thinking takes precedence)",
+      );
+    });
+
+    it('joins every held cause in the effort_status reason during initialize', async () => {
+      mockDebugLogger.warn.mockClear();
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('medium');
+      (
+        context.config.getReasoningEffortOverride as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'initialize', effort: 'high' },
+        'init-effort-both-causes',
+      );
+
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+        reason:
+          'thinking may be disabled; extra_body.thinking_budget takes precedence',
+      });
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "[SystemController] Effort 'high' was not applied (thinking may be disabled; extra_body.thinking_budget takes precedence)",
+      );
+    });
+
+    it('rejects invalid effort during initialize', async () => {
+      const controller = new SystemController(
+        createContext(),
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'initialize', effort: 'banana' },
+          'init-effort-3',
+        ),
+      ).rejects.toThrow('Invalid effort value');
     });
   });
 });

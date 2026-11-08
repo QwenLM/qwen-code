@@ -5,14 +5,22 @@
  */
 
 import type { GenerateContentResponse } from '@google/genai';
-import { AuthType } from '../core/contentGenerator.js';
-import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
+import { AuthType } from './auth-type.js';
+import {
+  isQwenQuotaExceededError,
+  isQuotaExhaustedError,
+  formatQuotaExhaustedMessage,
+} from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
-import { isRateLimitError } from './rateLimit.js';
 import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
-import { classifyRetryError } from './retryErrorClassification.js';
+import {
+  classifyRetryError,
+  isRetryableUpstreamError,
+} from './retryErrorClassification.js';
 import { retryContext } from './retryContext.js';
+import { beginRetryWait } from './retry-wait.js';
+import { ResponsesHttpError } from './responses-http-error.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
@@ -83,7 +91,12 @@ export interface RetryOptions {
   onRetry?: (info: RetryAttemptInfo) => void;
 }
 
-const DEFAULT_RETRY_OPTIONS: RetryOptions = {
+/**
+ * Default ladder for the normal HTTP retry path. Exported so callers that
+ * must outlast it — the workflow stall watchdog sizes `DEFAULT_STALL_MS`
+ * against it — can derive the ladder rather than hand-copy it.
+ */
+export const DEFAULT_RETRY_OPTIONS: RetryOptions = {
   maxAttempts: 7,
   initialDelayMs: 1500,
   maxDelayMs: 30000, // 30 seconds
@@ -92,7 +105,9 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
 
 /**
  * Default predicate function to determine if a retry should be attempted.
- * Retries on 429 (Too Many Requests) and 5xx server errors.
+ * Retries on 5xx server errors, on provider rate-limit codes, and on anything
+ * else the classifier calls retryable — transport failures and status-less
+ * upstream error bodies, which no HTTP status can decide.
  * @param error The error object.
  * @returns True if the error is a transient error, false otherwise.
  */
@@ -100,13 +115,20 @@ function defaultShouldRetry(
   error: Error | unknown,
   extraRetryErrorCodes?: readonly number[],
 ): boolean {
+  if (error instanceof ResponsesHttpError) {
+    return error.shouldRetry(extraRetryErrorCodes);
+  }
   const status = getErrorStatus(error);
-  // isRateLimitError already covers HTTP 429 (and 503) via RATE_LIMIT_ERROR_CODES,
-  // so an explicit `status === 429` check here would be redundant.
-  return (
-    isRateLimitError(error, extraRetryErrorCodes) ||
-    (status !== undefined && status >= 500 && status < 600)
-  );
+  if (status !== undefined && status >= 500 && status < 600) {
+    return true;
+  }
+  // HTTP 429/503 and the provider rate-limit codes reach the retry through the
+  // shared verdict, whose classification already returns 'retryable' for them;
+  // the verdict's separate rate-limit term matters only where a higher branch
+  // classified the error fail-fast, and its doc names that case. Sharing the
+  // verdict with LlmChat's inline stream predicate is what keeps a change to
+  // the status-less policy from landing on one path and not the other.
+  return isRetryableUpstreamError(error, extraRetryErrorCodes);
 }
 
 /**
@@ -210,6 +232,22 @@ async function sleepWithHeartbeat(
 }
 
 /**
+ * Runs one retry-owned backoff sleep as a single announced retry wait, so the
+ * request's owner can tell a scheduled backoff from a hung request.
+ */
+async function observedDelay(
+  delayMs: number,
+  sleep: () => Promise<void>,
+): Promise<void> {
+  const endWait = beginRetryWait(delayMs);
+  try {
+    await sleep();
+  } finally {
+    endWait();
+  }
+}
+
+/**
  * Retries a function with exponential backoff and jitter.
  * Supports persistent retry mode for unattended/CI environments where transient
  * capacity errors (429/529) should be retried indefinitely rather than failing.
@@ -304,7 +342,7 @@ export async function retryWithBackoff<T>(
           `Attempt ${iterationCount}: response rejected by content check. ` +
             `Retrying with backoff in ${Math.ceil(delayMs / 1000)}s...`,
         );
-        await delay(delayMs, signal);
+        await observedDelay(delayMs, () => delay(delayMs, signal));
         // Note: this inflates retryTotalDelayMs beyond what onRetry/ApiRetryEvent
         // reports — content-retry delays are invisible in the api_retry telemetry
         // channel (onRetry only fires from the catch-block error path). The LLM
@@ -319,14 +357,16 @@ export async function retryWithBackoff<T>(
     } catch (error) {
       const errorStatus = getErrorStatus(error);
 
-      // Classification drives logging plus one control decision: a 'fail-fast'
+      // Classification drives logging plus three control decisions in this
+      // function: an 'abort' kind rethrows immediately below; a 'fail-fast'
       // verdict keeps a permanent error out of the unbounded persistent loop
-      // (see shouldPersist below). Normal retry control still follows
-      // shouldRetryOnError and the persistent policy. Computed before the Qwen
-      // quota fast-fail so the original error (status, request id, provider
-      // body) is always classified and logged, even when we replace it with a
-      // guidance message.
-      const retryDiagnostics = classifyRetryError(error, {
+      // (see shouldPersist below); and a 'retryable' verdict decides the retry
+      // itself wherever defaultShouldRetry is the operative shouldRetryOnError
+      // — which it is unless the caller supplied its own. Computed before the
+      // Qwen quota fast-fail so the original error (status, request id,
+      // provider body) is always classified and logged, even when we replace it
+      // with a guidance message.
+      const fullClassification = classifyRetryError(error, {
         authType,
         extraRetryErrorCodes,
       });
@@ -334,7 +374,7 @@ export async function retryWithBackoff<T>(
       // Cancellation is authoritative: once the caller aborts (or the call
       // throws an abort/cancel error), never schedule another attempt,
       // regardless of a permissive shouldRetryOnError predicate.
-      if (retryDiagnostics.kind === 'abort') {
+      if (fullClassification.kind === 'abort') {
         throw error;
       }
 
@@ -342,7 +382,7 @@ export async function retryWithBackoff<T>(
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
         debugLogger.error(
           'Qwen OAuth quota exceeded, fast-failing',
-          retryDiagnostics,
+          fullClassification,
           error,
         );
         throw new Error(
@@ -353,6 +393,29 @@ export async function retryWithBackoff<T>(
             `  - ModelStudio:   https://help.aliyun.com/zh/model-studio/coding-plan\n\n` +
             `After setting up your API key, run /auth to configure your provider.`,
         );
+      }
+
+      // Permanent quota exhaustion (e.g. Bailian token-plan "1-week quota has
+      // been exhausted, will reset at …"). Unlike transient 429 throttling,
+      // retrying cannot succeed until the reset time — fast-fail and surface a
+      // friendly message so the session does not hang through the full retry
+      // budget with no output. Applies to any auth type since a reset time is
+      // the universal signal of a permanently exhausted quota.
+      if (isQuotaExhaustedError(error)) {
+        debugLogger.error(
+          'Quota exhausted, fast-failing',
+          fullClassification,
+          error,
+        );
+        // Intentionally throws a plain Error with no `.status`: a 429 status
+        // would make isRateLimitError() return true and re-trigger the
+        // stream-side rate-limit retry loop in llm-chat.ts (up to 10 retries
+        // at 1-5 min delays), reintroducing the silent hang this fast-fail
+        // eliminates. This also skips model fallback — quota exhaustion is
+        // provider-scoped and temporary, so the user should retry after the
+        // reset time rather than burning fallback provider quota. `cause`
+        // preserves the original error for diagnostics.
+        throw new Error(formatQuotaExhaustedMessage(error), { cause: error });
       }
 
       // Determine if this error qualifies for persistent retry.
@@ -369,7 +432,7 @@ export async function retryWithBackoff<T>(
       // Excluding them here falls back to the normal, maxAttempts-bounded retry
       // path so the request still gets a few attempts but is guaranteed to
       // terminate.
-      const isFailFast = retryDiagnostics.diagnosis === 'fail-fast';
+      const isFailFast = fullClassification.diagnosis === 'fail-fast';
       const shouldPersist =
         persistent && isTransient && callerAllowsRetry && !isFailFast;
 
@@ -386,9 +449,11 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        const retryAfterMs = hasRetryAfterStatus(errorStatus)
-          ? getRetryAfterDelayMs(error)
-          : null;
+        const retryAfterMs =
+          hasRetryAfterStatus(errorStatus) ||
+          error instanceof ResponsesHttpError
+            ? getRetryAfterDelayMs(error)
+            : null;
 
         if (retryAfterMs !== null && retryAfterMs > 0) {
           // Retry-After is a server-specified wait — respect it, only cap at
@@ -408,7 +473,7 @@ export async function retryWithBackoff<T>(
         debugLogger.warn(
           `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
             `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
-          retryDiagnostics,
+          fullClassification,
           error,
         );
 
@@ -434,13 +499,15 @@ export async function retryWithBackoff<T>(
         }
 
         // Heartbeat sleep — chunked to keep CI alive
-        await sleepWithHeartbeat(delayMs, {
-          attempt: reportedAttempt,
-          error,
-          heartbeatInterval,
-          heartbeatFn,
-          signal,
-        });
+        await observedDelay(delayMs, () =>
+          sleepWithHeartbeat(delayMs, {
+            attempt: reportedAttempt,
+            error,
+            heartbeatInterval,
+            heartbeatFn,
+            signal,
+          }),
+        );
         retryTotalDelayMs += delayMs;
 
         // Clamp attempt so the while-loop never exits
@@ -449,9 +516,11 @@ export async function retryWithBackoff<T>(
         }
       } else {
         // Normal retry path.
-        const retryAfterMs = hasRetryAfterStatus(errorStatus)
-          ? getRetryAfterDelayMs(error)
-          : null;
+        const retryAfterMs =
+          hasRetryAfterStatus(errorStatus) ||
+          error instanceof ResponsesHttpError
+            ? getRetryAfterDelayMs(error)
+            : null;
 
         let actualDelayMs: number;
         if (retryAfterMs !== null && retryAfterMs > 0) {
@@ -463,7 +532,7 @@ export async function retryWithBackoff<T>(
           currentDelay = initialDelayMs;
           logRetryAtStatusLevel(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
-            retryDiagnostics,
+            fullClassification,
             error,
             errorStatus,
           );
@@ -480,7 +549,7 @@ export async function retryWithBackoff<T>(
           logRetryAttempt(
             attempt,
             error,
-            retryDiagnostics,
+            fullClassification,
             errorStatus,
             actualDelayMs,
           );
@@ -507,7 +576,7 @@ export async function retryWithBackoff<T>(
 
         // Abort-aware: a cancelled request must not stay parked for the full
         // delay (including a provider-directed Retry-After wait).
-        await delay(actualDelayMs, signal);
+        await observedDelay(actualDelayMs, () => delay(actualDelayMs, signal));
         retryTotalDelayMs += actualDelayMs;
       }
     }
@@ -533,7 +602,7 @@ export async function retryWithBackoff<T>(
 function logRetryAttempt(
   attempt: number,
   error: unknown,
-  retryDiagnostics: ReturnType<typeof classifyRetryError>,
+  fullClassification: ReturnType<typeof classifyRetryError>,
   errorStatus?: number,
   delayMs?: number,
 ): void {
@@ -545,7 +614,7 @@ function logRetryAttempt(
     ? `Attempt ${attempt} failed with status ${errorStatus}. ${backoff}`
     : `Attempt ${attempt} failed. ${backoff}`;
 
-  logRetryAtStatusLevel(message, retryDiagnostics, error, errorStatus);
+  logRetryAtStatusLevel(message, fullClassification, error, errorStatus);
 }
 
 /**
@@ -555,13 +624,13 @@ function logRetryAttempt(
  */
 function logRetryAtStatusLevel(
   message: string,
-  retryDiagnostics: ReturnType<typeof classifyRetryError>,
+  fullClassification: ReturnType<typeof classifyRetryError>,
   error: unknown,
   errorStatus?: number,
 ): void {
   if (errorStatus !== undefined && errorStatus >= 500 && errorStatus < 600) {
-    debugLogger.error(message, retryDiagnostics, error);
+    debugLogger.error(message, fullClassification, error);
   } else {
-    debugLogger.warn(message, retryDiagnostics, error);
+    debugLogger.warn(message, fullClassification, error);
   }
 }

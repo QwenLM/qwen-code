@@ -7,9 +7,13 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import {
+  type MCPServerConfig,
+  normalizeClaudeMcpServer,
+} from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { SettingScope, type LoadedSettings } from './settings.js';
+import { stripUtf8Bom } from './execution-sandbox-settings.js';
 
 export type ClaudeMcpImportSource = 'all' | 'claude-code' | 'claude-desktop';
 export type ClaudeMcpImportScope = 'user' | 'project';
@@ -99,7 +103,7 @@ function readJsonObject(filePath: string): {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(raw));
+    parsed = JSON.parse(stripJsonComments(stripUtf8Bom(raw)));
   } catch (error) {
     return {
       found: true,
@@ -139,7 +143,10 @@ function copyMcpServers(
       errors.push(`${sourcePath}: server "${name}" is not an object - skipped`);
       continue;
     }
-    servers[name] = serverConfig as MCPServerConfig;
+    // Claude keys transport off a `type` field; Qwen keys off which URL field is
+    // set. Normalize so a Claude `type: 'http'` server connects over streamable
+    // HTTP instead of being mistaken for SSE.
+    servers[name] = normalizeClaudeMcpServer(serverConfig as MCPServerConfig);
   }
 }
 

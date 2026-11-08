@@ -30,9 +30,10 @@ import type {
   LspSymbolInformation,
   LspWorkspaceEdit,
   LspServerStatusInfo,
+  LspServiceReinitializeResult,
 } from './types.js';
 
-import type { NativeLspService } from './NativeLspService.js';
+import type { NativeLspService } from './native-lsp-service.js';
 
 function getErrorMessage(error: unknown): string | undefined {
   if (error === undefined || error === null) {
@@ -79,6 +80,14 @@ export class NativeLspClient implements LspClient {
     }
 
     return result;
+  }
+
+  reinitialize(): Promise<LspServiceReinitializeResult> {
+    return this.service.reinitialize();
+  }
+
+  stop(): Promise<void> {
+    return this.service.stop();
   }
 
   /**

@@ -1,8 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type {
-  ActiveGoal,
+  ApprovalModeValue,
+  GoalSnapshotV2,
   SubagentConfig,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 
 /**
@@ -114,6 +116,7 @@ export interface APIAssistantMessage {
  */
 export interface CLIUserMessage {
   type: 'user';
+  origin?: { kind: 'human' };
   uuid?: string;
   session_id: string;
   message: APIUserMessage;
@@ -134,6 +137,7 @@ export interface CLISystemMessage {
   subtype: string;
   uuid: string;
   session_id: string;
+  parent_tool_use_id?: string | null;
   data?: unknown;
   cwd?: string;
   tools?: string[];
@@ -142,7 +146,7 @@ export interface CLISystemMessage {
     status: string;
   }>;
   model?: string;
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   slash_commands?: string[];
   qwen_code_version?: string;
   output_style?: string;
@@ -244,12 +248,12 @@ export interface MessageStopStreamEvent {
 export interface ToolProgressStreamEvent {
   type: 'tool_progress';
   tool_use_id: string;
-  content: McpToolProgressData;
+  content: McpToolProgressData | ShellProgressData;
 }
 
-export interface ActiveGoalStreamEvent {
-  type: 'active_goal';
-  active_goal: ActiveGoal | null;
+export interface GoalStateStreamEvent {
+  type: 'goal_state';
+  goal_state: GoalSnapshotV2;
 }
 
 export type StreamEvent =
@@ -259,7 +263,7 @@ export type StreamEvent =
   | ContentBlockStopEvent
   | MessageStopStreamEvent
   | ToolProgressStreamEvent
-  | ActiveGoalStreamEvent;
+  | GoalStateStreamEvent;
 
 export interface CLIPartialAssistantMessage {
   type: 'stream_event';
@@ -269,7 +273,7 @@ export interface CLIPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
+export type PermissionMode = ApprovalModeValue;
 
 /**
  * Permission suggestion for tool use requests
@@ -304,6 +308,15 @@ export interface CLIControlInterruptRequest {
   subtype: 'interrupt';
 }
 
+/**
+ * Continue the most recent unfinished turn from existing history without
+ * sending a new user message. The reply reports whether a continuation was
+ * accepted; the resumed turn's output then flows as regular stream messages.
+ */
+export interface CLIControlContinueLastTurnRequest {
+  subtype: 'continue_last_turn';
+}
+
 export interface CLIControlPermissionRequest {
   subtype: 'can_use_tool';
   tool_name: string;
@@ -336,6 +349,9 @@ export interface CLIMcpServerConfig {
   headers?: Record<string, string>;
   tcp?: string;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -379,6 +395,12 @@ export interface CLIControlInitializeRequest {
    */
   mcpServers?: Record<string, CLIMcpServerConfig>;
   agents?: SubagentConfig[];
+  /**
+   * Initial reasoning effort tier: 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+   * Applied at session start via config.setReasoningEffort().
+   */
+  effort?: string;
+  workflowMode?: boolean;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -409,6 +431,29 @@ export interface CLIControlSetModelRequest {
   model: string;
 }
 
+export interface CLIControlSetEffortRequest {
+  subtype: 'set_effort';
+  effort: string;
+}
+
+export interface CLIControlGetWorkflowModeRequest {
+  subtype: 'get_workflow_mode';
+}
+
+export interface CLIControlSetWorkflowModeRequest {
+  subtype: 'set_workflow_mode';
+  enabled: boolean;
+}
+
+export interface CLIControlGetAvailableModelsRequest {
+  subtype: 'get_available_models';
+}
+
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export interface CLIControlMcpStatusRequest {
   subtype: 'mcp_server_status';
 }
@@ -424,15 +469,21 @@ export interface CLIControlGetContextUsageRequest {
 
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
+  | CLIControlContinueLastTurnRequest
   | CLIControlPermissionRequest
   | CLIControlInitializeRequest
   | CLIControlSetPermissionModeRequest
   | CLIHookCallbackRequest
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
+  | CLIControlSetEffortRequest
+  | CLIControlGetWorkflowModeRequest
+  | CLIControlSetWorkflowModeRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlGetAvailableModelsRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';

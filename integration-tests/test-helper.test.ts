@@ -1,0 +1,235 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TestRig } from './test-helper.js';
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe('TestRig', () => {
+  const originalKeepOutput = process.env['KEEP_OUTPUT'];
+
+  afterEach(() => {
+    if (originalKeepOutput === undefined) {
+      delete process.env['KEEP_OUTPUT'];
+    } else {
+      process.env['KEEP_OUTPUT'] = originalKeepOutput;
+    }
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('pins getDefaultTimeout to the CI-first environment table', () => {
+    const rig = new TestRig();
+
+    vi.stubEnv('CI', 'true');
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
+    expect(rig.getDefaultTimeout()).toBe(60_000);
+
+    // The documented scripts export QWEN_SANDBOX=false, which the helper's
+    // truthiness check still treats as a container.
+    vi.stubEnv('CI', '');
+    vi.stubEnv('QWEN_SANDBOX', 'false');
+    expect(rig.getDefaultTimeout()).toBe(30_000);
+
+    vi.stubEnv('QWEN_SANDBOX', '');
+    expect(rig.getDefaultTimeout()).toBe(15_000);
+  });
+
+  it('resets a reused test directory during setup', async () => {
+    const rig = new TestRig();
+    await rig.setup('reused test directory');
+    const staleFile = rig.createFile('stale.txt', 'stale');
+
+    await rig.setup('reused test directory');
+
+    expect(existsSync(staleFile)).toBe(false);
+    expect(rig.testDir).not.toBeNull();
+    expect(existsSync(rig.testDir!)).toBe(true);
+  });
+
+  it('disables managed auto-memory by default and honors a suite override', async () => {
+    const rig = new TestRig();
+    await rig.setup('managed memory default off');
+
+    const written = JSON.parse(
+      readFileSync(join(rig.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(written.memory).toEqual({
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: false,
+    });
+
+    const override = new TestRig();
+    await override.setup('managed memory opted back in', {
+      settings: { memory: { enableManagedAutoMemory: true } },
+    });
+    const overridden = JSON.parse(
+      readFileSync(join(override.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(overridden.memory).toEqual({
+      enableManagedAutoMemory: true,
+      enableManagedAutoDream: false,
+    });
+  });
+
+  it('removes the test directory during cleanup', async () => {
+    delete process.env['KEEP_OUTPUT'];
+    const rig = new TestRig();
+    await rig.setup('cleanup test directory');
+    const testDir = rig.testDir!;
+
+    await rig.cleanup();
+
+    expect(existsSync(testDir)).toBe(false);
+  });
+
+  it('keeps the test directory during cleanup when KEEP_OUTPUT is set', async () => {
+    process.env['KEEP_OUTPUT'] = 'true';
+    const rig = new TestRig();
+    await rig.setup('keep output test directory');
+    const testDir = rig.testDir!;
+
+    await rig.cleanup();
+
+    expect(existsSync(testDir)).toBe(true);
+  });
+
+  it('kills an interactive session a test never closed during cleanup', async () => {
+    // KEEP_OUTPUT is what CI sets, and it makes cleanup() keep the test
+    // directory — the spawned child must not survive that path either.
+    process.env['KEEP_OUTPUT'] = 'true';
+    const rig = new TestRig();
+    await rig.setup('cleanup kills interactive session');
+    // Stands in for the CLI bundle: what is under test is that cleanup ends
+    // whatever runInteractive spawned, not what the CLI itself does.
+    rig.bundlePath = rig.createFile(
+      'idle-cli.js',
+      'setInterval(() => {}, 1000);\n',
+    );
+
+    const { ptyProcess } = rig.runInteractive();
+    expect(isProcessAlive(ptyProcess.pid)).toBe(true);
+
+    await rig.cleanup();
+
+    await expect
+      .poll(() => isProcessAlive(ptyProcess.pid), {
+        message: 'the interactive CLI child outlived cleanup()',
+        timeout: 10_000,
+      })
+      .toBe(false);
+  });
+
+  it('re-arms a reused rig after cleanup', async () => {
+    const rig = new TestRig();
+    await rig.setup('reused after cleanup');
+
+    await rig.cleanup();
+    await rig.setup('reused after cleanup');
+
+    await expect(rig.poll(() => true, 1_000, 10)).resolves.toBe(true);
+  });
+
+  it('stops a pending readiness poll when the rig is cleaned up', async () => {
+    const rig = new TestRig();
+    await rig.setup('cleanup stops readiness poll');
+
+    const settled = rig.waitForText('never-rendered', 60_000);
+    await rig.cleanup();
+
+    // Without the stop flag the abandoned poll keeps scanning until its 60s
+    // budget expires; the race bounds the failure so a regression reddens
+    // this case instead of stalling the lane.
+    await expect(
+      Promise.race([
+        settled,
+        new Promise<'still polling'>((resolve) =>
+          setTimeout(() => resolve('still polling'), 5_000).unref(),
+        ),
+      ]),
+    ).resolves.toBe(false);
+  });
+
+  it.each([
+    [
+      'telemetry events',
+      (rig: TestRig) => rig.waitForTelemetryEvent('tool_call'),
+    ],
+    ['tool calls', (rig: TestRig) => rig.waitForToolCall('read_file')],
+    [
+      'any tool call',
+      (rig: TestRig) => rig.waitForAnyToolCall(['read_file', 'write_file']),
+    ],
+  ])(
+    'keeps polling for %s when telemetry is not ready yet',
+    async (_label, waitFor) => {
+      const rig = new TestRig();
+      vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(undefined);
+      const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
+
+      await expect(waitFor(rig)).resolves.toBe(false);
+      expect(poll).toHaveBeenCalled();
+    },
+  );
+
+  describe('readTelemetryEvent', () => {
+    it('returns the latest matching event with its attributes', async () => {
+      const rig = new TestRig();
+      await rig.setup('read telemetry event latest');
+      rig.createFile(
+        'telemetry.log',
+        [
+          JSON.stringify({
+            attributes: {
+              'event.name': 'qwen-code.chat_compression',
+              tokens_before: 1000,
+              tokens_after: 900,
+            },
+          }),
+          JSON.stringify({
+            attributes: { 'event.name': 'qwen-code.api_request' },
+          }),
+          JSON.stringify({
+            attributes: {
+              'event.name': 'qwen-code.chat_compression',
+              tokens_before: 28891,
+              tokens_after: 27128,
+            },
+          }),
+          JSON.stringify({
+            attributes: { 'event.name': 'qwen-code.api_request' },
+          }),
+        ].join('\n'),
+      );
+
+      const event = rig.readTelemetryEvent('chat_compression');
+
+      expect(event?.attributes?.['tokens_before']).toBe(28891);
+      expect(event?.attributes?.['tokens_after']).toBe(27128);
+
+      await rig.cleanup();
+    });
+
+    it('returns null when the event never landed', async () => {
+      const rig = new TestRig();
+      await rig.setup('read telemetry event absent');
+
+      expect(rig.readTelemetryEvent('chat_compression')).toBeNull();
+
+      await rig.cleanup();
+    });
+  });
+});

@@ -1,6 +1,92 @@
-import { defineConfig, type Plugin } from 'vite';
+import { pierreResources } from './pierre-build';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
+import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+import postcss from 'postcss';
+import selectorParser from 'postcss-selector-parser';
 import pkg from './package.json' with { type: 'json' };
+import { WEB_SHELL_BUILD_TARGET } from './vite.config';
+
+const COMPONENT_SCOPE =
+  ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn], [data-web-shell-root][data-web-shell-shadcn] *, [data-web-shell-portal-root][data-web-shell-shadcn] *)';
+const COMPONENT_ROOT_SCOPE =
+  ':is([data-web-shell-root]:where([data-web-shell-shadcn]), [data-web-shell-portal-root]:where([data-web-shell-shadcn]))';
+
+function scopeComponentCss(css: string): string {
+  const root = postcss.parse(css);
+  const scopeNode = selectorParser().astSync(COMPONENT_SCOPE).first.first;
+  if (!scopeNode) throw new Error('Invalid WebShell component CSS scope');
+  const keyframeNames = new Map<string, string>();
+  const propertyNames = new Map<string, string>();
+
+  root.walkAtRules((atRule) => {
+    const name = atRule.name.toLowerCase();
+    if (name.endsWith('keyframes')) {
+      const original = atRule.params.trim();
+      const scoped = `qwen-web-shell-${original}`;
+      keyframeNames.set(original, scoped);
+      atRule.params = scoped;
+    } else if (name === 'property' && atRule.params.startsWith('--')) {
+      const original = atRule.params.trim();
+      const scoped = `--qwen-web-shell-${original.slice(2)}`;
+      propertyNames.set(original, scoped);
+      atRule.params = scoped;
+    }
+  });
+  const sortedPropertyNames = [...propertyNames].sort(
+    ([left], [right]) => right.length - left.length,
+  );
+
+  root.walkDecls((declaration) => {
+    const scopedProperty = propertyNames.get(declaration.prop);
+    if (scopedProperty) declaration.prop = scopedProperty;
+    for (const [original, scoped] of sortedPropertyNames) {
+      declaration.value = declaration.value.replaceAll(original, scoped);
+    }
+    for (const [original, scoped] of keyframeNames) {
+      declaration.value = declaration.value.replace(
+        new RegExp(`(?<![\\w-])${escapeRegExp(original)}(?![\\w-])`, 'g'),
+        scoped,
+      );
+    }
+  });
+  root.walkRules((rule) => {
+    let parent = rule.parent;
+    while (parent) {
+      if (
+        parent.type === 'atrule' &&
+        parent.name.toLowerCase().endsWith('keyframes')
+      ) {
+        return;
+      }
+      parent = parent.parent;
+    }
+    if (
+      rule.selectors.every(
+        (selector) => selector === ':root' || selector === ':host',
+      )
+    ) {
+      rule.selector = COMPONENT_ROOT_SCOPE;
+      return;
+    }
+    rule.selector = selectorParser((selectors) => {
+      selectors.each((selector) => {
+        const first = selector.first;
+        if (first?.type === 'tag' || first?.type === 'universal') {
+          selector.insertAfter(first, scopeNode.clone());
+        } else {
+          selector.prepend(scopeNode.clone());
+        }
+      });
+    }).processSync(rule.selector);
+  });
+  return root.toString();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function injectCssModules(): Plugin {
   return {
@@ -13,68 +99,262 @@ function injectCssModules(): Plugin {
         )
         .map(([fileName, item]) => {
           delete bundle[fileName];
-          return typeof item.source === 'string'
-            ? item.source
-            : Buffer.from(item.source).toString('utf8');
+          const source =
+            typeof item.source === 'string'
+              ? item.source
+              : Buffer.from(item.source).toString('utf8');
+          return scopeComponentCss(source);
         })
         .join('\n');
       if (!css) return;
       const escapedCss = JSON.stringify(css);
       for (const item of Object.values(bundle)) {
         if (item.type !== 'chunk') continue;
-        if (
-          !item.isEntry &&
-          !item.facadeModuleId?.endsWith('/client/index.tsx')
-        ) {
+        // Every entry that renders components must carry the scoped
+        // stylesheet. The transcript entry is consumed on its own by the
+        // `/export html` document build, so it cannot inherit the CSS from
+        // the root entry.
+        //
+        // The two entries are built in separate rollup runs and therefore
+        // carry *different* stylesheets (the transcript one is a subset), so
+        // the injection guard is keyed per entry via
+        // `data-qwen-web-shell-entry`. A single shared key would let whichever
+        // entry loads first win: a host that imports both
+        // `@qwen-code/web-shell` and `@qwen-code/web-shell/transcript` would
+        // silently lose the editor/dialog rules if the transcript entry ran
+        // first. Injection stays idempotent per entry. Overlapping rules must
+        // retain the same relative order in both stylesheets because equal-
+        // specificity declarations still depend on cascade order. Both tags
+        // keep `data-qwen-web-shell="component"` so shadow-root style adoption
+        // (client/shadowDom.ts) still finds them; that reader concatenates
+        // every match rather than taking the first.
+        const entry = item.facadeModuleId?.endsWith('/client/managed-host.tsx')
+          ? 'managed-host'
+          : item.facadeModuleId?.endsWith('/client/transcript.ts')
+            ? 'transcript'
+            : item.facadeModuleId?.endsWith('/client/index.tsx')
+              ? 'index'
+              : undefined;
+        if (!entry) {
           continue;
         }
         item.code =
           `const __qwenWebShellCss=${escapedCss};\n` +
-          `if(typeof document!=="undefined"&&!document.querySelector('style[data-qwen-web-shell="component"]')){` +
-          `const s=document.createElement("style");s.dataset.qwenWebShell="component";s.textContent=__qwenWebShellCss;try{document.head.appendChild(s);}catch(e){console.warn("[qwen-web-shell] CSS injection blocked by CSP:",e);}}\n` +
+          `if(typeof document!=="undefined"&&!document.querySelector('style[data-qwen-web-shell-entry="${entry}"]')){` +
+          `const s=document.createElement("style");s.dataset.qwenWebShell="component";s.dataset.qwenWebShellEntry="${entry}";s.textContent=__qwenWebShellCss;try{document.head.appendChild(s);}catch(e){console.warn("[qwen-web-shell] CSS injection blocked by CSP:",e);}}\n` +
           item.code;
       }
     },
   };
 }
 
-export default defineConfig({
-  plugins: [react(), injectCssModules()],
+// The transcript entry is built in its own rollup run (`--mode transcript`)
+// so it only carries the CSS reachable from the read-only transcript
+// renderer. Built alongside the root entry, it would inherit the full
+// component stylesheet (editor, sidebar, …) that the `/export html`
+// document renderer inlines into every exported file (#11031).
+// The transcript renderer is inlined into every `/export html` document, under
+// a byte budget that web-templates enforces at build time. Strings for
+// surfaces the read-only transcript can never render have no business there:
+// the Live Voice dialog and setup card alone are ~200 entries. The selection
+// menu is also interactive-only; keep its converter out of the entry. Matching on the
+// resolved id (not the specifier) keeps this working however the module is
+// imported. Vite's ids use forward slashes on every platform while
+// `path.resolve` returns backslashes on Windows, so both sides go through
+// `normalizePath`: compared raw, the stub would never apply there and the
+// Windows build would blow the budget this exists to protect.
+const TRANSCRIPT_STUBS = new Map(
+  [
+    [
+      './client/components/message-deletion-messages.ts',
+      './client/components/message-deletion-messages.transcript-stub.ts',
+    ],
+    [
+      './client/trajectory/execution-messages.ts',
+      './client/trajectory/execution-messages.transcript-stub.ts',
+    ],
+    ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
+    [
+      './client/browser-notifications/messages.ts',
+      './client/browser-notifications/messages.transcript-stub.ts',
+    ],
+    [
+      './client/mcp-app/messages.ts',
+      './client/mcp-app/messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/files-messages.ts',
+      './client/components/artifacts/files-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/token-usage-messages.ts',
+      './client/components/artifacts/token-usage-messages.transcript-stub.ts',
+    ],
+    [
+      './client/voice/messages.ts',
+      './client/voice/messages.transcript-stub.ts',
+    ],
+    [
+      './client/trajectory/window-messages.ts',
+      './client/trajectory/window-messages.transcript-stub.ts',
+    ],
+    [
+      './client/trajectory/filter-messages.ts',
+      './client/trajectory/filter-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/workspace-agents/messages.ts',
+      './client/components/workspace-agents/messages.transcript-stub.ts',
+    ],
+    [
+      './client/settings/messages.ts',
+      './client/settings/messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/messages/SelectionCopyMenu.tsx',
+      './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
+    ],
+    [
+      './client/utils/selectionClipboard.ts',
+      './client/utils/selectionClipboard.transcript-stub.ts',
+    ],
+    [
+      './client/components/messages/workflow-agent-details.ts',
+      './client/components/messages/workflow-agent-details.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-lifecycle-messages.ts',
+      './client/components/managed/managed-lifecycle-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-task-messages.ts',
+      './client/components/managed/managed-task-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-workspace-messages.ts',
+      './client/components/managed/managed-workspace-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-mcp-messages.ts',
+      './client/components/managed/managed-mcp-messages.transcript-stub.ts',
+    ],
+  ].map(([module, stub]) => [
+    normalizePath(resolve(__dirname, module)),
+    normalizePath(resolve(__dirname, stub)),
+  ]),
+);
+
+function stubTranscriptModules(): Plugin {
+  return {
+    name: 'web-shell-stub-transcript-modules',
+    enforce: 'pre',
+    async resolveId(source, importer, options) {
+      const resolved = await this.resolve(source, importer, {
+        ...options,
+        skipSelf: true,
+      });
+      return resolved
+        ? (TRANSCRIPT_STUBS.get(normalizePath(resolved.id)) ?? null)
+        : null;
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => ({
+  plugins: [
+    pierreResources(),
+    ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
+    react(),
+    tailwindcss(),
+    injectCssModules(),
+  ],
+  resolve: {
+    alias: {
+      '@qwen-code/web-shell/daemon-react-sdk': resolve(
+        __dirname,
+        './client/daemon-react-sdk.ts',
+      ),
+      '@qwen-code/web-shell/transcript': resolve(
+        __dirname,
+        './client/transcript.ts',
+      ),
+      '@': resolve(__dirname, './client'),
+    },
+  },
   esbuild: {
     jsxDev: false,
   },
   build: {
     emptyOutDir: false,
+    outDir: mode === 'managed-host' ? 'dist/managed-host' : 'dist',
+    // Same floor as the app build: the lib bundle minifies the same xterm
+    // (it is not external), and Vite 5's default target lowers its logical
+    // assignments into code that throws on the first mode query. Also covers
+    // the transcript entry inlined into /export html documents.
+    target: WEB_SHELL_BUILD_TARGET,
     lib: {
-      entry: 'client/index.tsx',
+      entry:
+        mode === 'managed-host'
+          ? { index: 'client/managed-host.tsx' }
+          : mode === 'transcript'
+            ? { transcript: 'client/transcript.ts' }
+            : {
+                index: 'client/index.tsx',
+                'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+                'code-highlighter': 'client/code-highlighter.ts',
+              },
       formats: ['es'],
-      fileName: () => 'index.js',
+      fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: [
-        'react',
-        'react/jsx-runtime',
-        'react/jsx-dev-runtime',
-        'react-dom',
-        'react-dom/client',
-        '@qwen-code/sdk',
-        /^@qwen-code\/sdk\//,
-        '@qwen-code/webui',
-        /^@qwen-code\/webui\//,
-        'react-markdown',
-        'remark-gfm',
-        'remark-math',
-        'rehype-katex',
-        'shiki',
-        'mermaid',
-        'katex',
-        /^katex\//,
-        'codemirror',
-        /^@codemirror\//,
-      ],
+      external: (id, importer) => {
+        if (mode === 'managed-host') return false;
+        // Pierre requires Shiki 3/4; keep its copy inside the lazy preview bundle.
+        if (id === 'shiki') return !importer?.includes('/@pierre/');
+        return [
+          'react',
+          'react/jsx-runtime',
+          'react/jsx-dev-runtime',
+          'react-dom',
+          'react-dom/client',
+          'react-dom/server',
+          'radix-ui',
+          'lucide-react',
+          'class-variance-authority',
+          'clsx',
+          'tailwind-merge',
+          'vaul',
+          'react-resizable-panels',
+          '@qwen-code/sdk',
+          /^@qwen-code\/sdk\//,
+          '@datafe-open/markdown-chart',
+          '@datafe-open/markdown-chart-echarts',
+          '@datafe-open/markdown-chart-react',
+          'echarts',
+          /^echarts\//,
+          'react-markdown',
+          'remark-cjk-friendly',
+          /^remark-cjk-friendly\//,
+          'remark-gfm',
+          'remark-math',
+          'rehype-katex',
+          'mermaid',
+          'katex',
+          /^katex\/(?!dist\/katex\.min\.css$)/,
+          'codemirror',
+          /^@codemirror\//,
+        ].some((dependency) =>
+          typeof dependency === 'string'
+            ? dependency === id
+            : dependency.test(id),
+        );
+      },
     },
   },
   define: {
+    ...(mode === 'managed-host'
+      ? { 'process.env.NODE_ENV': JSON.stringify('production') }
+      : {}),
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
-});
+}));

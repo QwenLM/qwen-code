@@ -274,6 +274,36 @@ describe('checkI18n', () => {
     );
   });
 
+  it('allows the AUTO mode entry notice semantic key in en.js while preserving mismatch errors', async () => {
+    const { localesDir, sourceDir } = makeFixture();
+    writeLocale(localesDir, 'en', {
+      'auto_mode.entry_notice': 'Auto mode enabled.',
+      OrdinaryMismatch: 'Different English copy',
+    });
+    writeLocale(localesDir, 'fr', {
+      'auto_mode.entry_notice': 'Mode auto activé.',
+      OrdinaryMismatch: 'Texte français',
+    });
+    writeSource(
+      sourceDir,
+      "t('auto_mode.entry_notice');\nt('OrdinaryMismatch');\n",
+    );
+
+    const result = await checkI18n({
+      localesDir,
+      sourceDir,
+      supportedLanguages: languages('en', 'fr'),
+      mustTranslateKeys: ['auto_mode.entry_notice'],
+    });
+
+    expect(result.errors).not.toContain(
+      'Key-value mismatch in en.js: "auto_mode.entry_notice" !== "Auto mode enabled."',
+    );
+    expect(result.errors).toContain(
+      'Key-value mismatch in en.js: "OrdinaryMismatch" !== "Different English copy"',
+    );
+  });
+
   it('writes unused locale-only keys only when requested', async () => {
     const { root, localesDir, sourceDir } = makeFixture();
     writeLocale(localesDir, 'en', {
@@ -340,6 +370,22 @@ describe('checkI18n', () => {
     });
 
     expect(result.stats.unusedKeys).toEqual([]);
+  });
+
+  it('includes shared Core translator keys in the default scan', async () => {
+    const { localesDir } = makeFixture();
+    const key =
+      "You've used up your weekly credits.{{reset}} Please try again after the reset.";
+    writeLocale(localesDir, 'en', {
+      [key]: key,
+      'Unused quota fixture': 'Unused quota fixture',
+    });
+    const result = await checkI18n({
+      localesDir,
+      supportedLanguages: languages('en'),
+      mustTranslateKeys: [],
+    });
+    expect(result.stats.unusedKeys).toEqual(['Unused quota fixture']);
   });
 
   it('flags Mainland-Chinese vocabulary and variant Traditional chars in zh-TW values', async () => {

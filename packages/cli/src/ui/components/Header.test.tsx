@@ -52,6 +52,15 @@ describe('<Header />', () => {
     expect(lastFrame()).toContain('v1.0.0');
   });
 
+  it('shows a non-semver fallback like "unknown" without a bogus "v" prefix', () => {
+    const { lastFrame } = render(
+      <Header {...defaultProps} version="unknown" />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('(unknown)');
+    expect(frame).not.toContain('vunknown');
+  });
+
   it('displays auth type and model', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);
     expect(lastFrame()).toContain('Qwen OAuth');
@@ -73,6 +82,38 @@ describe('<Header />', () => {
       <Header {...defaultProps} authDisplayType={AuthDisplayType.API_KEY} />,
     );
     expect(lastFrame()).toContain('API Key');
+  });
+
+  it.each(['plus', 'pro'] as const)(
+    'shows the confirmed %s subscription plan and provider',
+    (subscriptionPlan) => {
+      const ui = render(
+        <Header
+          {...defaultProps}
+          authDisplayType="Qwen Subscription"
+          subscriptionPlan={subscriptionPlan}
+          model="qwen3.8-max"
+        />,
+      );
+      expect(ui.lastFrame()).toContain(
+        `Qwen ${subscriptionPlan === 'pro' ? 'Pro' : 'Plus'} | [Qwen Subscription] qwen3.8-max`,
+      );
+      ui.unmount();
+    },
+  );
+
+  it('does not invent a plan when subscription membership is unconfirmed', () => {
+    const ui = render(
+      <Header
+        {...defaultProps}
+        authDisplayType="Qwen Subscription"
+        model="qwen3.8-max"
+      />,
+    );
+    expect(ui.lastFrame()).toContain('[Qwen Subscription] qwen3.8-max');
+    expect(ui.lastFrame()).not.toContain('Qwen Pro');
+    expect(ui.lastFrame()).not.toContain('Qwen Plus');
+    ui.unmount();
   });
 
   it('displays custom provider auth labels as-is', () => {
@@ -125,6 +166,31 @@ describe('<Header />', () => {
     expect(titleIdx).toBeLessThan(subtitleIdx);
     expect(subtitleIdx).toBeLessThan(authIdx);
   });
+
+  it.each([undefined, 'Custom subtitle'])(
+    'removes only the default subscription spacer and preserves subtitle %s',
+    (customBannerSubtitle) => {
+      useTerminalSizeMock.mockReturnValue({ columns: 60, rows: 24 });
+      const ui = render(
+        <Header
+          {...defaultProps}
+          authDisplayType="Qwen Subscription"
+          subscriptionPlan="pro"
+          model="qwen3.8-max"
+          customBannerSubtitle={customBannerSubtitle}
+        />,
+      );
+      const lines = (ui.lastFrame() ?? '').split('\n');
+      const title = lines.findIndex((line) => line.includes('>_ Qwen Code'));
+      const plan = lines.findIndex((line) =>
+        line.includes('Qwen Pro | [Qwen Subscription]'),
+      );
+      expect(plan - title).toBe(customBannerSubtitle ? 2 : 1);
+      if (customBannerSubtitle)
+        expect(lines[title + 1]).toContain(customBannerSubtitle);
+      ui.unmount();
+    },
+  );
 
   it('keeps the blank spacer row when no subtitle is set (back-compat)', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);

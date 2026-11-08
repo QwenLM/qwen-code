@@ -10,6 +10,7 @@ import { ToolCallStatus } from '../types.js';
 import {
   STICKY_TODO_MAX_VISIBLE_ITEMS,
   getStickyTodoMaxVisibleItems,
+  getStickyTodoMaxVisibleItemsForMode,
   getStickyTodos,
   getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
@@ -108,11 +109,24 @@ function makeEmptyTodoToolGroup(
   return item;
 }
 
-function makeGeminiHistoryItem(text: string, id: number): HistoryItem {
+function makeLlmHistoryItem(text: string, id: number): HistoryItem {
   return {
     type: 'gemini',
     id,
     text,
+  };
+}
+
+function makeUserHistoryItem(
+  text: string,
+  id: number,
+  sentToModel?: boolean,
+): HistoryItem {
+  return {
+    type: 'user',
+    id,
+    text,
+    ...(sentToModel === undefined ? {} : { sentToModel }),
   };
 }
 
@@ -121,8 +135,8 @@ describe('getStickyTodos', () => {
     const history = [
       makeTodoToolGroup('first task', 1),
       makeTodoToolGroup('latest history task', 2),
-      makeGeminiHistoryItem('First response after todo', 3),
-      makeGeminiHistoryItem('Second response after todo', 4),
+      makeLlmHistoryItem('First response after todo', 3),
+      makeLlmHistoryItem('Second response after todo', 4),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toEqual([
@@ -154,7 +168,7 @@ describe('getStickyTodos', () => {
 
   it('keeps sticky todos hidden when the latest history todo is still the newest item', () => {
     const history = [
-      makeGeminiHistoryItem('Earlier response', 1),
+      makeLlmHistoryItem('Earlier response', 1),
       makeTodoToolGroup('latest history task', 2),
     ] as HistoryItem[];
 
@@ -164,7 +178,7 @@ describe('getStickyTodos', () => {
   it('keeps sticky todos hidden when the latest history todo has only one following item', () => {
     const history = [
       makeTodoToolGroup('latest history task', 1),
-      makeGeminiHistoryItem('One response after todo', 2),
+      makeLlmHistoryItem('One response after todo', 2),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toBeNull();
@@ -173,8 +187,8 @@ describe('getStickyTodos', () => {
   it('shows sticky todos once later history has likely moved the inline todo away', () => {
     const history = [
       makeTodoToolGroup('latest history task', 1),
-      makeGeminiHistoryItem('First response after todo', 2),
-      makeGeminiHistoryItem('Second response after todo', 3),
+      makeLlmHistoryItem('First response after todo', 2),
+      makeLlmHistoryItem('Second response after todo', 3),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toEqual([
@@ -203,11 +217,59 @@ describe('getStickyTodos', () => {
         ],
         1,
       ),
-      makeGeminiHistoryItem('First response after todo', 2),
-      makeGeminiHistoryItem('Second response after todo', 3),
+      makeLlmHistoryItem('First response after todo', 2),
+      makeLlmHistoryItem('Second response after todo', 3),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toBeNull();
+  });
+
+  it('hides sticky todos when a new user message starts after the snapshot', () => {
+    // Simulates: turn N creates todos → turn N ends → turn N+1 user message
+    // The stale todo list from turn N should not resurface.
+    const history = [
+      makeUserHistoryItem('Do the tasks', 1),
+      makeTodoToolGroup('task from turn N', 2),
+      makeLlmHistoryItem('Working on it', 3),
+      makeLlmHistoryItem('Done with turn N', 4),
+      makeUserHistoryItem('Next question', 5),
+    ] as HistoryItem[];
+
+    expect(getStickyTodos(history, [])).toBeNull();
+  });
+
+  it('hides sticky todos when a local slash command starts after the snapshot', () => {
+    // Local slash commands (/stats, /about, /exit) are handled without entering
+    // API history and carry sentToModel: false, yet they are still a new user
+    // interaction that must hide stale todos. Guarding hasUserMessageAfter on
+    // sentToModel !== false would silently regress this case (#7061).
+    const history = [
+      makeUserHistoryItem('Do the tasks', 1),
+      makeTodoToolGroup('task from turn N', 2),
+      makeLlmHistoryItem('Working on it', 3),
+      makeLlmHistoryItem('Done with turn N', 4),
+      makeUserHistoryItem('/stats', 5, false),
+    ] as HistoryItem[];
+
+    expect(getStickyTodos(history, [])).toBeNull();
+  });
+
+  it('shows sticky todos when no new user message follows the snapshot', () => {
+    // Normal case: todo snapshot is from the current turn.
+    const history = [
+      makeUserHistoryItem('Do the tasks', 1),
+      makeTodoToolGroup('current task', 2),
+      makeLlmHistoryItem('Working on it', 3),
+      makeLlmHistoryItem('Still working', 4),
+    ] as HistoryItem[];
+
+    expect(getStickyTodos(history, [])).toEqual([
+      {
+        id: 'todo-current task',
+        content: 'current task',
+        status: 'pending',
+      },
+    ]);
   });
 
   it('keeps sticky todos hidden for a completed pending snapshot', () => {
@@ -375,5 +437,108 @@ describe('sticky todo layout helpers', () => {
       STICKY_TODO_MAX_VISIBLE_ITEMS,
     );
     expect(getStickyTodoMaxVisibleItems(0)).toBe(STICKY_TODO_MAX_VISIBLE_ITEMS);
+  });
+
+  describe('getStickyTodoMaxVisibleItemsForMode', () => {
+    it('uses a height-aware VP cap that grows with terminal height', () => {
+      // VP cap = clamp(floor(h/12), 2, 4), then min(vpCap, base).
+      // h=80: vpCap=4, base=5 → 4
+      expect(getStickyTodoMaxVisibleItemsForMode(80, true)).toBe(4);
+      // h=40: vpCap=3, base=5 → 3
+      expect(getStickyTodoMaxVisibleItemsForMode(40, true)).toBe(3);
+      // h=24: vpCap=2, base=4 → 2
+      expect(getStickyTodoMaxVisibleItemsForMode(24, true)).toBe(2);
+    });
+
+    it('floors the VP cap at 2 on short terminals', () => {
+      // h=15: vpCap=clamp(1,2,4)=2, base=3 → min(2,3)=2
+      expect(getStickyTodoMaxVisibleItemsForMode(15, true)).toBe(2);
+    });
+
+    it('uses height-derived count in non-VP mode', () => {
+      expect(getStickyTodoMaxVisibleItemsForMode(80, false)).toBe(
+        getStickyTodoMaxVisibleItems(80),
+      );
+    });
+
+    it('respects height-derived floor when VP cap exceeds it', () => {
+      // Very short terminal: base is 1, vpCap is 2, so min(2,1)=1.
+      expect(getStickyTodoMaxVisibleItemsForMode(8, true)).toBe(1);
+    });
+  });
+
+  describe('unchanged snapshot guard', () => {
+    it('falls back to previous snapshot when the latest committed snapshot is unchanged', () => {
+      const history = [
+        makeCustomTodoToolGroup(
+          [{ id: '1', content: 'Old Task', status: 'in_progress' }],
+          1,
+        ),
+        makeLlmHistoryItem('Response', 2),
+        makeLlmHistoryItem('Response 2', 3),
+        {
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'todo-unchanged',
+              name: 'TodoWrite',
+              description: 'Update todos',
+              resultDisplay: {
+                type: 'todo_list' as const,
+                todos: [
+                  { id: '1', content: 'Old Task', status: 'in_progress' },
+                ],
+                unchanged: true,
+              },
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+            },
+          ],
+          id: 4,
+        },
+      ] as HistoryItem[];
+
+      // It should skip the unchanged snapshot and return the previous valid one
+      expect(getStickyTodos(history, [])).toEqual([
+        { id: '1', content: 'Old Task', status: 'in_progress' },
+      ]);
+    });
+
+    it('allows history snapshot to be used when pending snapshot is unchanged', () => {
+      const history = [
+        makeCustomTodoToolGroup(
+          [{ id: '1', content: 'History Task', status: 'pending' }],
+          1,
+        ),
+        makeLlmHistoryItem('Response', 2),
+        makeLlmHistoryItem('Response 2', 3),
+      ] as HistoryItem[];
+
+      const pendingHistoryItems = [
+        {
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'todo-pending-unchanged',
+              name: 'TodoWrite',
+              description: 'Update todos',
+              resultDisplay: {
+                type: 'todo_list' as const,
+                todos: [
+                  { id: '1', content: 'History Task', status: 'pending' },
+                ],
+                unchanged: true,
+              },
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ] as HistoryItemWithoutId[];
+
+      expect(getStickyTodos(history, pendingHistoryItems)).toEqual([
+        { id: '1', content: 'History Task', status: 'pending' },
+      ]);
+    });
   });
 });

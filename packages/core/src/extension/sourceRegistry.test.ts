@@ -184,6 +184,23 @@ describe('discoverPlugins', () => {
     expect(discovered.find((p) => p.name === 'docx')!.installed).toBe(true);
   });
 
+  it('passes the public network policy to marketplace loading', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Skills', []),
+    );
+
+    await discoverPlugins(
+      [{ name: 'Skills', source: 'anthropics/skills', type: 'github' }],
+      new Set(),
+      'public',
+    );
+
+    expect(loadMarketplaceConfigFromSource).toHaveBeenCalledWith(
+      'anthropics/skills',
+      'public',
+    );
+  });
+
   it('surfaces declared components and lastUpdated for the detail view', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Skills', [
@@ -360,5 +377,32 @@ describe('discoverPlugins', () => {
 
     expect(discovered).toHaveLength(1);
     expect(discovered[0].name).toBe('ok');
+  });
+
+  it('passes captured cwd and emits an absolute install source for a legacy relative marketplace', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'market-cwd-'));
+    const market = path.join(root, 'market');
+    fs.mkdirSync(market);
+    try {
+      vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+        config('Captured', [
+          { name: 'chosen', version: '1.0.0', source: './plugin' },
+        ]),
+      );
+      const [plugin] = await discoverPlugins(
+        [{ name: 'legacy', source: './market', type: 'local' }],
+        new Set(),
+        'public',
+        root,
+      );
+      expect(loadMarketplaceConfigFromSource).toHaveBeenCalledWith(
+        market,
+        'public',
+        root,
+      );
+      expect(plugin.installSource).toBe(`${market}:chosen`);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -47,7 +47,11 @@ export type VoiceTranscriber = (
   context: { voiceModel: string },
 ) => Promise<string>;
 
-export type VoiceInputStatus = 'idle' | 'recording' | 'transcribing';
+export type VoiceInputStatus =
+  | 'idle'
+  | 'recording'
+  | 'transcribing'
+  | 'refining';
 
 /** hold = hold-to-talk (release stops, dictation only). tap = tap to start, tap/silence to stop+submit. */
 export type VoiceInputMode = 'hold' | 'tap';
@@ -73,6 +77,13 @@ interface UseVoiceInputArgs {
   createRecorder: () => VoiceRecorder;
   transcribe: VoiceTranscriber;
   /**
+   * Optional cleanup pass applied to the final transcript before it is inserted
+   * (and, in tap mode, submitted). Runs for both batch and streaming models.
+   * Must resolve to usable text even on failure — the hook inserts whatever it
+   * returns. The signal is aborted if the recording is cancelled mid-refine.
+   */
+  refine?: (raw: string, signal: AbortSignal) => Promise<string>;
+  /**
    * Called after a tap-mode transcript is inserted, to submit the prompt.
    * Receives the resulting prompt text — buffer.insert dispatches async, so the
    * submit handler must not read it back from buffer.text synchronously.
@@ -80,6 +91,12 @@ interface UseVoiceInputArgs {
   onSubmit?: (text: string) => void;
   /** Pre-load the recorder backend when voice turns on (avoids cold-start race). */
   warmup?: () => void | Promise<void>;
+  /**
+   * Probe the OS microphone permission and surface a notice when it is not
+   * granted. Called when a recording actually starts, so users who never
+   * dictate are not told about microphone access on every startup.
+   */
+  checkMicrophonePermission?: () => void;
   /** Enable live streaming transcription (requires openStream + a drain-capable recorder). */
   streaming?: boolean;
   /** Open a streaming session; the hook pumps drained PCM into it while recording. */
@@ -151,8 +168,10 @@ export function useVoiceInput({
   addItem,
   createRecorder,
   transcribe,
+  refine,
   onSubmit,
   warmup,
+  checkMicrophonePermission,
   streaming,
   openStream,
 }: UseVoiceInputArgs): UseVoiceInputReturn {
@@ -168,6 +187,7 @@ export function useVoiceInput({
   const cancelRecordingRef = useRef<() => void>(() => {});
   const releaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const finalizeRef = useRef<(submit: boolean) => void>(() => {});
+  const refineAbortRef = useRef<AbortController | null>(null);
   const streamSessionRef = useRef<VoiceStreamSession | null>(null);
   const streamSessionPromiseRef = useRef<Promise<VoiceStreamSession> | null>(
     null,
@@ -274,6 +294,10 @@ export function useVoiceInput({
 
   const startRecording = useCallback(
     (silenceDetection: boolean) => {
+      // Permission is probed here rather than during warmup: on macOS an
+      // undetermined TCC status is only worth reporting to someone who is
+      // actually trying to record.
+      checkMicrophonePermission?.();
       const recorder = createRecorder();
       const sessionId = ++sessionIdRef.current;
       recorderRef.current = recorder;
@@ -388,6 +412,7 @@ export function useVoiceInput({
       });
     },
     [
+      checkMicrophonePermission,
       clearPump,
       clearReleaseTimer,
       createRecorder,
@@ -444,11 +469,37 @@ export function useVoiceInput({
           const audio = await recorder.stop();
           return transcribe(audio, { voiceModel });
         })
-        .then((transcript) => {
+        .then(async (transcript) => {
           if (!mountedRef.current || !isCurrentSession(recorder, sessionId)) {
             return;
           }
-          const inserted = insertTranscript(buffer, transcript);
+          let finalText = transcript;
+          if (refine) {
+            const escaped = escapeAnsiCtrlCodes(transcript).trim();
+            if (escaped) {
+              // refine() never throws (falls back to its input), so a failed
+              // cleanup still inserts the raw transcript.
+              setVoiceStatus('refining');
+              const controller = new AbortController();
+              refineAbortRef.current = controller;
+              try {
+                finalText = await refine(escaped, controller.signal);
+              } finally {
+                if (refineAbortRef.current === controller) {
+                  refineAbortRef.current = null;
+                }
+              }
+              // A cancel or a new recording during refinement invalidates this
+              // result — drop it instead of inserting into a changed buffer.
+              if (
+                !mountedRef.current ||
+                !isCurrentSession(recorder, sessionId)
+              ) {
+                return;
+              }
+            }
+          }
+          const inserted = insertTranscript(buffer, finalText);
           if (submit && inserted !== null) {
             // Pass the resulting prompt text explicitly — buffer.text hasn't
             // re-rendered yet after the async insert.
@@ -487,6 +538,7 @@ export function useVoiceInput({
       stopRecorderQuietly,
       isStreaming,
       onSubmit,
+      refine,
       reportError,
       resetStreamUi,
       setVoiceStatus,
@@ -500,6 +552,10 @@ export function useVoiceInput({
     sessionIdRef.current += 1;
     clearReleaseTimer();
     clearPump();
+    // Cancel any in-flight transcript refinement; the bumped sessionId already
+    // drops its result, this just stops the wasted request.
+    refineAbortRef.current?.abort();
+    refineAbortRef.current = null;
     const session = streamSessionRef.current;
     streamSessionRef.current = null;
     session?.abort();

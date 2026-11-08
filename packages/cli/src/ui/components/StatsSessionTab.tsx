@@ -7,6 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
+import { ICON } from '../constants.js';
 import { fmtTokens, getSeriesColors } from './stats-helpers.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { computeSessionStats } from '../utils/computeStats.js';
@@ -39,6 +40,22 @@ export const SessionTab: React.FC = () => {
     totalCached += m.tokens.cached;
   }
   const cacheRate = totalInput > 0 ? (totalCached / totalInput) * 100 : 0;
+  const generation = metrics.generation;
+  const lastGeneration = generation?.last;
+  const lastTps =
+    lastGeneration && lastGeneration.generationDurationMs > 0
+      ? lastGeneration.outputTokens /
+        (lastGeneration.generationDurationMs / 1000)
+      : undefined;
+  const averageTtft =
+    generation && generation.timedRequests > 0
+      ? generation.totalTtftMs / generation.timedRequests
+      : undefined;
+  const sessionTps =
+    generation && generation.totalGenerationDurationMs > 0
+      ? generation.totalThroughputOutputTokens /
+        (generation.totalGenerationDurationMs / 1000)
+      : undefined;
 
   const successColor = getStatusColor(computed.successRate, {
     green: TOOL_SUCCESS_RATE_HIGH,
@@ -158,6 +175,76 @@ export const SessionTab: React.FC = () => {
         </Box>
       </Box>
 
+      {lastGeneration && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color={theme.text.primary}>
+            {t('Generation Metrics')} ({t('Latest Request')})
+          </Text>
+          <Box>
+            <Box width={labelWidth}>
+              <Text color={theme.text.secondary}>{t('Model')}:</Text>
+            </Box>
+            <Text color={theme.text.primary}>{lastGeneration.model}</Text>
+          </Box>
+          <Box>
+            <Box width={labelWidth}>
+              <Text color={theme.text.secondary}>TTFT:</Text>
+            </Box>
+            <Text color={theme.text.primary}>
+              {formatDuration(lastGeneration.ttftMs)}
+            </Text>
+          </Box>
+          <Box>
+            <Box width={labelWidth}>
+              <Text color={theme.text.secondary}>{t('Generation Time')}:</Text>
+            </Box>
+            <Text color={theme.text.primary}>
+              {formatDuration(lastGeneration.generationDurationMs)}
+            </Text>
+          </Box>
+          <Box>
+            <Box width={labelWidth}>
+              <Text color={theme.text.secondary}>{t('Output Tokens')}:</Text>
+            </Box>
+            <Text color={theme.text.primary}>
+              {lastGeneration.outputTokens.toLocaleString()}
+            </Text>
+          </Box>
+          <Box>
+            <Box width={labelWidth}>
+              <Text color={theme.text.secondary}>TPS:</Text>
+            </Box>
+            <Text color={theme.text.primary}>
+              {lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}
+            </Text>
+          </Box>
+          <Box paddingLeft={2}>
+            <Box width={26}>
+              <Text color={theme.text.secondary}>» {t('Requests')}:</Text>
+            </Box>
+            <Text color={theme.text.primary}>{generation.timedRequests}</Text>
+          </Box>
+          <Box paddingLeft={2}>
+            <Box width={26}>
+              <Text color={theme.text.secondary}>» {t('Average TTFT')}:</Text>
+            </Box>
+            <Text color={theme.text.primary}>
+              {averageTtft === undefined ? '—' : formatDuration(averageTtft)}
+            </Text>
+          </Box>
+          <Box paddingLeft={2}>
+            <Box width={26}>
+              <Text color={theme.text.secondary}>» {t('Session TPS')}:</Text>
+            </Box>
+            <Text color={theme.text.primary}>
+              {sessionTps === undefined
+                ? '—'
+                : `${sessionTps.toFixed(1)} tok/s`}
+            </Text>
+          </Box>
+        </Box>
+      )}
+
       {/* Token Summary */}
       <Box flexDirection="column" marginTop={1}>
         <Text bold color={theme.text.primary}>
@@ -199,7 +286,9 @@ export const SessionTab: React.FC = () => {
           </Text>
           {Object.entries(metrics.models).map(([name, m], i) => (
             <Box key={name}>
-              <Text color={SERIES_COLORS[i % SERIES_COLORS.length]}>● </Text>
+              <Text color={SERIES_COLORS[i % SERIES_COLORS.length]}>
+                {ICON.CIRCLE_FILLED + ' '}
+              </Text>
               <Text color={theme.text.primary}>{name} </Text>
               <Text color={theme.text.secondary}>
                 {m.api.totalRequests} {t('reqs')} · {t('in')}=

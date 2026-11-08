@@ -10,6 +10,7 @@
  * Handles session updates from ACP and dispatches them to appropriate callbacks
  */
 
+import { logger } from '../utils/logger.js';
 import type {
   SessionNotification,
   AvailableCommand,
@@ -49,10 +50,6 @@ export class QwenSessionUpdateHandler {
   handleSessionUpdate(data: SessionNotification): void {
     const update = data.update;
     const sessionUpdate = (update as { sessionUpdate?: string }).sessionUpdate;
-    console.log(
-      '[SessionUpdateHandler] Processing update type:',
-      sessionUpdate,
-    );
 
     switch (sessionUpdate) {
       case 'user_message_chunk': {
@@ -115,7 +112,7 @@ export class QwenSessionUpdateHandler {
             this.callbacks.onThoughtChunk(text);
           } else if (this.callbacks.onStreamChunk) {
             // Fallback to regular stream processing
-            console.log(
+            logger.log(
               '[SessionUpdateHandler] 🧠 Falling back to onStreamChunk',
             );
             this.callbacks.onStreamChunk(text);
@@ -153,6 +150,13 @@ export class QwenSessionUpdateHandler {
       }
 
       case 'tool_call_update': {
+        if (
+          update._meta?.['toolLifecycle'] !== undefined &&
+          !('status' in update) &&
+          !('content' in update)
+        ) {
+          break;
+        }
         if (this.callbacks.onToolCall && 'toolCallId' in update) {
           const meta = update._meta as SessionUpdateMeta | undefined;
           const timestamp =
@@ -212,7 +216,7 @@ export class QwenSessionUpdateHandler {
             this.callbacks.onModeChanged(modeId);
           }
         } catch (err) {
-          console.warn(
+          logger.warn(
             '[SessionUpdateHandler] Failed to handle mode update',
             err,
           );
@@ -235,7 +239,7 @@ export class QwenSessionUpdateHandler {
             this.callbacks.onAvailableSkills(meta?.availableSkills ?? []);
           }
         } catch (err) {
-          console.warn(
+          logger.warn(
             '[SessionUpdateHandler] Failed to handle available commands update',
             err,
           );
@@ -244,7 +248,10 @@ export class QwenSessionUpdateHandler {
       }
 
       default:
-        console.log('[QwenAgentManager] Unhandled session update type');
+        logger.log(
+          '[SessionUpdateHandler] Unhandled session update type:',
+          sessionUpdate,
+        );
         break;
     }
   }
@@ -263,6 +270,7 @@ export class QwenSessionUpdateHandler {
     }
 
     const raw = meta.usage as Record<string, unknown> | null | undefined;
+    if (!raw && meta.durationMs == null) return;
     const usage = raw
       ? {
           // SDK field names

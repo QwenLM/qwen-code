@@ -11,7 +11,14 @@
  */
 
 import type React from 'react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -25,37 +32,57 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
-  ToolDisplayNames,
-  ToolNames,
-  type AgentTask,
-  type BackgroundApproval,
-  type MonitorTask,
-  type ToolCallConfirmationDetails,
-  type WorkflowTask,
-} from '@qwen-code/qwen-code-core';
+  MAX_RECENT_ACTIVITIES,
+} from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import type {
+  AgentTask,
+  BackgroundApproval,
+} from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import {
+  isActiveWorkflowStatus,
+  isTerminalWorkflowStatus,
+} from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type {
+  WorkflowApproval,
+  WorkflowTask,
+} from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type { MonitorTask } from '@qwen-code/qwen-code-core/services/monitorRegistry.js';
+import type { ToolCallConfirmationDetails } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
 import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  getCachedStringWidth,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
   type DreamDialogEntry,
+  compareActiveThenTerminal,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 import { localizeToolDisplayName, t } from '../../../i18n/index.js';
+import {
+  ancestorChain,
+  computeAgentTreeInfo,
+  computeUserBlockingIds,
+  statusGlyph,
+  treeRowPrefix,
+} from './agent-forest.js';
 
-// `DialogEntry['status']` widens the shell status union with the agent-only
-// `paused` state, so dialog handlers can switch on a single combined enum.
+// `DialogEntry['status']` widens the shared terminal states with the active
+// states used by agents and workflows.
 type EntryStatus = DialogEntry['status'];
 
-// Tool-name → display-name lookup (`run_shell_command` → `Shell`).
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
+// Bounds MaxSizedBox's per-tick layout work when a live activity carries a
+// pathological description (e.g. a heredoc script). A very large terminal
+// could in principle display more than this, so on such a description the
+// live row is truncated with an ellipsis; the cap trades that rare edge for
+// a hard ceiling on wrap-layout cost.
+const MAX_LIVE_LABEL_CHARS = 4096;
 
 function formatActivityLabel(name: string, description: string | undefined) {
   const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
@@ -69,6 +96,8 @@ function statusVerb(status: EntryStatus): string {
   switch (status) {
     case 'running':
       return t('Running');
+    case 'pausing':
+      return t('Pausing');
     case 'paused':
       return t('Paused');
     case 'completed':
@@ -128,10 +157,14 @@ interface StatusPresentation {
   labelColor: string;
 }
 
-function terminalStatusPresentation(
-  status: EntryStatus,
-): StatusPresentation | null {
+function statusPresentation(status: EntryStatus): StatusPresentation | null {
   switch (status) {
+    case 'pausing':
+      return {
+        icon: '\u2026',
+        color: theme.status.warning,
+        labelColor: theme.status.warningDim,
+      };
     case 'paused':
       return {
         icon: '\u23F8',
@@ -161,6 +194,27 @@ function terminalStatusPresentation(
   }
 }
 
+function isStoppableEntry(entry: DialogEntry): boolean {
+  return (
+    entry.status === 'running' ||
+    (entry.kind === 'workflow' && isActiveWorkflowStatus(entry.status))
+  );
+}
+
+function workflowPauseHint(entry: DialogEntry | null): string | undefined {
+  if (entry?.kind !== 'workflow' || !entry.isBackgrounded) return undefined;
+  // 'pausing' deliberately gets no footer hint: it is a status, not a
+  // keybinding; the detail body's Pausing explainer already carries it.
+  switch (entry.status) {
+    case 'running':
+      return 'p pause (cooperative)';
+    case 'paused':
+      return 'p resume (cooperative)';
+    default:
+      return undefined;
+  }
+}
+
 // Foreground agent rows get this prefix so users can tell at a glance
 // that cancelling one will unblock — and end — the parent's current
 // turn, a much heavier consequence than cancelling a truly async
@@ -170,13 +224,16 @@ function terminalStatusPresentation(
 const FOREGROUND_ROW_PREFIX = '[blocking]';
 const SHELL_ROW_PREFIX = '[shell]';
 
-function rowLabel(entry: DialogEntry): string {
+function rowLabel(entry: DialogEntry, userBlocking: boolean): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      const base = entry.isBackgrounded
-        ? label
-        : `${FOREGROUND_ROW_PREFIX} ${label}`;
+      // `[blocking]` warns that cancelling ends the USER's turn. That is
+      // only true when the whole ancestor chain is foreground — a nested
+      // foreground child awaited by a background parent blocks that
+      // parent, not the user. The caller resolves the verdict via
+      // computeUserBlockingIds.
+      const base = userBlocking ? `${FOREGROUND_ROW_PREFIX} ${label}` : label;
       // Flag agents with a parked approval so the user can spot which row to
       // open from the list without entering each detail view.
       return entry.pendingApprovals?.length
@@ -201,7 +258,10 @@ function rowLabel(entry: DialogEntry): string {
         entry.agentsDispatched > 0
           ? ` (${entry.agentsCompleted}/${entry.agentsDispatched})`
           : '';
-      return `[workflow] ${label}${phase}${counts}`;
+      const approval = entry.pendingApprovals.length
+        ? ` ⚠ ${t('needs approval')}`
+        : '';
+      return `[workflow] ${label}${phase}${counts}${approval}`;
     }
     case 'dream':
       return formatDreamRowLabel(entry);
@@ -212,6 +272,35 @@ function rowLabel(entry: DialogEntry): string {
       );
     }
   }
+}
+
+/**
+ * The detail view's Parent line for a nested agent: a breadcrumb of the
+ * present ancestor chain (`main › researcher — <description>`), rooted at
+ * '…' when the chain breaks before the top level, or the launch-time
+ * `parentName` when the immediate parent is already gone. Undefined for
+ * top-level agents (they get no Parent section).
+ */
+function formatParentBreadcrumb(
+  entry: AgentDialogEntry,
+  lookup: (id: string) => AgentTask | undefined,
+): string | undefined {
+  if (entry.parentAgentId == null) return undefined;
+  const { chain, terminatedBy } = ancestorChain(entry, lookup);
+  if (chain.length === 0) {
+    return `${entry.parentName ?? t('unknown agent')} · ${t('no longer running')}`;
+  }
+  // ancestorChain returns nearest-first; the breadcrumb reads root-first.
+  const rootFirst = [...chain].reverse();
+  const crumbs = [
+    terminatedBy === 'root' ? 'main' : '…',
+    ...rootFirst.map((p) => p.subagentType ?? 'agent'),
+  ].join(' › ');
+  const immediateParent = chain[0];
+  const desc = immediateParent.description
+    ? ` — ${immediateParent.description}`
+    : '';
+  return `${crumbs}${desc}`;
 }
 
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
@@ -232,7 +321,11 @@ function elapsedFor(entry: { startTime: number; endTime?: number }): string {
 // others needed ellipsis, breaking the left-column alignment of the prefix.
 function truncateToWidth(text: string, maxWidth: number): string {
   if (maxWidth <= 0) return '';
-  if (stringWidth(text) <= maxWidth) return text;
+  // Cache the full-string measurement: the detail view re-renders every
+  // second and this runs once per (unchanged) history row. The per-char
+  // loop below only executes on the rare row that actually needs an
+  // ellipsis, so it stays on the uncached primitive.
+  if (getCachedStringWidth(text) <= maxWidth) return text;
   const ellipsis = '…';
   const ellipsisWidth = stringWidth(ellipsis);
   const target = Math.max(0, maxWidth - ellipsisWidth);
@@ -295,6 +388,14 @@ const ListBody: React.FC<{
   const hiddenBelow = entries.length - windowEnd;
   const visible = entries.slice(windowStart, windowEnd);
 
+  // Nested-agent affordances, computed over the FULL roster (not the
+  // window) so indent and the [blocking] verdict don't change as the
+  // selection scrolls a parent out of view. The entries arrive already
+  // grouped depth-first (useBackgroundTaskView applies
+  // reorderChildrenUnderParents), so indentation lines up with position.
+  const treeInfo = computeAgentTreeInfo(entries);
+  const blockingIds = computeUserBlockingIds(entries);
+
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
@@ -312,19 +413,31 @@ const ListBody: React.FC<{
         {visible.map((entry, visibleIdx) => {
           const idx = windowStart + visibleIdx;
           const isSelected = idx === selectedIndex;
-          const terminal = terminalStatusPresentation(entry.status);
+          const presentation = statusPresentation(entry.status);
           const labelColor = isSelected
             ? theme.text.accent
-            : terminal
-              ? terminal.labelColor
+            : presentation
+              ? presentation.labelColor
               : theme.text.primary;
+          const treePrefix =
+            entry.kind === 'agent'
+              ? treeRowPrefix(entry, treeInfo.get(entry.agentId))
+              : '';
           return (
             <Box key={entryId(entry)} flexDirection="row" paddingX={1}>
               <Text color={isSelected ? theme.text.accent : undefined}>
                 {isSelected ? '> ' : '  '}
               </Text>
+              {treePrefix !== '' && (
+                <Text color={theme.text.secondary}>{treePrefix}</Text>
+              )}
               <Text color={labelColor}>
-                {escapeAnsiCtrlCodes(rowLabel(entry))}
+                {escapeAnsiCtrlCodes(
+                  rowLabel(
+                    entry,
+                    entry.kind === 'agent' && blockingIds.has(entry.agentId),
+                  ),
+                )}
               </Text>
             </Box>
           );
@@ -420,7 +533,7 @@ const DreamDetailBody: React.FC<{
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = t('Dream');
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.sessionCount !== undefined) {
     dimSubtitleParts.push(formatSessionCount(entry.sessionCount));
@@ -450,9 +563,9 @@ const DreamDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -588,27 +701,58 @@ const AgentDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
+  const config = useConfig();
   const title = escapeAnsiCtrlCodes(
     `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
   );
 
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
-  if (entry.stats?.totalTokens) {
+  if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
       t('{{count}} tokens', {
-        count: formatTokenCount(entry.stats.totalTokens),
+        count: formatTokenCount(entry.stats.outputTokens),
       }),
     );
   }
   if (entry.stats?.toolUses !== undefined) {
     dimSubtitleParts.push(formatToolUseCount(entry.stats.toolUses));
   }
+  // Nesting badge: launch depth is 0-based, user-facing levels are 1-based
+  // (a top-level sub-agent is level 1 and gets no badge).
+  if ((entry.depth ?? 0) > 0) {
+    dimSubtitleParts.push(
+      t('nested \u00B7 level {{level}} of {{max}}', {
+        level: String((entry.depth ?? 0) + 1),
+        max: String(config.getMaxSubagentDepth()),
+      }),
+    );
+  }
+
+  // Parent breadcrumb + live children, resolved from the registry at
+  // render time (the detail body re-renders on activity ticks, so both
+  // stay current). Every lookup tolerates eviction: a missing ancestor
+  // truncates the breadcrumb with '\u2026', a fully-gone parent falls back to
+  // the launch-time parentName captured at registration.
+  const registry = config.getBackgroundTaskRegistry();
+  const parentLine = formatParentBreadcrumb(entry, (id) => registry.get(id));
+  // Same active-first / newest-first ordering as the main roster: getAll()
+  // is insertion-ordered, so without the sort a parent with more than five
+  // children would hide its still-running newest child behind its oldest
+  // completed ones.
+  const childAgents = registry
+    .getAll()
+    .filter((task) => task.parentAgentId === entry.agentId)
+    .sort(compareActiveThenTerminal);
+  const visibleChildAgents = childAgents.slice(0, 5);
+  const hiddenChildCount = childAgents.length - visibleChildAgents.length;
 
   // Registry stores activities newest-last; keep that order so the live
-  // row sits at the bottom of the Progress block. Cap at 5 in case the
-  // registry ever raises its buffer.
-  const activities = (entry.recentActivities ?? []).slice(-5);
+  // row sits at the bottom of the Progress block. Re-cap defensively in
+  // case a resume path ever restores an oversized buffer.
+  const activities = (entry.recentActivities ?? []).slice(
+    -MAX_RECENT_ACTIVITIES,
+  );
   const blockedReason = entry.resumeBlockedReason;
   const hasError = Boolean(entry.error);
   const hasBlockedReason = Boolean(blockedReason);
@@ -624,6 +768,53 @@ const AgentDetailBody: React.FC<{
       `${visiblePromptLines[lastIdx].trimEnd()}\u2026`;
   }
 
+  // The live row (the newest activity) is the whole reason to open this
+  // view, so it always renders in full and wraps. The older history rows
+  // are one-line context. `MaxSizedBox` clips from the *bottom*, so a full
+  // 10-row history would push the live command \u2014 and the Transcript pointer
+  // below it \u2014 off a short terminal, inverting what this view is for. Budget
+  // the always-valuable sections first, then give what's left to the history,
+  // dropping the OLDEST rows first so the live row survives (issue #6569).
+  const liveActivity =
+    activities.length > 0 ? activities[activities.length - 1] : undefined;
+  const historyActivities = activities.slice(0, -1);
+  const liveFullLabel = liveActivity
+    ? sanitizeMultilineForDisplay(
+        formatActivityLabel(liveActivity.name, liveActivity.description),
+      )
+    : '';
+  const liveLabel =
+    liveFullLabel.length > MAX_LIVE_LABEL_CHARS
+      ? `${liveFullLabel.slice(0, MAX_LIVE_LABEL_CHARS)}\u2026`
+      : liveFullLabel;
+  const wrappedRows = (text: string) =>
+    maxWidth > 0
+      ? Math.max(1, Math.ceil(getCachedStringWidth(text) / maxWidth))
+      : 1;
+  // Reserve height for every section that is NOT a history row. Each
+  // `<Box />` spacer is one line, each bold header is one line.
+  let reservedLines = 2; // title + subtitle (no leading spacer)
+  if (parentLine !== undefined) reservedLines += 3; // spacer + header + path
+  if (visibleChildAgents.length > 0) {
+    reservedLines +=
+      2 + visibleChildAgents.length + (hiddenChildCount > 0 ? 1 : 0);
+  }
+  if (liveActivity) reservedLines += 2 + wrappedRows(`> ${liveLabel}`);
+  if (entry.outputFile) {
+    reservedLines += 2 + wrappedRows(`  ${entry.outputFile}`);
+  }
+  if (visiblePromptLines.length > 0) {
+    reservedLines += 2 + visiblePromptLines.length;
+  }
+  // Terminal-state sections (rare, and mutually exclusive with an active
+  // live command); a small fixed reserve keeps the estimate conservative.
+  if (hasBlockedReason) reservedLines += 3;
+  if (hasError) reservedLines += 3;
+  const historyBudget = Math.max(0, maxHeight - reservedLines);
+  const shownHistory = historyActivities.slice(
+    Math.max(0, historyActivities.length - historyBudget),
+  );
+
   return (
     <MaxSizedBox
       maxHeight={maxHeight}
@@ -636,15 +827,61 @@ const AgentDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
           {dimSubtitleParts.join(' \u00B7 ')}
         </Text>
       </Box>
+
+      {parentLine !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Parent')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {`  ${escapeAnsiCtrlCodes(parentLine)}`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {visibleChildAgents.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Sub-agents')}
+              <Text
+                color={theme.text.secondary}
+              >{` (${childAgents.length})`}</Text>
+            </Text>
+          </Box>
+          {visibleChildAgents.map((child) => (
+            <Box key={child.agentId}>
+              <Text color={theme.text.secondary} wrap="truncate-end">
+                {`  ${statusGlyph(child.status)} ${escapeAnsiCtrlCodes(
+                  `${child.subagentType ?? 'agent'} \u2014 ${child.description}`,
+                )} \u00B7 ${elapsedFor(child)}`}
+              </Text>
+            </Box>
+          ))}
+          {hiddenChildCount > 0 && (
+            <Box>
+              <Text color={theme.text.secondary}>
+                {`  \u2026 ${t('{{count}} more', { count: String(hiddenChildCount) })}`}
+              </Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
 
       {activities.length > 0 && (
         <Fragment>
@@ -654,28 +891,63 @@ const AgentDetailBody: React.FC<{
               {t('Progress')}
             </Text>
           </Box>
-          {activities.map((a, i) => {
-            const isLast = i === activities.length - 1;
+          {shownHistory.map((a, i) => {
             // ASCII `>` is unambiguously one cell wide in every terminal
-            // font, so `> ` (2 cells) aligns with a two-space indent on the
-            // other rows. Unicode chevrons rendered with inconsistent width
-            // broke alignment in some fonts.
-            const prefix = isLast ? '> ' : '  ';
+            // font, so `> ` (2 cells) aligns with the two-space indent on
+            // the history rows. Unicode chevrons rendered with inconsistent
+            // width broke alignment in some fonts. History rows stay one
+            // line; only the live row below wraps.
+            const prefix = '  ';
+            // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`)
+            // because bare C0 controls (\r, BS, BEL, DEL) pass through the
+            // ANSI-sequence escape and could still corrupt the row.
+            const fullLabel = sanitizeMultilineForDisplay(
+              formatActivityLabel(a.name, a.description),
+            );
             const label = truncateToWidth(
-              escapeAnsiCtrlCodes(formatActivityLabel(a.name, a.description)),
-              Math.max(0, maxWidth - stringWidth(prefix)),
+              fullLabel,
+              Math.max(0, maxWidth - getCachedStringWidth(prefix)),
             );
             return (
               <Box key={`${a.at}-${i}`}>
-                <Text
-                  color={isLast ? theme.text.primary : theme.text.secondary}
-                >
+                <Text color={theme.text.secondary}>
                   {prefix}
                   {label}
                 </Text>
               </Box>
             );
           })}
+          {liveActivity && (
+            // The live row is the one the user opens this view to inspect
+            // ("is this command stuck or still reasonable?"), so it renders
+            // in full and wraps; the height budget above keeps it and the
+            // Transcript pointer on-screen by trimming older history first.
+            // Prefix and label must be ONE string child: MaxSizedBox's wrap
+            // layout drops the prefix's trailing space when they arrive as
+            // separate segments (`> Shell` → `>Shell`).
+            <Box key="live">
+              <Text color={theme.text.primary}>{`> ${liveLabel}`}</Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {entry.outputFile && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Transcript')}
+            </Text>
+          </Box>
+          <Box>
+            {/* `wrap="wrap"`, not `truncate-end`: a real transcript path is
+                ~130 chars and only exists to be copied / `tail -f`'d, so
+                truncating it withholds the one string the section is for. */}
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`  ${escapeAnsiCtrlCodes(entry.outputFile)}`}
+            </Text>
+          </Box>
         </Fragment>
       )}
 
@@ -739,7 +1011,7 @@ const ShellDetailBody: React.FC<{
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Shell')} \u203A ${entry.command}`;
 
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
     dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
@@ -764,9 +1036,9 @@ const ShellDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -820,7 +1092,7 @@ const MonitorDetailBody: React.FC<{
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Monitor')} › ${entry.description}`;
 
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
     dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
@@ -856,9 +1128,9 @@ const MonitorDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -911,7 +1183,7 @@ const WorkflowDetailBody: React.FC<{
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.agentsDispatched > 0) {
     dimSubtitleParts.push(
@@ -962,9 +1234,9 @@ const WorkflowDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -975,6 +1247,52 @@ const WorkflowDetailBody: React.FC<{
           <Box />
           <Box>
             <Text wrap="wrap">{entry.meta.description}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {(entry.status === 'pausing' || entry.status === 'paused') && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text color={theme.status.warning}>
+              {entry.status === 'pausing'
+                ? t(
+                    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
+                  )
+                : t(
+                    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
+                  )}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {entry.sizeWarning && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {`⚠ ${
+                entry.sizeWarning.axis === 'agents'
+                  ? t(
+                      'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+                      {
+                        agents: String(entry.sizeWarning.scheduledAgents),
+                        cap: String(entry.sizeWarning.agentCap),
+                      },
+                    )
+                  : t(
+                      'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
+                      {
+                        tokens: formatTokenCount(
+                          entry.sizeWarning.projectedTokens,
+                        ),
+                        cap: formatTokenCount(entry.sizeWarning.tokenCap),
+                      },
+                    )
+              }`}
+            </Text>
           </Box>
         </Fragment>
       )}
@@ -998,7 +1316,7 @@ const WorkflowDetailBody: React.FC<{
           )}
           {visiblePhases.map((phaseTitle, i) => {
             const isCurrent =
-              entry.status === 'running' &&
+              isActiveWorkflowStatus(entry.status) &&
               i === visiblePhases.length - 1 &&
               entry.currentPhase === phaseTitle;
             const marker = isCurrent ? '▸' : '·';
@@ -1087,7 +1405,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   availableTerminalHeight,
   terminalWidth,
 }) => {
-  const { entries, selectedIndex, dialogOpen, dialogMode } =
+  const { entries, selectedIndex, dialogOpen, dialogMode, autoOpened } =
     useBackgroundTaskViewState();
   const isDetailMode =
     dialogMode === 'detail' || dialogMode === 'detail-from-panel';
@@ -1097,16 +1415,22 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     closeDialog,
     enterDetail,
     exitDetail,
+    acknowledgeAutoOpen,
     cancelSelected,
     resumeSelected,
+    toggleSelectedWorkflowPause,
+    setSelectedIndex,
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
-  // Progress and Prompt are each self-capped at 5 rows inside DetailBody,
-  // so the body never grows unbounded. Use all available height (minus the
-  // dialog chrome) as the MaxSizedBox budget so nothing gets clipped just
-  // because the terminal is short. Chrome = border(2) + title(1) + two
-  // marginTops(2) + hint(1) = 6 rows.
+  // Progress (up to 10 rows + the wrapped live row), Transcript (3 rows:
+  // spacer + label + path) and Prompt (5 rows) are each bounded inside
+  // DetailBody, so the body never grows unbounded. DetailBody also budgets
+  // this height across those sections so the live row and Transcript survive
+  // a short terminal. Pass all available height (minus the dialog chrome) as
+  // the MaxSizedBox budget so nothing gets clipped just because the terminal
+  // is short. Chrome = border(2) + title(1) + two marginTops(2) + hint(1) = 6
+  // rows.
   const detailContentHeight = Math.max(10, availableTerminalHeight - 6);
   // Rounded border + paddingX=1 on the outer Box ≈ 4 horizontal cells.
   const detailContentWidth = Math.max(10, terminalWidth - 4);
@@ -1141,6 +1465,31 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useEffect(() => {
     if (!isDetailMode) setSaveActive(false);
   }, [isDetailMode]);
+
+  // A rejected cooperative pause/resume (the registry returns false when the
+  // run's state raced away mid-request) flashes a short footer note instead
+  // of being swallowed, matching the explicit error /workflows p reports.
+  // The flash is keyed to the entry that produced it (moving the selection
+  // away hides it); each rejection sets a fresh object, so the effect's
+  // timer re-arms on a repeat rejection, and an accepted retry clears it.
+  const [pauseRejected, setPauseRejected] = useState<{
+    entryKey: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!pauseRejected) return;
+    const timer = setTimeout(() => setPauseRejected(null), 3000);
+    return () => clearTimeout(timer);
+  }, [pauseRejected]);
+
+  const toggleWorkflowPauseWithFeedback = useCallback(() => {
+    const target = entries[selectedIndex];
+    const verdict = toggleSelectedWorkflowPause();
+    if (verdict === false && target) {
+      setPauseRejected({ entryKey: entryId(target) });
+    } else if (verdict === true) {
+      setPauseRejected(null);
+    }
+  }, [entries, selectedIndex, toggleSelectedWorkflowPause]);
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
@@ -1184,35 +1533,60 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // registry's approval-change callback), so `pendingApprovals` is current.
   // When present in detail mode, the dialog renders the shared
   // ToolConfirmationMessage and yields keyboard focus to it.
-  const selectedApproval: BackgroundApproval | undefined =
-    selectedEntry?.kind === 'agent'
-      ? selectedEntry.pendingApprovals?.[0]
-      : undefined;
+  const selectedApproval:
+    | { kind: 'agent'; approval: BackgroundApproval; ownerId: string }
+    | { kind: 'workflow'; approval: WorkflowApproval; ownerId: string }
+    | undefined =
+    selectedEntry?.kind === 'agent' && selectedEntry.pendingApprovals?.[0]
+      ? {
+          kind: 'agent',
+          approval: selectedEntry.pendingApprovals[0],
+          ownerId: selectedEntry.agentId,
+        }
+      : selectedEntry?.kind === 'workflow' && selectedEntry.pendingApprovals[0]
+        ? {
+            kind: 'workflow',
+            approval: selectedEntry.pendingApprovals[0],
+            ownerId: selectedEntry.runId,
+          }
+        : undefined;
   const approvalActive = isDetailMode && Boolean(selectedApproval);
   const approvalUsesQuestionDialog =
-    selectedApproval?.confirmationDetails.type === 'ask_user_question';
+    selectedApproval?.approval.confirmationDetails.type === 'ask_user_question';
 
   // Reconstruct the full confirmation details (the parked approval omits
   // the runtime-owned `onConfirm`) and route the user's outcome back
   // through the registry, which invokes the parked call's `respond` to
-  // resume the agent's tool call.
+  // resume the parked tool call.
   const approvalConfirmationDetails: ToolCallConfirmationDetails | undefined =
-    selectedApproval && selectedAgentIdForActivity
+    selectedApproval
       ? // The spread restores every field except `onConfirm`; the cast is
         // needed because TS can't prove the discriminated-union shape across
         // an object spread.
         ({
-          ...selectedApproval.confirmationDetails,
+          ...selectedApproval.approval.confirmationDetails,
           hideAlwaysAllow: true,
           onConfirm: async (
-            outcome: Parameters<BackgroundApproval['respond']>[0],
-            payload?: Parameters<BackgroundApproval['respond']>[1],
+            outcome: Parameters<ToolCallConfirmationDetails['onConfirm']>[0],
+            payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
           ) => {
+            if (selectedApproval.kind === 'agent') {
+              await config
+                .getBackgroundTaskRegistry()
+                .resolvePendingApproval(
+                  selectedApproval.ownerId,
+                  selectedApproval.approval.callId,
+                  outcome,
+                  payload,
+                  selectedApproval.approval.subagentId,
+                );
+              return;
+            }
             await config
-              .getBackgroundTaskRegistry()
+              .getWorkflowRunRegistry()
               .resolvePendingApproval(
-                selectedAgentIdForActivity,
-                selectedApproval.callId,
+                selectedApproval.ownerId,
+                selectedApproval.approval.approvalId,
                 outcome,
                 payload,
               );
@@ -1240,21 +1614,26 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // fire when tools run, but duration needs to advance even when the agent
   // is quietly thinking — otherwise the "33s" line freezes between tool uses.
   const selectedStatus = selectedEntry?.status;
+  const selectedShouldTick =
+    selectedEntry?.kind === 'workflow'
+      ? isActiveWorkflowStatus(selectedEntry.status)
+      : selectedStatus === 'running';
   useEffect(() => {
-    if (
-      !dialogOpen ||
-      !isDetailMode ||
-      !selectedEntryId ||
-      selectedStatus !== 'running'
-    )
+    if (!dialogOpen || !isDetailMode || !selectedEntryId || !selectedShouldTick)
       return;
     const id = setInterval(() => setActivityTick((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    selectedEntryId,
+    selectedShouldTick,
+  ]);
 
-  // Auto-fallback to the list view when the selected agent reaches a
+  // Auto-fallback to the list view when the selected entry reaches a
   // terminal state while the user is watching it live. We only exit on
-  // the running → terminal *transition* — if the user deliberately
+  // an active → terminal *transition* — if the user deliberately
   // opened an already-completed entry, they stay on it. The detail
   // view itself renders terminal state fine, so this is a UX choice
   // (return focus to the running roster) rather than a correctness fix.
@@ -1273,11 +1652,36 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     // registry — but the entry could disappear if the registry is reset.
     if (!selectedEntryId) {
       initialDetailStatusRef.current = null;
+      // Match every key-handler exit: leaving detail must never carry an
+      // armed confirm step into list mode (stale footer hint + swallowed
+      // first Esc).
+      setPendingCancelEntryId(null);
       exitDetail();
       return;
     }
     const seen = initialDetailStatusRef.current;
-    if (!seen || seen.entryId !== selectedEntryId) {
+    if (seen && seen.entryId !== selectedEntryId) {
+      // Selection is index-based while the roster re-sorts on every
+      // status change, so a *different* entry can move into the pinned
+      // index while the viewed entry is still alive in the list.
+      // Re-anchor the selection to its new position; only exit when the
+      // entry is genuinely gone.
+      const driftedIndex = entries.findIndex(
+        (candidate) => entryId(candidate) === seen.entryId,
+      );
+      if (driftedIndex >= 0) {
+        setSelectedIndex(driftedIndex);
+        return;
+      }
+      initialDetailStatusRef.current = null;
+      // Match every key-handler exit: leaving detail must never carry an
+      // armed confirm step into list mode (stale footer hint + swallowed
+      // first Esc).
+      setPendingCancelEntryId(null);
+      exitDetail();
+      return;
+    }
+    if (!seen) {
       // First render in detail mode for this entry — remember the status we
       // opened with so we can detect a transition away from 'running' later.
       if (selectedStatus) {
@@ -1288,11 +1692,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
       return;
     }
-    if (
-      seen.status === 'running' &&
-      selectedStatus &&
-      selectedStatus !== 'running'
-    ) {
+    const seenWasActive =
+      seen.status === 'running' ||
+      seen.status === 'pausing' ||
+      seen.status === 'paused';
+    const selectedIsTerminal =
+      selectedStatus === 'completed' ||
+      selectedStatus === 'failed' ||
+      selectedStatus === 'cancelled';
+    if (seenWasActive && selectedIsTerminal) {
+      setPendingCancelEntryId(null);
       exitDetail();
     }
   }, [
@@ -1302,6 +1711,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntryId,
     selectedStatus,
     exitDetail,
+    entries,
+    setSelectedIndex,
   ]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
@@ -1310,19 +1721,25 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const handleCancelKey = () => {
     if (!selectedEntry) return;
     // `x` only has a meaning for entries the user can still act on:
-    // `running` → cancel, `paused` (agent kind) → abandon. Terminal
+    // Active workflows and running tasks → cancel; paused agents → abandon. Terminal
     // statuses (completed/failed/cancelled) ignore the keypress so a
     // foreground entry that just settled can't display the misleading
     // "x again to confirm stop" line during the brief window before it
     // unregisters.
-    const isCancelable = selectedEntry.status === 'running';
+    const isCancelable = isStoppableEntry(selectedEntry);
     const isAbandonable =
       selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
     if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
-    const isForegroundAgent =
-      selectedEntry.kind === 'agent' && !selectedEntry.isBackgrounded;
-    if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
+    // Two-step confirm only when cancelling would end the USER's turn —
+    // the same chain-aware verdict as the `[blocking]` row prefix. A
+    // foreground child awaited by a *background* parent unblocks that
+    // parent, not the user, so it cancels on the first press like any
+    // background entry.
+    const isUserBlockingAgent =
+      selectedEntry.kind === 'agent' &&
+      computeUserBlockingIds(entries).has(selectedEntry.agentId);
+    if (isUserBlockingAgent && pendingCancelEntryId !== entryKey) {
       setPendingCancelEntryId(entryKey);
       return;
     }
@@ -1361,6 +1778,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
 
       if (dialogMode === 'list') {
+        // Only keys prose cannot produce acknowledge the auto-open. The
+        // selection matchers also carry bare `k`/`j` and Ctrl+P/Ctrl+N, and
+        // ordinary typed letters satisfy them — acknowledging on those let
+        // the next letter of the same sentence cancel or pause the run
+        // (#16432 R2-1). Bare k/j still move the selection; the disarm
+        // simply stays armed until a real arrow key arrives.
+        if (key.name === 'up' || key.name === 'down') {
+          acknowledgeAutoOpen();
+        }
         if (keyMatchers[Command.SELECTION_UP](key)) {
           moveSelectionUp();
           setPendingCancelEntryId(null);
@@ -1369,6 +1795,22 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         if (keyMatchers[Command.SELECTION_DOWN](key)) {
           moveSelectionDown();
           setPendingCancelEntryId(null);
+          return;
+        }
+        // An auto-open lands mid-keystroke and keypress dispatch is a
+        // broadcast, so a letter still aimed at the unmounted composer
+        // would cancel or pause the run, and Enter would arm the approval.
+        // Disarm those keys until a navigation key (above) acknowledges
+        // the open; user-initiated opens never carry the tag (#16432).
+        if (
+          autoOpened &&
+          (key.name === 'return' ||
+            ((key.sequence === 'x' ||
+              key.sequence === 'p' ||
+              key.sequence === 'r') &&
+              !key.ctrl &&
+              !key.meta))
+        ) {
           return;
         }
         if (key.name === 'return') {
@@ -1386,6 +1828,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         }
         if (key.sequence === 'r' && !key.ctrl && !key.meta) {
           void resumeSelected();
+          return;
+        }
+        if (key.sequence === 'p' && !key.ctrl && !key.meta) {
+          toggleWorkflowPauseWithFeedback();
           return;
         }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
@@ -1410,7 +1856,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         !key.meta &&
         config &&
         selectedEntry?.kind === 'workflow' &&
-        selectedEntry.status !== 'running' &&
+        isTerminalWorkflowStatus(selectedEntry.status) &&
         !!selectedEntry.script
       ) {
         setSaveActive(true);
@@ -1440,6 +1886,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         void resumeSelected();
         return;
       }
+      if (key.sequence === 'p' && !key.ctrl && !key.meta) {
+        toggleWorkflowPauseWithFeedback();
+        return;
+      }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
         handleCancelKey();
         return;
@@ -1460,13 +1910,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const workflowSaveTarget =
     config &&
     selectedEntry?.kind === 'workflow' &&
-    selectedEntry.status !== 'running' &&
+    isTerminalWorkflowStatus(selectedEntry.status) &&
     selectedEntry.script
       ? selectedEntry
       : null;
 
   // Hint footer — context-sensitive.
   const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
+  const selectedWorkflowPauseHint = workflowPauseHint(selectedEntry);
   const showCancelConfirmHint =
     pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
@@ -1489,16 +1940,32 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       'Esc cancel',
     );
   } else if (dialogMode === 'list') {
-    hints.push('\u2191/\u2193 select', 'Enter view');
-    if (selectedEntry?.status === 'running') hints.push('x stop');
-    if (selectedEntryAllowsResume) hints.push('r resume');
-    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
-      hints.push('x abandon');
+    if (autoOpened) {
+      // Every destructive list key is swallowed until a navigation key
+      // acknowledges the auto-open, so advertising `Enter view` / `x stop`
+      // here would document keys that do nothing (#16432 R3-3).
+      hints.push('\u2191/\u2193 activate');
+    } else {
+      hints.push('\u2191/\u2193 select', 'Enter view');
+      if (selectedEntry && isStoppableEntry(selectedEntry)) {
+        hints.push('x stop');
+      }
+      if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
+      if (selectedEntryAllowsResume) hints.push('r resume');
+      if (
+        selectedEntry?.kind === 'agent' &&
+        selectedEntry.status === 'paused'
+      ) {
+        hints.push('x abandon');
+      }
+      hints.push('\u2190/Esc close');
     }
-    hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 back', 'Esc close');
-    if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntry && isStoppableEntry(selectedEntry)) {
+      hints.push('x stop');
+    }
+    if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
@@ -1548,8 +2015,21 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         {approvalActive && approvalConfirmationDetails && (
           <Box flexDirection="column" marginTop={1} paddingX={1}>
             <Text bold color={theme.status.warning}>
-              {t('Background agent needs approval')}
+              {selectedApproval?.kind === 'workflow'
+                ? `[workflow] ${t('needs approval')}`
+                : t('Background agent needs approval')}
             </Text>
+            {/* subagentId is set only on approvals bridged from a NESTED
+                agent onto this entry (see AgentTool's nested approval
+                bridge). Name the actual waiter so the user knows which of
+                the descendants is blocked. */}
+            {selectedApproval?.kind === 'agent' &&
+              selectedApproval.approval.subagentId !== undefined && (
+                <Text color={theme.text.secondary}>
+                  {t('from nested agent')}:{' '}
+                  {selectedApproval.approval.subagentId}
+                </Text>
+              )}
             <ToolConfirmationMessage
               confirmationDetails={approvalConfirmationDetails}
               config={config}
@@ -1574,7 +2054,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         />
       ) : (
         <Box marginTop={1} paddingX={1}>
-          <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+          {pauseRejected && pauseRejected.entryKey === selectedEntryKey ? (
+            <Text color={theme.status.warning}>
+              {t(
+                'Pause/resume was rejected; the workflow state changed. Try again.',
+              )}
+            </Text>
+          ) : (
+            <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+          )}
         </Box>
       )}
     </Box>

@@ -12,12 +12,61 @@ import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
   isDaemonEventType,
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
+import type {
+  DaemonGithubSetupCompletedData,
+  DaemonMidTurnMessageInjectedEvent,
+} from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
+
+it('accepts an explicitly cleared model after subscription logout', () => {
+  const event: DaemonEvent = {
+    v: 1,
+    type: 'model_switched',
+    data: { sessionId: 'session', modelId: '', subscriptionSignedOut: true },
+  };
+  expect(asKnownDaemonEvent(event)).toBe(event);
+  expect(
+    reduceDaemonSessionEvent(
+      createDaemonSessionViewState({ currentModelId: 'old' }),
+      event,
+    ).currentModelId,
+  ).toBeUndefined();
+  expect(
+    asKnownDaemonEvent({
+      ...event,
+      data: { sessionId: 'session', modelId: '' },
+    }),
+  ).toBeUndefined();
+});
+
+describe('session_messages_deleted', () => {
+  it('validates the identities published on the wire', () => {
+    const event: DaemonEvent = {
+      v: 1,
+      type: 'session_messages_deleted',
+      data: {
+        sessionId: 'session',
+        deletedGroupIds: ['g'],
+        deletedPromptIds: ['p'],
+      },
+    };
+    expect(asKnownDaemonEvent(event)).toBe(event);
+    expect(
+      asKnownDaemonEvent({
+        ...event,
+        data: { ...(event.data as object), deletedPromptIds: [42] },
+      }),
+    ).toBeUndefined();
+  });
+});
 
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
   it('is the wire literal and a registered known event type', () => {
@@ -32,6 +81,221 @@ describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
 });
 
 describe('daemon event schema', () => {
+  it('recognizes sanitized channel delivery result events', () => {
+    const delivered: DaemonEvent = {
+      id: 1,
+      v: 1,
+      type: 'channel_delivery_result',
+      promptId: 'prompt-1',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+    const failed: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_delivery_rejected',
+        error: 'Recipient rejected.',
+      },
+    };
+    const skipped: DaemonEvent = {
+      id: 3,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:456',
+        source: 'scheduled',
+        status: 'skipped',
+        taskId: 'task-1',
+        firedAt: 456,
+      },
+    };
+
+    expect(asKnownDaemonEvent(delivered)).toBe(delivered);
+    expect(asKnownDaemonEvent(failed)).toBe(failed);
+    expect(asKnownDaemonEvent(skipped)).toBe(skipped);
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('channel_delivery_result');
+  });
+
+  it('rejects malformed or unsanitized channel delivery results', () => {
+    const base = {
+      id: 1,
+      v: 1 as const,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, target: { id: 'secret' } },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, text: 'secret final answer' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, status: 'failed' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, source: 'scheduled' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('accepts every canonical channel delivery error code', () => {
+    // Canonical set from acp-bridge bridgeOptions.ts — the SDK carries an
+    // independent copy, so this test catches drift.
+    const canonicalCodes = [
+      'channel_worker_unavailable',
+      'channel_delivery_timeout',
+      'channel_delivery_invalid',
+      'channel_delivery_rejected',
+      'channel_delivery_queue_full',
+      'channel_delivery_failed',
+    ];
+    for (const code of canonicalCodes) {
+      const event: DaemonEvent = {
+        id: 1,
+        v: 1,
+        type: 'channel_delivery_result',
+        data: {
+          sessionId: 'session-1',
+          deliveryId: 'task-1:123',
+          source: 'scheduled',
+          status: 'failed',
+          taskId: 'task-1',
+          firedAt: 123,
+          code,
+          error: 'Something went wrong.',
+        },
+      };
+      expect(asKnownDaemonEvent(event), `code ${code} rejected`).toBe(event);
+    }
+    // A code outside the canonical set is rejected.
+    const unknown: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_delivery_exploded',
+        error: 'Not a real code.',
+      },
+    };
+    expect(asKnownDaemonEvent(unknown)).toBeUndefined();
+  });
+
+  it('recognizes pending prompt queue events', () => {
+    const added: DaemonEvent = {
+      id: 10,
+      v: 1,
+      type: PENDING_PROMPT_ADDED_EVENT,
+      data: {
+        sessionId: 's-1',
+        promptId: 'p-1',
+        text: 'queued',
+        queuedAt: 1_700_000_000_000,
+      },
+    };
+    const started: DaemonEvent = {
+      id: 11,
+      v: 1,
+      type: PENDING_PROMPT_STARTED_EVENT,
+      data: { sessionId: 's-1', promptId: 'p-1', text: 'queued' },
+    };
+    const completed: DaemonEvent = {
+      id: 12,
+      v: 1,
+      type: PENDING_PROMPT_COMPLETED_EVENT,
+      data: { sessionId: 's-1', promptId: 'p-1', state: 'removed' },
+    };
+
+    expect(asKnownDaemonEvent(added)).toBe(added);
+    expect(asKnownDaemonEvent(started)).toBe(started);
+    expect(asKnownDaemonEvent(completed)).toBe(completed);
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      PENDING_PROMPT_ADDED_EVENT,
+    );
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      PENDING_PROMPT_STARTED_EVENT,
+    );
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      PENDING_PROMPT_COMPLETED_EVENT,
+    );
+  });
+
+  it('rejects malformed pending prompt queue events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 10,
+        v: 1,
+        type: PENDING_PROMPT_ADDED_EVENT,
+        data: { sessionId: 's-1', promptId: 'p-1', text: 'queued' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 11,
+        v: 1,
+        type: PENDING_PROMPT_STARTED_EVENT,
+        data: { sessionId: 's-1', text: 'queued' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 12,
+        v: 1,
+        type: PENDING_PROMPT_COMPLETED_EVENT,
+        data: { sessionId: 's-1', promptId: 'p-1', state: 'done' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces pending prompt queue events without changing session view state', () => {
+    const state = createDaemonSessionViewState();
+    const next = reduceDaemonSessionEvent(state, {
+      id: 10,
+      v: 1,
+      type: PENDING_PROMPT_COMPLETED_EVENT,
+      data: { sessionId: 's-1', promptId: 'p-1', state: 'completed' },
+    });
+
+    expect(next).toEqual({ ...state, lastEventId: 10 });
+  });
+
   it('narrows known daemon events by discriminator', () => {
     const event: DaemonEvent = {
       id: 1,
@@ -51,6 +315,106 @@ describe('daemon event schema', () => {
     }
     expect(isDaemonEventType(event, 'model_switched')).toBe(true);
     expect(isDaemonEventType(event, 'permission_request')).toBe(false);
+  });
+
+  it('recognizes trust_change_requested as known daemon event', () => {
+    const event: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'trust_change_requested',
+      data: {
+        workspaceCwd: '/work',
+        desiredState: 'untrusted',
+        reason: 'remote user request',
+      },
+      originatorClientId: 'client-1',
+    };
+
+    const known = asKnownDaemonEvent(event);
+
+    expect(known).toBe(event);
+    expect(known?.type).toBe('trust_change_requested');
+    expect(isDaemonEventType(event, 'trust_change_requested')).toBe(true);
+  });
+
+  it('recognizes artifact_changed as a known daemon event', () => {
+    const event: DaemonEvent = {
+      id: 3,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'created',
+          artifactId: 'art-1',
+          artifact: {
+            id: 'art-1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Lineage',
+            url: 'https://example.com/lineage',
+            clientRetained: true,
+            createdAt: '2026-06-30T00:00:00.000Z',
+            updatedAt: '2026-06-30T00:00:00.000Z',
+          },
+        },
+      },
+    };
+
+    const known = asKnownDaemonEvent(event);
+
+    expect(known).toBe(event);
+    expect(known?.type).toBe('artifact_changed');
+    expect(isDaemonEventType(event, 'artifact_changed')).toBe(true);
+  });
+
+  it('keeps artifact_changed events with future artifact literals', () => {
+    const event: DaemonEvent = {
+      id: 4,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'created',
+          artifactId: 'art-2',
+          artifact: {
+            id: 'art-2',
+            kind: 'diagram',
+            storage: 'remote_preview',
+            source: 'extension',
+            status: 'warming',
+            title: 'Future artifact',
+            url: 'https://example.com/future',
+            clientRetained: false,
+            createdAt: '2026-06-30T00:00:00.000Z',
+            updatedAt: '2026-06-30T00:00:00.000Z',
+          },
+        },
+      },
+    };
+
+    expect(asKnownDaemonEvent(event)).toBe(event);
+  });
+
+  it('keeps artifact_changed events with future change literals', () => {
+    const event: DaemonEvent = {
+      id: 5,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'renamed',
+          artifactId: 'art-3',
+          reason: 'lifecycle_policy',
+        },
+      },
+    };
+
+    expect(asKnownDaemonEvent(event)).toBe(event);
   });
 
   it('leaves malformed or unknown events on the raw DaemonEvent path', () => {
@@ -74,7 +438,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 3,
+        id: 2,
         v: 1,
         type: 'permission_request',
         data: {
@@ -87,7 +451,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 4,
+        id: 3,
         v: 1,
         type: 'permission_request',
         data: {
@@ -155,6 +519,69 @@ describe('daemon event schema', () => {
         data: {
           requestId: 'req-1',
           outcome: { outcome: 'cancelled' },
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('validates settings_changed optional fields', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled' },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          scope: 'workspace',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            skills: [{ name: 'review', enabled: false }],
+            activation: 'reconciling',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled', scope: 1 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            activation: 'applied',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
         },
       }),
     ).toBeUndefined();
@@ -550,13 +977,40 @@ describe('daemon event schema', () => {
         id: 1,
         v: 1,
         type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: true,
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: 'true',
+        },
+      }),
+    ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
         data: { sessionId: 's-1', reason: 'client_close' },
       }),
     ).toBeDefined();
 
     expect(
       asKnownDaemonEvent({
-        id: 2,
+        id: 3,
         v: 1,
         type: 'session_closed',
         data: { sessionId: 's-1' },
@@ -565,7 +1019,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 3,
+        id: 4,
         v: 1,
         type: 'session_closed',
         data: { reason: 'client_close' },
@@ -579,7 +1033,11 @@ describe('daemon event schema', () => {
         id: 1,
         v: 1,
         type: 'session_metadata_updated',
-        data: { sessionId: 's-1', displayName: 'My Session' },
+        data: {
+          sessionId: 's-1',
+          displayName: 'My Session',
+          titleSource: 'manual',
+        },
       }),
     ).toBeDefined();
 
@@ -600,6 +1058,15 @@ describe('daemon event schema', () => {
         data: {},
       }),
     ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 4,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', titleSource: 'unknown' },
+      }),
+    ).toBeUndefined();
   });
 
   it('validates mid_turn_message_injected events', () => {
@@ -611,6 +1078,20 @@ describe('daemon event schema', () => {
         data: { sessionId: 's-1', messages: ['check the tests too'] },
       }),
     ).toBeDefined();
+
+    const aligned = asKnownDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a', 'b'],
+        messageIds: ['mid-a', 'mid-b'],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(aligned).toBeDefined();
+    expect(aligned?.data.messages).toEqual(['a', 'b']);
+    expect(aligned?.data.messageIds).toEqual(['mid-a', 'mid-b']);
 
     // Empty array is structurally valid (the guard only requires a string[]).
     expect(
@@ -633,7 +1114,7 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
     expect(
       asKnownDaemonEvent({
-        id: 4,
+        id: 5,
         v: 1,
         type: 'mid_turn_message_injected',
         data: { sessionId: 's-1', messages: ['ok', 42] },
@@ -641,12 +1122,44 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
     expect(
       asKnownDaemonEvent({
-        id: 5,
+        id: 6,
         v: 1,
         type: 'mid_turn_message_injected',
         data: { messages: ['x'] },
       }),
     ).toBeUndefined();
+    // A misaligned or malformed `messageIds` is an optional enrichment: it is
+    // stripped rather than rejecting the whole event (mirroring the sidechannel
+    // parser), so a buggy daemon can't silently lose the injection signal.
+    const misaligned = asKnownDaemonEvent({
+      id: 7,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a', 'b'],
+        messageIds: ['mid-a'],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(misaligned).toBeDefined();
+    expect(misaligned?.data.messages).toEqual(['a', 'b']);
+    expect(misaligned?.data.messageIds).toBeUndefined();
+    // The malformed enrichment is OMITTED, not left as a present `undefined`.
+    expect(misaligned?.data).not.toHaveProperty('messageIds');
+
+    const emptyId = asKnownDaemonEvent({
+      id: 8,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a'],
+        messageIds: [''],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(emptyId).toBeDefined();
+    expect(emptyId?.data.messageIds).toBeUndefined();
+    expect(emptyId?.data).not.toHaveProperty('messageIds');
   });
 
   it('reduces session_closed as terminal and clears pending permissions', () => {
@@ -721,6 +1234,25 @@ describe('daemon event schema', () => {
     expect(cleared.displayName).toBeUndefined();
   });
 
+  it('keeps displayName on a pr-binding metadata event that echoes the name', () => {
+    // The bridge echoes the current displayName on pr-binding events because
+    // the fold treats an absent name as "cleared" — a pr event without the
+    // echo would blank the title until the next rename.
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 's-1',
+          displayName: 'My Session',
+          prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+        },
+      },
+    ]);
+    expect(state.displayName).toBe('My Session');
+  });
+
   it('recognizes slow_client_warning frames as known events', () => {
     // PR 14b fix (codex round 8 — sibling consistency): `satisfies
     // DaemonEvent` keeps `v: 1` / `type: 'slow_client_warning'`
@@ -742,10 +1274,29 @@ describe('daemon event schema', () => {
       // No `id` on synthetic frames (matches the daemon's emit shape).
       v: 1,
       type: 'slow_client_warning',
-      data: { queueSize: 192, maxQueued: 256, lastEventId: 42 },
+      data: {
+        queueSize: 192,
+        maxQueued: 256,
+        lastEventId: 42,
+        queuedBytes: 1_800_000,
+        maxQueuedBytes: 2_097_152,
+        threshold: 'bytes',
+      },
     } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(warning);
     expect(known?.type).toBe('slow_client_warning');
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          threshold: 'frames',
+        },
+      }),
+    ).toBeDefined();
 
     // Schema validation: required numeric fields. Missing or wrongly
     // typed payloads must NOT be recognized as known events.
@@ -785,6 +1336,34 @@ describe('daemon event schema', () => {
         },
       }),
     ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          queuedBytes: Number.NaN,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'bytes',
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          queuedBytes: 1_800_000,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'bogus',
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it('reduces slow_client_warning into the view state without ending the stream', () => {
@@ -799,13 +1378,25 @@ describe('daemon event schema', () => {
       {
         v: 1,
         type: 'slow_client_warning',
-        data: { queueSize: 200, maxQueued: 256, lastEventId: 1 },
+        data: {
+          queueSize: 200,
+          maxQueued: 256,
+          lastEventId: 1,
+          threshold: 'frames',
+        },
       },
       // Warning #2 (e.g. after a drain + refill on the daemon side).
       {
         v: 1,
         type: 'slow_client_warning',
-        data: { queueSize: 220, maxQueued: 256, lastEventId: 5 },
+        data: {
+          queueSize: 220,
+          maxQueued: 256,
+          lastEventId: 5,
+          queuedBytes: 1_900_000,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'frames_and_bytes',
+        },
       },
     ]);
 
@@ -815,6 +1406,9 @@ describe('daemon event schema', () => {
       queueSize: 220,
       maxQueued: 256,
       lastEventId: 5,
+      queuedBytes: 1_900_000,
+      maxQueuedBytes: 2_097_152,
+      threshold: 'frames_and_bytes',
     });
     // Warning is non-terminal — stream is still alive, no
     // terminalEvent recorded.
@@ -823,6 +1417,71 @@ describe('daemon event schema', () => {
     // Warnings carry no `id`, so `lastEventId` stays at the highest
     // id observed (the original session_update at id=1).
     expect(state.lastEventId).toBe(1);
+  });
+
+  it('treats byte-overflow client_evicted as terminal', () => {
+    const evicted = {
+      id: 1,
+      v: 1,
+      type: 'client_evicted',
+      data: {
+        reason: 'queue_bytes_overflow',
+        droppedAfter: 8,
+        queueSize: 1,
+        maxQueued: 256,
+        queuedBytes: 1_900_000,
+        maxQueuedBytes: 2_097_152,
+        eventBytes: 300_000,
+      },
+    } satisfies DaemonEvent;
+    const known = asKnownDaemonEvent(evicted);
+    expect(known?.type).toBe('client_evicted');
+    if (known?.type !== 'client_evicted') {
+      throw new Error('expected client_evicted event');
+    }
+    expect(known.data.queuedBytes).toBe(1_900_000);
+
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'queue_bytes_overflow',
+          droppedAfter: 8,
+          queueSize: 1,
+          maxQueued: 256,
+          queuedBytes: Number.NaN,
+          maxQueuedBytes: 2_097_152,
+          eventBytes: 300_000,
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'queue_bytes_overflow',
+          droppedAfter: 8,
+          queueSize: 1,
+          maxQueued: 256,
+          queuedBytes: 1_900_000,
+          maxQueuedBytes: 2_097_152,
+          eventBytes: Number.NaN,
+        },
+      }),
+    ).toBeUndefined();
+
+    const state = reduceDaemonSessionEvents([evicted]);
+
+    expect(state.alive).toBe(false);
+    expect(state.terminalEvent?.type).toBe('client_evicted');
+    expect(state.terminalEvent?.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      queuedBytes: 1_900_000,
+      maxQueuedBytes: 2_097_152,
+      eventBytes: 300_000,
+    });
   });
 
   // PR 14b: MCP guardrail push events. Mirrors the slow_client_warning
@@ -1198,6 +1857,49 @@ describe('daemon event schema', () => {
       },
     };
     expect(asKnownDaemonEvent(missing)).toBeUndefined();
+  });
+
+  it('narrows managed memory_changed events from hidden remember tasks', () => {
+    const valid: DaemonEvent = {
+      id: 10,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project', 'user'],
+      },
+    };
+
+    const known = asKnownDaemonEvent(valid);
+    expect(known?.type).toBe('memory_changed');
+    expect(isDaemonEventType(valid, 'memory_changed')).toBe(true);
+
+    const missingTask: DaemonEvent = {
+      id: 11,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        touchedScopes: ['project'],
+      },
+    };
+    expect(asKnownDaemonEvent(missingTask)).toBeUndefined();
+
+    const badTouchedScope: DaemonEvent = {
+      id: 12,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['bad'],
+      },
+    };
+    expect(asKnownDaemonEvent(badTouchedScope)).toBeUndefined();
   });
 
   it('narrows agent_changed events and rejects malformed payloads', () => {
@@ -1612,6 +2314,73 @@ describe('PR 21 — auth device-flow events', () => {
   // `unrecognizedKnownEventCount` rather than the event-specific
   // counter), and the envelope-level `originatorClientId` merge.
   describe('PR 17 mutation events', () => {
+    it('keeps Plan execution permission through events and reconnect, then clears it on exit', () => {
+      let state = createDaemonSessionViewState();
+      for (const [id, mode] of ['yolo', 'auto-edit'].entries()) {
+        state = reduceDaemonSessionEvent(state, {
+          id: id + 1,
+          v: 1,
+          type: 'approval_mode_changed',
+          data: {
+            sessionId: 'sess-1',
+            previous: 'plan',
+            next: 'plan',
+            planExecutionMode: mode,
+            persisted: false,
+          },
+        });
+        expect(state.approvalMode).toBe('plan');
+        expect(state.planExecutionMode).toBe(mode);
+      }
+      state = reduceDaemonSessionEvent(state, {
+        id: 3,
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 'sess-1',
+          currentModelId: null,
+          currentApprovalMode: 'plan',
+          planExecutionMode: 'default',
+        },
+      });
+      expect(state.planExecutionMode).toBe('default');
+      state = reduceDaemonSessionEvent(state, {
+        id: 4,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 'sess-1',
+          previous: 'plan',
+          next: 'default',
+          persisted: false,
+        },
+      });
+      expect(state.approvalMode).toBe('default');
+      expect(state.planExecutionMode).toBeUndefined();
+    });
+
+    it.each(['approval_mode_changed', 'session_snapshot'])(
+      'rejects malformed Plan execution permission in %s',
+      (type) => {
+        expect(
+          asKnownDaemonEvent({
+            id: 1,
+            v: 1,
+            type,
+            data: {
+              sessionId: 'sess-1',
+              previous: 'default',
+              next: 'plan',
+              persisted: false,
+              currentModelId: null,
+              currentApprovalMode: 'plan',
+              planExecutionMode: true,
+            },
+          }),
+        ).toBeUndefined();
+      },
+    );
+
     it('approval_mode_changed: increments counter, copies envelope originator', () => {
       const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         id: 5,
@@ -1693,6 +2462,41 @@ describe('PR 21 — auth device-flow events', () => {
       expect(asKnownDaemonEvent(malformed)).toBeUndefined();
     });
 
+    it('github_setup_completed: accepts workflow summary and gitignore warning', () => {
+      const known = asKnownDaemonEvent({
+        id: 11,
+        v: 1,
+        type: 'github_setup_completed',
+        data: {
+          releaseTag: 'v1.2.3',
+          readmeUrl:
+            'https://github.com/QwenLM/qwen-code-action/blob/v1.2.3/README.md#quick-start',
+          workflows: [
+            {
+              path: '.github/workflows/qwen-dispatch.yml',
+              status: 'written',
+              sizeBytes: 12,
+            },
+          ],
+          gitignore: { path: '.gitignore', status: 'failed' },
+          warnings: ['Could not update .gitignore'],
+        },
+      });
+
+      expect(known?.type).toBe('github_setup_completed');
+      expect(
+        (known?.data as DaemonGithubSetupCompletedData).gitignore.status,
+      ).toBe('failed');
+      expect(
+        asKnownDaemonEvent({
+          id: 12,
+          v: 1,
+          type: 'github_setup_completed',
+          data: { releaseTag: 'v1.2.3' },
+        }),
+      ).toBeUndefined();
+    });
+
     it('mcp_server_restarted: counter + last snapshot + envelope originator merge', () => {
       const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         id: 11,
@@ -1714,6 +2518,7 @@ describe('PR 21 — auth device-flow events', () => {
         | 'in_flight'
         | 'disabled'
         | 'budget_would_exceed'
+        | 'authentication_required'
         // F2 (#4175 commit 5): pool-mode hard restart failure carried
         // alongside the soft-skip reasons. The reducer treats it like
         // any other refusal — count + remember last — without a
@@ -1722,7 +2527,13 @@ describe('PR 21 — auth device-flow events', () => {
         // counter is the operator-meaningful signal ("this many
         // restart attempts didn't take effect").
         | 'restart_failed'
-      > = ['in_flight', 'disabled', 'budget_would_exceed', 'restart_failed'];
+      > = [
+        'in_flight',
+        'disabled',
+        'budget_would_exceed',
+        'authentication_required',
+        'restart_failed',
+      ];
       let state = initial;
       for (const [i, reason] of reasons.entries()) {
         state = reduceDaemonSessionEvent(state, {
@@ -1732,7 +2543,7 @@ describe('PR 21 — auth device-flow events', () => {
           data: { serverName: 'docs', reason },
         });
       }
-      expect(state.mcpRestartRefusedCount).toBe(4);
+      expect(state.mcpRestartRefusedCount).toBe(5);
       expect(state.mcpRestartCount).toBe(0);
       expect(state.lastMcpRestartRefused?.reason).toBe('restart_failed');
       // Bogus reason literal is rejected by the parser.
@@ -2263,6 +3074,145 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('recognizes history_truncated and records it without entering resync', () => {
+      const event = {
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 4,
+          retainedEvents: 2,
+          maxBytes: 512,
+          scope: 'live_journal',
+          maxEvents: 10_000,
+          truncatedTurns: 2,
+          fullTranscriptAvailable: true,
+        },
+      } satisfies DaemonEvent;
+
+      const known = asKnownDaemonEvent(event);
+      expect(known?.type).toBe('history_truncated');
+      expect(
+        asKnownDaemonEvent({
+          ...event,
+          data: {
+            ...event.data,
+            fullTranscriptAvailable: false,
+          },
+        })?.type,
+      ).toBe('history_truncated');
+
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.awaitingResync).toBe(false);
+      expect(state.historyTruncatedCount).toBe(1);
+      expect(state.lastHistoryTruncated).toEqual(event.data);
+    });
+
+    it('rejects malformed history_truncated payloads', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      for (const extra of [
+        { scope: '' },
+        { scope: 42 },
+        { maxEvents: -1 },
+        { maxEvents: 1.5 },
+      ]) {
+        expect(
+          asKnownDaemonEvent({
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 2,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+              ...extra,
+            },
+          }),
+        ).toBeUndefined();
+      }
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: -1,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2.5,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            truncatedTurns: -1,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'wrong_reason',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: 'yes',
+          },
+        }),
+      ).toBeUndefined();
+    });
+
     it('sets awaitingResync + records the resync data when daemon emits state_resync_required', () => {
       const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         v: 1,
@@ -2700,6 +3650,57 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('session_snapshot (A5 #4511)', () => {
+    it('validates and reduces recording degradation events', () => {
+      const event = {
+        id: 44,
+        v: 1,
+        type: 'session_recording_degraded',
+        data: { sessionId: 's-1', reason: 'write_failed' },
+      } satisfies DaemonEvent;
+
+      expect(asKnownDaemonEvent(event)).toBe(event);
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.sessionId).toBe('s-1');
+      expect(state.recordingDegraded).toBe(true);
+    });
+
+    it('applies recording degradation while awaiting resync', () => {
+      const state = reduceDaemonSessionEvent(
+        {
+          ...createDaemonSessionViewState(),
+          awaitingResync: true,
+        },
+        {
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'write_failed' },
+        },
+      );
+
+      expect(state.recordingDegraded).toBe(true);
+      expect(state.awaitingResync).toBe(true);
+    });
+
+    it('rejects malformed recording degradation events', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: '', reason: 'write_failed' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'disk_full' },
+        }),
+      ).toBeUndefined();
+    });
+
     it('asKnownDaemonEvent narrows session_snapshot', () => {
       const event: DaemonEvent = {
         v: 1,
@@ -2728,6 +3729,46 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.sessionId).toBe('s-1');
       expect(state.currentModelId).toBe('qwen-turbo');
       expect(state.approvalMode).toBe('yolo');
+    });
+
+    it('uses snapshot recording state when present and preserves it for old daemons', () => {
+      const degraded = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 's-1',
+            currentModelId: null,
+            currentApprovalMode: null,
+            recordingDegraded: true,
+          },
+        },
+      );
+      expect(degraded.recordingDegraded).toBe(true);
+
+      const legacySnapshot = reduceDaemonSessionEvent(degraded, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+        },
+      });
+      expect(legacySnapshot.recordingDegraded).toBe(true);
+
+      const recovered = reduceDaemonSessionEvent(legacySnapshot, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: false,
+        },
+      });
+      expect(recovered.recordingDegraded).toBe(false);
     });
 
     it('reducer does not overwrite model/mode with null snapshot values', () => {
@@ -2786,6 +3827,21 @@ describe('PR 21 — auth device-flow events', () => {
       });
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.approvalMode).toBeUndefined();
+    });
+
+    it('drops session_snapshot with a non-boolean recordingDegraded', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: 'yes' as unknown as boolean,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.recordingDegraded).toBe(false);
     });
   });
 });

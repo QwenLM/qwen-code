@@ -86,6 +86,71 @@ describe('arenaCommand localization', () => {
   });
 });
 
+describe('arenaCommand tool sandbox', () => {
+  it.each(['start', 'stop', 'status', 'select'] as const)(
+    'rejects %s before accessing an Arena runtime',
+    async (name) => {
+      const getArenaManager = vi.fn();
+      const cleanupArenaRuntime = vi.fn();
+      const context = createMockCommandContext({
+        executionMode: 'interactive',
+        services: {
+          config: {
+            getShellExecutionSandbox: () => ({ backend: 'bwrap' }),
+            getArenaManager,
+            cleanupArenaRuntime,
+          } as never,
+        },
+      });
+      expect(
+        await getArenaSubCommand(name).action!(context, '--discard'),
+      ).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Arena is unavailable in tool sandbox.',
+      });
+      expect(getArenaManager).not.toHaveBeenCalled();
+      expect(cleanupArenaRuntime).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('arenaCommand start subcommand', () => {
+  it('rejects image-only models passed explicitly', async () => {
+    const context = createMockCommandContext({
+      executionMode: 'interactive',
+      services: {
+        config: {
+          getArenaManager: vi.fn(() => null),
+          getContentGeneratorConfig: vi.fn(() => undefined),
+          getModelsConfig: vi.fn(() => ({
+            getAvailableModelsForAuthType: vi.fn(() => [
+              {
+                id: 'qwen-image-2.0',
+                label: 'Qwen Image 2.0',
+                imageOnly: true,
+              },
+              { id: 'qwen-plus', label: 'Qwen Plus' },
+            ]),
+          })),
+        } as never,
+      },
+    });
+
+    const result = await getArenaSubCommand('start').action!(
+      context,
+      '--models qwen-image-2.0,qwen-plus "build a feature"',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Image-only model 'qwen-image-2.0' cannot be used in an Arena session.",
+    });
+  });
+});
+
 describe('arenaCommand stop subcommand', () => {
   let mockContext: CommandContext;
   let mockConfig: {

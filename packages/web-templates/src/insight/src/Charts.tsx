@@ -1,4 +1,5 @@
 import type { InsightData } from './types';
+import { dayKey } from './dates';
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
@@ -242,7 +243,10 @@ function ActivityHeatmap({
         const x = startX + week * (cellSize + cellPadding);
         const y = startY + day * (cellSize + cellPadding);
 
-        const dateKey = date.toISOString().split('T')[0];
+        // Local key to match both the local grid cursor above and the
+        // local storage keys (#6835) — the previous UTC key landed the
+        // value under a weekday label off by one day for non-UTC viewers.
+        const dateKey = dayKey(date);
         const value = heatmapData[dateKey] || 0;
         const color = getColor(value);
 

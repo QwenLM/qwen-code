@@ -11,8 +11,6 @@ import yargs from 'yargs';
 const mockInstallExtension = vi.hoisted(() => vi.fn());
 const mockRefreshCache = vi.hoisted(() => vi.fn());
 const mockSetExtensionScope = vi.hoisted(() => vi.fn());
-const mockEnableExtension = vi.hoisted(() => vi.fn());
-const mockDisableExtension = vi.hoisted(() => vi.fn());
 const mockParseInstallSource = vi.hoisted(() => vi.fn());
 const mockRequestConsentNonInteractive = vi.hoisted(() => vi.fn());
 const mockRequestConsentOrFail = vi.hoisted(() => vi.fn());
@@ -20,16 +18,30 @@ const mockIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
 const mockLoadSettings = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+// Recording pass-throughs rather than inline arrows: the stub keeps the
+// settings term as the whole story for this file, so the assertions below pin
+// that `install.ts` still routes through the resolvers at all.
+const mockResolveUsageStatisticsEnabled = vi.hoisted(() =>
+  vi.fn((settingsValue?: boolean) => settingsValue ?? true),
+);
+const mockResolveExtensionTelemetryProxy = vi.hoisted(() =>
+  vi.fn((settingsProxy?: string) => settingsProxy),
+);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   ExtensionManager: vi.fn().mockImplementation(() => ({
     installExtension: mockInstallExtension,
     refreshCache: mockRefreshCache,
     setExtensionScope: mockSetExtensionScope,
-    enableExtension: mockEnableExtension,
-    disableExtension: mockDisableExtension,
   })),
   parseInstallSource: mockParseInstallSource,
+  resolveUsageStatisticsEnabled: mockResolveUsageStatisticsEnabled,
+  resolveExtensionTelemetryProxy: mockResolveExtensionTelemetryProxy,
+  isExtensionCommittedWithWarningsError: (error: unknown) =>
+    error instanceof Error &&
+    (error as Error & { code?: string; committed?: boolean }).code ===
+      'extension_committed_with_warnings' &&
+    (error as Error & { committed?: boolean }).committed === true,
 }));
 
 vi.mock('./consent.js', () => ({
@@ -102,6 +114,47 @@ describe('handleInstall', () => {
 
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "http-extension" installed successfully and enabled.',
+    );
+
+    processSpy.mockRestore();
+  });
+
+  it('forwards the resolved telemetry opt-out and proxy to the ExtensionManager', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    const { ExtensionManager } = await import('@qwen-code/qwen-code-core');
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        privacy: { usageStatisticsEnabled: false },
+        proxy: 'http://settings-proxy:8080',
+      },
+    });
+    mockParseInstallSource.mockResolvedValue({
+      type: 'http',
+      url: 'http://google.com',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'http-extension' });
+
+    await handleInstall({
+      source: 'http://google.com',
+    });
+
+    expect(ExtensionManager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usageStatisticsEnabled: false,
+        proxy: 'http://settings-proxy:8080',
+      }),
+    );
+    // The stubbed resolvers make the settings term the whole story above, so
+    // pin the routing itself: replacing the two calls in `install.ts` with raw
+    // `settings.privacy?.usageStatisticsEnabled ?? true` / `settings.proxy`
+    // reads must red here. The env-vs-settings precedence each resolver
+    // implements is pinned where the real ones run (core's `config.test.ts`,
+    // and `uninstall.test.ts` / `utils.test.ts` for the call-site env term).
+    expect(mockResolveUsageStatisticsEnabled).toHaveBeenCalledWith(false);
+    expect(mockResolveExtensionTelemetryProxy).toHaveBeenCalledWith(
+      'http://settings-proxy:8080',
     );
 
     processSpy.mockRestore();
@@ -238,6 +291,10 @@ describe('handleInstall', () => {
         autoUpdate: true,
       }),
       expect.any(Function),
+      undefined,
+      expect.any(String),
+      undefined,
+      { scope: 'user' },
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "archive-extension" installed successfully and enabled.',
@@ -293,7 +350,41 @@ describe('handleInstall', () => {
     processSpy.mockRestore();
   });
 
-  it('should re-scope enablement to the workspace for a project-scope install', async () => {
+  it('reports a committed install warning without failing', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockRejectedValue(
+      Object.assign(
+        new Error('Extension committed but could not be reloaded.'),
+        {
+          code: 'extension_committed_with_warnings',
+          committed: true,
+          identity: { id: 'extension-id', name: 'scoped-extension' },
+          warnings: [],
+        },
+      ),
+    );
+
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Warning: Extension committed but could not be reloaded.',
+    );
+    expect(mockSetExtensionScope).toHaveBeenCalledWith(
+      'scoped-extension',
+      'project',
+    );
+    expect(processSpy).not.toHaveBeenCalled();
+
+    processSpy.mockRestore();
+  });
+
+  it('commits project-scope activation with the install', async () => {
     mockParseInstallSource.mockResolvedValue({
       type: 'git',
       url: 'git@some-url',
@@ -306,58 +397,43 @@ describe('handleInstall', () => {
       'scoped-extension',
       'project',
     );
-    expect(mockDisableExtension).toHaveBeenCalledWith(
-      'scoped-extension',
-      'User',
-    );
-    expect(mockEnableExtension).toHaveBeenCalledWith(
-      'scoped-extension',
-      'Workspace',
+    expect(mockInstallExtension).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Function),
+      undefined,
+      expect.any(String),
+      undefined,
+      {
+        scope: 'workspace',
+        workspacePath: expect.any(String),
+      },
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "scoped-extension" installed successfully and enabled for the current workspace.',
     );
   });
 
-  it('rolls back the User-scope disable when the Workspace enable fails', async () => {
-    const processSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation(() => undefined as never);
+  it('keeps a committed install successful when saving scope preference fails', async () => {
     mockParseInstallSource.mockResolvedValue({
       type: 'git',
       url: 'git@some-url',
     });
     mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
-    // Workspace enable (first call) fails; the rollback User enable succeeds.
-    mockEnableExtension.mockRejectedValueOnce(
-      new Error('workspace enable failed'),
-    );
-    mockEnableExtension.mockResolvedValueOnce(undefined);
+    mockSetExtensionScope.mockImplementationOnce(() => {
+      throw new Error('preference denied');
+    });
 
     await handleInstall({ source: 'git@some-url', scope: 'project' });
 
-    expect(mockDisableExtension).toHaveBeenCalledWith(
-      'scoped-extension',
-      'User',
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "scoped-extension" installed successfully and enabled for the current workspace.',
     );
-    // Both the failed Workspace enable and the rollback User enable were attempted.
-    expect(mockEnableExtension).toHaveBeenNthCalledWith(
-      1,
-      'scoped-extension',
-      'Workspace',
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Warning: Extension installed, but failed to save scope preference: preference denied',
     );
-    expect(mockEnableExtension).toHaveBeenNthCalledWith(
-      2,
-      'scoped-extension',
-      'User',
-    );
-    // The original failure is surfaced and the command exits non-zero.
-    expect(mockWriteStderrLine).toHaveBeenCalledWith('workspace enable failed');
-    expect(processSpy).toHaveBeenCalledWith(1);
-    processSpy.mockRestore();
   });
 
-  it('surfaces a rollback failure when the recovery enable also fails', async () => {
+  it('reports a failed project-scope install without a follow-up scope mutation', async () => {
     const processSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined as never);
@@ -365,20 +441,12 @@ describe('handleInstall', () => {
       type: 'git',
       url: 'git@some-url',
     });
-    mockInstallExtension.mockResolvedValue({ name: 'scoped-extension' });
-    // Both the Workspace enable and the rollback User enable fail.
-    mockEnableExtension.mockRejectedValueOnce(
-      new Error('workspace enable failed'),
-    );
-    mockEnableExtension.mockRejectedValueOnce(new Error('rollback failed'));
+    mockInstallExtension.mockRejectedValue(new Error('atomic install failed'));
 
     await handleInstall({ source: 'git@some-url', scope: 'project' });
 
-    // A warning naming the failed rollback, plus the original error, are shown.
-    expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('failed to roll back the scope change'),
-    );
-    expect(mockWriteStderrLine).toHaveBeenCalledWith('workspace enable failed');
+    expect(mockSetExtensionScope).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('atomic install failed');
     expect(processSpy).toHaveBeenCalledWith(1);
     processSpy.mockRestore();
   });
@@ -396,9 +464,13 @@ describe('handleInstall', () => {
       'scoped-extension',
       'project',
     );
-    expect(mockEnableExtension).toHaveBeenCalledWith(
-      'scoped-extension',
-      'Workspace',
+    expect(mockInstallExtension).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Function),
+      undefined,
+      expect.any(String),
+      undefined,
+      expect.objectContaining({ scope: 'workspace' }),
     );
   });
 
@@ -415,8 +487,14 @@ describe('handleInstall', () => {
       'user-extension',
       'user',
     );
-    expect(mockDisableExtension).not.toHaveBeenCalled();
-    expect(mockEnableExtension).not.toHaveBeenCalled();
+    expect(mockInstallExtension).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Function),
+      undefined,
+      expect.any(String),
+      undefined,
+      { scope: 'user' },
+    );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "user-extension" installed successfully and enabled.',
     );

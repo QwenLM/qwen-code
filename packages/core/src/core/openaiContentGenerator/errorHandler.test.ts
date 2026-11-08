@@ -8,6 +8,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
 import type { RequestContext } from './types.js';
+import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { APIConnectionTimeoutError } from 'openai';
+import { AuthType } from '../../utils/auth-type.js';
+
+const debugLoggerSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+}));
+
+vi.mock('../../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    error: debugLoggerSpy.error,
+  }),
+}));
 
 describe('EnhancedErrorHandler', () => {
   const fixedNow = 10_000;
@@ -16,6 +29,7 @@ describe('EnhancedErrorHandler', () => {
   let mockRequest: GenerateContentParameters;
 
   beforeEach(() => {
+    debugLoggerSpy.error.mockReset();
     vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
     mockContext = {
       model: 'test-model',
@@ -47,6 +61,45 @@ describe('EnhancedErrorHandler', () => {
   });
 
   describe('handle method', () => {
+    it('preserves retryable timeout markers for statusless subscription stream errors', () => {
+      const error = Object.assign(new Error('upstream timed out'), {
+        code: 'upstream_timeout',
+        error: { code: 'upstream_timeout', message: 'upstream timed out' },
+      });
+      const handler = new EnhancedErrorHandler(
+        undefined,
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+      try {
+        handler.handle(error, mockContext, mockRequest);
+      } catch (failure) {
+        expect(failure).toMatchObject({ code: 'ETIMEDOUT', cause: error });
+        expect(classifyRetryError(failure).diagnosis).toBe('retryable');
+        return;
+      }
+      expect.fail('Expected timeout error');
+    });
+    it('keeps subscription backend timeout wording and retry fields intact', () => {
+      const error = Object.assign(new Error('503 upstream timeout'), {
+        status: 503,
+        code: 'service_unavailable',
+        error: {
+          message: 'Upstream timeout; please retry later.',
+          retryable: true,
+        },
+      });
+      const handler = new EnhancedErrorHandler(
+        undefined,
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+      expect(() => handler.handle(error, mockContext, mockRequest)).toThrow(
+        'Upstream timeout; please retry later.',
+      );
+      expect(error.message).toBe('Upstream timeout; please retry later.');
+      expect(error.status).toBe(503);
+      expect(error.code).toBe('service_unavailable');
+      expect(error.error.retryable).toBe(true);
+    });
     beforeEach(() => {
       errorHandler = new EnhancedErrorHandler();
     });
@@ -59,12 +112,195 @@ describe('EnhancedErrorHandler', () => {
       }).toThrow(originalError);
     });
 
+    it('logs structured API diagnostics without request contents', () => {
+      const apiError = Object.assign(
+        new Error(
+          'event:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-123","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+        ),
+        { type: 'rate_limit_error' },
+      );
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        {
+          durationMs: 5000,
+          errorType: 'rate_limit_error',
+          model: 'test-model',
+          providerCode: 'Throttling.AllocationQuota',
+          providerMessage: 'Allocated quota exceeded',
+          requestId: 'req-123',
+          statusCode: 429,
+          transport: 'sse',
+        },
+      );
+      expect(JSON.stringify(debugLoggerSpy.error.mock.calls[0])).not.toContain(
+        'test prompt',
+      );
+    });
+
+    it('prefers top-level request ids before parsed provider details', () => {
+      const apiError = Object.assign(new Error('API failure'), {
+        requestID: 'req-top-level',
+        request_id: 'req-snake-case',
+        response_id: 'resp-id',
+        status: 500,
+      });
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        expect.objectContaining({
+          requestId: 'req-top-level',
+          statusCode: 500,
+        }),
+      );
+    });
+
+    it('skips empty request ids and falls back to later request id fields', () => {
+      const apiError = Object.assign(new Error('API failure'), {
+        requestID: '',
+        request_id: '',
+        response_id: 'resp-id',
+      });
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        expect.objectContaining({
+          requestId: 'resp-id',
+        }),
+      );
+    });
+
+    it('throws the original error when provider details have a null error object', () => {
+      const apiError = { error: null, message: 'API failure' };
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBe(apiError);
+    });
+
     it('should throw enhanced error message for timeout errors', () => {
       const timeoutError = new Error('Request timeout');
 
       expect(() => {
         errorHandler.handle(timeoutError, mockContext, mockRequest);
       }).toThrow(/Request timeout after 5s.*Troubleshooting tips:/s);
+    });
+
+    it('preserves transport metadata when enhancing timeout errors', () => {
+      const timeoutError = Object.assign(
+        new Error('socket timed out via token@proxy.local:8080'),
+        { code: 'ETIMEDOUT' },
+      );
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(timeoutError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(
+        /Request timeout after 5s.*Troubleshooting tips:/s,
+      );
+      expect((thrown as Error).cause).toBe(timeoutError);
+      expect((thrown as Error).cause).toMatchObject({
+        code: 'ETIMEDOUT',
+        message: 'socket timed out via <redacted>@proxy.local:8080',
+      });
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        transportCode: 'ETIMEDOUT',
+      });
+    });
+
+    it('keeps an HTTP client status authoritative on enhanced timeouts', () => {
+      const timeoutError = Object.assign(new Error('socket timed out'), {
+        code: 'ETIMEDOUT',
+        status: 400,
+      });
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(timeoutError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'http',
+        diagnosis: 'fail-fast',
+        reason: 'client-error',
+        statusCode: 400,
+      });
+    });
+
+    it('marks the SDK bare connection timeout as retryable transport', () => {
+      // The OpenAI SDK throws APIConnectionTimeoutError bare — no code,
+      // status, or cause — once its internal retries are exhausted.
+      const bareTimeout = new APIConnectionTimeoutError();
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(bareTimeout, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(
+        /Request timeout after 5s.*Troubleshooting tips:/s,
+      );
+      expect((thrown as Error).cause).toBe(bareTimeout);
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        transportCode: 'ETIMEDOUT',
+      });
+    });
+
+    it('attaches the redacted clone, not the raw original, when redaction clones', () => {
+      const original = Object.freeze(
+        Object.assign(
+          new Error('socket timed out via token@proxy.local:8080'),
+          {
+            code: 'ETIMEDOUT',
+          },
+        ),
+      );
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(original, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect((thrown as Error).cause).not.toBe(original);
+      expect(((thrown as Error).cause as Error).message).toContain(
+        '<redacted>@proxy.local:8080',
+      );
     });
 
     it('should use custom suppression function', () => {
@@ -85,6 +321,11 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(stringError, mockContext, mockRequest);
       }).toThrow(stringError);
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        stringError,
+        expect.objectContaining({ model: 'test-model' }),
+      );
     });
 
     it('should redact proxy credentials before throwing request-time errors', () => {
@@ -230,6 +471,27 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(originalError, mockContext, mockRequest);
       }).toThrow('Original error message');
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        'Original error message',
+        expect.objectContaining({ model: 'test-model' }),
+      );
+    });
+
+    it('should include the underlying cause for non-timeout errors', () => {
+      const cause = Object.assign(new Error('fetch failed'), {
+        code: 'ECONNREFUSED',
+      });
+      const connectionError = new Error('Connection error.', { cause });
+
+      expect(() => {
+        errorHandler.handle(connectionError, mockContext, mockRequest);
+      }).toThrow(connectionError);
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        'Connection error. (cause: ECONNREFUSED: fetch failed)',
+        expect.objectContaining({ model: 'test-model' }),
+      );
     });
 
     it('should handle non-Error objects', () => {

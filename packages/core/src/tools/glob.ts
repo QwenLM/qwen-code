@@ -4,14 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
-import { glob, escape } from 'glob';
+import { existsSync } from 'node:fs';
+import { Worker } from 'node:worker_threads';
+import { resolveBundleDir } from '../utils/bundlePaths.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import {
   resolveAndValidatePath,
+  formatDisplayPath,
   resolvePath,
   isSubpath,
   unescapePath,
@@ -22,21 +24,27 @@ import type { PermissionDecision } from '../permissions/types.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   type FileFilteringOptions,
-} from '../config/constants.js';
+} from '../utils/file-filtering-options.js';
 import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  searchGlobDirectory,
+  type GlobDirectorySearch,
+  type GlobDirectoryReply,
+  type GlobPath,
+} from './glob-search.js';
+export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
 
 const MAX_FILE_COUNT = 100;
-
-// Subset of 'Path' interface provided by 'glob' that we can implement for testing
-export interface GlobPath {
-  fullpath(): string;
-  mtimeMs?: number;
-}
+const MAX_GLOB_COLLECTED_ENTRIES = MAX_FILE_COUNT * 10;
+const normalizePathForComparison = (p: string) =>
+  process.platform === 'win32' || process.platform === 'darwin'
+    ? p.toLowerCase()
+    : p;
 
 /**
  * Sorts file entries based on recency and then alphabetically.
@@ -83,6 +91,18 @@ export interface GlobToolParams {
   path?: string;
 }
 
+export interface GlobToolOptions {
+  /**
+   * A directory the search never leaves: the walk neither enters
+   * nor reports anything whose real location is outside it, whatever the
+   * pattern's grammar spells. Managed Sessions set it; the ordinary CLI
+   * keeps external globs, which ask for permission instead.
+   */
+  containmentRoot?: string;
+  /** Runs each search in a terminable worker; ordinary CLI callers omit it. */
+  executionTimeoutMs?: number;
+}
+
 class GlobToolInvocation extends BaseToolInvocation<
   GlobToolParams,
   ToolResult
@@ -92,6 +112,8 @@ class GlobToolInvocation extends BaseToolInvocation<
   constructor(
     private config: Config,
     params: GlobToolParams,
+    private readonly containmentRoot?: string,
+    private readonly executionTimeoutMs?: number,
   ) {
     super(params);
     this.fileService = config.getFileService();
@@ -100,7 +122,11 @@ class GlobToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     let description = `'${this.params.pattern}'`;
     if (this.params.path) {
-      description += ` in path '${this.params.path}'`;
+      const displayPath = formatDisplayPath(
+        this.params.path,
+        this.config.getTargetDir(),
+      );
+      description += ` in ${displayPath}`;
     }
 
     return description;
@@ -128,59 +154,80 @@ class GlobToolInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  /**
-   * Runs glob search in a single directory and returns filtered entries.
-   */
   private async globInDirectory(
     searchDir: string,
     pattern: string,
     signal: AbortSignal,
-  ): Promise<GlobPath[]> {
-    let effectivePattern = pattern;
-    const fullPath = path.join(searchDir, effectivePattern);
-    if (fs.existsSync(fullPath)) {
-      effectivePattern = escape(effectivePattern);
+    entryLimit: number,
+  ): Promise<{ entries: GlobPath[]; hitLimit: boolean }> {
+    const options: GlobDirectorySearch = {
+      searchDir,
+      pattern,
+      entryLimit,
+      projectRoot: this.config.getTargetDir(),
+      fileFilteringOptions: this.getFileFilteringOptions(),
+      containmentRoot: this.containmentRoot,
+    };
+    const timeoutMs = this.executionTimeoutMs;
+    if (timeoutMs === undefined) {
+      return searchGlobDirectory(options, this.fileService, signal);
     }
 
-    const entries = (await glob(effectivePattern, {
-      cwd: searchDir,
-      withFileTypes: true,
-      nodir: true,
-      stat: true,
-      nocase: true,
-      dot: true,
-      follow: false,
-      signal,
-    })) as GlobPath[];
-
-    // Filter using paths relative to the project root (the base that
-    // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
-    // Using searchDir-relative paths would cause ignore rules to be
-    // evaluated against incorrect paths when searchDir != projectRoot.
-    const projectRoot = this.config.getTargetDir();
-    const relativePaths = entries.map((p) =>
-      path.relative(projectRoot, p.fullpath()),
+    signal.throwIfAborted();
+    // A timer on the matching thread cannot interrupt a backtracking regexp.
+    const workerFile = path.join(
+      resolveBundleDir(import.meta.url),
+      'glob-search-worker.js',
     );
-
-    const { filteredPaths } = this.fileService.filterFilesWithReport(
-      relativePaths,
-      this.getFileFilteringOptions(),
-    );
-
-    const normalizePathForComparison = (p: string) =>
-      process.platform === 'win32' || process.platform === 'darwin'
-        ? p.toLowerCase()
-        : p;
-
-    const filteredAbsolutePaths = new Set(
-      filteredPaths.map((p) =>
-        normalizePathForComparison(path.resolve(projectRoot, p)),
-      ),
-    );
-
-    return entries.filter((entry) =>
-      filteredAbsolutePaths.has(normalizePathForComparison(entry.fullpath())),
-    );
+    // tsx must register its loader inside a worker running source files.
+    const workerEntry =
+      import.meta.url.endsWith('.ts') && !existsSync(workerFile)
+        ? new URL(
+            `data:text/javascript,${encodeURIComponent(
+              `import { register } from ${JSON.stringify(import.meta.resolve('tsx/esm/api'))}; register(); await import(${JSON.stringify(new URL('./glob-search-worker.ts', import.meta.url).href)});`,
+            )}`,
+          )
+        : workerFile;
+    const worker = new Worker(workerEntry, { workerData: options });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort = () => {};
+    try {
+      return await new Promise<{ entries: GlobPath[]; hitLimit: boolean }>(
+        (resolve, reject) => {
+          onAbort = () => reject(signal.reason);
+          worker.once('message', (reply: GlobDirectoryReply) =>
+            resolve({
+              entries: reply.entries.map((entry) => ({
+                fullpath: () => entry.path,
+                mtimeMs: entry.mtimeMs,
+              })),
+              hitLimit: reply.hitLimit,
+            }),
+          );
+          worker.once('error', () =>
+            reject(new Error('Glob search worker failed.')),
+          );
+          worker.once('exit', () =>
+            reject(new Error('Glob search worker exited before a result.')),
+          );
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Glob search exceeded ${timeoutMs / 1000} seconds. Narrow the pattern or path and retry.`,
+                ),
+              ),
+            timeoutMs,
+          );
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        },
+      );
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      await worker.terminate();
+    }
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -214,12 +261,25 @@ class GlobToolInvocation extends BaseToolInvocation<
       const pattern = this.params.pattern;
       const allFilteredEntries: GlobPath[] = [];
       const seenPaths = new Set<string>();
+      let hitCollectionLimit = false;
 
       for (const searchDir of searchDirs) {
-        const entries = await this.globInDirectory(searchDir, pattern, signal);
+        const remainingEntries =
+          MAX_GLOB_COLLECTED_ENTRIES - allFilteredEntries.length;
+        if (remainingEntries <= 0) {
+          hitCollectionLimit = true;
+          break;
+        }
+        const { entries, hitLimit } = await this.globInDirectory(
+          searchDir,
+          pattern,
+          signal,
+          remainingEntries,
+        );
+        hitCollectionLimit ||= hitLimit;
         for (const entry of entries) {
           // Deduplicate entries that might appear in overlapping directories
-          const normalized = entry.fullpath();
+          const normalized = normalizePathForComparison(entry.fullpath());
           if (!seenPaths.has(normalized)) {
             seenPaths.add(normalized);
             allFilteredEntries.push(entry);
@@ -252,7 +312,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         MAX_FILE_COUNT,
         this.config.getTruncateToolOutputLines(),
       );
-      const truncated = totalFileCount > fileLimit;
+      const truncated = hitCollectionLimit || totalFileCount > fileLimit;
 
       // Limit to fileLimit if needed
       const entriesToShow = truncated
@@ -264,11 +324,15 @@ class GlobToolInvocation extends BaseToolInvocation<
       );
       const fileListDescription = sortedAbsolutePaths.join('\n');
 
-      let resultMessage = `Found ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`;
+      let resultMessage = hitCollectionLimit
+        ? `Found at least ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`
+        : `Found ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`;
       resultMessage += `, sorted by modification time (newest first):\n---\n${fileListDescription}`;
 
       // Add truncation notice if needed
-      if (truncated) {
+      if (hitCollectionLimit) {
+        resultMessage += `\n---\n[Results truncated after scanning ${totalFileCount} matching files. Narrow the pattern or path.]`;
+      } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
@@ -276,8 +340,11 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: resultMessage,
-        returnDisplay: `Found ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
         resultFilePaths: sortedAbsolutePaths,
+        // The certified count covers the collected set, not the display
+        // slice — containment consumers must check this, never the slice.
+        collectedFilePaths: sortedEntries.map((entry) => entry.fullpath()),
       };
     } catch (error) {
       const errorMessage =
@@ -317,11 +384,14 @@ class GlobToolInvocation extends BaseToolInvocation<
 export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
   static readonly Name = ToolNames.GLOB;
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    private readonly options: GlobToolOptions = {},
+  ) {
     super(
       GlobTool.Name,
       ToolDisplayNames.GLOB,
-      'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.',
+      'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns',
       Kind.Search,
       {
         properties: {
@@ -373,6 +443,11 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
   protected createInvocation(
     params: GlobToolParams,
   ): ToolInvocation<GlobToolParams, ToolResult> {
-    return new GlobToolInvocation(this.config, params);
+    return new GlobToolInvocation(
+      this.config,
+      params,
+      this.options.containmentRoot,
+      this.options.executionTimeoutMs,
+    );
   }
 }

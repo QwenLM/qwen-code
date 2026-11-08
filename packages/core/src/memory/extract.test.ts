@@ -18,15 +18,53 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
+import { refreshMemoryInstruction } from './refresh.js';
+import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
+}));
+
+vi.mock('../agents/forkedAgent.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../agents/forkedAgent.js')>()),
+  getCacheSafeParamsSessionId: vi.fn(),
 }));
 
 vi.mock('./indexer.js', () => ({
   rebuildManagedAutoMemoryIndex: vi.fn().mockResolvedValue(''),
   rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(''),
 }));
+
+vi.mock('./refresh.js', () => ({
+  refreshMemoryInstruction: vi.fn().mockResolvedValue(undefined),
+}));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForMockCall(mock: { mock: { calls: unknown[] } }) {
+  // Wall-clock deadline, not a fixed tick count: the mock is invoked after
+  // real async work (index reads, cursor I/O), and ten zero-delay turns can
+  // elapse before that work completes on a loaded CI runner — the poll spun
+  // through its turns without waiting any actual time.
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    if (mock.mock.calls.length > 0) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('Expected mock to be called');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 describe('auto-memory extraction', () => {
   let tempDir: string;
@@ -43,6 +81,7 @@ describe('auto-memory extraction', () => {
       getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     } as unknown as Config;
     vi.clearAllMocks();
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-1');
   });
 
   afterEach(async () => {
@@ -59,6 +98,7 @@ describe('auto-memory extraction', () => {
       touchedTopics: [],
       touchedProjectScope: false,
       touchedUserScope: false,
+      hasToolActivity: true,
       systemMessage: undefined,
     });
 
@@ -82,6 +122,7 @@ describe('auto-memory extraction', () => {
 
     expect(first.touchedTopics).toEqual([]);
     expect(second.touchedTopics).toEqual([]);
+    expect(refreshMemoryInstruction).not.toHaveBeenCalled();
 
     const cursor = JSON.parse(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
@@ -89,6 +130,208 @@ describe('auto-memory extraction', () => {
 
     expect(cursor.sessionId).toBe('session-1');
     expect(cursor.processedOffset).toBe(2);
+  });
+
+  it('forwards skipped context while keeping the cursor in raw-history offsets', async () => {
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'Prefer Chinese reviews.' }] },
+    ];
+    const history = Array.from({ length: 60 }, () => ({
+      role: 'user',
+      parts: [{ text: 'next' }],
+    }));
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(60);
+  });
+
+  // Regression (#13004): an image-only unprocessed tail must not let the
+  // no-new-user-message early return swallow a parked supplement — the turns
+  // it holds are owed to the extractor, so the fork still runs over them and
+  // the cursor only advances after a real run.
+  it('forks over an image-only unprocessed tail when skippedHistory is parked', async () => {
+    await fs.writeFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      JSON.stringify({
+        sessionId: 'session-1',
+        processedOffset: 3,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'skipped-but-real-content' }] },
+    ];
+    const history = [
+      { role: 'user', parts: [{ text: 'a' }] },
+      { role: 'user', parts: [{ text: 'b' }] },
+      { role: 'user', parts: [{ text: 'c' }] },
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'AAA' } }],
+      },
+    ];
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+      systemMessage: undefined,
+    });
+
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(4);
+  });
+
+  // Regression (#13004 R18-2): a close-time flush replays a parked snapshot
+  // whose history a later non-forking run already advanced the cursor past.
+  // The replay still owes its turns to the extractor, but its write must not
+  // move the project cursor backwards — the next run reads a rewound offset as
+  // unprocessed history and re-scans everything after it. A genuine
+  // post-compaction run keeps the downward move.
+  it('never rewinds the persisted cursor on a flush replay', async () => {
+    const cursorPath = getAutoMemoryExtractCursorPath(projectRoot);
+    const seedCursor = () =>
+      fs.writeFile(
+        cursorPath,
+        JSON.stringify({
+          sessionId: 'session-1',
+          processedOffset: 6,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
+    const readOffset = async () =>
+      (
+        JSON.parse(await fs.readFile(cursorPath, 'utf-8')) as {
+          processedOffset: number;
+        }
+      ).processedOffset;
+    // No genuine progress, so the write falls back to startOffset — which the
+    // shrink clamp reduced to 0 because the cursor is ahead of this history.
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: false,
+      systemMessage: undefined,
+    });
+    const parked = Array.from({ length: 4 }, (_, i) => ({
+      role: 'user',
+      parts: [{ text: `parked ${i}` }],
+    }));
+    const skippedHistory = [{ role: 'user', parts: [{ text: 'owed' }] }];
+
+    await seedCursor();
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: parked,
+      skippedHistory,
+      flushReplay: true,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalled();
+    expect(await readOffset()).toBe(6);
+
+    // Control: the same run without the replay marker still moves the cursor
+    // down, so the shrink clamp keeps serving a real post-compaction history.
+    await seedCursor();
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: parked,
+      skippedHistory,
+    });
+    expect(await readOffset()).toBe(0);
+  });
+
+  it('skips a session mismatch without advancing the cursor', async () => {
+    vi.mocked(getCacheSafeParamsSessionId)
+      .mockReturnValueOnce('session-1')
+      .mockReturnValueOnce('session-2');
+    const cursorBefore = await fs.readFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      'utf-8',
+    );
+
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+    });
+
+    expect(result.skippedReason).toBe('session_mismatch');
+    expect(result.cursor.processedOffset).toBeUndefined();
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+    expect(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ).toBe(cursorBefore);
+  });
+
+  it('skips an existing session mismatch before scaffold IO', async () => {
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+    const uncreatedProjectRoot = path.join(tempDir, 'not-created');
+
+    const result = await runAutoMemoryExtract({
+      projectRoot: uncreatedProjectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+    });
+
+    expect(result.skippedReason).toBe('session_mismatch');
+    await expect(fs.stat(uncreatedProjectRoot)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+  });
+
+  it('preserves the empty-cache failure path', async () => {
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue(undefined);
+    vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValueOnce(
+      new Error('no cache-safe params'),
+    );
+
+    await expect(
+      runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+      }),
+    ).rejects.toThrow('no cache-safe params');
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
   });
 
   it('throws when config is missing because heuristic fallback was removed', async () => {
@@ -125,6 +368,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
       vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
@@ -151,6 +395,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: true,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
       vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValueOnce('');
@@ -180,6 +425,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user', 'project'],
         touchedProjectScope: true,
         touchedUserScope: true,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -200,6 +446,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: false,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -212,6 +459,69 @@ describe('auto-memory extraction', () => {
 
       expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledTimes(1);
       expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the live instruction after touched topics are indexed', async () => {
+      const projectRebuild = deferred<string>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['project'],
+        touchedProjectScope: true,
+        touchedUserScope: false,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+      vi.mocked(rebuildManagedAutoMemoryIndex).mockReturnValueOnce(
+        projectRebuild.promise,
+      );
+
+      const extractPromise = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      });
+      await waitForMockCall(vi.mocked(rebuildManagedAutoMemoryIndex));
+
+      expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+
+      projectRebuild.resolve('');
+      await extractPromise;
+
+      expect(refreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'managed auto-memory extraction',
+      });
+    });
+
+    it('refreshes user-scope-only updates after the user index is rebuilt', async () => {
+      const userRebuild = deferred<string>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['user'],
+        touchedProjectScope: false,
+        touchedUserScope: true,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+      vi.mocked(rebuildUserAutoMemoryIndex).mockReturnValueOnce(
+        userRebuild.promise,
+      );
+
+      const extractPromise = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      });
+      await waitForMockCall(vi.mocked(rebuildUserAutoMemoryIndex));
+
+      expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+      expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+
+      userRebuild.resolve('');
+      await extractPromise;
+
+      expect(refreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'managed auto-memory extraction',
+      });
     });
   });
 
@@ -227,6 +537,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -284,6 +595,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: [],
         touchedProjectScope: false,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -331,6 +643,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -356,6 +669,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -400,6 +714,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -489,6 +804,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -531,6 +847,51 @@ describe('auto-memory extraction', () => {
         agentCallsBefore + 1,
       );
       expect(result.cursor.processedOffset).toBe(compressedHistory.length);
+    });
+    it('BUG #6311: should NOT advance cursor when agent makes zero tool calls (hallucination)', async () => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: false,
+        systemMessage: undefined,
+      });
+
+      const history = [
+        {
+          role: 'user' as const,
+          parts: [{ text: 'Remember that I prefer pnpm over npm.' }],
+        },
+      ];
+
+      const result = await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...history],
+      });
+
+      expect(result.cursor.processedOffset).toBe(0);
+    });
+    it('should advance cursor on legitimate noop (agent checked memory, found nothing new)', async () => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+
+      const history = [{ role: 'user' as const, parts: [{ text: 'hello' }] }];
+
+      const result = await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...history],
+      });
+
+      expect(result.cursor.processedOffset).toBe(1);
     });
   });
 });

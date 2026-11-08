@@ -17,7 +17,16 @@
  * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +36,18 @@ import {
   DaemonHttpError,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import { AcpWsTransport } from '@qwen-code/sdk/daemon/transports';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  Storage,
+  type ChatRecord,
+} from '@qwen-code/qwen-code-core';
+import { isNativeDirectoryPickerAvailable } from '../../packages/cli/src/serve/native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from '../../packages/cli/src/serve/local-path-open.js';
+import { isGitAvailable } from '../../packages/cli/src/serve/git-availability.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -40,6 +61,15 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'integration-test-token';
+// The ACP child's `initialize` handshake gets 10s by default, which is a
+// budget for an interactive desktop, not for a shard sharing a 128-core ECS
+// host with ~30 other jobs. Run 33633418567 lost `honors and reserves a
+// normalized caller-supplied session ID` to three ~10s
+// `AcpSessionBridge initialize timed out` attempts and a 504 on the
+// sandbox:docker leg while the same commit's sandbox:none shards passed —
+// the same signature #10605 diagnosed in run 33351032808. Nothing here
+// asserts the handshake budget, so raise it for the spawned daemon only.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
@@ -47,9 +77,98 @@ let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
+// The daemon evaluates isNativeDirectoryPickerAvailable() in its own process
+// at boot. Probe once at spawn time (same host, same uid, same relevant env)
+// so the expectation matches the daemon's boot-time view; re-probing at
+// assertion time minutes later diverged when the host's GUI session state
+// drifted mid-run (red macOS E2E runs after #9406, tracked in #10453).
+let nativeDirectoryPickerAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_open tag.
+let localPathOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_terminal tag.
+let localTerminalOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the git_workspace_clone tag.
+let gitAvailableAtBoot = false;
+
+function writePersistedTranscript(
+  sessionId: string,
+  records: ChatRecord[],
+  state: 'active' | 'archived' = 'active',
+): string {
+  const qwenHome = path.join(homeDir, '.qwen');
+  const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+    new Storage(REPO_ROOT).getProjectDir(),
+  );
+  const chatsDir = path.join(
+    projectDir,
+    'chats',
+    ...(state === 'archived' ? ['archive'] : []),
+  );
+  mkdirSync(chatsDir, { recursive: true });
+  const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+  writeFileSync(
+    filePath,
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    'utf8',
+  );
+  return filePath;
+}
+
+function chatRecord(
+  sessionId: string,
+  uuid: string,
+  parentUuid: string | null,
+  text: string,
+): ChatRecord {
+  const assistant = uuid.startsWith('a');
+  return {
+    uuid,
+    parentUuid,
+    sessionId,
+    timestamp: assistant
+      ? '2026-07-08T00:00:01.000Z'
+      : '2026-07-08T00:00:00.000Z',
+    type: assistant ? 'assistant' : 'user',
+    cwd: REPO_ROOT,
+    version: '1.0.0',
+    message: {
+      role: assistant ? 'model' : 'user',
+      parts: [{ text }],
+    },
+  };
+}
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
+  mkdirSync(path.join(homeDir, '.qwen'));
+  writeFileSync(
+    path.join(homeDir, '.qwen', 'settings.json'),
+    JSON.stringify({
+      model: { reasoningEffort: 'none' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen-startup-test',
+            name: 'Startup test',
+            baseUrl: 'http://127.0.0.1:9/v1',
+            envKey: 'OPENAI_API_KEY',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                efforts: ['low', 'high'],
+                defaultEffort: 'low',
+                disableField: 'reasoning_effort',
+              },
+            },
+          },
+        ],
+      },
+    }),
+  );
+  nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
+  localPathOpenAtBoot = isLocalPathOpenAvailable();
+  localTerminalOpenAtBoot = isLocalTerminalAvailable();
+  gitAvailableAtBoot = isGitAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -69,6 +188,8 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      '--initialize-timeout-ms',
+      String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -87,6 +208,9 @@ beforeAll(async () => {
                 'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
                 'QWEN_SERVE_RATE_LIMIT',
                 'QWEN_SERVE_NO_MCP_POOL',
+                'QWEN_SERVE_NO_PERSISTENT_REGISTRATION',
+                'QWEN_SERVE_CLIENT_MCP_OVER_WS',
+                'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
               ].includes(k),
           ),
         ),
@@ -103,12 +227,14 @@ beforeAll(async () => {
   port = await new Promise<number>((resolve, reject) => {
     let buf = '';
     // Capture the timeout handle so we can clear it on success — an
-    // un-cleared 10s timer outlives the spawn promise and keeps the
+    // un-cleared timer outlives the spawn promise and keeps the
     // vitest event loop alive past the test, manifesting as
     // intermittent `Test timed out` retries on slow CI.
+    // 25s is strictly below the 30s beforeAll backstop so this
+    // descriptive rejection fires first on a genuine boot hang.
     const bootTimer = setTimeout(
       () => reject(new Error('daemon boot timeout')),
-      10_000,
+      25_000,
     );
     const onData = (chunk: Buffer) => {
       buf += chunk.toString();
@@ -221,27 +347,68 @@ describe('qwen serve — capabilities envelope', () => {
     // `packages/cli/src/serve/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
     //
-    // Conditional tags absent under this suite's spawn flags (token auth /
-    // no `--require-auth` / no `--allow-origin` / no deadline env vars /
-    // no rate-limit opt-in): `require_auth`, `allow_origin`,
-    // `prompt_absolute_deadline`, `writer_idle_timeout`, `rate_limit`.
+    // Conditional tags absent under this suite's spawn flags (no
+    // `--require-auth` / `--allow-origin` / deadline env vars /
+    // rate-limit opt-in, no `--channel`, no configured batch ASR model):
+    // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
+    // `prompt_absolute_deadline`, `writer_idle_timeout`,
+    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `native_directory_picker` is host-conditional (the daemon host's GUI
+    // environment, not a spawn flag) and is spliced at its registry
+    // position below, using the boot-time probe captured when the daemon
+    // was spawned rather than a fresh probe at assertion time.
+    // `git_workspace_clone` is host-conditional too (the daemon host's
+    // `git` binary) and is spliced the same way.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
-    // `workspace_settings` / `workspace_reload` (the CLI serve path
-    // always wires `persistSetting` and the workspace service).
-    expect(caps.features).toEqual([
+    // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
+    // `workspace_trust`, `workspace_github_setup`, and `workspace_reload`.
+    // `scheduled_task_session_reuse` appears only after the managed runtime
+    // mounts, so the fast-path bootstrap and runtime envelopes legitimately
+    // differ by that tag. Its transition is covered by the serve startup tests.
+    // `workspace_runtime_stop` skews the same way (#12490): stop readiness
+    // depends on the mounted runtime's bridge, which the bootstrap envelope
+    // cannot see, so the tag appears only once the runtime app serves the
+    // envelope.
+    expect(
+      caps.features.filter(
+        (feature) =>
+          feature !== 'scheduled_task_session_reuse' &&
+          feature !== 'workspace_runtime_stop',
+      ),
+    ).toEqual([
       'health',
       'daemon_status',
+      'daemon_update',
       'capabilities',
       'session_create',
+      'session_startup_config',
+      'session_id_override',
       'session_scope_override',
       'session_load',
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_catalog_batch',
+      'session_info',
+      'session_source_metadata',
+      'session_side_task',
       'session_prompt',
+      'session_turn_status',
+      'session_attachments',
+      'session_attachment_chunk_upload',
+      'session_attachment_list',
+      'session_mid_turn_message_mutation',
+      'session_mid_turn_message_query',
+      'session_mid_turn_send_now',
       'session_cancel',
       'session_events',
+      'session_artifacts',
+      'session_artifacts_persistence',
+      'session_artifact_library',
+      'workspace_artifact_library',
+      'workspace_artifact_library_stream',
+      'session_sources',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
@@ -251,9 +418,19 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_vote',
       'workspace_mcp',
       'workspace_skills',
+      'workspace_skills_config_runtime',
       'workspace_providers',
+      'workspace_acp_preheat',
+      'workspace_acp_status',
       'auth_provider_install',
       'workspace_memory',
+      'memory_import_v1',
+      'workspace_memory_remember',
+      'workspace_memory_remember_project_scope',
+      'workspace_memory_remember_user_scope',
+      'workspace_memory_forget',
+      'workspace_memory_forget_scope',
+      'workspace_memory_dream',
       'workspace_agents',
       'workspace_agent_generate',
       'workspace_env',
@@ -262,39 +439,360 @@ describe('qwen serve — capabilities envelope', () => {
       'session_context_usage',
       'session_supported_commands',
       'session_tasks',
+      'session_agents',
+      'session_agent_trace',
+      'scheduled_task_gate',
+      'autofix_pr_watches',
+      'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
+      'session_resources',
+      'session_status',
       'session_close',
+      'session_archive',
+      'session_archive_idle_guard',
+      'session_storage_conflict_repair',
       'session_metadata',
+      'session_organization',
+      'session_export',
+      'standalone_sessions_v1',
+      'standalone_session_options_v1',
+      'session_transcript',
+      'session_transcript_pagination',
+      'session_turn_navigation',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',
       'mcp_server_runtime_mutation',
       'workspace_file_read',
       'workspace_file_bytes',
+      'workspace_file_read_cursor',
       'workspace_file_write',
+      'workspace_file_upload',
+      'workspace_file_delete',
+      'workspace_directory_create',
+      'workspace_directory_delete',
       'session_approval_mode_control',
       'workspace_tool_toggle',
+      'workspace_skill_settings_toggle',
+      'workspace_skill_settings_batch_toggle',
+      'user_skill_activation',
+      'workspace_session_refresh',
+      'extension_batch_activation_v2',
+      'extension_activation_explicit_refresh',
+      'workspace_skill_manage',
+      'skill_archive_install',
+      'skill_zip_file_source',
+      'web_shell_brand',
       'workspace_settings',
       'workspace_permissions',
+      'workspace_voice',
+      'workspace_trust',
+      'workspace_trust_grant',
+      'workspace_trust_hot_reload',
       'workspace_init',
+      'workspace_github_setup',
+      'workspace_github_prs',
+      'workspace_git_worktrees',
       'workspace_mcp_restart',
       'session_recap',
+      'session_generation',
+      'workspace_generation',
       'session_btw',
+      'session_btw_stream',
       'mcp_workspace_pool',
       'mcp_pool_restart',
       'auth_device_flow',
       'permission_mediation',
       'non_blocking_prompt',
       'session_language',
+      'user_language_sync',
+      'session_message_deletion',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
       'workspace_extensions',
       'session_branch',
+      'session_branch_worktree',
       'workspace_reload',
+      'workspace_model_reload',
+      'channel_delivery',
+      'channel_control',
+      'channel_management',
+      'channel_delete_config_loss_convergence',
+      'workspace_channel_observed_contacts',
+      'dynamic_workspace_registration',
+      'persistent_workspace_registration',
+      'workspace_display_name',
+      'scratch_workspace_registration',
+      ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
+      'workspace_runtime_removal',
+      ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
+      'workspace_runtime',
+      'workspace_directories',
+      ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
+      ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
+      'workspace_qualified_rest_core',
+      'extension_management_v2',
+      'extension_list_details',
+      'extension_state',
+      'extension_git_credentials',
+      'extension_local_path_install',
+      'workspace_persisted_transcript',
+      'workspace_session_export',
+      'workspace_archived_session_export',
+      'workspace_session_live_state',
+      'workspace_session_live_state_batch',
+      'workspace_session_metadata',
+      'session_worktree_persistence_v1',
+      'session_worktree_reset_v1',
       'voice_transcribe',
+      'web_terminal',
     ]);
+  });
+});
+
+describe('qwen serve — local Extension install', () => {
+  it('installs an absolute daemon-local directory into managed storage', async () => {
+    const source = path.join(homeDir, 'local-extension-source');
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(source, 'qwen-extension.json'),
+      JSON.stringify({
+        name: 'daemon-local-path-e2e',
+        version: '1.0.0',
+      }),
+      'utf8',
+    );
+
+    const accepted = await client.installExtension({ source, consent: true });
+    await expect
+      .poll(
+        async () =>
+          (await client.extensionOperationStatus(accepted.operationId)).status,
+        { timeout: 10_000 },
+      )
+      .toBe('succeeded');
+
+    const operation = await client.extensionOperationStatus(
+      accepted.operationId,
+    );
+    expect(operation.result).toMatchObject({
+      status: 'installed',
+      source,
+      name: 'daemon-local-path-e2e',
+    });
+    const status = await client.workspaceExtensions();
+    const installed = status.extensions.find(
+      (extension) => extension.name === 'daemon-local-path-e2e',
+    );
+    expect(installed).toMatchObject({
+      source,
+      installType: 'local',
+    });
+    expect(installed?.path).not.toBe(source);
+    expect(
+      installed?.path.startsWith(
+        `${path.join(homeDir, '.qwen', 'extensions')}${path.sep}`,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('qwen serve — transcript paging route', () => {
+  const getTranscript = (sessionId: string, query = '') =>
+    fetch(`${base}/session/${sessionId}/transcript${query}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+
+  it('serves persisted transcript pages through the SDK helper', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111111';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'hello persisted transcript'),
+      chatRecord(sessionId, 'a1', 'u1', 'hello from replay'),
+    ]);
+
+    const first = await client.getSessionTranscriptPage(sessionId, {
+      limit: 1,
+    });
+    expect(first.sessionId).toBe(sessionId);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBeDefined();
+    expect(first.events.length).toBeGreaterThan(0);
+    expect(first.events.every((event) => event.type === 'session_update')).toBe(
+      true,
+    );
+    expect(first.events.some((event) => 'id' in event)).toBe(false);
+
+    const second = await client.getSessionTranscriptPage(sessionId, {
+      cursor: first.nextCursor!,
+      limit: 1,
+    });
+    expect(second.sessionId).toBe(sessionId);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeUndefined();
+    expect(second.events.length).toBeGreaterThan(0);
+    expect(
+      second.events.every((event) => event.type === 'session_update'),
+    ).toBe(true);
+    expect(second.events.some((event) => 'id' in event)).toBe(false);
+  });
+
+  it('indexes and opens frozen turns through the real daemon owner path', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111112';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'first prompt'),
+      chatRecord(sessionId, 'a1', 'u1', 'first answer'),
+      chatRecord(sessionId, 'u2', 'a1', 'second prompt'),
+      chatRecord(sessionId, 'a2', 'u2', 'second answer'),
+    ]);
+
+    const initial = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(initial.totalTurns).toBe(2);
+    expect(initial.turns.map((turn) => turn.turnId)).toEqual(['u1', 'u2']);
+
+    const anchored = await client.getSessionTranscriptPage(sessionId, {
+      atRecordId: 'u2',
+      snapshot: initial.snapshot,
+      limit: 2,
+    });
+    expect(anchored.targetRecordId).toBe('u2');
+    expect(anchored.hasOlder).toBe(true);
+
+    appendFileSync(
+      filePath,
+      `${JSON.stringify(chatRecord(sessionId, 'u3', 'a2', 'third prompt'))}\n`,
+      'utf8',
+    );
+    const frozen = await client.getSessionTurnIndexPage(sessionId, {
+      snapshot: initial.snapshot,
+      start: 0,
+      limit: 10,
+    });
+    const fresh = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(frozen.totalTurns).toBe(2);
+    expect(fresh.totalTurns).toBe(3);
+
+    const tampered = `${initial.snapshot[0] === 'A' ? 'B' : 'A'}${initial.snapshot.slice(1)}`;
+    await expect(
+      client.getSessionTurnIndexPage(sessionId, {
+        snapshot: tampered,
+        start: 0,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { code: 'invalid_transcript_cursor' },
+    } satisfies Partial<DaemonHttpError>);
+  });
+
+  it('maps transcript request validation errors through the real daemon', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-222222222222';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'validation transcript'),
+    ]);
+
+    const invalidLimit = await getTranscript(sessionId, '?limit=0');
+    expect(invalidLimit.status).toBe(400);
+    await expect(invalidLimit.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_limit',
+    });
+
+    const invalidCursor = await getTranscript(
+      sessionId,
+      '?cursor=not-a-cursor',
+    );
+    expect(invalidCursor.status).toBe(400);
+    await expect(invalidCursor.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_cursor',
+    });
+
+    const missing = await getTranscript('99999999-aaaa-bbbb-cccc-333333333333');
+    expect(missing.status).toBe(404);
+  });
+
+  it('reads exact conflicts from active and maps archived/unavailable snapshots to 409', async () => {
+    const archivedId = '99999999-aaaa-bbbb-cccc-444444444444';
+    const archivedRecord = chatRecord(
+      archivedId,
+      'u1',
+      null,
+      'archived transcript',
+    );
+    writePersistedTranscript(archivedId, [archivedRecord], 'archived');
+    const archived = await getTranscript(archivedId);
+    expect(archived.status).toBe(409);
+    await expect(archived.json()).resolves.toMatchObject({
+      code: 'session_archived',
+    });
+
+    const conflictId = '99999999-aaaa-bbbb-cccc-555555555555';
+    const activeConflictRecord = chatRecord(
+      conflictId,
+      'u1',
+      null,
+      'active conflicting transcript',
+    );
+    const archivedConflictRecord = chatRecord(
+      conflictId,
+      'u1',
+      null,
+      'archived conflicting transcript',
+    );
+    writePersistedTranscript(conflictId, [activeConflictRecord]);
+    writePersistedTranscript(conflictId, [archivedConflictRecord], 'archived');
+    const conflict = await getTranscript(conflictId);
+    expect(conflict.status).toBe(200);
+    const conflictBody = await conflict.json();
+    expect(conflictBody).toMatchObject({
+      sessionId: conflictId,
+      hasMore: false,
+    });
+    expect(JSON.stringify(conflictBody)).toContain(
+      'active conflicting transcript',
+    );
+    expect(JSON.stringify(conflictBody)).not.toContain(
+      'archived conflicting transcript',
+    );
+
+    const unavailable = await getTranscript(
+      '99999999-aaaa-bbbb-cccc-666666666666',
+      '?cursor=stale',
+    );
+    expect(unavailable.status).toBe(409);
+    await expect(unavailable.json()).resolves.toMatchObject({
+      code: 'transcript_snapshot_unavailable',
+    });
+  });
+
+  it('rejects oversized transcript snapshots with 413', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-777777777777';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'oversized transcript'),
+    ]);
+    truncateSync(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+
+    const response = await getTranscript(sessionId);
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'transcript_too_large',
+      maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+    });
+  });
+
+  afterAll(() => {
+    // The persisted transcript fixtures above live in the daemon's project
+    // `chats/` dir. Remove them so later suites (e.g. PATCH metadata's
+    // listWorkspaceSessions readback) start from a clean session list: extra
+    // persisted sessions widen a pre-existing listing race and flake them.
+    const qwenHome = path.join(homeDir, '.qwen');
+    const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+      new Storage(REPO_ROOT).getProjectDir(),
+    );
+    rmSync(path.join(projectDir, 'chats'), { recursive: true, force: true });
   });
 });
 
@@ -311,6 +809,100 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     expect(res.status).toBe(400);
   });
 
+  it('honors and reserves a normalized caller-supplied session ID', async () => {
+    // Fresh id per attempt: vitest `retry` re-enters this body against the
+    // same long-lived daemon, and a fixed id turns one timed-out create into
+    // deterministic 409 session_id_conflict failures on every retry — the
+    // session a failed attempt left live (or abandoned-but-later-registered)
+    // still owns the reservation the retry's first POST collides with. The
+    // ACP_INITIALIZE_TIMEOUT_MS note above names the load class.
+    const requestedId = randomUUID().toUpperCase();
+    const normalizedId = requestedId.toLowerCase();
+    try {
+      const created = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          cwd: REPO_ROOT,
+          sessionId: requestedId,
+          sessionScope: 'single',
+        }),
+      });
+      const createdBody = await created.json();
+      expect(created.status, JSON.stringify(createdBody)).toBe(200);
+      expect(createdBody).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+
+      let conflict: unknown;
+      try {
+        await client.createOrAttachSession({
+          workspaceCwd: REPO_ROOT,
+          sessionId: normalizedId,
+        });
+      } catch (error) {
+        conflict = error;
+      }
+      expect(conflict).toBeInstanceOf(DaemonHttpError);
+      expect((conflict as DaemonHttpError).status).toBe(409);
+      expect((conflict as DaemonHttpError).body).toMatchObject({
+        code: 'session_id_conflict',
+        sessionId: normalizedId,
+      });
+
+      await client.closeSession(normalizedId);
+
+      const sdkRest = await client.createOrAttachSession({
+        workspaceCwd: REPO_ROOT,
+        sessionId: requestedId,
+      });
+      expect(sdkRest).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+      await client.closeSession(normalizedId);
+
+      const acpTransport = new AcpWsTransport(
+        `ws://127.0.0.1:${port}/acp`,
+        TOKEN,
+      );
+      const acpClient = new DaemonClient({
+        baseUrl: base,
+        token: TOKEN,
+        transport: acpTransport,
+      });
+      try {
+        const sdkAcp = await acpClient.createOrAttachSession({
+          workspaceCwd: REPO_ROOT,
+          sessionId: requestedId,
+        });
+        expect(sdkAcp).toMatchObject({ sessionId: normalizedId });
+        await client.closeSession(normalizedId);
+      } finally {
+        acpClient.dispose();
+      }
+
+      const invalid = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: REPO_ROOT, sessionId: '../escape' }),
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toMatchObject({
+        code: 'invalid_session_id',
+      });
+    } finally {
+      await client.closeSession(normalizedId).catch(() => undefined);
+    }
+  });
+
   it('two parallel POSTs same workspace coalesce to one session', async () => {
     const cwd = REPO_ROOT;
     const [a, b] = await Promise.all([
@@ -320,6 +912,112 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     expect(a.sessionId).toBe(b.sessionId);
     // Exactly one of the two reports `attached: false` (the spawn owner).
     expect([a.attached, b.attached].sort()).toEqual([false, true]);
+  });
+
+  it('confirms real model-only startup and the cached model notification', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      startupConfig: { modelServiceId },
+    });
+    try {
+      expect(session).toMatchObject({
+        modelApplied: true,
+        startupConfigApplied: { modelServiceId },
+      });
+      expect(session.startupConfigApplied).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      const status = await client.daemonStatus('full');
+      expect(
+        status.full?.sessions.find(
+          (entry) => entry.sessionId === session.sessionId,
+        )?.currentModelId,
+      ).toBe(modelServiceId);
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('applies high over shared none and tears down only rejected startup selections', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      startupConfig: { modelServiceId, reasoningEffort: 'high' },
+    });
+    try {
+      expect(session.startupConfigApplied).toEqual({
+        modelServiceId,
+        reasoningEffort: 'high',
+        effectiveReasoning: { state: 'enabled', effort: 'high' },
+      });
+      const context = await client.sessionContext(
+        session.sessionId,
+        session.clientId,
+      );
+      expect(context.state.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue: 'high',
+          }),
+        ]),
+      );
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+    const sessionId = randomUUID();
+    const failed = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        cwd: REPO_ROOT,
+        sessionId,
+        startupConfig: { modelServiceId, reasoningEffort: 'max' },
+      }),
+    });
+    const failureBody = await failed.json();
+    expect(failed.status, JSON.stringify(failureBody)).toBe(422);
+    expect(failureBody).toMatchObject({
+      code: 'startup_config_rejected',
+    });
+    const missing = await fetch(`${base}/session/${sessionId}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(missing.status).toBe(404);
+  });
+
+  it('rolls back rejected standalone startup so its caller id can be reused', async () => {
+    const sessionId = randomUUID();
+    const modelServiceId = 'qwen-startup-test(openai)';
+    await expect(
+      client.createStandaloneSession({
+        sessionId,
+        startupConfig: { modelServiceId, reasoningEffort: 'max' },
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      body: { code: 'startup_config_rejected' },
+    });
+    await expect(client.getStandaloneSession(sessionId)).rejects.toMatchObject({
+      status: 404,
+    });
+    const retried = await client.createStandaloneSession({
+      sessionId,
+      startupConfig: { modelServiceId, reasoningEffort: 'high' },
+    });
+    try {
+      expect(retried).toMatchObject({
+        sessionId,
+        modelApplied: true,
+        startupConfigApplied: { modelServiceId, reasoningEffort: 'high' },
+      });
+    } finally {
+      await client.closeSession(sessionId);
+    }
   });
 
   it('bad modelServiceId keeps the session alive on the default model', async () => {
@@ -517,6 +1215,46 @@ describe('qwen serve — cancel + list', () => {
   });
 });
 
+describe('qwen serve — GET /goals', () => {
+  const getGoals = async () => {
+    const res = await fetch(`${base}/goals`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  it('returns an empty, versioned list when no session has a goal', async () => {
+    const { status, body } = await getGoals();
+    expect(status).toBe(200);
+    expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+  });
+
+  it('probes each live session over the bridge without reporting a goal', async () => {
+    // The real round trip: serve -> bridge -> `sessionGoalGet` ext method in
+    // the `qwen --acp` child -> back. A live session with no `/goal` must come
+    // back as "no goal" rather than an error or a phantom entry.
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    try {
+      const { status, body } = await getGoals();
+      expect(status).toBe(200);
+      // `droppedCount: 0` is the load-bearing half: it proves the ext-method
+      // probe actually reached the child. A dropped probe would also yield an
+      // empty `goals`, so that alone cannot tell success from a silent failure.
+      expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('requires the bearer token', async () => {
+    const res = await fetch(`${base}/goals`);
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('qwen serve — DELETE /session/:id', () => {
   it('204 on explicit close', async () => {
     const session = await client.createOrAttachSession({
@@ -540,6 +1278,108 @@ describe('qwen serve — DELETE /session/:id', () => {
     await client.closeSession(session.sessionId);
     await client.closeSession(session.sessionId);
   });
+});
+
+describe('qwen serve — session approval-mode recovery', () => {
+  it('restores Full Access, explicit overrides, and Plan execution mode after cold load', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+      sourceType: 'approval-mode-persistence-test',
+      sourceId: `cold-load-${Date.now()}`,
+    });
+    expect(session.clientId).toBeTypeOf('string');
+    expect(session.sourcePersisted).toBe(true);
+
+    try {
+      const waitUntilClosed = async () => {
+        await expect
+          .poll(
+            async () => {
+              try {
+                await client.sessionStatus(session.sessionId);
+                return false;
+              } catch (error) {
+                return error instanceof DaemonHttpError && error.status === 404;
+              }
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      };
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.detachSession(session.sessionId, session.clientId);
+      await waitUntilClosed();
+
+      const restored = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const modes = restored.state.modes as { currentModeId?: string };
+      const configOptions = restored.state.configOptions as Array<{
+        id: string;
+        currentValue: string;
+      }>;
+
+      expect(modes.currentModeId).toBe('yolo');
+      expect(
+        configOptions.find((option) => option.id === 'mode'),
+      ).toMatchObject({ currentValue: 'yolo' });
+
+      await client.reload({ clientId: restored.clientId });
+      const afterReload = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (afterReload.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('yolo');
+      await client.detachSession(session.sessionId, afterReload.clientId);
+
+      expect(restored.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restored.clientId);
+      await waitUntilClosed();
+      const overridden = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+        approvalMode: 'default',
+      });
+      expect(
+        (overridden.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('default');
+
+      expect(overridden.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, overridden.clientId);
+      await waitUntilClosed();
+      const restoredOverride = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (restoredOverride.state.modes as { currentModeId?: string })
+          .currentModeId,
+      ).toBe('default');
+
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.setSessionApprovalMode(session.sessionId, 'yolo', {
+        planMode: true,
+      });
+      await client.setSessionApprovalMode(session.sessionId, 'auto-edit', {
+        planMode: true,
+      });
+      expect(restoredOverride.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restoredOverride.clientId);
+      await waitUntilClosed();
+
+      const restoredPlan = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const planModes = restoredPlan.state.modes as {
+        currentModeId?: string;
+        _meta?: { planExecutionMode?: string };
+      };
+      expect(planModes.currentModeId).toBe('plan');
+      expect(planModes._meta?.planExecutionMode).toBe('auto-edit');
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 45_000);
 });
 
 describe('qwen serve — PATCH /session/:id/metadata', () => {
@@ -577,10 +1417,34 @@ describe('qwen serve — PATCH /session/:id/metadata', () => {
   });
 });
 
+describe('qwen serve — POST /session/:id/continue', () => {
+  // Real-daemon wiring check for the continuation lifecycle path
+  // (route → bridge.continueSession → control method → agent
+  // continueLastTurn). Model-free: a fresh session has no interrupted turn,
+  // so the pre-check rejects and no continuation turn is dispatched — the
+  // happy/reject path that exercises the full HTTP round-trip.
+  it('returns accepted:false on a session with no interrupted turn', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const res = await fetch(`${base}/session/${session.sessionId}/continue`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      accepted: false,
+      interruption: 'none',
+    });
+    await client.closeSession(session.sessionId);
+  });
+});
+
 describe('qwen serve — prompt clientId admission', () => {
   // Validates the three real-daemon behaviors that DaemonSessionClient's
   // clientId self-heal relies on (see
-  // docs/superpowers/specs/2026-06-24-daemon-clientid-self-heal-design.md).
+  // docs/design/2026-06-24-daemon-clientid-self-heal-design.md).
   // Model-free: prompt admission (where invalid_client_id is decided) runs
   // before any model call, so promptNonBlocking returns 202 on acceptance
   // without reaching the (unreachable, fake) model.

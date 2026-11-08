@@ -14,7 +14,7 @@ import {
   createAuditPublisher,
 } from './audit.js';
 import type { ResolvedPath } from './paths.js';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 
 function expectedHash(p: string): string {
   return createHash('sha256').update(p).digest('hex').slice(0, 16);

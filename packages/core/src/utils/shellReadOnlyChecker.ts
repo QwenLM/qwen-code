@@ -16,6 +16,11 @@ import {
   splitCommands,
   stripShellWrapper,
 } from './shell-utils.js';
+import {
+  classifyAwkCommandSafety,
+  classifySedCommandSafety,
+  hasShellBraceExpansion,
+} from './shell-safety-rules.js';
 
 const READ_ONLY_ROOT_COMMANDS = new Set([
   'awk',
@@ -32,21 +37,13 @@ const READ_ONLY_ROOT_COMMANDS = new Set([
   'git',
   'grep',
   'head',
-  'less',
   'ls',
-  'more',
   'printenv',
-  'printf',
   'ps',
   'pwd',
-  'rg',
-  'ripgrep',
   'sed',
-  'sort',
   'stat',
   'tail',
-  'tree',
-  'uniq',
   'wc',
   'which',
   'where',
@@ -61,7 +58,7 @@ const BLOCKED_FIND_FLAGS = new Set([
   '-okdir',
 ]);
 
-const BLOCKED_FIND_PREFIXES = ['-fprint', '-fprintf'];
+const BLOCKED_FIND_PREFIXES = ['-fls', '-fprint', '-fprintf'];
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'blame',
@@ -81,47 +78,22 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 const BLOCKED_GIT_REMOTE_ACTIONS = new Set([
   'add',
   'remove',
+  'rm',
   'rename',
+  'set-branches',
+  'set-head',
   'set-url',
   'prune',
   'update',
 ]);
+const GIT_EXTERNAL_HELPER_OPTION =
+  /(?:^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager)(?:=|$)|%G[?GKFPST])/;
 
-const BLOCKED_GIT_BRANCH_FLAGS = new Set([
-  '-d',
-  '-D',
-  '--delete',
-  '--move',
-  '-m',
-]);
-
-const BLOCKED_SED_PREFIXES = ['-i'];
-
-// AWK side-effect patterns that can execute commands or write files
-const AWK_SIDE_EFFECT_PATTERNS = [
-  /system\s*\(/, // system() function calls
-  /print\s+[^>|]*>\s*"[^"]*"/, // print > "file"
-  /printf\s+[^>|]*>\s*"[^"]*"/, // printf > "file"
-  /print\s+[^>|]*>>\s*"[^"]*"/, // print >> "file"
-  /printf\s+[^>|]*>>\s*"[^"]*"/, // printf >> "file"
-  /print\s+[^|]*\|\s*"[^"]*"/, // print | "command"
-  /printf\s+[^|]*\|\s*"[^"]*"/, // printf | "command"
-  /getline\s*<\s*"[^"]*"/, // getline < "command"
-  /"[^"]*"\s*\|\s*getline/, // "command" | getline
-  /close\s*\(/, // close() can trigger command execution
-];
-
-// SED side-effect patterns
-const SED_SIDE_EFFECT_PATTERNS = [
-  /[^\\]e\s/, // e command (execute)
-  /^e\s/, // e command at start
-  /[^\\]w\s/, // w command (write)
-  /^w\s/, // w command at start
-  /[^\\]r\s/, // r command (read file)
-  /^r\s/, // r command at start
-];
+const SAFE_SED_OPTION = /^(?:-[nErsuz]|--(?:quiet|silent))$/;
 
 const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const MALFORMED_CONTROL_OPERATOR =
+  /(?:^|[({])\s*(?:&&|\|\||\|&|[|;&])|(?:&&|\|\||\|&|[|;&])\s+(?:&&|\|\||\|&|[|;&])|(?!(?:&&|\|\||\|&))[|;&]{2}|[|;&]{3,}|(?:\|&?|&&|\|\|)\s*[)}]*\s*$/;
 
 function containsWriteRedirection(command: string): boolean {
   let inSingleQuotes = false;
@@ -158,11 +130,13 @@ function containsWriteRedirection(command: string): boolean {
 }
 
 function normalizeTokens(segment: string): string[] {
-  const parsed = parse(segment);
+  const parsed = parse(segment, (key) => `\0${key}`);
   const tokens: string[] = [];
   for (const token of parsed) {
     if (typeof token === 'string') {
       tokens.push(token);
+    } else if ('op' in token && token.op === 'glob') {
+      tokens.push(`\0${token.pattern}`);
     }
   }
   return tokens;
@@ -189,6 +163,7 @@ function skipEnvironmentAssignments(tokens: string[]): {
 
 function evaluateFindCommand(tokens: string[]): boolean {
   const [, ...rest] = tokens;
+  if (rest.at(-1)?.startsWith('-')) return false;
   for (const token of rest) {
     const lower = token.toLowerCase();
     if (BLOCKED_FIND_FLAGS.has(lower)) {
@@ -205,66 +180,47 @@ function evaluateSedCommand(tokens: string[]): boolean {
   const [, ...rest] = tokens;
   for (const token of rest) {
     if (
-      BLOCKED_SED_PREFIXES.some((prefix) => token.startsWith(prefix)) ||
-      token === '--in-place'
+      ['-i', '-I'].some((prefix) => token.startsWith(prefix)) ||
+      token === '--in-place' ||
+      token.startsWith('--in-place=') ||
+      token === '-f' ||
+      token === '--file' ||
+      (token.startsWith('-f') && token.length > 2) ||
+      token.startsWith('--file=') ||
+      (token.startsWith('-') && !SAFE_SED_OPTION.test(token))
     ) {
       return false;
     }
   }
 
-  // Check for side-effect patterns in sed script
-  const scriptContent = rest.join(' ');
-  for (const pattern of SED_SIDE_EFFECT_PATTERNS) {
-    if (pattern.test(scriptContent)) {
-      return false;
-    }
-  }
-
-  return true;
+  return classifySedCommandSafety(rest) === 'read-only';
 }
 
 function evaluateAwkCommand(tokens: string[]): boolean {
   const [, ...rest] = tokens;
-
-  // Join all arguments to check for awk script content
-  const scriptContent = rest.join(' ');
-
-  // Check for dangerous side-effect patterns
-  for (const pattern of AWK_SIDE_EFFECT_PATTERNS) {
-    if (pattern.test(scriptContent)) {
-      return false;
-    }
-  }
-
-  return true;
+  return classifyAwkCommandSafety(rest) === 'read-only';
 }
 
 function evaluateGitRemoteArgs(args: string[]): boolean {
+  const action = args.find((arg) => !arg.startsWith('-'))?.toLowerCase();
+  if (action && !['show', 'get-url'].includes(action)) return false;
   for (const arg of args) {
-    if (BLOCKED_GIT_REMOTE_ACTIONS.has(arg.toLowerCase())) {
-      return false;
-    }
+    if (BLOCKED_GIT_REMOTE_ACTIONS.has(arg.toLowerCase())) return false;
   }
   return true;
 }
 
 function evaluateGitBranchArgs(args: string[]): boolean {
-  for (const arg of args) {
-    if (BLOCKED_GIT_BRANCH_FLAGS.has(arg)) {
-      return false;
-    }
-  }
-  return true;
+  return args.length === 0 || (args.length === 1 && args[0] === '--list');
 }
 
 function evaluateGitCommand(tokens: string[]): boolean {
   let index = 1;
   while (index < tokens.length && tokens[index]!.startsWith('-')) {
-    const flag = tokens[index]!.toLowerCase();
-    if (flag === '--version' || flag === '--help') {
-      return true;
-    }
-    index++;
+    const flag = tokens[index++]!.toLowerCase();
+    if (flag === '--version') return true;
+    if (flag === '--help') return tokens.length === 2;
+    return false;
   }
 
   if (index >= tokens.length) {
@@ -277,6 +233,14 @@ function evaluateGitCommand(tokens: string[]): boolean {
   }
 
   const args = tokens.slice(index + 1);
+  const end = args.indexOf('--');
+  const options = args.slice(0, end < 0 ? args.length : end);
+  if (
+    options.some((arg) => GIT_EXTERNAL_HELPER_OPTION.test(arg)) ||
+    (subcommand === 'grep' && options.some((arg) => arg.startsWith('-O')))
+  )
+    return false;
+  if (options.some((arg) => /^(?:--help|--version)$/i.test(arg))) return false;
 
   if (subcommand === 'remote') {
     return evaluateGitRemoteArgs(args);
@@ -286,6 +250,9 @@ function evaluateGitCommand(tokens: string[]): boolean {
     return evaluateGitBranchArgs(args);
   }
 
+  if (['blame', 'diff', 'log', 'show'].includes(subcommand)) {
+    return !options.some((arg) => /^--output(?:=|$)/.test(arg));
+  }
   return true;
 }
 
@@ -300,7 +267,7 @@ function evaluateShellSegment(segment: string): boolean {
   // `stripShellWrapper`, leaving a substitution-free `echo ok` that
   // this fallback would then classify as read-only. Checking the raw
   // segment first keeps the regex-fallback path in lockstep with the
-  // AST path (`evaluateStatementReadOnly`) and the L3 gates added in
+  // AST classifier and the L3 gates added in
   // PR #4386 R6 (cid 3298521039).
   if (detectCommandSubstitution(segment)) {
     return false;
@@ -310,6 +277,7 @@ function evaluateShellSegment(segment: string): boolean {
   if (!stripped) {
     return true;
   }
+  if (stripped !== segment.trim()) return false;
 
   if (detectCommandSubstitution(stripped)) {
     return false;
@@ -328,8 +296,17 @@ function evaluateShellSegment(segment: string): boolean {
   if (!root) {
     return true;
   }
+  if (root !== tokens[0]) return false;
 
   const normalizedRoot = root.toLowerCase();
+  if (root !== normalizedRoot) return false;
+  if (
+    /^(awk|find|git|sed)$/.test(normalizedRoot) &&
+    args.some(
+      (arg) => !arg || arg.includes('\0') || hasShellBraceExpansion(arg),
+    )
+  )
+    return false;
   if (!READ_ONLY_ROOT_COMMANDS.has(normalizedRoot)) {
     return false;
   }
@@ -362,6 +339,12 @@ export function isShellCommandReadOnly(command: string): boolean {
   if (typeof command !== 'string' || !command.trim()) {
     return false;
   }
+  if (MALFORMED_CONTROL_OPERATOR.test(command)) return false;
+  if (
+    /[({;&|]\s*[A-Za-z_][A-Za-z0-9_]*=/.test(command) ||
+    /^[A-Za-z_][A-Za-z0-9_]*=.*[;&|]/s.test(command)
+  )
+    return false;
 
   const segments = splitCommands(command);
 

@@ -230,12 +230,10 @@ public class Session {
                             new TypeReference<CLIControlResponse<? extends ControlResponsePayload>>() {});
                     MyConcurrentUtils.runAndWait(() -> sessionEventConsumers.onControlResponse(this, controlResponse),
                             Optional.ofNullable(sessionEventConsumers.onControlResponseTimeout(this, controlResponse)).orElse(defaultEventTimeout));
-                    if (!"error".equals(jsonObject.getString("subtype"))) {
-                        return false;
-                    } else {
-                        log.info("control_response error: {}", jsonObject.toJSONString());
-                        return "error".equals(jsonObject.getString("subtype"));
+                    if ("error".equals(getControlResponseSubtype(jsonObject))) {
+                        log.warn("control_response error: {}", jsonObject.toJSONString());
                     }
+                    return false;
                 } else if ("control_request".equals(messageType)) {
                     CLIControlResponse<? extends ControlResponsePayload> controlResponse;
                     try {
@@ -292,6 +290,14 @@ public class Session {
      */
     public Capabilities getCapabilities() {
         return Optional.ofNullable(lastCliControlInitializeResponse).map(CLIControlInitializeResponse::getCapabilities).orElse(new Capabilities());
+    }
+
+    private String getControlResponseSubtype(JSONObject jsonObject) {
+        JSONObject responseObject = jsonObject.getJSONObject("response");
+        if (responseObject != null && responseObject.containsKey("subtype")) {
+            return responseObject.getString("subtype");
+        }
+        return jsonObject.getString("subtype");
     }
 
     private void checkAvailable() throws SessionControlException {

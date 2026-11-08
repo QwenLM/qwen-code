@@ -4,33 +4,70 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
-import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
+import { useState, useEffect, useRef } from 'react';
+import {
+  resolveBranchName,
+  watchRepoBranch,
+} from '@qwen-code/qwen-code-core/utils/gitDirect.js';
+
+/**
+ * Polling interval (ms) for the branch-name fallback. `fs.watch` on the
+ * reflog is unreliable on NFS / FUSE / Docker overlay and some Linux
+ * filesystems — events can be silently dropped with no recovery path.
+ * A lightweight poll every 5 s ensures the footer branch name self-heals
+ * within one interval even when the watcher misses a branch switch.
+ */
+export const BRANCH_POLL_INTERVAL_MS = 5_000;
+
+const primedBranchNames = new Map<string, string | undefined>();
+
+/**
+ * Resolves `cwd`'s branch ahead of the first frame, so the footer does not
+ * change (and the screen reflow) right after the prompt becomes usable.
+ */
+export async function primeGitBranchName(cwd: string): Promise<void> {
+  primedBranchNames.set(cwd, await resolveBranchName(cwd));
+}
 
 /**
  * Tracks the current git branch (or a short commit hash when detached) for
  * `cwd`, read directly from `.git` via core's gitDirect helpers — no `git`
  * subprocess. Re-reads automatically when the repository's reflog moves
- * (branch switch, commit, reset).
+ * (branch switch, commit, reset), with a polling fallback for filesystems
+ * where `fs.watch` is unreliable (#7828).
  */
 export function useGitBranchName(cwd: string): string | undefined {
-  const [branchName, setBranchName] = useState<string | undefined>(undefined);
+  const [branchName, setBranchName] = useState<string | undefined>(() =>
+    primedBranchNames.get(cwd),
+  );
+  const branchNameRef = useRef(branchName);
+  branchNameRef.current = branchName;
 
   useEffect(() => {
     let cancelled = false;
     let dispose: (() => void) | undefined;
+    let pollTimer: ReturnType<typeof setInterval> | undefined;
+    // Orders concurrent refreshes (watcher callback + polling interval): a
+    // read that started earlier can resolve later and would otherwise
+    // overwrite a newer result with a stale branch name.
+    let refreshGeneration = 0;
 
     const refresh = async () => {
+      const generation = ++refreshGeneration;
       const name = await resolveBranchName(cwd);
-      if (!cancelled) setBranchName(name);
+      if (
+        !cancelled &&
+        generation === refreshGeneration &&
+        name !== branchNameRef.current
+      ) {
+        setBranchName(name);
+      }
     };
 
     const init = async () => {
       await refresh();
       if (cancelled) return;
       const disposer = await watchRepoBranch(cwd, () => {
-        // Guard the watcher-triggered refresh too: the synchronous try/catch
-        // inside watchRepoBranch can't observe an async rejection.
         void refresh().catch(() => {});
       });
       // The component may have unmounted while we were resolving the watcher;
@@ -39,6 +76,14 @@ export function useGitBranchName(cwd: string): string | undefined {
         disposer();
       } else {
         dispose = disposer;
+      }
+
+      if (!cancelled) {
+        pollTimer = setInterval(() => {
+          void refresh().catch(() => {});
+        }, BRANCH_POLL_INTERVAL_MS);
+        // Don't keep the process alive just for this timer.
+        pollTimer.unref?.();
       }
     };
 
@@ -50,6 +95,7 @@ export function useGitBranchName(cwd: string): string | undefined {
     return () => {
       cancelled = true;
       dispose?.();
+      if (pollTimer) clearInterval(pollTimer);
     };
   }, [cwd]);
 

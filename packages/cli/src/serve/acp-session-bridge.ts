@@ -41,7 +41,15 @@ export {
   createAcpSessionBridge,
   createHttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridge';
-export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+export {
+  DEFAULT_SESSION_RESTORE_TIMEOUT_MS,
+  MAX_SESSION_RESTORE_TIMEOUT_MS,
+  resolveSessionRestoreTimeoutMs,
+} from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+export {
+  defaultSpawnChannelFactory,
+  createSpawnChannelFactory,
+} from '@qwen-code/acp-bridge/spawnChannel';
 // `MAX_RESOLVED_PERMISSION_RECORDS`, `PendingPermission`,
 // `PermissionResolutionRecord` re-exports were removed alongside the
 // source definitions — the mediator now owns pending+resolved state.
@@ -55,7 +63,13 @@ export type {
 } from '@qwen-code/acp-bridge';
 
 export type {
+  BridgeFreshSessionAdmission,
+  BridgeFreshSessionAdmissionContext,
+  BridgeFreshSessionReservation,
+  BridgeSessionLifecycle,
+  BridgeSessionLifecycleEvent,
   BridgeOptions,
+  BridgeRuntimeEpochSource,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 
@@ -67,25 +81,55 @@ export type {
   BridgeRestoreSessionRequest,
   BridgeSessionState,
   BridgeRestoredSession,
+  BridgeSessionTranscriptPage,
+  BridgeSessionTranscriptPageRequest,
+  BridgeGenerationModelSource,
+  BridgeGenerationStreamEvent,
+  BridgeWorkspaceGenerationStreamEvent,
+  BridgePromptContentBlock,
   BridgeSessionSummary,
+  BridgeTurnStatus,
+  BridgeSessionCatalogVersion,
   SessionMetadataUpdate,
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
+  BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberTargetScope,
+  BridgeWorkspaceMemoryRememberRequest,
+  BridgeWorkspaceMemoryRememberResult,
+  BridgeAutoMemoryTopic,
+  BridgeWorkspaceMemoryForgetRequest,
+  BridgeWorkspaceMemoryForgetMatch,
+  BridgeWorkspaceMemoryForgetResult,
+  BridgeWorkspaceMemoryDreamResult,
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
+  BridgeWorkspaceRuntimeLifecycleSnapshot,
+  BridgeShutdownOptions,
+  WorkspaceEventPublisher,
+  WorkspaceEventBridge,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 
 export {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
   RestoreInProgressError,
+  SessionArchivedError,
+  SessionNotArchivedError,
+  SessionConflictError,
+  SessionArchivingError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
+  PromptDeadlineExceededError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -94,10 +138,15 @@ export {
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,
+  SessionResetPendingError,
+  WorkspaceDrainingError,
+  BridgeChannelQuarantinedError,
   InvalidRewindTargetError,
+  TotalSessionLimitExceededError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   // Multi-client permission coordination errors.
   CancelSentinelCollisionError,
@@ -108,6 +157,16 @@ export {
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 export {
+  BridgeTimeoutError,
+  SessionRestoreTimeoutError,
+} from '@qwen-code/acp-bridge/status';
+
+export {
   MAX_WORKSPACE_PATH_LENGTH,
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
+
+export {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';

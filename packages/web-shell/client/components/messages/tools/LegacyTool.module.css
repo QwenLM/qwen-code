@@ -6,7 +6,7 @@
 }
 
 .description {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -16,10 +16,10 @@
 .content,
 .args,
 .output {
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--editor-bg);
-  color: var(--text-secondary);
+  background: var(--background);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.5;
   min-width: 0;
@@ -36,7 +36,7 @@
 
 .prompt,
 .fileIcon {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   flex-shrink: 0;
 }
 
@@ -64,7 +64,7 @@
 
 .editFile {
   min-width: 0;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -73,7 +73,7 @@
 
 .editToggle {
   margin-left: auto;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 10px;
   flex-shrink: 0;
 }

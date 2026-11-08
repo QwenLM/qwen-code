@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { TelemetrySettings } from '../config/config.js';
+import type {
+  ResolvedTelemetrySettings,
+  TelemetrySettings,
+} from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
-import { TelemetryTarget } from './index.js';
+import {
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  TelemetryTarget,
+  isValidSensitiveSpanAttributeMaxLength,
+} from './index.js';
 import type { ResourceAttributeWarnings } from './resource-attributes.js';
 import {
   coerceStringResourceAttributes,
@@ -25,6 +33,60 @@ export function parseBooleanEnvFlag(
 }
 
 /**
+ * Resolve the usage-statistics opt-in with the same precedence as the main
+ * session config: `QWEN_USAGE_STATISTICS_ENABLED` env, then
+ * `settings.privacy.usageStatisticsEnabled`, then default true.
+ *
+ * Standalone entrypoints (extension CLI commands, the serve daemon's
+ * extension controller) do not build a session Config; they must route
+ * through this so the opt-out reaches `QwenLogger.getInstance` (#12770).
+ */
+export function resolveUsageStatisticsEnabled(
+  settingsValue: boolean | undefined,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return (
+    parseBooleanEnvFlag(env['QWEN_USAGE_STATISTICS_ENABLED']) ??
+    settingsValue ??
+    true
+  );
+}
+
+/**
+ * Resolve the proxy for extension lifecycle telemetry uploads with the
+ * settings-then-env precedence of the main session chain
+ * (`settings.proxy`, then `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` /
+ * `http_proxy`), minus the leading CLI-flag term: `--proxy` is deprecated
+ * in favor of `settings.proxy` and never reaches the extension command
+ * handlers (`qwen extensions ...` exits before `loadCliConfig`).
+ *
+ * Returns the RAW first match; normalization (and the SOCKS rejection a
+ * session would fail on at startup) happens in
+ * `ExtensionManager.getTelemetryConfig`, which drops an unsupported value
+ * instead of aborting the extension mutation.
+ *
+ * `env` is injectable so a long-lived host (the `qwen serve` daemon) can pass
+ * the resolved environment of the runtime that owns the workspace being
+ * resolved, rather than an ambient `process.env` that per-workspace settings
+ * loads may have polluted. A host that cannot attribute an env to the
+ * workspace in hand must pass `{}` rather than fall back to the ambient one —
+ * the daemon's extensions controller does exactly that for every workspace
+ * other than the one it is bound to.
+ */
+export function resolveExtensionTelemetryProxy(
+  settingsProxy: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  return (
+    settingsProxy ||
+    env['HTTPS_PROXY'] ||
+    env['https_proxy'] ||
+    env['HTTP_PROXY'] ||
+    env['http_proxy']
+  );
+}
+
+/**
  * Normalize a telemetry target value into TelemetryTarget or undefined.
  */
 export function parseTelemetryTargetValue(
@@ -38,6 +100,61 @@ export function parseTelemetryTargetValue(
     return TelemetryTarget.GCP;
   }
   return undefined;
+}
+
+/**
+ * @throws FatalConfigError when the env var is set but invalid; telemetry
+ * config fails closed instead of silently falling back.
+ */
+function parseSensitiveSpanAttributeMaxLengthEnvValue(
+  envName: string,
+  value: string | undefined,
+): number | undefined {
+  if (value === undefined) return undefined;
+
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+  if (
+    !/^\d+$/.test(trimmed) ||
+    !isValidSensitiveSpanAttributeMaxLength(parsed)
+  ) {
+    throw new FatalConfigError(
+      `Invalid ${envName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got '${value}'`,
+    );
+  }
+
+  return parsed;
+}
+
+function parseSensitiveSpanAttributeMaxLengthSetting(
+  settingName: string,
+  value: unknown,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'number' ||
+    !isValidSensitiveSpanAttributeMaxLength(value)
+  ) {
+    throw new FatalConfigError(
+      `Invalid ${settingName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
+        value,
+      )}`,
+    );
+  }
+  return value;
+}
+
+function parseTelemetryUserId(
+  source: string,
+  value: unknown,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new FatalConfigError(
+      `Invalid ${source}: must be a string, got ${typeof value}`,
+    );
+  }
+  return value.trim() || undefined;
 }
 
 export interface TelemetryArgOverrides {
@@ -56,7 +173,7 @@ export async function resolveTelemetrySettings(options: {
   argv?: TelemetryArgOverrides;
   env?: Record<string, string | undefined>;
   settings?: TelemetrySettings;
-}): Promise<TelemetrySettings> {
+}): Promise<ResolvedTelemetrySettings> {
   const argv = options.argv ?? {};
   const env = options.env ?? {};
   const settings = options.settings ?? {};
@@ -105,12 +222,29 @@ export async function resolveTelemetrySettings(options: {
     parseBooleanEnvFlag(env['QWEN_TELEMETRY_LOG_PROMPTS']) ??
     settings.logPrompts;
 
+  const userId =
+    parseTelemetryUserId(
+      'QWEN_TELEMETRY_USER_ID',
+      env['QWEN_TELEMETRY_USER_ID'],
+    ) ?? parseTelemetryUserId('telemetry.userId', settings.userId);
+
   const includeSensitiveSpanAttributes =
     parseBooleanEnvFlag(
       env['QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES'],
     ) ??
     settings.includeSensitiveSpanAttributes ??
     false;
+
+  const sensitiveSpanAttributeMaxLength =
+    parseSensitiveSpanAttributeMaxLengthEnvValue(
+      'QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH',
+      env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'],
+    ) ??
+    parseSensitiveSpanAttributeMaxLengthSetting(
+      'telemetry.sensitiveSpanAttributeMaxLength',
+      settings.sensitiveSpanAttributeMaxLength,
+    ) ??
+    DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
 
   const outfile =
     argv.telemetryOutfile ?? env['QWEN_TELEMETRY_OUTFILE'] ?? settings.outfile;
@@ -184,7 +318,9 @@ export async function resolveTelemetrySettings(options: {
     otlpLogsEndpoint,
     otlpMetricsEndpoint,
     logPrompts,
+    userId,
     includeSensitiveSpanAttributes,
+    sensitiveSpanAttributeMaxLength,
     outfile,
     resourceAttributes,
     metrics: { includeSessionId: metricsIncludeSessionId },

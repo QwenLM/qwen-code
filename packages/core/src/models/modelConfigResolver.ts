@@ -21,7 +21,14 @@
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import {
+  QWEN_SUBSCRIPTION_BASE_URL,
+  QWEN_SUBSCRIPTION_MODEL,
+  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+} from '../qwen/oauth-config.js';
+import { subscriptionModelModalities } from '../qwen/subscription-models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
+import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -36,7 +43,6 @@ import {
   type ConfigSources,
   type ConfigLayer,
 } from '../utils/configResolver.js';
-import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   AUTH_ENV_MAPPINGS,
   DEFAULT_MODELS,
@@ -123,14 +129,17 @@ function applyTimeoutEnvOverride(
   const raw = env['QWEN_CODE_API_TIMEOUT_MS'];
   if (raw === undefined) return;
 
-  const parsed = parsePositiveIntegerEnv(raw, 0);
-  if (parsed > 0) {
-    generationConfig.timeout = parsed;
-    sources['timeout'] = {
-      kind: 'env',
-      envKey: 'QWEN_CODE_API_TIMEOUT_MS',
-    };
-  }
+  const trimmed = raw.trim();
+  // Accept a non-negative integer; `0` disables the request timeout downstream
+  // (see resolveRequestTimeout). Malformed values are ignored (keep default).
+  if (!/^\d+$/.test(trimmed)) return;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) return;
+  generationConfig.timeout = parsed;
+  sources['timeout'] = {
+    kind: 'env',
+    envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+  };
 }
 
 /**
@@ -150,6 +159,57 @@ export function resolveModelConfig(
   const { authType, cli, settings, env, modelProvider, proxy } = input;
   const warnings: string[] = [];
   const sources: ConfigSources = {};
+
+  if (authType === AuthType.QWEN_SUBSCRIPTION) {
+    if (
+      (cli?.baseUrl && cli.baseUrl !== QWEN_SUBSCRIPTION_BASE_URL) ||
+      (modelProvider &&
+        modelProvider.baseUrl &&
+        modelProvider.baseUrl !== QWEN_SUBSCRIPTION_BASE_URL)
+    ) {
+      throw new Error('Qwen Subscription does not support gateway overrides.');
+    }
+    const model =
+      modelProvider?.id ??
+      cli?.model ??
+      settings?.model ??
+      QWEN_SUBSCRIPTION_MODEL;
+    const config: ContentGeneratorConfig = {
+      authType,
+      model,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+      modalities: subscriptionModelModalities(model),
+      proxy,
+    };
+    for (const field of [
+      'timeout',
+      'streamIdleTimeoutMs',
+      'streamMaxLifetimeMs',
+      'maxRetries',
+      'retryInitialDelayMs',
+      'retryMaxDelayMs',
+      'retryErrorCodes',
+    ] as const) {
+      const value = settings?.generationConfig?.[field];
+      if (value !== undefined) {
+        Object.assign(config, { [field]: value });
+        sources[field] = settingsSource(`model.generationConfig.${field}`);
+      }
+    }
+    applyTimeoutEnvOverride(env, config, sources);
+    for (const field of [
+      'authType',
+      'model',
+      'baseUrl',
+      'apiKey',
+      'modalities',
+    ]) {
+      sources[field] = computedSource('Qwen Subscription fixed configuration');
+    }
+    if (proxy) sources['proxy'] = computedSource('Config.getProxy()');
+    return { config, sources, warnings };
+  }
 
   // Special handling for Qwen OAuth
   if (authType === AuthType.QWEN_OAUTH) {
@@ -395,6 +455,19 @@ function resolveGenerationConfig(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (result as any)[field] = settingsConfig[field];
       sources[field] = settingsSource(`model.generationConfig.${field}`);
+    }
+  }
+
+  // contextWindowSize fallback: auto-detect from model when neither
+  // modelProvider nor settings supplied it. Only known models are stamped —
+  // unknown models keep `undefined` so downstream `?? DEFAULT_TOKEN_LIMIT`
+  // consumers apply the generic default without a misleading
+  // 'auto-detected' source label.
+  if (result.contextWindowSize === undefined && modelId) {
+    const knownLimit = knownTokenLimit(modelId, 'input');
+    if (knownLimit !== undefined) {
+      result.contextWindowSize = knownLimit;
+      sources['contextWindowSize'] = computedSource('auto-detected from model');
     }
   }
 

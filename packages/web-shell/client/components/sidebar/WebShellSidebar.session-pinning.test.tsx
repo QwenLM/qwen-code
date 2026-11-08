@@ -1,0 +1,1992 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import {
+  clickSidebarElement as click,
+  createSidebarMocks,
+  DAEMON_APPROVAL_MODES,
+  flushSidebar,
+  installSidebarDomShims,
+  makeSidebarSession as makeSession,
+  useResolvedWebShellSessions,
+  sidebarSessionPage,
+  useSidebarSessionCatalogQuery,
+} from '../../test/sidebarHarness';
+
+const mocks = createSidebarMocks({
+  colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  searchWorkspaceSessions: true,
+  connection: { capabilities: undefined },
+});
+const {
+  connection,
+  workspace,
+  workspaceActions,
+  active,
+  pinned,
+  archived,
+  refreshSessionCatalogQueries,
+  useSessionCatalogQueries,
+  loadSession,
+} = mocks;
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
+}));
+
+vi.mock('../../session-catalog/session-catalog-hooks', () => ({
+  useWebShellSessions: (options?: {
+    enabled?: boolean;
+    archiveState?: string;
+    group?: string;
+  }) => useResolvedWebShellSessions(mocks, options),
+  useSessionCatalogController: () => ({
+    refreshQueries: refreshSessionCatalogQueries,
+    invalidateWorkspace: vi.fn(),
+    refreshWorkspace: vi.fn(),
+    renamed: vi.fn(),
+    // Emulates SessionCatalogStore.applySessionPinToggle on the fixtures:
+    // the pinned page gains or loses the row, the all-sessions page patches
+    // it in place, unloaded pages stay untouched.
+    toggleSessionPinned: (
+      _workspaceCwd: string,
+      session: DaemonSessionSummary,
+      toggle: { pinned: boolean; pinnedAt?: string },
+    ) => {
+      const applyPinState = (
+        row: DaemonSessionSummary,
+      ): DaemonSessionSummary => {
+        const next: DaemonSessionSummary = { ...row, isPinned: toggle.pinned };
+        if (toggle.pinned) {
+          if (toggle.pinnedAt !== undefined) next.pinnedAt = toggle.pinnedAt;
+        } else {
+          delete next.pinnedAt;
+        }
+        return next;
+      };
+      if (pinned.data !== undefined) {
+        const present = pinned.sessions.some(
+          (row) => row.sessionId === session.sessionId,
+        );
+        if (toggle.pinned) {
+          pinned.sessions = present
+            ? pinned.sessions.map((row) =>
+                row.sessionId === session.sessionId ? applyPinState(row) : row,
+              )
+            : [...pinned.sessions, applyPinState(session)];
+        } else if (present) {
+          pinned.sessions = pinned.sessions.filter(
+            (row) => row.sessionId !== session.sessionId,
+          );
+        }
+        pinned.data = pinned.sessions;
+      }
+      if (
+        active.data !== undefined &&
+        active.sessions.some((row) => row.sessionId === session.sessionId)
+      ) {
+        active.sessions = active.sessions.map((row) =>
+          row.sessionId === session.sessionId ? applyPinState(row) : row,
+        );
+        active.data = active.sessions;
+      }
+    },
+  }),
+  useSessionCatalogPolling: () => undefined,
+  useSessionCatalogQuery: (
+    client: typeof mocks.workspace.client,
+    query: { workspaceCwd: string; options?: Record<string, unknown> },
+    options: { autoLoad?: boolean; enabled?: boolean },
+  ) => useSidebarSessionCatalogQuery(client, query, options),
+  useSessionCatalogQueries,
+}));
+
+const { I18nProvider } = await import('../../i18n');
+const { WebShellSidebar } = await import('./WebShellSidebar');
+
+installSidebarDomShims();
+
+const organizationCapabilities = {
+  qwenCodeVersion: '1.2.3',
+  features: ['session_organization'],
+};
+
+let root: Root;
+let container: HTMLDivElement;
+
+function renderSidebar(
+  props: {
+    onError?: (error: unknown, message?: string) => void;
+    sessionActions?: React.ComponentProps<
+      typeof WebShellSidebar
+    >['sessionActions'];
+  } = {},
+): void {
+  const onError = props.onError ?? (() => {});
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <WebShellSidebar
+          collapsed={false}
+          onCollapsedChange={() => {}}
+          onOpenSettings={() => {}}
+          onOpenDaemonStatus={() => {}}
+          onOpenScheduledTasks={() => {}}
+          onOpenGoals={() => {}}
+          onOpenSessions={() => {}}
+          onOpenSplitView={() => {}}
+          onNewSession={() => false}
+          onLoadSession={loadSession}
+          onError={onError}
+          sessionActions={props.sessionActions}
+        />
+      </I18nProvider>,
+    );
+  });
+}
+
+function pinnedListTitles(): string[] {
+  const header = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+  ).find((button) => button.textContent?.includes('Pinned'));
+  if (!header) return [];
+  const section = header.closest('div');
+  const list = section?.parentElement?.querySelector(
+    '[class*="pinnedSessionList"]',
+  );
+  const scope = list ?? section?.parentElement;
+  if (!scope) return [];
+  return Array.from(
+    scope.querySelectorAll('[data-web-shell-session-title]'),
+  ).map((node) => node.textContent ?? '');
+}
+
+function sessionTitleCount(displayName: string): number {
+  return Array.from(
+    container.querySelectorAll('[data-web-shell-session-title]'),
+  ).filter((node) => node.textContent === displayName).length;
+}
+
+function findSessionPinButton(displayName: string): HTMLButtonElement {
+  const titles = Array.from(
+    container.querySelectorAll('[data-web-shell-session-title]'),
+  ).filter((node) => node.textContent === displayName);
+  expect(titles.length).toBeGreaterThan(0);
+  for (const title of titles) {
+    let node: HTMLElement | null = title;
+    while (node) {
+      const pinButton = node.querySelector<HTMLButtonElement>(
+        'button[aria-label="Pin"], button[aria-label="Unpin"]',
+      );
+      if (pinButton) return pinButton;
+      node = node.parentElement;
+    }
+  }
+  throw new Error(`No pin button found for ${displayName}`);
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  connection.sessionId = null;
+  connection.workspaceCwd = '/tmp/project';
+  connection.capabilities = organizationCapabilities;
+  workspace.capabilities = organizationCapabilities;
+  workspaceActions.updateSessionOrganization.mockReset();
+  workspaceActions.updateSessionOrganization.mockResolvedValue({});
+  active.sessions = [];
+  active.data = active.sessions;
+  pinned.sessions = [];
+  pinned.data = pinned.sessions;
+  archived.sessions = [];
+  archived.data = archived.sessions;
+  refreshSessionCatalogQueries.mockReset();
+  useSessionCatalogQueries.mockReset();
+  useSessionCatalogQueries.mockReturnValue([]);
+  loadSession.mockReset();
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  window.localStorage.clear();
+});
+
+describe('WebShellSidebar session pinning (issue #9465)', () => {
+  it('does not restore cleared activity unread when the legacy catalog catches up', async () => {
+    const running = makeSession('background', {
+      displayName: 'Background result',
+      hasActivePrompt: true,
+      updatedAt: new Date().toISOString(),
+    });
+    const completed = { ...running, hasActivePrompt: false };
+    const catalog = (session: DaemonSessionSummary) => {
+      useSessionCatalogQueries.mockReturnValue([
+        { loading: false, stale: false, page: { sessions: [session] } },
+      ]);
+    };
+    active.sessions = [running];
+    active.data = active.sessions;
+    catalog(running);
+    renderSidebar();
+    await flushSidebar();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="View activity"]',
+        )!,
+      );
+    });
+    await flushSidebar();
+    catalog(completed);
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector('button[aria-label="Activity options"]')!
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+    });
+    const markRead = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent === 'Mark all as read');
+    expect(markRead).toBeDefined();
+    await act(async () => click(markRead!));
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    active.sessions = [completed];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Close activity view"]',
+        )!,
+      );
+    });
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(workspaceActions.updateSessionOrganization).not.toHaveBeenCalled();
+  });
+
+  it('orders the pinned section by pin time, not last activity', async () => {
+    // The daemon returns the pinned page sorted by activity (updatedAt
+    // descending): "recent" was active most recently but was pinned AFTER
+    // "older". Pin-time order keeps "older" first and appends "recent".
+    pinned.sessions = [
+      makeSession('recent', {
+        displayName: 'Recent activity',
+        isPinned: true,
+        pinnedAt: '2026-01-02T00:00:00.000Z',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        // pinned LAST, but with the NEWEST activity time
+        updatedAt: '2026-01-05T00:00:00.000Z',
+      }),
+      makeSession('older', {
+        displayName: 'Older activity',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        // pinned FIRST, but with the OLDEST activity time
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Older activity', 'Recent activity']);
+  });
+
+  it('orders pins without a usable pinnedAt deterministically by session ID', async () => {
+    // Current daemons cannot emit a pinned row without pinnedAt, but the
+    // comparator must still be deterministic for missing/invalid values:
+    // such rows sort before timestamped pins, by sessionId — never by
+    // activity time.
+    pinned.sessions = [
+      makeSession('b-legacy', {
+        displayName: 'Legacy B',
+        isPinned: true,
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+      makeSession('c-timestamped-later', {
+        displayName: 'Timestamped later',
+        isPinned: true,
+        pinnedAt: '2026-01-03T00:00:00.000Z',
+      }),
+      makeSession('a-legacy', {
+        displayName: 'Legacy A',
+        isPinned: true,
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+      makeSession('d-invalid', {
+        displayName: 'Invalid pinnedAt',
+        isPinned: true,
+        pinnedAt: 'not-a-date',
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+      makeSession('e-timestamped-earlier', {
+        displayName: 'Timestamped earlier',
+        isPinned: true,
+        pinnedAt: '2026-01-02T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([
+      'Legacy A',
+      'Legacy B',
+      'Invalid pinnedAt',
+      'Timestamped earlier',
+      'Timestamped later',
+    ]);
+  });
+
+  it('reflects pinning immediately without waiting for the daemon RPC', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    // RPC stays in flight: the sidebar must still show the pinned state.
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise(() => {}),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'plain',
+      { isPinned: true },
+    );
+    // Optimistically pinned: shown in the pinned section exactly once and
+    // hidden from the unpinned list while the RPC is in flight.
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('appends an optimistic pin below existing pinned sessions', async () => {
+    pinned.sessions = [
+      makeSession('existing', {
+        displayName: 'Existing pin',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise(() => {}),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Existing pin', 'Plain session']);
+  });
+
+  it('reflects unpinning immediately without waiting for the daemon RPC', async () => {
+    // The daemon's "all" page carries pinned rows too, so the session is
+    // present in both pages while pinned.
+    const pinnedSession = makeSession('pinned-session', {
+      displayName: 'Pinned session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [pinnedSession];
+    pinned.data = pinned.sessions;
+    active.sessions = [pinnedSession];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise(() => {}),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Pinned session']);
+
+    act(() => click(findSessionPinButton('Pinned session')));
+    await flushSidebar();
+
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'pinned-session',
+      { isPinned: false },
+    );
+    // Optimistically unpinned: gone from the pinned section, back in the
+    // unpinned list, while the RPC is in flight.
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+  });
+
+  it('rolls the optimistic pin back when the daemon RPC fails', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockRejectedValue(
+      new Error('daemon unavailable'),
+    );
+    const onError = vi.fn();
+
+    renderSidebar({ onError });
+    await flushSidebar();
+
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+
+    expect(onError).toHaveBeenCalled();
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('rolls the optimistic unpin back when the daemon RPC fails', async () => {
+    const row = makeSession('pinned-session', {
+      displayName: 'Pinned session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    active.sessions = [row];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockRejectedValue(
+      new Error('daemon unavailable'),
+    );
+    const onError = vi.fn();
+
+    renderSidebar({ onError });
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Pinned session']);
+
+    act(() => click(findSessionPinButton('Pinned session')));
+    await flushSidebar();
+
+    expect(onError).toHaveBeenCalled();
+    expect(pinnedListTitles()).toEqual(['Pinned session']);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+  });
+
+  it('drops an optimistic pin when the refreshed catalog contradicts it', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    active.sessions = [
+      makeSession('plain', { displayName: 'Plain session', isPinned: false }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps an optimistic pin while the pinned catalog is unloaded', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    pinned.data = undefined;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    // The real catalog hook returns a fresh sessions=[] on each render while
+    // data remains undefined. Render churn must not count as authoritative
+    // evidence that contradicts the successful pin.
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps an unpin cleared across staggered page refetches', async () => {
+    const row = makeSession('pinned-session', {
+      displayName: 'Pinned session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    active.sessions = [row];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Pinned session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    // The store cleared every loaded page at toggle time; the authoritative
+    // refetches then land one page at a time and must never re-expose the
+    // row in the pinned section.
+    active.sessions = [
+      makeSession('pinned-session', {
+        displayName: 'Pinned session',
+        isPinned: false,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+  });
+
+  it('keeps an optimistic pin when a page churns while the RPC is in flight', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    let resolvePin: (() => void) | undefined;
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolvePin = resolve;
+      }),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    // Churn swaps the all-sessions page while the RPC is pending. The store
+    // owns the optimistic toggle in the page data, so churned pages carry
+    // the pin state forward — here modeled by the store-patched row.
+    active.sessions = [
+      makeSession('plain', {
+        displayName: 'Plain session',
+        isPinned: true,
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    act(() => resolvePin?.());
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps one row when the authoritative pinned page lands after an optimistic pin', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    // The post-toggle catalog refresh lands: the pinned page now carries the
+    // authoritative row. No duplicate row may appear.
+    pinned.sessions = [
+      makeSession('plain', {
+        displayName: 'Plain session',
+        isPinned: true,
+        pinnedAt: '2026-01-06T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    active.sessions = [];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps a settled pin when churn refreshes only the row-carrying page', async () => {
+    // patchSession (prompt admission, rename) and live-state ticks recreate
+    // only the pages carrying the touched row and never touch isPinned. The
+    // store owns the optimistic toggle in the page data, so the churned page
+    // still carries the pin state and the settled pin must survive it.
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    active.sessions = [
+      makeSession('plain', {
+        displayName: 'Plain session',
+        isPinned: true,
+        hasActivePrompt: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps a settled pin when an unrelated pinned row churns (R5-1)', async () => {
+    // The R5-1 regression: churn of ANOTHER pinned row (rename, prompt
+    // admission, live-state tick) must not drop a successful optimistic pin
+    // before its authoritative refetch lands. With store-owned pages the
+    // churned pinned page still carries the pinned row.
+    pinned.sessions = [
+      makeSession('other', {
+        displayName: 'Existing pin renamed',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    active.sessions = [
+      makeSession('other', {
+        displayName: 'Existing pin renamed',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      }),
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([
+      'Existing pin renamed',
+      'Plain session',
+    ]);
+
+    // patchSession-style churn of the other pinned row: a fresh pinned-page
+    // reference that never touches the toggled row's pin state.
+    pinned.sessions = [
+      makeSession('other', {
+        displayName: 'Existing pin renamed',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+        hasActivePrompt: true,
+      }),
+      makeSession('plain', {
+        displayName: 'Plain session',
+        isPinned: true,
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([
+      'Existing pin renamed',
+      'Plain session',
+    ]);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps a settled unpin while only the pinned page has refreshed', async () => {
+    // The row is carried by both pages. When the pinned-page refetch lands
+    // first, the stale all-sessions row (still isPinned) must not surface in
+    // the pinned section until its own page refreshes.
+    const row = makeSession('pinned-session', {
+      displayName: 'Pinned session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    active.sessions = [row];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Pinned session']);
+
+    act(() => click(findSessionPinButton('Pinned session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+  });
+
+  it('keeps a settled unpin across a scope shift and does not re-expose stale pages', async () => {
+    // Switching scopes disables the pinned query (page becomes undefined) and
+    // reshapes the all-sessions page into one that cannot carry the row. The
+    // store-owned toggle already cleared the row from the store's pages, so
+    // switching back to those pages must not re-expose the pinned row.
+    const row = makeSession('plain', {
+      displayName: 'Plain session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    active.sessions = [row];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    // The store applied the unpin to its pages: capture that state.
+    const pinnedAfterToggle = pinned.sessions;
+    const activeAfterToggle = active.sessions;
+
+    // Scope shift: pinned query disabled, reshaped all-page drops the row.
+    pinned.data = undefined;
+    active.sessions = [];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    // Switching back re-exposes the store-owned pages, still toggled.
+    pinned.sessions = pinnedAfterToggle;
+    pinned.data = pinned.sessions;
+    active.sessions = activeAfterToggle;
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('reconciles an unpin whose row leaves every list, and never hides a later re-pin', async () => {
+    // Rows that exist only in the pinned page (e.g. secondary-workspace rows
+    // are absent from the primary all-sessions page): the store-owned unpin
+    // drops them from the pinned page at toggle time. A later cross-client
+    // re-pin landing in the authoritative page must never be masked by the
+    // settled overlay entry.
+    const row = makeSession('only-pinned', {
+      displayName: 'Only pinned',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Only pinned']);
+
+    act(() => click(findSessionPinButton('Only pinned')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    // The refresh lands and the pinned page drops the row.
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    // Another client re-pins the session; a stale optimistic unpin entry
+    // must not hide it.
+    pinned.sessions = [
+      makeSession('only-pinned', {
+        displayName: 'Only pinned',
+        isPinned: true,
+        pinnedAt: '2026-01-08T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Only pinned']);
+  });
+});
+
+describe('WebShellSidebar pinned group members (issue #10391)', () => {
+  const defaultGroupsCatalog = {
+    groups: [],
+    colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  };
+
+  it('keeps pinned sessions inside their group section instead of rendering the group empty', async () => {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      member,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    // Reported symptom: every member pinned -> group rendered `· 0`.
+    expect(group?.textContent).toContain('· 1');
+    expect(group?.textContent).toContain('Pinned member');
+
+    // The pinned row also stays in the dedicated Pinned section.
+    expect(pinnedListTitles()).toContain('Pinned member');
+
+    // ...and it does not fall into Ungrouped.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned member');
+    expect(ungrouped?.textContent).toContain('Plain session');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  function mockDesignGroupCatalog(): void {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+  }
+
+  it('keeps the group section visible when search only matches pinned members', async () => {
+    mockDesignGroupCatalog();
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      member,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const searchButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    const searchInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchInput).not.toBeNull();
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setValue.call(searchInput, 'Pinned member');
+      searchInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    // The only match is pinned, so the pinned-filtered flat list is empty;
+    // the body must still render the group section holding that member
+    // instead of the empty-state notice.
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('Pinned member');
+    expect(group?.textContent).toContain('\u00b7 1');
+    expect(container.textContent ?? '').not.toContain('No sessions');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('mounts a single rename form for a pinned member rendered in two rows', async () => {
+    mockDesignGroupCatalog();
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [member];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+    connection.sessionId = 'pinned-member';
+
+    renderSidebar();
+    await flushSidebar();
+
+    // The member renders twice: in the Pinned section and in its group
+    // section. Starting a rename from the group row must mount one form.
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Pinned member'));
+    expect(groupRow).not.toBeUndefined();
+    act(() => {
+      groupRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Pinned member"]')
+        .length,
+    ).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('renders each member once when a group mixes pinned and unpinned sessions', async () => {
+    mockDesignGroupCatalog();
+    const pinnedMember = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    const activeMember = makeSession('active-member', {
+      displayName: 'Active member',
+      groupId: 'design-group',
+    });
+    active.sessions = [pinnedMember, activeMember];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('\u00b7 2');
+    const titles = Array.from(
+      group!.querySelectorAll('[data-web-shell-session-title]'),
+    ).map((node) => node.textContent ?? '');
+    expect(titles.filter((title) => title === 'Pinned member')).toHaveLength(1);
+    expect(titles.filter((title) => title === 'Active member')).toHaveLength(1);
+    // The pinned member still renders in the Pinned section too.
+    expect(pinnedListTitles()).toContain('Pinned member');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('keeps a pinned color-tagged session in its color section', async () => {
+    mockDesignGroupCatalog();
+    const colorMember = makeSession('pinned-color', {
+      displayName: 'Pinned color',
+      color: 'red',
+      groupId: null,
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      colorMember,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [colorMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // Color sections render only when non-empty: a pinned row that lost the
+    // color classification would make an all-pinned color section disappear
+    // entirely — the #10391 membership-loss symptom one path over.
+    const colorSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Red"]',
+    );
+    expect(colorSection).not.toBeNull();
+    expect(colorSection?.textContent).toContain('\u00b7 1');
+    expect(colorSection?.textContent).toContain('Pinned color');
+    // The row stays in the Pinned section and never spills into Ungrouped.
+    expect(pinnedListTitles()).toContain('Pinned color');
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned color');
+    expect(ungrouped?.textContent).toContain('Plain session');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('keeps a pinned member visible in its group preview ahead of unpinned members', async () => {
+    mockDesignGroupCatalog();
+    const pinnedMember = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    // One pinned member plus five unpinned: the bucket exceeds the preview
+    // limit (5), so the pinned row must keep its catalog position (pinned
+    // sorts first) instead of being appended after every unpinned member,
+    // which would hide it behind "Show all".
+    const unpinnedMembers = [1, 2, 3, 4, 5].map((index) =>
+      makeSession(`unpinned-${index}`, {
+        displayName: `Unpinned ${index}`,
+        groupId: 'design-group',
+      }),
+    );
+    active.sessions = [pinnedMember, ...unpinnedMembers];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('\u00b7 6');
+    const rows = Array.from(
+      group!.querySelectorAll('[data-web-shell-session-title]'),
+    ).map((node) => node.textContent ?? '');
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toBe('Pinned member');
+    expect(group?.textContent).toContain('Show all');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('drops a pinned member from its group when search only matches unpinned members', async () => {
+    mockDesignGroupCatalog();
+    const pinnedMember = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      pinnedMember,
+      makeSession('active-member', {
+        displayName: 'Active member',
+        groupId: 'design-group',
+      }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const searchButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    const searchInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchInput).not.toBeNull();
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setValue.call(searchInput, 'Active member');
+      searchInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    // The query matches only the unpinned member: the grouped bucket must
+    // read the search-filtered list, so the pinned member leaves the group
+    // instead of lingering as a stale row with a stale count.
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('\u00b7 1');
+    expect(group?.textContent).toContain('Active member');
+    expect(group?.textContent ?? '').not.toContain('Pinned member');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('mounts a single rename form from the group row when the Pinned section is collapsed', async () => {
+    mockDesignGroupCatalog();
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [member];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+    connection.sessionId = 'pinned-member';
+
+    renderSidebar();
+    await flushSidebar();
+
+    // Collapse the Pinned section: its rows unmount, so the duplicate group
+    // row becomes the rename host.
+    const pinnedToggle = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('Pinned'));
+    expect(pinnedToggle).not.toBeUndefined();
+    act(() => {
+      pinnedToggle!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+      )
+        .find((button) => button.textContent?.includes('Pinned'))
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Pinned member'));
+    expect(groupRow).not.toBeUndefined();
+    act(() => {
+      groupRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Pinned member"]')
+        .length,
+    ).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('keeps a group-less pinned session out of the Ungrouped section', async () => {
+    mockDesignGroupCatalog();
+    const pinnedFree = makeSession('pinned-free', {
+      displayName: 'Pinned free',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+      // groupId and color stay null: the row has no color/group bucket.
+    });
+    active.sessions = [
+      pinnedFree,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedFree];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // The pinned row stays in the dedicated Pinned section...
+    expect(pinnedListTitles()).toContain('Pinned free');
+
+    // ...and never spills into Ungrouped, which keeps only the plain row.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    expect(ungrouped?.textContent).toContain('Plain session');
+    expect(ungrouped?.textContent).toContain('\u00b7 1');
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('mounts a single rename form for a secondary-workspace pinned member rendered in two rows', async () => {
+    // The sidebar-level Pinned section lifts pinned rows out of every
+    // workspace; a secondary workspace's own group section keeps the member
+    // too (#10391), so the member renders twice and only one row may host
+    // the rename form.
+    connection.capabilities = {
+      ...organizationCapabilities,
+      // Qualified-rest rename for non-current secondary sessions.
+      features: [
+        ...organizationCapabilities.features,
+        'workspace_session_metadata',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const designGroupCatalog = {
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('secondary-member', {
+      displayName: 'Secondary member',
+      workspaceCwd: '/tmp/other',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    // The sidebar's secondary pinned page carries the grouped member.
+    useSessionCatalogQueries.mockImplementation(
+      (
+        _client: unknown,
+        queries: Array<{
+          workspaceCwd: string;
+          options?: Record<string, unknown>;
+        }>,
+      ) =>
+        queries.map((query) => {
+          if (
+            query.workspaceCwd === '/tmp/other' &&
+            query.options?.group === 'pinned'
+          ) {
+            return {
+              page: { sessions: [member] },
+              loading: false,
+              stale: false,
+            };
+          }
+          return {};
+        }),
+    );
+    // The secondary workspace section loads its own session and group pages.
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => {
+      if (cwd === '/tmp/other') {
+        return {
+          listWorkspaceSessions: vi.fn().mockResolvedValue([
+            member,
+            makeSession('secondary-plain', {
+              displayName: 'Secondary plain',
+              workspaceCwd: '/tmp/other',
+            }),
+          ]),
+          listSessionGroups: vi.fn().mockResolvedValue(designGroupCatalog),
+        };
+      }
+      return {
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [],
+          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+        }),
+      };
+    });
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    active.sessions = [];
+    active.data = active.sessions;
+    connection.sessionId = 'secondary-member';
+
+    renderSidebar();
+    await flushSidebar();
+    await flushSidebar();
+
+    // The member renders twice: in the Pinned section and in the secondary
+    // workspace's group section.
+    expect(sessionTitleCount('Secondary member')).toBe(2);
+    const group = Array.from(
+      container.querySelectorAll<HTMLElement>('section[aria-label="Design"]'),
+    ).find((section) => section.textContent?.includes('Secondary member'));
+    expect(group).not.toBeUndefined();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Secondary member'));
+    expect(groupRow).not.toBeUndefined();
+    act(() => {
+      groupRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Secondary member"]')
+        .length,
+    ).toBe(1);
+  });
+
+  it('mounts the rename form on the workspace row while the pinned page is absent', async () => {
+    // Cold-load race: the secondary workspace's own session page settles
+    // before the sidebar's secondary pinned catalog page (or the pinned
+    // query errors and retries only after 30s). `pinnedSessions` then lacks
+    // the member, so the Pinned section renders no host row for it — the
+    // workspace group row must host the rename form itself instead of being
+    // suppressed, otherwise double-click rename is a silent no-op.
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: [
+        ...organizationCapabilities.features,
+        'workspace_session_metadata',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const designGroupCatalog = {
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('secondary-member', {
+      displayName: 'Secondary member',
+      workspaceCwd: '/tmp/other',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    // The secondary pinned catalog page never settles (absent query result),
+    // so `pinnedSessions` stays empty and the Pinned section never renders.
+    useSessionCatalogQueries.mockImplementation(
+      (_client: unknown, queries: Array<{ workspaceCwd: string }>) =>
+        queries.map(() => ({})),
+    );
+    // The secondary workspace section loads its own session page carrying
+    // the pinned member.
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => {
+      if (cwd === '/tmp/other') {
+        return {
+          listWorkspaceSessions: vi.fn().mockResolvedValue([member]),
+          listSessionGroups: vi.fn().mockResolvedValue(designGroupCatalog),
+        };
+      }
+      return {
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [],
+          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+        }),
+      };
+    });
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    active.sessions = [];
+    active.data = active.sessions;
+    connection.sessionId = 'secondary-member';
+
+    renderSidebar();
+    await flushSidebar();
+    await flushSidebar();
+
+    // No host row exists in the Pinned section...
+    expect(pinnedListTitles()).not.toContain('Secondary member');
+    // ...so the only rendered copy is the workspace group row.
+    expect(sessionTitleCount('Secondary member')).toBe(1);
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Secondary member'));
+    expect(groupRow).not.toBeUndefined();
+    act(() => {
+      groupRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Secondary member"]')
+        .length,
+    ).toBe(1);
+  });
+});
+
+describe('WebShellSidebar content-search ghosts', () => {
+  const defaultGroupsCatalog = {
+    groups: [],
+    colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  };
+
+  function mockDesignGroupCatalog(): void {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+  }
+
+  beforeEach(() => {
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [],
+    });
+  });
+
+  function ghostHit(
+    sessionId: string,
+    over: Partial<DaemonSessionSummary> = {},
+  ): {
+    session: DaemonSessionSummary;
+    snippet: string;
+  } {
+    return {
+      session: makeSession(sessionId, {
+        displayName: `Ghost ${sessionId}`,
+        ...over,
+      }),
+      snippet: 'qdrant excerpt',
+    };
+  }
+
+  function sessionRowCount(displayName: string): number {
+    return Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).filter((node) => node.textContent?.startsWith(displayName)).length;
+  }
+
+  async function typeSearchQuery(text: string): Promise<void> {
+    const searchButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    const searchInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchInput).not.toBeNull();
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setValue.call(searchInput, text);
+      searchInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // Past the hook's 300ms debounce plus the mocked daemon round-trip.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    await flushSidebar();
+  }
+
+  it('renders a pinned ghost hit with its snippet in the flat list', async () => {
+    connection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+    workspace.capabilities = connection.capabilities;
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        ghostHit('pinned', {
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        }),
+      ],
+    });
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    // R2-2: the ghost is pinned, but no Pinned-section source carries it,
+    // so the pinned-row filters must not make it vanish (R3-2).
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+    expect(container.textContent).toContain('qdrant excerpt');
+  });
+
+  it('renders a pinned ghost hit in the Ungrouped section when organization is enabled', async () => {
+    mockDesignGroupCatalog();
+    // The group section must survive the query filter for the sectioned
+    // renderer to exist at all (empty sections are hidden while searching),
+    // and an ungrouped session must exist at first sync so the Ungrouped
+    // section registers as known (mid-session-new sections auto-collapse).
+    const member = makeSession('design-member', {
+      displayName: 'qdrant design member',
+      groupId: 'design-group',
+    });
+    active.sessions = [member, makeSession('plain', { displayName: 'plain' })];
+    active.data = active.sessions;
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        ghostHit('pinned', {
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        }),
+      ],
+    });
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    expect(ungrouped?.textContent).toContain('Ghost pinned');
+    expect(ungrouped?.textContent).toContain('qdrant excerpt');
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('renders a pinned content hit exactly once, whoever the Pinned section carries', async () => {
+    const ghost = ghostHit('pinned', {
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [ghost],
+    });
+    // The pinned page carries the session while the loaded catalog page
+    // does not — the Pinned section owns the row (R4-1 passive arm).
+    pinned.sessions = [ghost.session];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+    expect(
+      pinnedListTitles().some((title) => title.startsWith('Ghost pinned')),
+    ).toBe(true);
+
+    // Inverse arm: the pinned page settles WITHOUT the session — the ghost
+    // exemption keeps it visible, exactly once, in the main list.
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+  });
+
+  it('mounts the rename form for a pinned ghost row in the org section renderer', async () => {
+    mockDesignGroupCatalog();
+    // The group section must survive the query filter for the sectioned
+    // renderer to exist at all (empty sections are hidden while searching),
+    // and an ungrouped session must exist at first sync so the Ungrouped
+    // section registers as known (mid-session-new sections auto-collapse).
+    const member = makeSession('design-member', {
+      displayName: 'qdrant design member',
+      groupId: 'design-group',
+    });
+    active.sessions = [member, makeSession('plain', { displayName: 'plain' })];
+    active.data = active.sessions;
+    const ghost = ghostHit('pinned', {
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [ghost],
+    });
+    // Rename for non-current sessions requires workspace metadata
+    // capabilities the harness doesn't enable; the current session always
+    // renames, mirroring the existing single-rename-form test.
+    connection.sessionId = 'pinned';
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    const ghostRow = Array.from(
+      ungrouped!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Ghost pinned'));
+    expect(ghostRow).not.toBeUndefined();
+    act(() => {
+      ghostRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    // R4-2: the ghost never renders in the Pinned section, so the section
+    // renderer's renameFormDisabled must not suppress the form here.
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Ghost pinned"]')
+        .length,
+    ).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+});
+
+describe('WebShellSidebar PR badge rows', () => {
+  function metaSlotFor(displayName: string): HTMLElement {
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((node) => node.textContent === displayName);
+    const slot = title
+      ?.closest('[role="button"]')
+      ?.querySelector<HTMLElement>('[class*="sessionMetaSlot"]');
+    if (!slot) throw new Error(`No meta slot found for ${displayName}`);
+    return slot;
+  }
+
+  it('keeps the hover actions width reserved on rows that show a PR badge', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+      makeSession('unsafe-pr', {
+        displayName: 'Unsafe PR',
+        prs: [{ number: 1, url: 'javascript:alert(1)' }],
+      }),
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // Revealing Pin + More on hover must not slide the badge under the
+    // pointer, so the slot already holds both buttons' width at rest.
+    const withPr = metaSlotFor('With PR');
+    expect(withPr.className).toMatch(/sessionMetaSlotReserved/);
+    expect(withPr.style.getPropertyValue('--session-actions-width')).toBe(
+      '52px',
+    );
+    // A filtered binding renders no badge, so there is nothing to hold still.
+    expect(metaSlotFor('Unsafe PR').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+    expect(metaSlotFor('Plain session').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+  });
+
+  it('reserves nothing on a row without actions', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar({ sessionActions: { items: [] } });
+    await flushSidebar();
+
+    // Unset, the variable falls back to the stylesheet's 78px and the row
+    // grows on hover for buttons it never shows.
+    expect(
+      metaSlotFor('With PR').style.getPropertyValue('--session-actions-width'),
+    ).toBe('0px');
+  });
+});
+
+describe('WebShellSidebar session tree', () => {
+  const flatCapabilities = { qwenCodeVersion: '1.2.3', features: [] };
+
+  function primeDerived() {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    active.sessions = [
+      makeSession('parent', { displayName: 'Parent session' }),
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'parent',
+      }),
+    ];
+    active.data = active.sessions;
+  }
+
+  function toggleOf(sessionTitle: string): HTMLElement | null {
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes(sessionTitle));
+    return (
+      row?.querySelector<HTMLElement>('[class*="sessionTreeToggle"]') ?? null
+    );
+  }
+
+  it('collapses a derived session under its parent in the main list', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Parent session');
+    expect(container.textContent).not.toContain('Derived session');
+    const toggle = toggleOf('Parent session');
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle?.getAttribute('aria-label')).toBe('1 sub-session');
+  });
+
+  it('expands the derived session and persists the toggle', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    act(() => click(toggleOf('Parent session')!));
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
+    const childRow = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes('Derived session'));
+    expect(childRow?.getAttribute('data-session-tree-depth')).toBe('1');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.session-tree-expanded:primary:/tmp/project',
+      ),
+    ).toContain('parent');
+  });
+
+  it('nests a derived session inside its group section', async () => {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    active.sessions = [
+      makeSession('group-parent', {
+        displayName: 'Group parent',
+        groupId: 'design-group',
+      }),
+      makeSession('group-child', {
+        displayName: 'Group child',
+        groupId: 'design-group',
+        parentSessionId: 'group-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('Group parent');
+    expect(group?.textContent).not.toContain('Group child');
+    expect(
+      group
+        ?.querySelector('[class*="sessionTreeToggle"]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+
+    act(() =>
+      click(group!.querySelector<HTMLElement>('[class*="sessionTreeToggle"]')!),
+    );
+    await flushSidebar();
+
+    expect(
+      container.querySelector('section[aria-label="Design"]')?.textContent,
+    ).toContain('Group child');
+  });
+
+  it('keeps an unarchived child reachable after its parent is archived', async () => {
+    // Archiving only the parent removes it from the active page; the child is
+    // still active and must stay reachable from the sidebar.
+    active.sessions = [
+      makeSession('orphaned-child', {
+        displayName: 'Archived parent child',
+        parentSessionId: 'archived-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Archived parent child');
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) =>
+      candidate.textContent?.includes('Archived parent child'),
+    );
+    expect(row?.getAttribute('data-session-tree-depth')).toBe('0');
+  });
+
+  it('does not open the session when Enter is pressed on the chevron', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    const toggle = toggleOf('Parent session')!;
+    act(() => {
+      toggle.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    expect(loadSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the child flat when its parent is pinned into the Pinned section', async () => {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    const pinnedParent = makeSession('pinned-parent', {
+      displayName: 'Pinned parent',
+      isPinned: true,
+    });
+    // The daemon's all-sessions page keeps a pinned row in place (isPinned),
+    // while the project list lifts it into the Pinned section.
+    active.sessions = [
+      pinnedParent,
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'pinned-parent',
+      }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedParent];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
+  });
+});

@@ -6,7 +6,6 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { detectLineEnding } from '../services/fileSystemService.js';
@@ -25,7 +24,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -58,6 +57,13 @@ import type {
 } from './modifiable-tool.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
+import {
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('NOTEBOOK_EDIT');
 
@@ -69,6 +75,12 @@ export interface NotebookEditToolParams {
   new_source?: string;
   cell_type?: EditableNotebookCellType;
   edit_mode?: NotebookEditMode;
+
+  /**
+   * When false, do not create a session artifact for this edit. An artifact
+   * the session already has for this path is still refreshed.
+   */
+  record_as_artifact?: boolean;
 }
 
 interface NotebookEditModifyMetadata {
@@ -402,6 +414,15 @@ async function checkPriorNotebookRead(
     });
   }
 
+  if (status.state === 'unverifiable') {
+    return rejectNotebookPriorRead(notebookPath, 'unverifiable-cache-entry', {
+      ok: false,
+      type: ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      rawMessage: `Notebook ${notebookPath} is on a filesystem that does not provide a verifiable inode identity (ino=0), so NotebookEdit cannot safely confirm a prior read. Use a different mechanism to edit this notebook.`,
+      displayMessage: `cannot verify prior read of ${notebookPath}; use a different mechanism to edit it.`,
+    });
+  }
+
   return rejectNotebookPriorRead(notebookPath, `cache-${status.state}`, {
     ok: false,
     type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
@@ -440,18 +461,30 @@ class NotebookEditInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
+  /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  override requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.notebook_path, getCurrentAgentId()) !==
+      undefined
+    );
+  }
+
   override async getConfirmationDetails(
     abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const prepared = await this.prepareEdit(abortSignal);
     const fileName = path.basename(this.params.notebook_path);
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
       prepared.originalContent,
       prepared.updatedContent,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
 
     const confirmationDetails: ToolEditConfirmationDetails = {
@@ -576,6 +609,25 @@ class NotebookEditInvocation extends BaseToolInvocation<
       };
     }
 
+    // Scan the serialized notebook that will hit disk: a notebook under
+    // .qwen/team-memory/ could otherwise carry credentials past the guard
+    // that write-file.ts/edit.ts enforce. Block before any disk side effects.
+    const teamMemoryError = checkTeamMemorySecrets(
+      this.params.notebook_path,
+      prepared.updatedContent,
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return {
+        llmContent: `[ERROR: ${teamMemoryError}]`,
+        returnDisplay: teamMemoryError,
+        error: {
+          message: teamMemoryError,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+
     try {
       try {
         await this.config
@@ -604,6 +656,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: this.params.notebook_path,
         content: prepared.updatedContent,
+        toolWriteOrigin: 'notebook_edit',
         _meta: {
           bom: prepared.bom,
           encoding: prepared.encoding,
@@ -619,8 +672,10 @@ class NotebookEditInvocation extends BaseToolInvocation<
         );
       }
 
+      let postWriteSizeBytes: number | undefined;
       try {
         const postWriteStats = fs.statSync(this.params.notebook_path);
+        postWriteSizeBytes = postWriteStats.size;
         const cache = this.config.getFileReadCache();
         if (prepared.requiresReadAfterWrite) {
           cache.invalidate(postWriteStats);
@@ -640,13 +695,12 @@ class NotebookEditInvocation extends BaseToolInvocation<
       }
 
       const fileName = path.basename(this.params.notebook_path);
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
         prepared.originalContent,
         prepared.updatedContent,
         'Current',
         'Proposed',
-        DEFAULT_DIFF_OPTIONS,
       );
       const diffStat = getDiffStat(
         fileName,
@@ -670,15 +724,28 @@ class NotebookEditInvocation extends BaseToolInvocation<
       const displayResult = {
         fileDiff,
         fileName,
+        filePath: this.params.notebook_path,
         originalContent: prepared.originalContent,
         newContent: prepared.updatedContent,
         diffStat,
       };
 
+      const artifact = buildWorkspaceArtifactCandidate(
+        this.config,
+        this.params.notebook_path,
+        {
+          recordAsArtifact: this.params.record_as_artifact,
+          sizeBytes: postWriteSizeBytes,
+        },
+      );
+      const reminder =
+        artifact && !artifact.updateOnly
+          ? ` ${formatRecordArtifactReminder(artifact.workspacePath)}`
+          : '';
       const llmContent =
         this.modifyMetadata?.modifiedNotebookContent !== undefined
-          ? `Notebook ${this.params.notebook_path} has been updated. Notebook content was modified by the user before approval; the final saved notebook may differ from the original ${prepared.mode} cell ${prepared.editedCellId} proposal.`
-          : `Notebook ${this.params.notebook_path} has been updated. ${prepared.mode} cell ${prepared.editedCellId}.${
+          ? `Notebook ${this.params.notebook_path} has been updated.${reminder} Notebook content was modified by the user before approval; the final saved notebook may differ from the original ${prepared.mode} cell ${prepared.editedCellId} proposal.`
+          : `Notebook ${this.params.notebook_path} has been updated.${reminder} ${prepared.mode} cell ${prepared.editedCellId}.${
               prepared.mode === 'delete'
                 ? ''
                 : `\n\nUpdated source:\n\n---\n\n${normalizeSource(this.params.new_source ?? '')}`
@@ -687,6 +754,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
         llmContent,
         returnDisplay: displayResult,
         resultFilePaths: [this.params.notebook_path],
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -720,7 +788,7 @@ export class NotebookEditTool
     super(
       NotebookEditTool.Name,
       ToolDisplayNames.NOTEBOOK_EDIT,
-      `Edits a Jupyter notebook (.ipynb) safely at the cell level. Use this instead of ${ToolNames.EDIT} or ${ToolNames.WRITE_FILE} for notebook cells. Supports replacing, inserting, and deleting cells. Always read the notebook first with ${ToolNames.READ_FILE}; then use the cell IDs shown in that output.`,
+      `Edits a Jupyter notebook (.ipynb). Use this instead of ${ToolNames.EDIT} or ${ToolNames.WRITE_FILE} for cells. Always read the notebook first with ${ToolNames.READ_FILE}, then use the cell IDs from that output.`,
       Kind.Edit,
       {
         properties: {
@@ -749,6 +817,10 @@ export class NotebookEditTool
             description: 'Notebook edit operation. Defaults to replace.',
             type: 'string',
             enum: ['replace', 'insert', 'delete'],
+          },
+          record_as_artifact: {
+            description: 'Refresh existing only.',
+            type: 'boolean',
           },
         },
         required: ['notebook_path'],
@@ -795,6 +867,21 @@ export class NotebookEditTool
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.notebook_path)) {
       return `File path '${params.notebook_path}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.notebook_path)} pattern(s).`;
+    }
+
+    // Scan the cell source at validate time too — for parity with edit/write-file
+    // — so a team-memory write carrying a secret is rejected before scheduling.
+    // execute() still scans the full serialized notebook, which catches secrets
+    // split across cells that this single-cell check cannot.
+    if (typeof params.new_source === 'string') {
+      const teamMemoryError = checkTeamMemorySecrets(
+        params.notebook_path,
+        params.new_source,
+        this.config.getProjectRoot(),
+      );
+      if (teamMemoryError) {
+        return teamMemoryError;
+      }
     }
 
     return null;

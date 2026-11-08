@@ -1,0 +1,427 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import yargs from 'yargs';
+import type { ArgumentsCamelCase } from 'yargs';
+
+const loadSettings = vi.fn();
+const checkForUpdatesDetailed = vi.fn();
+const getInstallationInfo = vi.fn();
+const resolveUpdateCommand = vi.fn(
+  (updateCommand: string, latestVersion: string) =>
+    updateCommand.replace('@latest', `@${latestVersion}`),
+);
+const formatUpdateInstructions = vi.fn(
+  (
+    installationInfo: {
+      updateMessage?: string;
+      updateCommand?: string;
+      isStandalone?: boolean;
+    },
+    latestVersion: string,
+  ) => {
+    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+      return [installationInfo.updateMessage];
+    }
+    if (installationInfo.updateCommand) {
+      return [
+        'Run the following to update:',
+        `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
+      ];
+    }
+    return ['Manual update required. Please reinstall Qwen Code.'];
+  },
+);
+const performStandaloneUpdate = vi.fn();
+const getPackageJson = vi.fn();
+const writeStdoutLine = vi.fn();
+const writeStderrLine = vi.fn();
+const initializeI18n = vi.fn();
+const resolveLanguageSetting = vi.fn((language?: string) => language || 'auto');
+
+vi.mock('../config/settings.js', () => ({ loadSettings }));
+vi.mock('../ui/utils/updateCheck.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ui/utils/updateCheck.js')>()),
+  checkForUpdatesDetailed,
+}));
+vi.mock('../utils/installationInfo.js', () => ({
+  formatUpdateInstructions,
+  getInstallationInfo,
+  resolveUpdateCommand,
+}));
+vi.mock('../ui/standalone-update.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ui/standalone-update.js')>()),
+  performStandaloneUpdate,
+}));
+vi.mock('../utils/package.js', () => ({ getPackageJson }));
+vi.mock('../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/stdioHelpers.js')>()),
+  writeStdoutLine,
+  writeStderrLine,
+}));
+vi.mock('../i18n/index.js', () => ({
+  initializeI18n,
+  resolveLanguageSetting,
+  t: (key: string, params?: Record<string, string>) =>
+    key.replace(
+      /\{\{(\w+)\}\}/g,
+      (_, param: string) => params?.[param] ?? `{{${param}}}`,
+    ),
+}));
+
+const { updateCommand } = await import('./update.js');
+
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
+
+const updateArgs: ArgumentsCamelCase<object> = {
+  _: [],
+  $0: 'qwen',
+};
+
+function settings(enableAutoUpdate?: boolean) {
+  return {
+    merged: {
+      general: { enableAutoUpdate, language: 'zh' },
+    },
+  };
+}
+
+describe('update command', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.exitCode = undefined;
+    loadSettings.mockReturnValue(settings(undefined));
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'update',
+      info: {
+        message: 'Update available: 1.2.3',
+        update: { latest: '1.2.3' },
+      },
+    });
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+    });
+  });
+
+  it.each(['1.2.3', 'v1.2.3', '1.2.3-preview.1', '1.2.3-nightly.20260909'])(
+    'installs exact version %s without discovery',
+    async (version) => {
+      getInstallationInfo.mockReturnValue({
+        isStandalone: true,
+        standaloneDir: '/test/qwen',
+      });
+      performStandaloneUpdate.mockResolvedValue('done');
+      await updateCommand.handler({ ...updateArgs, targetVersion: version });
+      expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+      expect(performStandaloneUpdate).toHaveBeenCalledWith(
+        '/test/qwen',
+        version.replace(/^v/, ''),
+      );
+    },
+  );
+
+  it.each([
+    '',
+    'latest',
+    'nightly',
+    '../1.2.3',
+    '1.2',
+    '01.2.3',
+    '1.2.3-01',
+    '1.2.3?x=1',
+    // Raw argv carrying an OSC-52 sequence: the rejection must not echo
+    // terminal escapes to stderr.
+    '1.2.3\u001b]52;c;aGk=\u0007',
+  ])(
+    'rejects invalid target %j before discovery or installation',
+    async (targetVersion) => {
+      await updateCommand.handler({ ...updateArgs, targetVersion });
+      expect(process.exitCode).toBe(1);
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.not.stringContaining('\u001b'),
+      );
+      expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+      expect(getInstallationInfo).not.toHaveBeenCalled();
+      expect(performStandaloneUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('strips bidi-format characters from an echoed rejection', async () => {
+    await updateCommand.handler({
+      ...updateArgs,
+      targetVersion: '1.2.3\u202e',
+    });
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.not.stringContaining('\u202e'),
+    );
+  });
+
+  it('collapses an interior whitespace run in an echoed rejection', async () => {
+    await updateCommand.handler({
+      ...updateArgs,
+      targetVersion: '1.2.3   x',
+    });
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Update failed: Invalid version format: 1.2.3 x',
+    );
+  });
+
+  it('bounds an over-long rejected target echoed to stderr', async () => {
+    await updateCommand.handler({
+      ...updateArgs,
+      targetVersion: '1.2.3-' + 'a'.repeat(5000),
+    });
+    expect(process.exitCode).toBe(1);
+    const message = String(writeStderrLine.mock.calls.at(-1)?.[0]);
+    expect(message.length).toBeLessThanOrEqual(540);
+    expect(message).toContain('…');
+  });
+
+  it('sanitizes a download failure that carries terminal controls', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/test/qwen',
+    });
+    performStandaloneUpdate.mockRejectedValue(
+      new Error('mirror said \u001b]52;c;aGk=\u0007nope'),
+    );
+    await updateCommand.handler({ ...updateArgs, targetVersion: '1.2.3' });
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Update failed: mirror said nope',
+    );
+  });
+
+  it('keeps the manual recovery step in a long rollback failure', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/test/qwen',
+    });
+    const installs =
+      '/home/runner/.local/share/qwen-code/installations/qwen-code-linux-x64-0123456789abcdef';
+    performStandaloneUpdate.mockRejectedValue(
+      new Error(
+        'Standalone update failed AND rollback failed.\n' +
+          `Original error: EXDEV: cross-device link not permitted, rename '${installs}' -> '${installs}.old'\n` +
+          `Rollback error: ENOTEMPTY: directory not empty, rename '${installs}.old' -> '${installs}'\n` +
+          `Manual recovery: mv "${installs}.old" "${installs}"`,
+      ),
+    );
+    await updateCommand.handler({ ...updateArgs, targetVersion: '1.2.3' });
+    expect(process.exitCode).toBe(1);
+    const message = String(writeStderrLine.mock.calls.at(-1)?.[0]);
+    expect(message).toContain('Manual recovery: mv');
+  });
+
+  it('rejects an unmanaged exact target without suggesting an unpinned upgrade', async () => {
+    await updateCommand.handler({ ...updateArgs, targetVersion: 'v1.2.3' });
+    expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Install version 1.2.3 manually'),
+    );
+    expect(formatUpdateInstructions).not.toHaveBeenCalled();
+    expect(performStandaloneUpdate).not.toHaveBeenCalled();
+  });
+
+  it('prints the package-manager update command even when auto-update is disabled', async () => {
+    loadSettings.mockReturnValue(settings(false));
+
+    await updateCommand.handler(updateArgs);
+
+    expect(resolveLanguageSetting).toHaveBeenCalledWith('zh');
+    expect(initializeI18n).toHaveBeenCalledWith('zh');
+    expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), true);
+    expect(writeStdoutLine).toHaveBeenCalledWith('Update available: 1.2.3');
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Run the following to update:',
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      '  npm install -g @qwen-code/qwen-code@1.2.3',
+    );
+  });
+
+  it('sets a non-zero exit code when a standalone update fails', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockRejectedValue(new Error('boom'));
+
+    await updateCommand.handler(updateArgs);
+
+    expect(performStandaloneUpdate).toHaveBeenCalledWith(
+      '/tmp/qwen-code',
+      '1.2.3',
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
+    expect(writeStderrLine).toHaveBeenCalledWith('Update failed: boom');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('updates standalone installs even when auto-update is disabled', async () => {
+    loadSettings.mockReturnValue(settings(false));
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('done');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), true);
+    expect(performStandaloneUpdate).toHaveBeenCalledWith(
+      '/tmp/qwen-code',
+      '1.2.3',
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update successful! The new version will be used on your next run.',
+    );
+  });
+
+  it('does not print generic fallback when installation info has updateMessage', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+      updateMessage: 'Running via npx, update not applicable.',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Running via npx, update not applicable.',
+    );
+    expect(writeStdoutLine).not.toHaveBeenCalledWith(
+      'Manual update required. Please reinstall Qwen Code.',
+    );
+  });
+
+  it('prints the update message when no update command is available', async () => {
+    getInstallationInfo.mockReturnValue({
+      updateMessage:
+        'Running from a local git clone. Please update with "git pull".',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Running from a local git clone. Please update with "git pull".',
+    );
+  });
+
+  it('prints success message on standalone update', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('done');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update successful! The new version will be used on your next run.',
+    );
+  });
+
+  it('prints deferred message on standalone update', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('deferred');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update downloaded. It will be applied after you exit this session.',
+    );
+  });
+
+  it('prints the current version when no update is available', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'up-to-date',
+      currentVersion: '1.0.0',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Qwen Code 1.0.0 is up to date!',
+    );
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('sets a non-zero exit code when the update check fails', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new Error('registry unavailable'),
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Failed to check for updates (registry error). Please check your network or registry configuration.',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('sets a non-zero exit code when the update check is skipped', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'skipped',
+      reason: 'development mode',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Unable to check for updates: development mode',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+});
+
+describe('update command argument parsing', () => {
+  // The parser mirrors production: config.ts builds yargs with .strict(), so
+  // an undeclared --target-version (builder removed or option renamed) throws
+  // instead of silently falling through to registry discovery.
+  function capturingParser(received: { argv?: ArgumentsCamelCase<unknown> }) {
+    return yargs([])
+      .command({
+        ...updateCommand,
+        handler: (argv) => {
+          received.argv = argv;
+        },
+      })
+      .strict()
+      .fail(false)
+      .locale('en');
+  }
+
+  it('maps --target-version to argv.targetVersion through the builder', async () => {
+    const received: { argv?: ArgumentsCamelCase<unknown> } = {};
+    await capturingParser(received).parse('update --target-version 0.23.1');
+    expect(received.argv).toMatchObject({ targetVersion: '0.23.1' });
+  });
+
+  it('leaves targetVersion absent when the flag is not given', async () => {
+    const received: { argv?: ArgumentsCamelCase<unknown> } = {};
+    await capturingParser(received).parse('update');
+    expect(received.argv).not.toHaveProperty('targetVersion');
+  });
+});

@@ -57,16 +57,29 @@ export class LlmRewriter {
     // promptFile takes precedence over inline prompt
     if (rewriteConfig.promptFile) {
       const filePath = resolve(rewriteConfig.promptFile);
-      if (existsSync(filePath)) {
-        this.prompt = readFileSync(filePath, 'utf-8').trim();
-        debugLogger.info(
-          `Loaded rewrite prompt from file: ${filePath} (${this.prompt.length} chars)`,
-        );
-      } else {
+      if (!existsSync(filePath)) {
         debugLogger.warn(
           `Rewrite prompt file not found: ${filePath}, using default`,
         );
         this.prompt = DEFAULT_REWRITE_PROMPT;
+      } else {
+        // existsSync passes for directories and says nothing about
+        // readability, so the read itself can still fail (EISDIR, EACCES,
+        // ...). Degrade like the missing-file case instead of throwing,
+        // which would crash ACP session startup (#9752).
+        try {
+          this.prompt = readFileSync(filePath, 'utf-8').trim();
+          debugLogger.info(
+            `Loaded rewrite prompt from file: ${filePath} (${this.prompt.length} chars)`,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Rewrite prompt file could not be read: ${filePath} (${
+              error instanceof Error ? error.message : String(error)
+            }), using default`,
+          );
+          this.prompt = DEFAULT_REWRITE_PROMPT;
+        }
       }
     } else {
       this.prompt = rewriteConfig.prompt || DEFAULT_REWRITE_PROMPT;
@@ -147,8 +160,19 @@ export class LlmRewriter {
           `--- OUTPUT ---\n${rewritten}\n---`,
       );
 
-      // Update context for next turn
-      this.outputHistory.push(rewritten);
+      // Update context for next turn. Only the last `contextTurns` outputs are
+      // ever read (see the context slice above), so keep at most that many to
+      // avoid unbounded growth over a long session. Infinity ('all') keeps
+      // everything; 0 means the history is never read, so store nothing.
+      if (this.contextTurns > 0) {
+        this.outputHistory.push(rewritten);
+        if (
+          Number.isFinite(this.contextTurns) &&
+          this.outputHistory.length > this.contextTurns
+        ) {
+          this.outputHistory = this.outputHistory.slice(-this.contextTurns);
+        }
+      }
 
       return rewritten;
     } catch (error) {

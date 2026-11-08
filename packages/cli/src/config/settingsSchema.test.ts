@@ -4,17 +4,138 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '@qwen-code/qwen-code-core';
+import { describe, it, expect, expectTypeOf } from 'vitest';
+import {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
+  HELD_EXPIRY_OPTIONS,
+  HookEventName,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  OutputFormat,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+} from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
+import { advertisedMaxSessions } from '../serve/server/serve-features.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
+import {
+  MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+  MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_TRACKED_SPAWNED_SESSIONS,
+} from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('defaults regular subagents to background execution and requires a restart', () => {
+    expect(
+      getSettingsSchema().agents.properties.defaultBackground,
+    ).toMatchObject({
+      type: 'boolean',
+      default: true,
+      requiresRestart: true,
+      showInDialog: false,
+    });
+  });
+
+  it('exposes a default-on Generated UI setting that requires restarting its owner', () => {
+    expect(
+      getSettingsSchema().experimental.properties.generatedUi,
+    ).toMatchObject({
+      type: 'boolean',
+      default: true,
+      category: 'Experimental',
+      requiresRestart: true,
+      showInDialog: true,
+    });
+  });
+
+  it('declares a replace-only Web Shell approval mode allowlist', () => {
+    const { allowedApprovalModes } = getSettingsSchema().ui.properties;
+    expect(allowedApprovalModes).toMatchObject({
+      type: 'array',
+      default: undefined,
+      mergeStrategy: MergeStrategy.REPLACE,
+      showInDialog: false,
+      items: {
+        type: 'string',
+        // Pinned to the SDK vocabulary rather than restated as a literal, so
+        // a permission mode added there without this schema following turns
+        // this assertion red instead of shipping a stale editor enum.
+        enum: DAEMON_APPROVAL_MODES.filter((mode) => mode !== 'plan'),
+      },
+    });
+    // The key is workspace-restricted; the description is the only in-editor
+    // signal, so it must say so (mirrored verbatim into the VSCode schema).
+    expect(allowedApprovalModes.description).toMatch(
+      /values set in Workspace settings are ignored/,
+    );
+  });
+
   describe('getSettingsSchema', () => {
+    it('declares the operator-scoped model catalog refresh switch', () => {
+      expect(getSettingsSchema().model.properties.catalogRefresh).toMatchObject(
+        {
+          type: 'boolean',
+          default: true,
+          requiresRestart: true,
+          showInDialog: false,
+        },
+      );
+      expect(
+        getSettingsSchema().model.properties.catalogRefresh.description,
+      ).toMatch(/values set in Workspace settings are ignored/);
+      expect(
+        getSettingsSchema().privacy.properties.usageStatisticsEnabled
+          .description,
+      ).toMatch(/also stops the models.dev catalog refresh/);
+    });
+
+    it('should describe prompt hooks supported by the runtime', () => {
+      const hookProperties =
+        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
+          'hooks'
+        ]?.items?.properties;
+
+      expect(hookProperties?.['type']?.enum).toEqual([
+        'command',
+        'http',
+        'prompt',
+      ]);
+      expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
+    it('should declare a hooks setting for every hook event', () => {
+      expect(
+        Object.keys(getSettingsSchema().hooks.properties ?? {}).sort(),
+      ).toEqual([...Object.values(HookEventName)].sort());
+    });
+
+    it('should concatenate every hook event across settings scopes', () => {
+      const hookProperties = getSettingsSchema().hooks.properties ?? {};
+      const eventNames = Object.values(HookEventName);
+
+      expect(
+        Object.fromEntries(
+          eventNames.map((eventName) => [
+            eventName,
+            hookProperties[eventName]?.mergeStrategy,
+          ]),
+        ),
+      ).toEqual(
+        Object.fromEntries(
+          eventNames.map((eventName) => [eventName, MergeStrategy.CONCAT]),
+        ),
+      );
+    });
+
     it('should contain all expected top-level settings', () => {
       const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
@@ -31,11 +152,37 @@ describe('SettingsSchema', () => {
         'advanced',
         'plansDirectory',
         'voiceModel',
+        'imageModel',
       ];
 
       expectedSettings.forEach((setting) => {
         expect(getSettingsSchema()[setting as keyof Settings]).toBeDefined();
       });
+    });
+
+    it('accepts none in configuration without adding a TUI off control', () => {
+      const { options, jsonSchemaOverride } =
+        getSettingsSchema().model.properties.reasoningEffort;
+
+      expect(options?.map((option) => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(jsonSchemaOverride).toEqual({
+        type: 'string',
+        enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      });
+      expectTypeOf<
+        NonNullable<Settings['model']>['reasoningEffort']
+      >().toEqualTypeOf<
+        'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined
+      >();
+      expect(options).not.toContainEqual(
+        expect.objectContaining({ value: 'default' }),
+      );
     });
 
     it('should have correct structure for each setting', () => {
@@ -74,6 +221,12 @@ describe('SettingsSchema', () => {
         expect(definition.properties).toBeDefined();
         expect(typeof definition.properties).toBe('object');
       });
+    });
+
+    it('should not expose the removed dynamic command translation setting', () => {
+      expect(getSettingsSchema().general.properties).not.toHaveProperty(
+        'dynamicCommandTranslation',
+      );
     });
 
     it('should have accessibility nested properties', () => {
@@ -117,6 +270,41 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
+    // requiresRestart is load-bearing, not decorative: the Workflow tool is
+    // registered once while the tool registry is built, so a mid-session
+    // toggle would leave the dialog claiming the feature is on while the
+    // tool is absent from the registry.
+    it('should keep dynamic workflows opt-in and restart-scoped', () => {
+      expect(
+        getSettingsSchema().tools.properties.workflowsEnabled,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+        category: 'Tools',
+      });
+    });
+
+    it('should warn that an execution sandbox refuses the LSP setting', () => {
+      const description =
+        getSettingsSchema().tools.properties.lspEnabled?.description ?? '';
+
+      expect(description).toContain('tools.executionSandbox');
+      expect(description).toContain('--safe-mode');
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties
@@ -146,6 +334,50 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // Type and bounds mirror resolveWebSearchTimeoutMs, which accepts only
+    // whole numbers in range: without them the write paths accept values the
+    // runtime silently replaces with the default. The maximum is core's
+    // constant so the schema cannot drift from the runtime contract.
+    it('should bound tools.webSearch.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
+        showInDialog: true,
+      });
+    });
+
+    it('should bound tools.webSearch.maxPerSession to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.maxPerSession,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
+    // The bundled Mem0 runtime validates this same field with its own zod copy
+    // (mem0-settings.ts `int().min(1).max(30_000).default(5000)`, pinned by
+    // mem0-settings.test.ts). Neither copy is derived from the other, so both
+    // are asserted against the documented contract in
+    // docs/users/features/mem0.md: drifting either one turns a test red.
+    it('should bound memory.mem0.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().memory.properties.mem0.jsonSchemaOverride
+          ?.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: 30_000,
+        default: 5000,
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');
@@ -153,6 +385,16 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().proxy.requiresRestart).toBe(true);
       expect(getSettingsSchema().proxy.default).toBe(undefined);
       expect(getSettingsSchema().proxy.showInDialog).toBe(false);
+    });
+
+    it('should have general.outputStyle setting in schema', () => {
+      const outputStyle = getSettingsSchema().general.properties!.outputStyle;
+
+      expect(outputStyle).toBeDefined();
+      expect(outputStyle.type).toBe('string');
+      expect(outputStyle.category).toBe('General');
+      expect(outputStyle.default).toBe(undefined);
+      expect(outputStyle.requiresRestart).toBe(true);
     });
 
     it('should have plansDirectory setting in schema', () => {
@@ -175,6 +417,187 @@ describe('SettingsSchema', () => {
       expect(voiceModel.showInDialog).toBe(false);
     });
 
+    it('should define the image model setting', () => {
+      const imageModel = getSettingsSchema().imageModel;
+
+      expect(imageModel.type).toBe('string');
+      expect(imageModel.category).toBe('Model');
+      expect(imageModel.default).toBe('');
+      expect(imageModel.requiresRestart).toBe(false);
+      expect(imageModel.showInDialog).toBe(false);
+      expect(imageModel.description).toContain('supportsImageGeneration: true');
+    });
+
+    it('should define the advisor model setting', () => {
+      const advisorModel = getSettingsSchema().advisorModel;
+
+      expect(advisorModel.type).toBe('string');
+      expect(advisorModel.category).toBe('Model');
+      expect(advisorModel.default).toBe('');
+      expect(advisorModel.requiresRestart).toBe(true);
+      expect(advisorModel.showInDialog).toBe(false);
+    });
+
+    it('should define the built-in Explore model setting', () => {
+      const exploreModel =
+        getSettingsSchema().agents.properties.builtin.properties.exploreModel;
+
+      expect(exploreModel.type).toBe('string');
+      expect(exploreModel.category).toBe('Model');
+      expect(exploreModel.default).toBe('inherit');
+      expect(exploreModel.requiresRestart).toBe(true);
+      expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should keep cross-session messaging on by default', () => {
+      // On by default since docs/design/2026-09-14-cross-session-messaging-default-on.md.
+      // This value is not what bounds a peer: the inbound gate is (review-class
+      // parity, an explicit hold or refuse), with the tighten-only workspace
+      // ranking and the per-session inbox token around it.
+      const crossSessionMessaging =
+        getSettingsSchema().agents.properties.crossSessionMessaging;
+
+      expect(crossSessionMessaging.type).toBe('boolean');
+      expect(crossSessionMessaging.default).toBe(true);
+      expect(crossSessionMessaging.requiresRestart).toBe(true);
+      expect(crossSessionMessaging.showInDialog).toBe(false);
+    });
+
+    it('should define the inbound cross-session policy as accept/hold/refuse', () => {
+      const crossSessionInbound =
+        getSettingsSchema().agents.properties.crossSessionInbound;
+
+      expect(crossSessionInbound.type).toBe('enum');
+      // Unset is not a fourth policy: it means approval-mode parity, which
+      // the gate derives. A concrete default here would silence that.
+      expect(crossSessionInbound.default).toBeUndefined();
+      expect(crossSessionInbound.options).toEqual([
+        { value: 'accept', label: 'Accept' },
+        { value: 'hold', label: 'Hold for review' },
+        { value: 'refuse', label: 'Refuse' },
+      ]);
+      expect(crossSessionInbound.description).toContain(
+        'user-minted controllers',
+      );
+      expect(crossSessionInbound.description).toContain('child processes');
+    });
+
+    it('should offer exactly the hold lifetimes core knows how to parse', () => {
+      // Three copies of this vocabulary exist: core's table, these
+      // options, and the generated JSON schema. Adding an option here
+      // without a core entry fails nowhere -- `parseHeldExpiry` takes its
+      // unrecognized branch, logs at debug level (off by default), and
+      // returns the five-minute default. A user who hand-edits
+      // settings.json to the new value gets a silently shorter review
+      // window, with the whole suite green.
+      const crossSessionHeldExpiry =
+        getSettingsSchema().agents.properties.crossSessionHeldExpiry;
+
+      expect(crossSessionHeldExpiry.options?.map((o) => o.value)).toEqual(
+        HELD_EXPIRY_OPTIONS,
+      );
+      // And the declared default must be one core resolves to a real
+      // lifetime, not one that happens to fall back to it.
+      expect(HELD_EXPIRY_OPTIONS).toContain(crossSessionHeldExpiry.default);
+    });
+
+    it('should define model grade settings', () => {
+      const agents = getSettingsSchema().agents.properties;
+
+      expect(agents.modelGrades.jsonSchemaOverride).toEqual({
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      });
+      expect(agents.modelGrades.requiresRestart).toBe(true);
+      expect(agents.allowedGrades.type).toBe('array');
+      expect(agents.allowedGrades.items).toEqual({ type: 'string' });
+      expect(agents.allowedGrades.requiresRestart).toBe(true);
+    });
+
+    it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {
+      const timeout = getSettingsSchema().visionBridgeTimeoutMs;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(2_147_483_647);
+      expect(timeout.requiresRestart).toBe(true);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define goalCheckpointTimeoutSeconds as a bounded integer', () => {
+      const timeout =
+        getSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(900);
+      expect(timeout.description).toMatch(/^Deprecated\./);
+      expect(timeout.requiresRestart).toBe(false);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should bound the Goal cadence ceilings and default them to no ceiling', () => {
+      const model = getSettingsSchema().model.properties;
+
+      for (const [key, cap] of [
+        ['goalMaxTurns', GOAL_MAX_TURNS_CAP],
+        ['goalMaxActiveMinutes', GOAL_MAX_ACTIVE_MINUTES_CAP],
+      ] as const) {
+        const setting = model[key];
+        expect(setting).toBeDefined();
+        expect(setting.type).toBe('integer');
+        expect(setting.category).toBe('Model');
+        // Absent means no ceiling: a cadence is what an operator asks for,
+        // not a number the project picks on their behalf.
+        expect(setting.default).toBeUndefined();
+        expect(setting.minimum).toBe(-1);
+        expect(setting.maximum).toBe(cap);
+        expect(setting.excludedValues).toEqual([0]);
+        expect(setting.requiresRestart).toBe(true);
+        expect(setting.showInDialog).toBe(false);
+      }
+    });
+
+    it('should define count-based model limits as integers', () => {
+      const model = getSettingsSchema().model.properties;
+
+      expect(model.maxSessionTurns.type).toBe('integer');
+      expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
+    it('should define model.loopProtection with warn as the default', () => {
+      const loopProtection =
+        getSettingsSchema().model.properties.loopProtection;
+
+      expect(loopProtection).toMatchObject({ type: 'enum', default: 'warn' });
+      expect(loopProtection.options?.map((option) => option.value)).toEqual([
+        'warn',
+        'stop',
+        'off',
+      ]);
+    });
+
+    it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
+      const streamIdleTimeout =
+        getSettingsSchema().model.properties.generationConfig.properties
+          ?.streamIdleTimeoutMs;
+
+      expect(streamIdleTimeout).toMatchObject({
+        type: 'integer',
+        default: undefined,
+        minimum: 0,
+        maximum: 2_147_483_647,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+    });
+
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
       expect(
         getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,
@@ -182,6 +605,29 @@ describe('SettingsSchema', () => {
         type: 'integer',
         minimum: 1,
         default: 8,
+      });
+    });
+
+    it('should define telemetry sensitiveSpanAttributeMaxLength as a positive integer', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(
+        telemetrySchema.properties?.sensitiveSpanAttributeMaxLength,
+      ).toEqual({
+        description:
+          'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.',
+        type: 'integer',
+        minimum: 1,
+        maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+        default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      });
+    });
+
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
       });
     });
 
@@ -200,6 +646,12 @@ describe('SettingsSchema', () => {
 
       expect(voice.language.type).toBe('string');
       expect(voice.language.default).toBe('');
+
+      expect(voice.keytermsFile.type).toBe('string');
+      expect(voice.keytermsFile.default).toBe('');
+
+      expect(voice.refineTranscript.type).toBe('boolean');
+      expect(voice.refineTranscript.default).toBe(true);
     });
 
     it('should have unique categories', () => {
@@ -230,6 +682,45 @@ describe('SettingsSchema', () => {
       expect(categories).toContain('Advanced');
     });
 
+    it('marks MCP reconcile inputs as hot-reloadable but startup-only MCP keys as restart-required (sub-task 3)', () => {
+      // These three feed the runtime reconcile (mcpServers is the server map;
+      // mcp.allowed / mcp.excluded are read by mcpGatingEqual), so they MUST be
+      // hot-reloadable — otherwise the SettingsWatcher suppresses MCP-only
+      // edits and registerMcpHotReload never fires for the advertised
+      // add/remove/restart/gating changes.
+      expect(getSettingsSchema().mcpServers.requiresRestart).toBe(false);
+      expect(getSettingsSchema().mcp.properties!.allowed.requiresRestart).toBe(
+        false,
+      );
+      expect(getSettingsSchema().mcp.properties!.excluded.requiresRestart).toBe(
+        false,
+      );
+      // serverCommand is consumed once at startup (not part of the reconcile
+      // input), so it stays restart-required. The mcp parent node also stays
+      // restart-required; the watcher resolves the longest-matching schema key,
+      // so the flipped leaves win for allowed/excluded edits regardless.
+      expect(
+        getSettingsSchema().mcp.properties!.serverCommand.requiresRestart,
+      ).toBe(true);
+      expect(getSettingsSchema().mcp.requiresRestart).toBe(true);
+    });
+
+    it('defines disabled skill levels as a restart-required union setting', () => {
+      const disabledLevels =
+        getSettingsSchema().skills.properties.disabledLevels;
+
+      expect(disabledLevels.type).toBe('array');
+      expect(disabledLevels.default).toBeUndefined();
+      expect(disabledLevels.requiresRestart).toBe(true);
+      expect(disabledLevels.mergeStrategy).toBe(MergeStrategy.UNION);
+      expect(disabledLevels.items?.enum).toEqual([
+        'project',
+        'user',
+        'extension',
+        'bundled',
+      ]);
+    });
+
     it('should have consistent default values for boolean settings', () => {
       const checkBooleanDefaults = (schema: SettingsSchema) => {
         Object.entries(schema).forEach(([, definition]) => {
@@ -245,6 +736,17 @@ describe('SettingsSchema', () => {
       };
 
       checkBooleanDefaults(getSettingsSchema() as SettingsSchema);
+    });
+
+    it('keeps Session Workflow opt-in without requiring a restart', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWorkflow,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: true,
+      });
     });
 
     it('should have showInDialog property configured', () => {
@@ -277,6 +779,9 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().security.properties.auth.showInDialog).toBe(
         false,
       );
+      expect(getSettingsSchema().tools.properties.freeform.showInDialog).toBe(
+        false,
+      );
       expect(getSettingsSchema().permissions.showInDialog).toBe(false);
       expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
       expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
@@ -301,6 +806,24 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should define the web shell brand as deployment-only configuration', () => {
+      const brand = getSettingsSchema().ui.properties.brand;
+
+      expect(brand.type).toBe('object');
+      // Edited in settings.json, not from the in-browser Settings page: brand
+      // is deployment identity, not a preference one viewer of a workspace
+      // should be able to change for everyone else.
+      expect(brand.showInDialog).toBe(false);
+
+      const { name, logoPath } = brand.properties;
+      expect(name.type).toBe('string');
+      expect(name.default).toBe('');
+      expect(name.showInDialog).toBe(false);
+      expect(logoPath.type).toBe('string');
+      expect(logoPath.default).toBe('');
+      expect(logoPath.showInDialog).toBe(false);
+    });
+
     it('should define Markdown render mode as a user-facing UI enum', () => {
       const renderMode = getSettingsSchema().ui.properties.renderMode;
 
@@ -319,9 +842,51 @@ describe('SettingsSchema', () => {
         getSettingsSchema().ui.properties.useTerminalBuffer;
       expect(useTerminalBuffer).toBeDefined();
       expect(useTerminalBuffer.type).toBe('boolean');
-      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.default).toBe(true);
       expect(useTerminalBuffer.showInDialog).toBe(true);
-      expect(useTerminalBuffer.requiresRestart).toBe(false);
+      expect(useTerminalBuffer.requiresRestart).toBe(true);
+    });
+
+    it('should have mouseTracking in ui settings', () => {
+      const mouseTracking = getSettingsSchema().ui.properties.mouseTracking;
+      expect(mouseTracking).toBeDefined();
+      expect(mouseTracking.type).toBe('boolean');
+      expect(mouseTracking.default).toBe(true);
+      expect(mouseTracking.showInDialog).toBe(true);
+      expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should have arrowKeysScrollTranscript in ui settings', () => {
+      const arrowKeysScrollTranscript =
+        getSettingsSchema().ui.properties.arrowKeysScrollTranscript;
+      expect(arrowKeysScrollTranscript).toBeDefined();
+      expect(arrowKeysScrollTranscript.type).toBe('boolean');
+      // Default must stay false — bare ↑/↓ are input-history keys.
+      expect(arrowKeysScrollTranscript.default).toBe(false);
+      expect(arrowKeysScrollTranscript.showInDialog).toBe(true);
+      expect(arrowKeysScrollTranscript.requiresRestart).toBe(false);
+    });
+
+    it('should expose tool call details as a live UI setting', () => {
+      const showToolCallDetails =
+        getSettingsSchema().ui.properties.showToolCallDetails;
+      expect(showToolCallDetails).toBeDefined();
+      expect(showToolCallDetails.type).toBe('boolean');
+      expect(showToolCallDetails.default).toBe(true);
+      expect(showToolCallDetails.showInDialog).toBe(true);
+      expect(showToolCallDetails.requiresRestart).toBe(false);
+    });
+
+    it('should have showToolCallArgs in ui settings', () => {
+      const showToolCallArgs =
+        getSettingsSchema().ui.properties.showToolCallArgs;
+      expect(showToolCallArgs).toBeDefined();
+      expect(showToolCallArgs.type).toBe('boolean');
+      // Default must stay false — the compact tool view is the baseline.
+      expect(showToolCallArgs.default).toBe(false);
+      expect(showToolCallArgs.showInDialog).toBe(true);
+      // Read at render time, so no restart is needed.
+      expect(showToolCallArgs.requiresRestart).toBe(false);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {
@@ -332,6 +897,26 @@ describe('SettingsSchema', () => {
       expect(responseTokensPerSecond.default).toBe(false);
       expect(responseTokensPerSecond.showInDialog).toBe(true);
       expect(responseTokensPerSecond.requiresRestart).toBe(true);
+    });
+
+    it('should pin serve limits to the runtime defaults', () => {
+      const serve = getSettingsSchema().serve.properties;
+      expect(serve.maxSessions.type).toBe('integer');
+      expect(serve.maxSessions.minimum).toBe(0);
+      expect(serve.maxSessions.default).toBe(advertisedMaxSessions(undefined));
+      expect(serve.maxSessions.requiresRestart).toBe(true);
+      expect(serve.maxConcurrentSubSessionsPerCaller.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+      );
+      expect(serve.maxConcurrentSubSessionsTotal.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+      );
+      // The runtime clamps the total cap to the tracked-id set size; the
+      // schema maximum must match so editors reject values that the daemon
+      // would otherwise silently clamp.
+      expect(serve.maxConcurrentSubSessionsTotal.maximum).toBe(
+        MAX_TRACKED_SPAWNED_SESSIONS,
+      );
     });
 
     it('should infer Settings type correctly', () => {
@@ -388,6 +973,22 @@ describe('SettingsSchema', () => {
         { value: 'tree', label: 'Tree' },
         { value: 'flat', label: 'Flat' },
       ]);
+    });
+
+    it('should allow stream-json as an output.format the runtime honors', () => {
+      // The runtime reads `output.format` from settings.json via
+      // `normalizeOutputFormat`, which returns `OutputFormat.STREAM_JSON` for
+      // `"stream-json"` — a documented, first-class CLI output format. The
+      // settings schema drives VS Code validation of `.qwen/settings.json`, so
+      // it must not reject a value the runtime accepts and runs.
+      const format = getSettingsSchema().output?.properties.format;
+
+      expect(format.type).toBe('enum');
+      const values = format.options?.map((o: { value: string }) => o.value);
+      // Pin the options to the full runtime enum, array-derived (order
+      // included) so a removed, added, or reordered core format fails this
+      // test until the schema follows.
+      expect(values).toEqual(Object.values(OutputFormat));
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {

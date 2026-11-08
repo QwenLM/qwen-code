@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`; the current set has 43 known event types. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `server.ts`; see [Envelope-level metadata](#envelope-level-metadata).
+Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts`; see [Envelope-level metadata](#envelope-level-metadata).
 
 The SDK exposes `asKnownDaemonEvent(evt)`. It returns a discriminated `KnownDaemonEvent` for known event types and `undefined` for other types. SDK consumers can therefore handle forward compatibility without requiring a lockstep SDK upgrade when a newer daemon adds an event type; the session reducer records those as `unrecognizedKnownEventCount`.
 
@@ -15,29 +15,71 @@ The wire format lives in [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md
 - Provide pure reducers (`reduceDaemonSessionEvent`, `reduceDaemonAuthEvent`) that project an event stream into SDK view state.
 - Broadcast the `typed_event_schema` capability tag as an informational signal. If the tag is absent, `asKnownDaemonEvent` still falls back to `unknown`.
 
-## Event vocabulary (43 known types)
+## Event vocabulary
 
 Grouped by domain.
 
 ### Core session
 
-| Type                       | Direction      | Trigger                                                                       | Key payload fields                                                               |
-| -------------------------- | -------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `session_update`           | S->C           | Any ACP `sessionUpdate` notification: agent text, thought, tool call, or plan | `sessionUpdate: string, content?: ...` (opaque ACP shape)                        |
-| `session_metadata_updated` | S->C           | `PATCH /session/:id/metadata`                                                 | `sessionId, displayName?`                                                        |
-| `session_died`             | S->C terminal  | `channel.exited`                                                              | `sessionId, reason, exitCode? \| null, signalCode? \| null`                      |
-| `session_closed`           | S->C terminal  | `DELETE /session/:id` or programmatic close                                   | `sessionId, reason: 'client_close' \| string, closedBy?`                         |
-| `session_snapshot`         | S->C synthetic | Snapshot frame after SSE attach / replay                                      | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null` |
+| Type                         | Direction      | Trigger                                                                               | Key payload fields                                                                                                                |
+| ---------------------------- | -------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `session_update`             | S->C           | Any ACP `sessionUpdate` notification: agent text, thought, tool call, or plan         | `sessionUpdate: string, content?: ...` (opaque ACP shape)                                                                         |
+| `session_metadata_updated`   | S->C           | `PATCH /session/:id/metadata`                                                         | `sessionId, displayName?`                                                                                                         |
+| `session_died`               | S->C terminal  | Unexpected `channel.exited` outside a workspace stop                                  | `sessionId, reason, exitCode? \| null, signalCode? \| null`                                                                       |
+| `session_closed`             | S->C terminal  | `DELETE /session/:id`, programmatic close, or confirmed workspace runtime stop        | `sessionId, reason: 'client_close' \| string, closedBy?, cause?, persistenceUnconfirmed?, exitCode? \| null, signalCode? \| null` |
+| `session_snapshot`           | S->C synthetic | Snapshot frame after SSE attach / replay                                              | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null, recordingDegraded: boolean`                      |
+| `session_recording_degraded` | S->C           | The session transcript writer permanently stopped after an asynchronous write failure | `sessionId, reason: 'write_failed'`                                                                                               |
 
 ### Subscriber-level synthetic frames
 
-| Type                    | Trigger                                                                                                                                                                                                                              | Notes                                                                                                                                                                                                                                                                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `client_evicted`        | Per-subscriber EventBus queue overflow. **No `id`**                                                                                                                                                                                  | `reason: string, droppedAfter?: number`; terminal only for the current subscriber, while the session remains alive.                                                                                                                                                                                                            |
-| `slow_client_warning`   | Queue >= 75%; force-pushed and **has no `id`**                                                                                                                                                                                       | `queueSize, maxQueued, lastEventId`; re-armed after the queue drops below 37.5%.                                                                                                                                                                                                                                               |
-| `stream_error`          | `SubscriberLimitExceededError` or another route stream error                                                                                                                                                                         | `error: string`; terminal for the subscription.                                                                                                                                                                                                                                                                                |
-| `state_resync_required` | `subscribe({lastEventId})` detects that the daemon ring no longer holds `[lastEventId+1, earliestInRing-1]`, or the client cursor is from a previous bus epoch. Force-pushed **before** remaining replay frames and **has no `id`**. | `reason: 'ring_evicted' \| 'epoch_reset' \| string`, `lastDeliveredId: number`, `earliestAvailableId: number`. This is a recovery signal, not terminal: the SSE stream stays open and replay + live frames continue. The SDK reducer sets `awaitingResync = true` and skips deltas until the caller resets with `loadSession`. |
-| `replay_complete`       | Id-less sentinel emitted after the `Last-Event-ID` replay loop finishes, for both clean replay and ring-evicted paths, even when `data.replayedCount === 0`. **No `id`**                                                             | `replayedCount: number`; lets consumers remove catch-up UI deterministically without a timeout.                                                                                                                                                                                                                                |
+| Type                    | Trigger                                                                                                                                                                                            | Notes                                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `client_evicted`        | Per-subscriber EventBus queue overflow. **No `id`**                                                                                                                                                | `reason: 'queue_overflow' \| 'queue_bytes_overflow' \| string, droppedAfter?: number, queueSize?: number, maxQueued?: number, queuedBytes?: number, maxQueuedBytes?: number, eventBytes?: number`; terminal only for the current subscriber, while the session remains alive.                                                                                              |
+| `slow_client_warning`   | Live frame backlog or live serialized-byte backlog >= 75%; force-pushed and **has no `id`**                                                                                                        | `queueSize, maxQueued, lastEventId, queuedBytes?, maxQueuedBytes?, threshold?: 'frames' \| 'bytes' \| 'frames_and_bytes'`; re-armed after both frame and byte measurements drop below 37.5%.                                                                                                                                                                               |
+| `stream_error`          | `SubscriberLimitExceededError` or another route stream error                                                                                                                                       | `error: string`; terminal for the subscription.                                                                                                                                                                                                                                                                                                                            |
+| `state_resync_required` | Reconnect cannot supply a complete replay because of an epoch reset, unavailable history, or the replay byte budget. **No `id`**; see [Resync reasons and ordering](#resync-reasons-and-ordering). | `reason: 'ring_evicted' \| 'epoch_reset' \| 'seeded_replay_not_in_ring' \| 'replay_budget_exceeded'`, `lastDeliveredId: number`, `earliestAvailableId: number`, `detail?: 'epoch_mismatch'`. This is a recovery signal, not terminal: the SSE stream stays open. The SDK reducer sets `awaitingResync = true` and skips deltas until the caller resets with `loadSession`. |
+| `history_truncated`     | `POST /session/:id/load` returns a bounded replay snapshot after older in-memory replay entries were dropped. Prepended to `compactedReplay` and **has no `id`**.                                  | `reason: 'replay_window_exceeded'`, `truncatedEvents: number`, `retainedEvents: number`, `maxBytes: number`, `truncatedTurns?: number`, `fullTranscriptAvailable: boolean`. This is a status marker, not a resync request; clients render it and continue applying retained replay.                                                                                        |
+| `replay_complete`       | Id-less sentinel emitted after the `Last-Event-ID` replay loop finishes, for both clean replay and ring-evicted paths, even when `data.replayedCount === 0`. **No `id`**                           | `replayedCount: number`; lets consumers remove catch-up UI deterministically without a timeout.                                                                                                                                                                                                                                                                            |
+
+`fullTranscriptAvailable` is a boolean capability flag, not a literal `true` type. Current daemons emit `true` when `/session/:id/transcript` can be used to page the persisted transcript; older or constrained daemons may emit `false`, and clients should keep rendering the bounded replay normally.
+
+#### Resync reasons and ordering
+
+For the current v1 daemon, `state_resync_required.data.reason` is one of the
+four values below. Let `N` be the requested `Last-Event-ID` and `nextId` the
+next id the session's event bus will assign.
+
+| Reason                      | Trigger                                                                                                                                                                                | Frame order and cursor fields                                                                                                                                                                                                                         |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `epoch_reset`               | The supplied `X-Qwen-Event-Epoch` differs from the current bus epoch, or `N >= nextId`.                                                                                                | Before replay of the current ring from its beginning, subject to the replay byte budget. `lastDeliveredId = N`; `earliestAvailableId` is the first ring id, or `nextId` if the ring is empty. Token mismatches also carry `detail: 'epoch_mismatch'`. |
+| `seeded_replay_not_in_ring` | No epoch reset, the ring is empty, and `N < nextId - 1`: restored history advanced the sequence without populating the live ring.                                                      | Before `replay_complete` with no ring frames to replay. `lastDeliveredId = N`; `earliestAvailableId = nextId`. Recover the seeded history through `loadSession`.                                                                                      |
+| `ring_evicted`              | No epoch reset, and the first retained ring id is greater than `N + 1`.                                                                                                                | Before replay of the surviving suffix, subject to the replay byte budget. `lastDeliveredId = N`; `earliestAvailableId` is the first retained ring id.                                                                                                 |
+| `replay_budget_exceeded`    | The next replay frame would exceed the serialized-byte budget, so the remaining ring frames are omitted. At least one eligible frame is replayed, even if it alone exceeds the budget. | **After** the delivered replay prefix and **before** `replay_complete`. `lastDeliveredId` is the last replayed id; `earliestAvailableId` is the first id omitted by the budget.                                                                       |
+
+`epoch_reset` prevents a cursor from a previous daemon instance from being
+mistaken for a caught-up cursor when the new ring is empty. Comparing epoch
+tokens also detects stale cursors after the new sequence has caught up
+numerically. Clients should retain the response's `X-Qwen-Event-Epoch` with
+their cursor and send both on reconnect.
+
+An initial resync signal can be followed by `replay_budget_exceeded` on the
+same subscription. None of these frames consumes an event id or closes the
+stream. `replay_complete` ends the replay phase; it does not clear
+`awaitingResync`. Clients must rebuild from `loadSession` before applying
+further deltas; see [SDK reducer behavior](#sdk-reducer-behavior). The SDK
+accepts other non-empty reason strings for forward compatibility and applies
+the same recovery behavior.
+
+#### History truncation anchor
+
+The `history_truncated` marker in `compactedReplay` may also carry
+`recordId?: string`, a fallback `beforeRecordId` pagination anchor. When an
+anchor is available at the first replay-window eviction, it is frozen there:
+prefer the first retained record id, falling back to the last dropped record
+id if the retained window has none. Later events must not advance an existing
+anchor into the displayed history, which would duplicate records when older
+pages are prepended. The marker omits `recordId` when no anchor is available.
+This status marker does not set `awaitingResync`.
 
 ### Permissions (F3 + base)
 
@@ -67,15 +109,27 @@ Grouped by domain.
 
 ### Mutation control (Wave 4 PR 16+17)
 
-| Type                    | Direction | Payload                                                                                              |
-| ----------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
-| `memory_changed`        | S->C      | `scope: 'workspace' \| 'global', filePath, mode: 'append' \| 'replace', bytesWritten`                |
-| `agent_changed`         | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                      |
-| `approval_mode_changed` | S->C      | `sessionId, previous, next, persisted: boolean`                                                      |
-| `tool_toggled`          | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.  |
-| `settings_changed`      | S->C      | Workspace settings write completed. Payload is open; consumers should refresh with read-after-write. |
-| `settings_reloaded`     | S->C      | Daemon workspace service reread settings. Payload is open.                                           |
-| `workspace_initialized` | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                              |
+| Type                     | Direction | Payload                                                                                                                                        |
+| ------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory_changed`         | S->C      | File memory: `scope: 'workspace' \| 'global', filePath, mode, bytesWritten`; managed memory: `scope: 'managed', source, taskId, touchedScopes` |
+| `agent_changed`          | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                                                                |
+| `approval_mode_changed`  | S->C      | `sessionId, previous, next, persisted: boolean`                                                                                                |
+| `tool_toggled`           | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.                                            |
+| `settings_changed`       | S->C      | Workspace settings write completed. Payload includes `key`; `value`, `scope`, and Skill-toggle `mutation` are optional.                        |
+| `settings_reloaded`      | S->C      | Daemon workspace service reread settings. Payload is open.                                                                                     |
+| `trust_change_requested` | S->C      | `workspaceCwd, desiredState: 'trusted' \| 'untrusted', reason?`                                                                                |
+| `workspace_initialized`  | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                                                                        |
+| `github_setup_completed` | S->C      | `releaseTag, readmeUrl, secretsUrl?, workflows: [{path, status, sizeBytes?, error?}], gitignore: {path, status, added?, error?}`               |
+
+Skill toggle APIs attach optional `mutation: { id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. Every `skills.disabled` / `skills.enabled` event from the same request shares one mutation id. Other settings writes omit `mutation`. Workspace-service writes include `scope`; some other emitters (for example session model switches) omit it. The SDK normalizer defaults missing `scope` to `'workspace'`.
+
+`memory_changed` also covers sessionless managed-memory tasks. For those
+payloads, `scope` is `"managed"`, `source` is one of
+`"workspace_memory_remember"`, `"workspace_memory_forget"`, or
+`"workspace_memory_dream"`, `taskId` is the queued task id, and
+`touchedScopes` lists the managed memory scopes that changed (`"user"` and/or
+`"project"`). No event is emitted when a remember/forget/dream task completes
+without touching managed memory.
 
 ### Auth device flow (PR 21)
 
@@ -96,25 +150,45 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 | `mcp_server_added`   | S->C      | Server added at runtime through `POST /workspace/mcp/servers` | `name, transport, replaced, shadowedSettings, toolCount, originatorClientId` |
 | `mcp_server_removed` | S->C      | Server removed at runtime                                     | `name, wasShadowingSettings, originatorClientId`                             |
 
+### Extensions lifecycle
+
+| Type                 | Direction | Trigger                                                              | Key payload fields                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------- | --------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extensions_changed` | S->C      | Background extension install/refresh work completed or status change | `refreshed, failed, status?: 'installed' \| 'enabled' \| 'disabled' \| 'updated' \| 'uninstalled' \| 'failed', source?, name?, version?, error?`. A daemon advertising `extension_activation_explicit_refresh` commits activation without broadcasting it, so a successful activation no longer emits `enabled`/`disabled`; those come from older daemons, and newer ones converge activation through a status-less refresh broadcast. |
+
+### Mid-turn message injection
+
+| Type                        | Direction | Trigger                                                                                         | Key payload fields                                                                                                                 |
+| --------------------------- | --------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `mid_turn_message_injected` | S->C      | Web-shell or remote client injected messages into a running turn via `POST /session/:id/inject` | `sessionId, messages: string[], originatorClientId?`; consumers MUST compare `originatorClientId` to their own id before deduping. |
+
+### Pending prompt queue
+
+| Type                       | Direction | Trigger                                                                                                                                                                                                                                                                                                                                                                                                                   | Key payload fields                                     |
+| -------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `pending_prompt_added`     | S->C      | A prompt was appended to the session's prompt FIFO and is waiting behind the active turn. Published only when the prompt is _genuinely queued_ — the first prompt on an idle session starts immediately and emits no queue events.                                                                                                                                                                                        | `sessionId, promptId, text, queuedAt`                  |
+| `pending_prompt_started`   | S->C      | The queued prompt reached the head of the FIFO and was promoted to running (also emitted for a promoted mid-turn message that starts immediately). Skipped when the prompt is aborted before promotion.                                                                                                                                                                                                                   | `sessionId, promptId, text`                            |
+| `pending_prompt_completed` | S->C      | A queued prompt settled — `state: 'completed'` (it ran; execution errors still report `completed` and ride the terminal `turn_error` frame) or `state: 'removed'` (removed from the queue and never ran). Only emitted for prompts that were genuinely queued (an `added` was published). This is queue-view bookkeeping, **not a turn terminal**; correlate `turn_complete` / `turn_error` by `promptId` for completion. | `sessionId, promptId, state: 'completed' \| 'removed'` |
+
 ### Turn lifecycle / assistant pushes
 
-| Type                  | Direction | Trigger                                                                                                             | Key payload fields                                                                                                                                                                               |
-| --------------------- | --------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `prompt_cancelled`    | S->C      | Prompt was cancelled through explicit `cancelSession` route **or** originator SSE disconnect                        | Envelope stamps `originatorClientId` for the canceling client. This means "cancellation requested", not "cancellation confirmed". Peer subscribers learn that the prompt has ended.              |
-| `turn_complete`       | S->C      | A turn completed successfully                                                                                       | `sessionId, stopReason, promptId?`. `promptId` links to non-blocking prompt responses (`202`). The SDK matches SSE events to the originating prompt through it.                                  |
-| `turn_error`          | S->C      | A turn failed                                                                                                       | `sessionId, message, code?, promptId?`; same `promptId` correlation mechanism.                                                                                                                   |
-| `session_rewound`     | S->C      | `POST /session/:id/rewind` succeeded                                                                                | `sessionId, promptId, targetTurnIndex, filesChanged[], filesFailed[], originatorClientId?`                                                                                                       |
-| `session_branched`    | S->C      | `POST /session/:id/branch` created a branch from an existing session                                                | `sourceSessionId, newSessionId, displayName, originatorClientId?`                                                                                                                                |
-| `followup_suggestion` | S->C      | ACP child generated ghost-text follow-up suggestions after `end_turn`, forwarded over per-session SSE               | `sessionId, suggestion, promptId`; wire only carries suggestions whose `getFilterReason()===null`. Clients render them as input-placeholder ghost text and invalidate them on next `sendPrompt`. |
-| `user_shell_command`  | S->C      | User started a shell command through `POST /session/:id/shell`; fanned out to other subscribers in the same session | `sessionId, command, shellId, originatorClientId?`. There is no typed `DaemonXxxData` interface yet; `asKnownDaemonEvent` returns `undefined` and the UI normalizer parses it ad hoc.            |
-| `user_shell_result`   | S->C      | Result of the shell command above                                                                                   | `sessionId, shellId, exitCode, output, aborted`. Same ad hoc parsing note as `user_shell_command`.                                                                                               |
+| Type                  | Direction | Trigger                                                                                                             | Key payload fields                                                                                                                                                                                                                                                                      |
+| --------------------- | --------- | ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt_cancelled`    | S->C      | Prompt was cancelled through explicit `cancelSession` route **or** originator SSE disconnect                        | Envelope stamps `originatorClientId` for the canceling client. This means "cancellation requested", not "cancellation confirmed". Peer subscribers learn that the prompt has ended.                                                                                                     |
+| `turn_complete`       | S->C      | A turn completed successfully                                                                                       | `sessionId, stopReason, promptId?, branchPoint?`. `promptId` links to non-blocking prompt responses (`202`). Eligible completed turns include `branchPoint: { assistantRecordUuid, checkpointUuid }`.                                                                                   |
+| `turn_error`          | S->C      | A turn failed                                                                                                       | `sessionId, message, code?, promptId?`; same `promptId` correlation mechanism. For agent-side `-32603` failures `message` carries the provider's own detail when the agent supplied one (`data.details` / `data.message` / nested `data.error.message`), not the generic JSON-RPC text. |
+| `session_rewound`     | S->C      | `POST /session/:id/rewind` succeeded                                                                                | `sessionId, promptId, targetTurnIndex, filesChanged[], filesFailed[], originatorClientId?`                                                                                                                                                                                              |
+| `session_branched`    | S->C      | Legacy compatibility event; the current branch endpoint returns its result directly and does not publish this event | `sourceSessionId, newSessionId, displayName, originatorClientId?`. Readers retain support for older producers.                                                                                                                                                                          |
+| `followup_suggestion` | S->C      | ACP child generated ghost-text follow-up suggestions after `end_turn`, forwarded over per-session SSE               | `sessionId, suggestion, promptId`; wire only carries suggestions whose `getFilterReason()===null`. Clients render them as input-placeholder ghost text and invalidate them on next `sendPrompt`.                                                                                        |
+| `user_shell_command`  | S->C      | User started a shell command through `POST /session/:id/shell`; fanned out to other subscribers in the same session | `sessionId, command, shellId, originatorClientId?`. There is no typed `DaemonXxxData` interface yet; `asKnownDaemonEvent` returns `undefined` and the UI normalizer parses it ad hoc.                                                                                                   |
+| `user_shell_result`   | S->C      | Result of the shell command above                                                                                   | `sessionId, shellId, exitCode, output, aborted`. Same ad hoc parsing note as `user_shell_command`.                                                                                                                                                                                      |
 
 ## Architecture
 
 | Concern                                | Source                                         | Notes                                                                                                              |
 | -------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `EVENT_SCHEMA_VERSION = 1`             | `packages/acp-bridge/src/eventBus.ts`          | Sent on every frame.                                                                                               |
-| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | Closed list with 43 types.                                                                                         |
+| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | Closed list with 53 types.                                                                                         |
 | `DaemonEventEnvelope<TType, TData>`    | `events.ts`                                    | Generic envelope.                                                                                                  |
 | `DaemonKnownEventType`                 | `events.ts`                                    | `typeof DAEMON_KNOWN_EVENT_TYPE_VALUES[number]`.                                                                   |
 | Per-event payload types                | `events.ts`                                    | Most event types have a `DaemonXxxData` interface; `user_shell_*` is currently parsed ad hoc by the UI normalizer. |
@@ -130,6 +204,7 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 - `alive: boolean` - becomes `false` after a terminal frame (`session_died`, `session_closed`, `client_evicted`, `stream_error`).
 - `currentModelId?: string` - from `model_switched`.
 - `displayName?: string` - from `session_metadata_updated`.
+- `recordingDegraded: boolean` - sticky session recording state from `session_recording_degraded`; an explicit `session_snapshot.recordingDegraded` value is authoritative.
 - `pendingPermissions: Record<string, DaemonPermissionRequestData>` - open requests keyed by `requestId`; cleared by `permission_resolved` / `permission_already_resolved`.
 - `lastSessionUpdate?: DaemonSessionUpdateData` - latest `session_update`.
 - `lastModelSwitchFailure?: DaemonModelSwitchFailedData` - from `model_switch_failed`.
@@ -147,7 +222,7 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 - `workspaceInitCount`, `lastWorkspaceInit?` - from `workspace_initialized`.
 - `mcpRestartCount`, `lastMcpRestart?` - from `mcp_server_restarted`.
 - `mcpRestartRefusedCount`, `lastMcpRestartRefused?` - from `mcp_server_restart_refused`.
-- `settings_changed` / `settings_reloaded` - recognized by `asKnownDaemonEvent`; the session reducer does not maintain dedicated view-state fields, and UIs usually treat them as refresh signals.
+- `settings_changed` / `settings_reloaded` - recognized by `asKnownDaemonEvent`; the session reducer does not maintain dedicated view-state fields. Skill-toggle `settings_changed` events carry optional `mutation` metadata so hosts can apply Skill-only changes incrementally instead of reloading the task. Other UIs may still treat the event as a refresh signal.
 - `permissionVoteProgress: Record<string, DaemonPermissionPartialVoteData>` - consensus voting progress.
 - `forbiddenVotes: DaemonPermissionForbiddenData[]`, `forbiddenVoteCount` - policy-rejected vote records, capped at 32.
 - `awaitingResync: boolean` - set by `state_resync_required`; cleared when consumer resets view state.
@@ -192,7 +267,7 @@ Beyond each event's `data` payload, the daemon stamps two envelope-level fields.
 
 ### `_meta.serverTimestamp` - daemon clock
 
-`formatSseFrame()` in `packages/cli/src/serve/server.ts` stamps this at the SSE write boundary, **not** inside `EventBus.publish`. The in-memory `BridgeEvent` type stays unchanged; internal daemon consumers do not see `_meta`, while wire SSE frames do.
+`EventBus.publish()` in `packages/acp-bridge/src/eventBus.ts` stamps `_meta.serverTimestamp` when the event enters the bus. The `BridgeEvent` type includes `_meta?: Record<string, unknown>`, so internal daemon consumers **do** see `_meta` on every bus-published event. `formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts` provides a fallback timestamp only for synthetic frames (e.g. `stream_error`) that bypass `EventBus.publish`.
 
 ```jsonc
 {
@@ -204,10 +279,10 @@ Beyond each event's `data` payload, the daemon stamps two envelope-level fields.
 }
 ```
 
-The merge preserves any existing `_meta` keys
-(`{...existingMeta, serverTimestamp: Date.now()}`). **No current daemon producer
-writes envelope-level `_meta`**. The top-level merge is a forward-compatibility
-escape hatch.
+The merge preserves any existing `_meta` keys from the input event
+(`{...input._meta, serverTimestamp: Date.now()}`). Producers may attach
+additional envelope-level `_meta` keys; `EventBus.publish` merges them with the
+timestamp rather than overwriting.
 
 Why it matters: multi-client UIs that render relative time or sort transcript blocks should use server time instead of each browser/tab/phone local clock. Server stamping keeps ordering consistent across clients.
 
@@ -219,7 +294,7 @@ Events triggered by a request that carried a registered `X-Qwen-Client-Id` may s
 
 ## Tool-call `_meta` (provenance / serverId)
 
-This is separate from envelope `_meta`: ACP `session/update` payloads can carry their own `_meta` in `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`) stamps two fields on `emitStart`, `emitResult`, and `emitError`:
+This is separate from envelope `_meta`: ACP `session/update` payloads can carry their own `_meta` in `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/tool-call-emitter.ts`) stamps two fields on `emitStart`, `emitResult`, and `emitError`:
 
 | Field        | Type                                      | Resolution rule                                                                                                                                                            |
 | ------------ | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -238,14 +313,15 @@ The existing `_meta.toolName` display name is preserved. UI uses these fields to
 
 While `awaitingResync = true`, the reducer **skips delta application** and only allows the closed `RESYNC_PASSTHROUGH_TYPES` set:
 
-| Passthrough type        | Why it is still applied during resync                                          |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `state_resync_required` | Rare second resync should update `lastResyncRequired` / `resyncRequiredCount`. |
-| `session_died`          | Terminal stream signal must remain visible during resync.                      |
-| `session_closed`        | Same as above.                                                                 |
-| `client_evicted`        | Same as above.                                                                 |
-| `stream_error`          | Same as above.                                                                 |
-| `session_snapshot`      | Full-state authoritative frame; safe to apply during resync.                   |
+| Passthrough type             | Why it is still applied during resync                                          |
+| ---------------------------- | ------------------------------------------------------------------------------ |
+| `state_resync_required`      | Rare second resync should update `lastResyncRequired` / `resyncRequiredCount`. |
+| `session_died`               | Terminal stream signal must remain visible during resync.                      |
+| `session_closed`             | Same as above.                                                                 |
+| `client_evicted`             | Same as above.                                                                 |
+| `stream_error`               | Same as above.                                                                 |
+| `session_snapshot`           | Full-state authoritative frame; safe to apply during resync.                   |
+| `session_recording_degraded` | Sticky safety signal independent of transcript delta state.                    |
 
 `lastEventId` still advances monotonically through `advanceLastEventId(base)` during resync. After the caller resets and clears `awaitingResync`, subsequent deltas align to the correct cursor.
 
@@ -263,6 +339,7 @@ per-event shapes listed above.
 - Adding optional fields to an existing payload is safe because payloads are open (`{ [key: string]: unknown }`).
 - Changing an existing payload **shape** is breaking and must bump `EVENT_SCHEMA_VERSION` plus advertise a compatible capability tag such as `caps.features.typed_event_schema_v2`.
 - `id` is per-session monotonic. Subscriber-level synthetic frames (`client_evicted`, `slow_client_warning`, `stream_error`, `state_resync_required`, `replay_complete`, `session_snapshot`) intentionally have no id so other subscribers do not see gaps.
+- A rejected publish must not consume an id: an unserializable event is neither retained nor delivered, and the next accepted event uses the same next id. Otherwise a rejection would look like a replay gap to subscribers.
 - `originatorClientId` lives on the envelope rather than `data`. F3 partial-vote / forbidden payloads also merge it into `data` through `mergeOriginator` so view-state consumers do not need to retain the envelope.
 
 ## Dependencies

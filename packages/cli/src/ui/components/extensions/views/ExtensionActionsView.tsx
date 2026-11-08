@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
@@ -42,6 +42,12 @@ interface ExtensionActionsViewProps {
   onReload: () => void;
   /** Leave the detail and return to the list. */
   onExit: () => void;
+  /**
+   * Report the state an update settled on, so the parent's update-state map
+   * stops re-supplying the superseded "update available" value to a later
+   * mount of this view (leaving the detail and coming back remounts it).
+   */
+  onUpdateStateChange?: (name: string, state: ExtensionUpdateState) => void;
 }
 
 const SCOPE_LABEL: Record<ExtensionScope, string> = {
@@ -73,6 +79,7 @@ export const ExtensionActionsView = ({
   onStatus,
   onReload,
   onExit,
+  onUpdateStateChange,
 }: ExtensionActionsViewProps) => {
   const manager = config.getExtensionManager();
   const [sub, setSub] = useState<SubView>('detail');
@@ -92,6 +99,28 @@ export const ExtensionActionsView = ({
   // Uninstall removes files (and can take a moment); surfaced as a loading
   // line so the confirm prompt doesn't appear frozen after pressing Enter.
   const [uninstallBusy, setUninstallBusy] = useState(false);
+  // An update re-fetches the source, converts, stages, swaps the artifact and
+  // reloads tools; surfaced as a loading line so the action doesn't look
+  // ignored — the action list is also replaced while it runs, so a second
+  // Enter cannot start a concurrent update, and Escape cancels the run instead
+  // of leaving (see the keypress guard below); leaving would unmount this view
+  // mid-update and let the user start a second one from a fresh mount.
+  const [updateBusy, setUpdateBusy] = useState(false);
+  // Cancellation handle for the update in flight, so the wait below has a
+  // release valve: `updateExtension` takes an optional AbortSignal that reaches
+  // the git fetch underneath, and without one a fetch that stalls rather than
+  // fails would leave this view (and the dialog's keys) inert with no deadline
+  // to break out of. Held in a ref because it must survive the re-render the
+  // busy branch causes, and cleared in the same `finally` that clears the flag.
+  const updateAbortRef = useRef<AbortController | null>(null);
+  // The action the user last activated from the detail list. The busy branches
+  // unmount that list, so it is remounted when the action settles; without this
+  // the cursor would re-seed to the first row — and on a failed update, where
+  // the list comes back unchanged, the row under it would then be "Disable"
+  // rather than the "Update Now" the user just pressed.
+  const [lastActivatedAction, setLastActivatedAction] = useState<
+    PluginDetailAction | undefined
+  >(undefined);
 
   // Result of an in-view "check for updates" (Mark for Update), which takes
   // precedence over the background-checked state passed in via props so the
@@ -112,22 +141,39 @@ export const ExtensionActionsView = ({
       const name = extension.name;
       try {
         switch (action) {
-          case 'toggle':
+          case 'toggle': {
+            let activationResult;
             if (enabled) {
-              await manager.disableExtension(name, settingScopeFor(scope));
+              activationResult = await manager.disableExtension(
+                name,
+                settingScopeFor(scope),
+              );
             } else {
-              await manager.enableExtension(name, settingScopeFor(scope));
+              activationResult = await manager.enableExtension(
+                name,
+                settingScopeFor(scope),
+              );
             }
             setEnabled(!enabled);
+            const warnings = activationResult.warnings ?? [];
             onStatus({
-              type: 'success',
-              text: t('"{{name}}" {{state}}.', {
-                name,
-                state: enabled ? t('disabled') : t('enabled'),
-              }),
+              type: warnings.length > 0 ? 'warning' : 'success',
+              text:
+                warnings.length > 0
+                  ? t('"{{name}}" changed with warnings: {{detail}}', {
+                      name,
+                      detail: warnings
+                        .map((warning) => warning.error)
+                        .join('; '),
+                    })
+                  : t('"{{name}}" {{state}}.', {
+                      name,
+                      state: enabled ? t('disabled') : t('enabled'),
+                    }),
             });
             onReload();
             break;
+          }
           case 'favorite': {
             const now = manager.toggleFavorite(name);
             setIsFavorite(now);
@@ -189,18 +235,59 @@ export const ExtensionActionsView = ({
             }
             break;
           }
-          case 'update':
-            await manager.updateExtension(
-              extension,
-              ExtensionUpdateState.UPDATE_AVAILABLE,
-              () => {},
-            );
-            onStatus({
-              type: 'success',
-              text: t('Updated "{{name}}".', { name }),
-            });
-            onReload();
+          case 'update': {
+            setLastActivatedAction(action);
+            setUpdateBusy(true);
+            const controller = new AbortController();
+            updateAbortRef.current = controller;
+            try {
+              // The manager's callback is a state transition, not a progress
+              // string: it emits UPDATING and then the state the update
+              // settled on. Adopting the last emission is what stops the menu
+              // offering "Update Now" for an extension that is current again.
+              // An aborted run rejects instead of emitting a terminal state, so
+              // nothing is adopted and the "Update Now" row stays.
+              let settledState: ExtensionUpdateState | undefined;
+              const result = await manager.updateExtension(
+                extension,
+                ExtensionUpdateState.UPDATE_AVAILABLE,
+                (_extensionName, state) => {
+                  settledState = state;
+                },
+                // Passed explicitly: the fifth argument is the signal, and the
+                // reload behaviour this parameter drives is load-bearing (it
+                // decides whether the settled state is UPDATED or
+                // UPDATED_NEEDS_RESTART).
+                true,
+                controller.signal,
+              );
+              if (settledState) {
+                setCheckedUpdateState(settledState);
+                onUpdateStateChange?.(name, settledState);
+              }
+              if (result?.warnings?.length) {
+                onStatus({
+                  type: 'warning',
+                  text: t('Updated "{{name}}" with warnings: {{warnings}}.', {
+                    name,
+                    warnings: result.warnings
+                      .map((warning) => `${warning.code}: ${warning.error}`)
+                      .join('; '),
+                  }),
+                });
+              } else {
+                onStatus({
+                  type: 'success',
+                  text: t('Updated "{{name}}".', { name }),
+                });
+              }
+              onReload();
+            } finally {
+              updateAbortRef.current = null;
+              setUpdateBusy(false);
+            }
             break;
+          }
           case 'uninstall':
             setSub('uninstall-confirm');
             break;
@@ -211,7 +298,15 @@ export const ExtensionActionsView = ({
         onStatus({ type: 'error', text: getErrorMessage(error) });
       }
     },
-    [manager, extension, enabled, scope, onStatus, onReload],
+    [
+      manager,
+      extension,
+      enabled,
+      scope,
+      onStatus,
+      onReload,
+      onUpdateStateChange,
+    ],
   );
 
   const handleScope = useCallback(
@@ -220,45 +315,36 @@ export const ExtensionActionsView = ({
       const name = extension.name;
       setScopeBusy(true);
       try {
-        // Apply enablement first: Global -> User; Project/Local -> workspace
-        // only. Record the scope preference only once enablement succeeds so a
-        // failed enable can't leave the prefs pointing at a scope the extension
-        // isn't actually enabled at.
-        if (newScope === 'user') {
-          await manager.enableExtension(name, SettingScope.User);
-        } else {
-          await manager.disableExtension(name, SettingScope.User);
-          try {
-            await manager.enableExtension(name, SettingScope.Workspace);
-          } catch (enableError) {
-            // The User-scope disable already landed; if the Workspace enable
-            // fails the extension would be disabled everywhere. Roll the User
-            // enable back so it isn't silently dead.
-            try {
-              await manager.enableExtension(name, SettingScope.User);
-            } catch (rollbackError) {
-              // Rollback also failed: the extension is now disabled at every
-              // scope. Surface that explicitly — the bare enable error wouldn't
-              // tell the user the extension is dead and needs manual recovery.
-              throw new Error(
-                t(
-                  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})',
-                  { name, error: getErrorMessage(rollbackError) },
-                ),
-              );
-            }
-            throw enableError;
-          }
+        const result = await manager.setExtensionActivationScope(
+          extension.id,
+          newScope === 'user'
+            ? { scope: 'user' }
+            : { scope: 'workspace', workspacePath: process.cwd() },
+        );
+        let preferenceWarning: string | undefined;
+        try {
+          manager.setExtensionScope(name, newScope);
+        } catch (error) {
+          preferenceWarning = getErrorMessage(error);
         }
-        manager.setExtensionScope(name, newScope);
         setScope(newScope);
         setEnabled(true);
+        const warnings = [
+          ...(result.warnings ?? []).map((warning) => warning.error),
+          ...(preferenceWarning ? [preferenceWarning] : []),
+        ];
         onStatus({
-          type: 'success',
-          text: t('Set "{{name}}" scope to {{scope}}.', {
-            name,
-            scope: t(SCOPE_LABEL[newScope]),
-          }),
+          type: warnings.length > 0 ? 'warning' : 'success',
+          text:
+            warnings.length > 0
+              ? t('Set "{{name}}" scope with warnings: {{detail}}', {
+                  name,
+                  detail: warnings.join('; '),
+                })
+              : t('Set "{{name}}" scope to {{scope}}.', {
+                  name,
+                  scope: t(SCOPE_LABEL[newScope]),
+                }),
         });
         onReload();
       } catch (error) {
@@ -275,10 +361,17 @@ export const ExtensionActionsView = ({
       if (!manager) return;
       setUninstallBusy(true);
       try {
-        await manager.uninstallExtension(ext.name, false);
+        const result = await manager.uninstallExtension(ext.name, false);
+        const warnings = result.warnings ?? [];
         onStatus({
-          type: 'success',
-          text: t('Uninstalled "{{name}}".', { name: ext.name }),
+          type: warnings.length > 0 ? 'warning' : 'success',
+          text:
+            warnings.length > 0
+              ? t('Uninstalled "{{name}}" with warnings: {{detail}}', {
+                  name: ext.name,
+                  detail: warnings.map((warning) => warning.error).join('; '),
+                })
+              : t('Uninstalled "{{name}}".', { name: ext.name }),
         });
         onReload();
       } catch (error) {
@@ -292,13 +385,26 @@ export const ExtensionActionsView = ({
   );
 
   // Escape: from the detail leaves; from a sub-view returns to the detail.
-  // Ignored while a scope change is in flight so it can't be abandoned midway.
+  // While an update is in flight Escape cancels the run rather than leaving —
+  // leaving would unmount this view while the operation keeps running and let
+  // the user start a second one from a fresh mount. Cancelling (rather than
+  // ignoring the key) matters because the update can sit in a fetch with no
+  // deadline of its own, and this view can neither bound nor see it: ignoring
+  // Escape would leave every key in the dialog inert while the footer still
+  // promises "Esc to go back". The abort rejects the awaited call, so the catch
+  // below reports it and the `finally` clears the guard.
+  // A scope change is ignored while it runs: it has no cancellation of its own
+  // and is short-lived.
   useKeypress(
     (key) => {
-      if (key.name === 'escape' && !scopeBusy) {
-        if (sub === 'detail') onExit();
-        else setSub('detail');
+      if (key.name !== 'escape') return;
+      if (updateBusy) {
+        updateAbortRef.current?.abort();
+        return;
       }
+      if (scopeBusy) return;
+      if (sub === 'detail') onExit();
+      else setSub('detail');
     },
     { isActive: isActive && sub !== 'uninstall-confirm' },
   );
@@ -354,6 +460,14 @@ export const ExtensionActionsView = ({
     );
   }
 
+  if (updateBusy) {
+    return (
+      <Text color={theme.text.secondary}>
+        {t('Updating {{name}}...', { name: extension.name })}
+      </Text>
+    );
+  }
+
   return (
     <PluginDetailView
       extension={{ ...extension, isActive: enabled }}
@@ -362,6 +476,7 @@ export const ExtensionActionsView = ({
       showFavorite={showFavorite}
       hasUpdateAvailable={hasUpdate}
       isFocused={isActive && sub === 'detail'}
+      initialAction={lastActivatedAction}
       onAction={handleAction}
     />
   );

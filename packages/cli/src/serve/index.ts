@@ -6,6 +6,11 @@
 
 export { createServeApp, type ServeAppDeps } from './server.js';
 export {
+  getServeAppLifecycle,
+  type ServeAppLifecycle,
+  type ServeAppLifecycleBindingOptions,
+} from './serve-app-lifecycle.js';
+export {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
@@ -37,6 +42,7 @@ export {
 export {
   ACP_PREFLIGHT_KINDS,
   BridgeTimeoutError,
+  SessionRestoreTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_ERROR_KINDS,
   SERVE_STATUS_EXT_METHODS,
@@ -59,6 +65,7 @@ export {
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
+  type ServeSessionResourcesStatus,
   type ServeSessionAgentTaskStatus,
   type ServeSessionMonitorTaskStatus,
   type ServeSessionProcessTaskLifecycleStatus,
@@ -92,7 +99,7 @@ export {
   type ServeExtensionInstallType,
   type ServeExtensionOriginSource,
   type ServeWorkspaceExtensionsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 export {
   ENV_NONSECRET_VARS,
   ENV_PROXY_VARS,
@@ -139,5 +146,5 @@ export {
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type SubscribeOptions,
-} from './event-bus.js';
-export { createInMemoryChannel } from './in-memory-channel.js';
+} from '@qwen-code/acp-bridge/eventBus';
+export { createInMemoryChannel } from '@qwen-code/acp-bridge/inMemoryChannel';

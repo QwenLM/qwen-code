@@ -1,6 +1,6 @@
 ---
 name: batch
-description: Execute batch operations on multiple files in parallel. Automatically discovers files, splits into chunks, and processes with parallel worker agents. Use `/batch` followed by operation and file pattern.
+description: Execute batch operations on multiple files in parallel. Automatically discovers files, splits into chunks, and processes with parallel worker agents. Use `/batch` followed by operation and file pattern. For many independent single-turn transforms (translate/rewrite/extract each file into a new file) that can wait minutes to hours, you may suggest the user type `/batch-api` themselves for the half-price asynchronous Batch API — you cannot invoke it, and it is not suited to in-place edits or tasks needing tool feedback.
 argument-hint: '<operation> <file-pattern>'
 allowedTools:
   - task
@@ -52,6 +52,7 @@ Apply these common exclusions automatically:
 - `**/test/**`, `**/tests/**`
 - `**/package-lock.json`
 - `**/yarn.lock`
+- `**/pnpm-lock.yaml`
 - `**/*.min.js`
 - Binary files (images, fonts, etc.)
 - Files larger than 500KB (check size if needed)
@@ -126,23 +127,29 @@ You are a worker agent processing a batch of files.
 
 ### Example Invocation Pattern
 
+Set `run_in_background: false` on every worker call so all results return inline
+for aggregation in Step 4.
+
 ```
 <Agent tool call 1>
 description: "Process batch chunk 1/3"
 prompt: "You are a worker agent... [full prompt as above]"
 subagent_type: "general-purpose"
+run_in_background: false
 </Agent tool call 1>
 
 <Agent tool call 2>
 description: "Process batch chunk 2/3"
 prompt: "You are a worker agent... [full prompt as above]"
 subagent_type: "general-purpose"
+run_in_background: false
 </Agent tool call 2>
 
 <Agent tool call 3>
 description: "Process batch chunk 3/3"
 prompt: "You are a worker agent... [full prompt as above]"
 subagent_type: "general-purpose"
+run_in_background: false
 </Agent tool call 3>
 ```
 

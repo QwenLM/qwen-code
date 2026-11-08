@@ -7,7 +7,10 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import type { ScannedAutoMemoryDocument } from './scan.js';
+import {
+  sanitizeAutoMemoryPromptField,
+  type ScannedAutoMemoryDocument,
+} from './scan.js';
 
 /**
  * System prompt for the selector side-query.
@@ -35,9 +38,11 @@ interface RecallSelectorResponse {
   selected_memories: string[];
 }
 
+const MAX_MODEL_MANIFEST_BYTES = 25_000;
+
 /**
  * Format memory headers as a text manifest: one line per file with
- * [type] filePath (ISO-timestamp): description.
+ * [type] filePath (ISO-timestamp): description; keywords.
  *
  * Uses the absolute filePath (never relativePath) so docs from the two
  * memory scopes — per-project under `~/.qwen/projects/<hash>/memory/`
@@ -46,19 +51,41 @@ interface RecallSelectorResponse {
  * addressable. Keying by relativePath caused the selector's Map dedupe
  * to silently drop one scope.
  *
- * Selector sees only the header (type, path, age, description), not the
- * body content.
+ * Selector sees only the compact header, not the body content.
  */
-function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): string {
-  return docs
-    .map((doc) => {
-      const tag = `[${doc.type}] `;
-      const ts = new Date(doc.mtimeMs).toISOString();
-      return doc.description
-        ? `- ${tag}${doc.filePath} (${ts}): ${doc.description}`
-        : `- ${tag}${doc.filePath} (${ts})`;
-    })
-    .join('\n');
+function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): {
+  manifest: string;
+  includedDocs: ScannedAutoMemoryDocument[];
+} {
+  const lines: string[] = [];
+  const includedDocs: ScannedAutoMemoryDocument[] = [];
+  let bytes = 0;
+
+  for (const doc of docs) {
+    const tag = `[${doc.type}] `;
+    const ts = new Date(doc.mtimeMs).toISOString();
+    const description = sanitizeAutoMemoryPromptField(doc.description, 512);
+    const keywords = doc.keywords
+      .slice(0, 3)
+      .map((keyword) => sanitizeAutoMemoryPromptField(keyword, 64))
+      .filter(Boolean)
+      .join(', ');
+    const metadata = [description, keywords ? `keywords: ${keywords}` : '']
+      .filter(Boolean)
+      .join('; ');
+    const line = `- ${tag}${doc.filePath} (${ts})${metadata ? `: ${metadata}` : ''}`;
+    const nextBytes = Buffer.byteLength(
+      `${lines.length > 0 ? '\n' : ''}${line}`,
+    );
+    if (bytes + nextBytes > MAX_MODEL_MANIFEST_BYTES) {
+      continue;
+    }
+    lines.push(line);
+    includedDocs.push(doc);
+    bytes += nextBytes;
+  }
+
+  return { manifest: lines.join('\n'), includedDocs };
 }
 
 export async function selectRelevantAutoMemoryDocumentsByModel(
@@ -73,7 +100,10 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     return [];
   }
 
-  const manifest = formatMemoryManifest(docs);
+  const { manifest, includedDocs } = formatMemoryManifest(docs);
+  if (includedDocs.length === 0) {
+    return [];
+  }
 
   // When the assistant is actively using a tool, surfacing that tool's
   // reference docs is noise.  Pass the tool list so the selector can skip them.
@@ -93,15 +123,15 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     },
   ];
 
-  const validFilePaths = new Set(docs.map((doc) => doc.filePath));
-  const byFilePath = new Map(docs.map((doc) => [doc.filePath, doc]));
+  const validFilePaths = new Set(includedDocs.map((doc) => doc.filePath));
+  const byFilePath = new Map(includedDocs.map((doc) => [doc.filePath, doc]));
 
   const response = await runSideQuery<RecallSelectorResponse>(config, {
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
     skipOutputLanguagePreference: true,
-    // Caller (`GeminiClient.MemoryPrefetchHandle`) owns lifecycle and aborts
+    // Caller (`LlmClient.MemoryPrefetchHandle`) owns lifecycle and aborts
     // via its controller on cleanup paths. The 30 s ceiling is a generous
     // safety net that only fires if the model API hangs (network partition,
     // server stall, runaway retry) AND the caller never aborts. Normal

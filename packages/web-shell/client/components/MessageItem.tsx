@@ -1,92 +1,307 @@
-import { memo, type ReactElement } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactElement,
+} from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
+import { CompactModeContext } from '../WebShellContexts';
+import type {
+  WebShellAssistantFeedbackRating,
+  WebShellAssistantTurnFooterRenderInfo,
+  WebShellSource,
+} from '../customization';
+import { useI18n } from '../i18n';
+import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
+import { QuestionAnswerMessage } from './messages/QuestionAnswerMessage';
+import {
+  extractText,
+  getQuestionAnswerResult,
+  isCompletedAskUserQuestion,
+} from './messages/toolFormatting';
+import {
+  AssistantMessage,
+  ThinkingMessage,
+  type SessionContentGenerator,
+} from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
+import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
+import { isSummaryRunId } from './summaryRunId';
 import { PlanMessage } from './messages/PlanMessage';
 import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
+import type {
+  AttachmentPreviewRequest,
+  DaemonAssistantMessage,
+} from '../adapters/messageTypes';
+import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
 
 interface MessageItemProps {
   message: Message;
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
+  onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
-  isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
-  onBranchSession?: () => void;
+  sendFailed?: boolean;
+  onRetrySend?: () => void;
+  /**
+   * Open the in-place editor for this user message. Return `true` when a host
+   * owns the edit lifecycle — then the inline editor stays closed.
+   */
+  onEditUserMessage?: () => boolean | void;
+  onDeleteMessage?: () => void;
+  deleteMessageDisabled?: boolean;
+  /**
+   * Send the text the user confirmed in the inline editor. Resolves `false`
+   * when the resend was refused or failed; the editor stays open then.
+   */
+  onSubmitUserMessageEdit?: (
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
+  onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+  branchRecordId?: string;
   showAssistantActions?: boolean;
+  assistantFooterAlwaysVisible?: boolean;
   showAssistantBranch?: boolean;
-  shellOutputMaxLines: number;
+  /** Turn id marks are keyed by; unset hides the marks for this message. */
+  assistantFeedbackTurnId?: string;
+  /** Admitted prompt id of the turn; unset hides the marks for this message. */
+  assistantFeedbackPromptId?: string;
+  assistantFeedbackRating?: WebShellAssistantFeedbackRating;
+  onAssistantFeedbackRate?: (
+    promptId: string,
+    turnId: string,
+    rating: WebShellAssistantFeedbackRating | null,
+  ) => void;
+  isLocateFlashing?: boolean;
+  assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
+  generateContent?: SessionContentGenerator;
 }
 
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
-  onConfirm,
   onShowContextDetail,
+  onOpenMemoryFile,
+  onLocateBackgroundSource,
+  onImagePreview,
+  onAttachmentPreview,
+  onTurnOutputOpen,
+  onToolResultOpen,
+  onInsightReportOpen,
   workspaceCwd,
-  isLatest = false,
   showRetryHint = false,
   onRetryClick,
+  sendFailed = false,
+  onRetrySend,
+  onEditUserMessage,
+  onDeleteMessage,
+  deleteMessageDisabled,
+  onSubmitUserMessageEdit,
   onBranchSession,
+  branchRecordId,
   showAssistantActions = false,
+  assistantFooterAlwaysVisible = false,
   showAssistantBranch = false,
-  shellOutputMaxLines,
+  assistantFeedbackTurnId,
+  assistantFeedbackPromptId,
+  assistantFeedbackRating,
+  onAssistantFeedbackRate,
+  isLocateFlashing = false,
+  assistantTurnFooterInfo,
+  turnSources,
+  onSourceOpen,
+  generateContent,
 }: MessageItemProps) {
+  const { t } = useI18n();
+  // The inline editor is owned here because the toggle (in the timestamp row)
+  // and the edited bubble are siblings under this row.
+  const [editingUserMessage, setEditingUserMessage] = useState(false);
+  // Held while the resend is in flight so the editor can show progress and
+  // survive a refusal instead of dropping the user's text.
+  const [submittingUserMessageEdit, setSubmittingUserMessageEdit] =
+    useState(false);
+  const openUserMessageEditor = useCallback(() => {
+    if (onEditUserMessage?.() === true) return;
+    setEditingUserMessage(true);
+  }, [onEditUserMessage]);
+  const closeUserMessageEditor = useCallback(() => {
+    setEditingUserMessage(false);
+  }, []);
+  const submitUserMessageEdit = useCallback(
+    (content: string) => {
+      if (!onSubmitUserMessageEdit) return;
+      setSubmittingUserMessageEdit(true);
+      void Promise.resolve(onSubmitUserMessageEdit(content))
+        .catch(() => false)
+        .then((accepted) => {
+          setSubmittingUserMessageEdit(false);
+          if (accepted !== false) setEditingUserMessage(false);
+        });
+    },
+    [onSubmitUserMessageEdit],
+  );
+  const boundBranchSession = useMemo(
+    () =>
+      onBranchSession && branchRecordId
+        ? () => onBranchSession(branchRecordId)
+        : undefined,
+    [onBranchSession, branchRecordId],
+  );
+  const boundFeedbackRate = useMemo(
+    () =>
+      onAssistantFeedbackRate && assistantFeedbackPromptId
+        ? (rating: WebShellAssistantFeedbackRating | null) =>
+            onAssistantFeedbackRate(
+              assistantFeedbackPromptId,
+              assistantFeedbackTurnId ?? '',
+              rating,
+            )
+        : undefined,
+    [
+      onAssistantFeedbackRate,
+      assistantFeedbackPromptId,
+      assistantFeedbackTurnId,
+    ],
+  );
+  const compactMode = useContext(CompactModeContext);
+  const questionTool =
+    message.role === 'tool_group' &&
+    message.tools.length === 1 &&
+    isCompletedAskUserQuestion(message.tools[0])
+      ? message.tools[0]
+      : undefined;
+  const questionAnswer = questionTool
+    ? getQuestionAnswerResult(questionTool)
+    : null;
+  const isUserStyled =
+    !!questionAnswer ||
+    message.role === 'user' ||
+    (message.role === 'system' &&
+      message.source === 'mid_turn_message_injected');
+  const openTurnCalls = useOpenTurnCalls();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
         return (
-          <UserMessage content={message.content} images={message.images} />
+          <UserMessage
+            content={message.content}
+            images={message.images}
+            files={message.files}
+            inputAnnotations={message.inputAnnotations}
+            isLocateFlashing={isLocateFlashing}
+            sendFailed={sendFailed}
+            onRetrySend={onRetrySend}
+            editing={editingUserMessage}
+            submittingEdit={submittingUserMessageEdit}
+            onEditSubmit={submitUserMessageEdit}
+            onEditCancel={closeUserMessageEditor}
+            onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
+            author={message.author}
+          />
         );
       case 'assistant':
         return (
           <AssistantMessage
             content={message.content}
+            author={message.author}
+            agentMessage={message.agentMessage}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
-            onBranchSession={onBranchSession}
+            onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
+            footerAlwaysVisible={assistantFooterAlwaysVisible}
             showBranchAction={showAssistantBranch}
+            showAssistantFeedback={assistantFeedbackPromptId !== undefined}
+            assistantFeedbackRating={assistantFeedbackRating}
+            onAssistantFeedbackRate={boundFeedbackRate}
+            isLocateFlashing={isLocateFlashing}
+            customFooterInfo={assistantTurnFooterInfo}
+            turnSources={turnSources}
+            onSourceOpen={onSourceOpen}
           />
         );
       case 'thinking':
         return (
           <ThinkingMessage
             content={message.content}
+            author={message.author}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
+            isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'tool_group':
+        if (
+          questionTool &&
+          !questionAnswer &&
+          !extractText(questionTool)?.trim()
+        ) {
+          return null;
+        }
+        if (questionAnswer && questionTool) {
+          if (!questionAnswer.answers.length && !questionAnswer.text.trim())
+            return null;
+          return (
+            <QuestionAnswerMessage
+              tool={questionTool}
+              result={questionAnswer}
+              isLocateFlashing={isLocateFlashing}
+            />
+          );
+        }
         return (
           <ToolGroup
             tools={message.tools}
+            onTurnOutputOpen={onTurnOutputOpen}
+            onToolResultOpen={onToolResultOpen}
+            thoughts={message.thoughts}
+            compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
             workspaceCwd={workspaceCwd}
-            shellOutputMaxLines={shellOutputMaxLines}
+            isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'plan':
-        return <PlanMessage id={message.id} todos={message.todos} />;
+        return (
+          <PlanMessage
+            id={message.id}
+            todos={message.todos}
+            isLocateFlashing={isLocateFlashing}
+          />
+        );
       case 'system':
         return (
           <SystemMessage
@@ -94,8 +309,13 @@ export const MessageItem = memo(function MessageItem({
             variant={message.variant}
             source={message.source}
             data={message.data}
+            images={message.images}
+            files={message.files}
             onShowContextDetail={onShowContextDetail}
-            isLatest={isLatest}
+            onOpenMemoryFile={onOpenMemoryFile}
+            onLocateBackgroundSource={onLocateBackgroundSource}
+            onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
             showRetryHint={showRetryHint && message.retryable === true}
             onRetryClick={onRetryClick}
           />
@@ -123,7 +343,12 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'insight_ready':
-        return <InsightReady path={message.path} />;
+        return (
+          <InsightReady
+            path={message.path}
+            onInsightReportOpen={onInsightReportOpen}
+          />
+        );
       case 'insight_error':
         return (
           <div style={{ color: 'var(--error-color, #e06c75)' }}>
@@ -137,61 +362,246 @@ export const MessageItem = memo(function MessageItem({
 
   if (body === null) return null;
 
+  // Isolate each message's render: a throw in Markdown/KaTeX/Mermaid/a tool
+  // panel degrades to an inline notice rather than white-screening the whole
+  // (embeddable) transcript. `resetKeys={[message]}` lets a streamed/edited/
+  // retried update recover on its own; a stable broken message stays on the
+  // fallback without looping.
+  const safeBody = (
+    <ErrorBoundary
+      label={`message:${message.role}`}
+      resetKeys={[message]}
+      fallback={<MessageRenderError align={isUserStyled ? 'end' : 'start'} />}
+    >
+      {body}
+    </ErrorBoundary>
+  );
+
+  // Re-enable text selection on every message row so users can long-press /
+  // drag-select reply text. The blanket `html * { user-select: none }` in
+  // standalone.css disables selection on UI chrome (native-app feel); this
+  // attribute opts the message subtree back in, including descendants
+  // (Markdown body, code blocks, tool panels, sub-messages).
+  //
+  // `display: contents` keeps this wrapper out of layout: several parents
+  // (e.g. MessageTimestamp's chat row) are flex containers whose items used
+  // to be the message body itself. A plain div here becomes the flex item
+  // instead and shrinks to its content width, squeezing user chat bubbles
+  // (whose max-width: 80% then resolves against the shrunken wrapper) so
+  // even short messages wrap mid-word. The user-select re-enable rule
+  // matches `[data-user-selectable] *`, so the boxless wrapper does not
+  // affect it.
+  const selectableSafeBody = (
+    <div data-user-selectable="true" style={{ display: 'contents' }}>
+      {safeBody}
+    </div>
+  );
+
   if (message.role === 'assistant') {
     if (showAssistantActions) {
-      return body;
+      return selectableSafeBody;
     }
     return (
-      <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+      <MessageTimestamp timestamp={message.timestamp}>
+        {selectableSafeBody}
+      </MessageTimestamp>
     );
   }
 
+  // The cancellation marker is a right-aligned, full-width turn-terminal row;
+  // a hover timestamp would overlap its text, so skip the MessageTimestamp
+  // wrapper. The data-user-selectable div is still applied for consistency.
+  if (message.role === 'system' && message.source === 'prompt_cancelled') {
+    return selectableSafeBody;
+  }
+
+  // A turn's identity is its leading user message's id, so the entry is
+  // available as soon as the turn exists — including while it is still running.
+  const turnCallsTurnId =
+    openTurnCalls &&
+    message.role === 'user' &&
+    isTurnCallsPrompt(message.source, message.content)
+      ? message.id
+      : undefined;
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
-      chatMode={message.role === 'user'}
-      copyText={message.role === 'user' ? message.content : undefined}
-      copyTitle="Copy"
+      hideTimestamp={
+        message.role === 'system' &&
+        (message.source === 'background_task_completed' ||
+          message.source === 'background_notification_turn_started')
+      }
+      chatMode={isUserStyled}
+      toolGroupSpacing={message.role === 'tool_group' && compactMode}
+      copyText={
+        isUserStyled && 'content' in message ? message.content : undefined
+      }
+      copyTitle={t('common.copy')}
+      onEdit={
+        onEditUserMessage && !editingUserMessage
+          ? openUserMessageEditor
+          : undefined
+      }
+      editTitle={t('userMessage.edit')}
+      onDelete={onDeleteMessage}
+      deleteDisabled={deleteMessageDisabled}
+      deleteTitle={t('messageDelete.entry')}
+      onOpenTurnCalls={
+        openTurnCalls && turnCallsTurnId
+          ? () => openTurnCalls(turnCallsTurnId)
+          : undefined
+      }
+      turnCallsTitle={t('turnCalls.open')}
     >
-      {body}
+      {selectableSafeBody}
     </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
+
+// Aligns with the message it replaces: user messages are right-aligned bubbles,
+// so the notice sits on the right too and still reads as that user turn's prompt
+// (a left-aligned notice would look like it belongs to the previous turn's
+// output). Assistant and other rows are left-aligned, matching their layout.
+function MessageRenderError({ align }: { align: 'start' | 'end' }) {
+  const { t } = useI18n();
+  return (
+    <div
+      role="alert"
+      style={{
+        display: 'flex',
+        justifyContent: align === 'end' ? 'flex-end' : 'flex-start',
+      }}
+    >
+      <span
+        style={{
+          color: 'var(--error-color, #e06c75)',
+          fontSize: '0.85em',
+          opacity: 0.85,
+        }}
+      >
+        {t('message.renderError')}
+      </span>
+    </div>
+  );
+}
 
 function areMessageItemPropsEqual(
   prev: MessageItemProps,
   next: MessageItemProps,
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onOpenMemoryFile !== next.onOpenMemoryFile) return false;
+  if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
+    return false;
+  if (prev.onImagePreview !== next.onImagePreview) return false;
+  if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
+  if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
+  if (prev.onToolResultOpen !== next.onToolResultOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
-  if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
+  if (prev.sendFailed !== next.sendFailed) return false;
+  if (prev.onRetrySend !== next.onRetrySend) return false;
+  if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onDeleteMessage !== next.onDeleteMessage) return false;
+  if (prev.deleteMessageDisabled !== next.deleteMessageDisabled) return false;
+  if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
+    return false;
+  if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
+  if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (prev.assistantFooterAlwaysVisible !== next.assistantFooterAlwaysVisible)
+    return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
+  if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
+    return false;
+  if (prev.assistantFeedbackPromptId !== next.assistantFeedbackPromptId)
+    return false;
+  if (prev.assistantFeedbackRating !== next.assistantFeedbackRating)
+    return false;
+  if (prev.onAssistantFeedbackRate !== next.onAssistantFeedbackRate)
+    return false;
+  if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
+  if (prev.generateContent !== next.generateContent) return false;
+  if (
+    prev.turnSources !== next.turnSources ||
+    prev.onSourceOpen !== next.onSourceOpen
+  )
+    return false;
+  if (
+    !areAssistantTurnFooterInfosEqual(
+      prev.assistantTurnFooterInfo,
+      next.assistantTurnFooterInfo,
+    )
+  ) {
+    return false;
+  }
   return areMessagesEqual(prev.message, next.message);
+}
+
+function areAssistantTurnFooterInfosEqual(
+  prev?: WebShellAssistantTurnFooterRenderInfo,
+  next?: WebShellAssistantTurnFooterRenderInfo,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.turnId === next.turnId &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.isStreaming === next.message.isStreaming &&
+    prev.message.timestamp === next.message.timestamp
+  );
+}
+
+/** Re-parsed on every projection, so compared by what renders. */
+function agentMessagesEqual(
+  prev: DaemonAssistantMessage['agentMessage'],
+  next: DaemonAssistantMessage['agentMessage'],
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.status === next.status &&
+    prev.error === next.error &&
+    prev.totalTokens === next.totalTokens &&
+    prev.squadOutcome === next.squadOutcome &&
+    prev.author?.squadName === next.author?.squadName &&
+    prev.author?.memberSquadName === next.author?.memberSquadName &&
+    (prev.steps ?? []).length === (next.steps ?? []).length &&
+    (prev.steps ?? []).every(
+      (step, index) =>
+        step.title === next.steps?.[index]?.title &&
+        step.status === next.steps?.[index]?.status,
+    )
+  );
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   if (prev.timestamp !== next.timestamp) return false;
+  if (
+    prev.author?.name !== next.author?.name ||
+    prev.author?.color !== next.author?.color
+  )
+    return false;
   switch (prev.role) {
     case 'user':
       return (
         next.role === 'user' &&
         prev.content === next.content &&
+        prev.source === next.source &&
         stableImagesEqual(prev.images, next.images)
       );
     case 'assistant':
       return (
         next.role === 'assistant' &&
         prev.content === next.content &&
-        prev.isStreaming === next.isStreaming
+        prev.isStreaming === next.isStreaming &&
+        agentMessagesEqual(prev.agentMessage, next.agentMessage)
       );
     case 'thinking':
       return (
@@ -206,7 +616,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         prev.variant === next.variant &&
         prev.retryable === next.retryable &&
         prev.source === next.source &&
-        prev.data === next.data
+        prev.data === next.data &&
+        stableImagesEqual(prev.images, next.images)
       );
     case 'user_shell':
       return (
@@ -238,6 +649,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
     case 'tool_group':
       return (
         next.role === 'tool_group' &&
+        areToolGroupThoughtsEqual(prev.thoughts, next.thoughts) &&
         prev.tools.length === next.tools.length &&
         prev.tools.every((tool, index) =>
           areToolCallsEqual(tool, next.tools[index]),
@@ -273,6 +685,7 @@ function areToolCallsEqual(
     prev.callId === next.callId &&
     prev.toolName === next.toolName &&
     prev.status === next.status &&
+    prev.subagentSessionReady === next.subagentSessionReady &&
     prev.title === next.title &&
     prev.kind === next.kind &&
     prev.startTime === next.startTime &&
@@ -280,9 +693,37 @@ function areToolCallsEqual(
     prev.subContent === next.subContent &&
     stableJson(prev.args) === stableJson(next.args) &&
     stableJson(prev.rawOutput) === stableJson(next.rawOutput) &&
+    stableJson(prev.toolResult) === stableJson(next.toolResult) &&
+    prev.wasCancelled === next.wasCancelled &&
     stableJson(prev.locations) === stableJson(next.locations) &&
     stableJson(prev.content) === stableJson(next.content) &&
     areToolListsEqual(prev.subTools, next.subTools)
+  );
+}
+
+function areToolGroupThoughtsEqual(
+  prev:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+  next:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every(
+    (thought, index) =>
+      thought.content === next[index]?.content &&
+      thought.isStreaming === next[index]?.isStreaming &&
+      thought.beforeToolCallId === next[index]?.beforeToolCallId,
   );
 }
 

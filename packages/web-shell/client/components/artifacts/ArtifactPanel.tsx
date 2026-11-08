@@ -1,0 +1,4664 @@
+import { useDaemonTargetOptional } from '../../config/daemon-target';
+import { hasReloadSurvivableDaemonToken } from '../../config/daemon';
+import type {
+  DaemonSessionArtifact,
+  SessionSource,
+  DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
+  DaemonSessionTaskStatus,
+} from '@qwen-code/sdk/daemon';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
+import type { WebShellRightPanelItem } from '../../customization';
+import {
+  useConnection,
+  useWorkspace,
+  type DaemonContextMemoryDetail,
+  type DaemonSessionOwnerSnapshot,
+  type DaemonSessionActions,
+  type DaemonScheduledTask,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import { EditorState } from '@codemirror/state';
+import { basicSetup, EditorView } from 'codemirror';
+import { DownloadIcon } from 'lucide-react';
+import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  ChevronRightIcon,
+  CirclePlusIcon,
+  Code2Icon,
+  EyeIcon,
+  ExpandIcon,
+  GaugeIcon,
+  GlobeIcon,
+  FolderIcon as FilesIcon,
+  ImageIcon,
+  LayersIcon,
+  WrenchIcon,
+  ListTreeIcon,
+  MessageCirclePlusIcon,
+  PanelRightIcon,
+  PlusIcon,
+  ShrinkIcon,
+  SquareActivityIcon,
+  SquareTerminalIcon,
+  NetworkIcon,
+} from 'lucide-react';
+import { Skeleton } from '../ui/skeleton';
+import { Button } from '../ui/button';
+import { ErrorBoundary } from '../ErrorBoundary';
+import { RootErrorFallback } from '../RootErrorFallback';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
+import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
+import { DiffView } from '../messages/tools/DiffView';
+import { TurnCallsPanel } from './TurnCallsPanel';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { normalizeTextMediaType } from '../../utils/imageIngestion';
+import { DialogShell } from '../dialogs/DialogShell';
+import { FileTypeIcon } from '../FileTypeIcon';
+import { isSafeHref, Markdown } from '../messages/Markdown';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
+import {
+  buildCron,
+  describeCron,
+  parseCronToBuilder,
+  type BuilderState,
+  type Frequency,
+} from '../dialogs/scheduledTasksSchedule';
+import taskStyles from '../dialogs/ScheduledTasksDialog.module.css';
+import {
+  artifactKindLabel,
+  downloadWorkspaceFile,
+  formatArtifactSize,
+  getArtifactFreshnessKey,
+  getArtifactLocation,
+  getArtifactImageMimeType,
+  getImageMimeTypeFromPath,
+  getReviewDownloadMimeType,
+  isDownloadOnlyWorkspaceArtifact,
+  isDocxFile,
+  isExcelFile,
+  isPdfArtifact,
+  normalizeArtifactMimeType,
+  normalizePath,
+  readWorkspaceFileAsBlob,
+  loadArtifactPreviewDocument,
+} from './artifactUtils';
+import {
+  displayPath,
+  isDownloadableReviewFilePath,
+  isRenderedFilePath,
+  type TurnOutputFileChange,
+  type TurnOutputFileDiff,
+  type TurnOutputOpenRequest,
+  type TurnOutputScheduledTask,
+} from './TurnOutputs';
+import { LineStats, sumLineStats } from './LineStats';
+import styles from './ArtifactPanel.module.css';
+import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
+import { ArtifactIcon } from './ArtifactIcon';
+import DocxPreview from './DocxPreview';
+import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
+import { SubagentDetail } from './SubagentDetail';
+import { AgentWorkflow } from './AgentWorkflow';
+import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
+import { SideTaskPanel } from './SideTaskPanel';
+import type { WebShellModelManagementOptions } from '../../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../../unavailableModels';
+import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
+import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
+import { TerminalPanel } from '../terminal/TerminalPanel';
+import { DaemonConnectionBanner } from '../DaemonConnectionBanner';
+import { WebPreviewPanel } from '../preview/WebPreviewPanel';
+import { SavedWebPreview } from '../preview/SavedWebPreview';
+import type { WebPreviewState } from '../preview/web-preview';
+import { TokenUsagePanel } from './TokenUsagePanel';
+import { TrajectoryPanel } from './TrajectoryPanel';
+import type { TrajectoryPageLoader } from '../../trajectory/useTrajectoryWindow';
+import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
+import { ContextUsagePanel } from './ContextUsagePanel';
+import {
+  useArtifactWorkspaceTarget,
+  resolveArtifactWorkspaceOwner,
+  type ArtifactWorkspaceActions,
+} from './useArtifactWorkspaceTarget';
+import {
+  MonitorTaskDetail,
+  ShellTaskDetail,
+} from '../messages/TasksStatusMessage';
+
+class FilePaneImportError extends Error {}
+
+function fileImportFailed(error: unknown): never {
+  throw new FilePaneImportError(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+const loadWorkspaceFileBrowser = () =>
+  import('./WorkspaceFileBrowser')
+    .then((module) => ({ default: module.WorkspaceFileBrowser }))
+    .catch(fileImportFailed);
+const loadPierreFilePreview = () =>
+  import('./PierreFilePreview').catch(fileImportFailed);
+const SpreadsheetPreview = lazy(() => import('./SpreadsheetPreview'));
+
+const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
+const FREQUENCIES: Frequency[] = [
+  'daily',
+  'weekdays',
+  'weekly',
+  'hourly',
+  'minutes',
+  'custom',
+];
+const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+const ignoreSideTaskCreated = (_tabId: string, _sessionId: string) => undefined;
+const ignoreSideTaskTitleChange = (
+  _tabId: string,
+  _title: string,
+  _fromFirstPrompt?: boolean,
+) => undefined;
+const rejectMissingSideTaskCreate = () =>
+  Promise.reject(new Error('Side-task session creation is unavailable'));
+
+export type ImageTabSource = {
+  kind: 'attachment';
+  attachmentId: string;
+  sessionId?: string;
+};
+
+export type ArtifactPanelTab =
+  | {
+      id: string;
+      kind: 'files';
+      title: string;
+      workspaceCwd: string;
+      workspaceId?: string;
+    }
+  | (WebPreviewState & {
+      id: string;
+      kind: 'web_preview';
+      title: string;
+    })
+  | {
+      id: string;
+      kind: 'source';
+      title: string;
+      source: SessionSource;
+      sourceSessionId: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      owner: DaemonSessionOwnerSnapshot;
+      sessionActions: DaemonSessionActions;
+    }
+  | {
+      id: string;
+      kind: 'review';
+      title: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      changes?: readonly TurnOutputFileChange[];
+      selectedPath?: string;
+      sourceTurnId?: string;
+      sourceSessionId?: string;
+      sourceToolCallIds?: readonly string[];
+    }
+  | {
+      id: string;
+      kind: 'file';
+      title: string;
+      previewVersion?: number;
+      workspacePath: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      previewContent?: string;
+      previewData?: Blob;
+      previewMimeType?: string;
+      previewOnly?: boolean;
+      sourcePreview?: boolean;
+      sourceSessionId?: string;
+      /**
+       * Set for attachment-backed previews so the tab can re-fetch its bytes
+       * after a reload instead of persisting the Blob.
+       */
+      attachmentId?: string;
+      loadError?: string;
+    }
+  | {
+      id: string;
+      kind: 'artifact';
+      title: string;
+      artifactId: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      sourceSessionId?: string;
+      previewContent?: string;
+    }
+  | {
+      id: string;
+      kind: 'scheduled_task';
+      title: string;
+      task: TurnOutputScheduledTask;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      sourceSessionId?: string;
+    }
+  | {
+      id: string;
+      kind: 'image';
+      title: string;
+      src: string;
+      alt?: string;
+      /**
+       * Where the image bytes come from, so the tab can be rehydrated after a
+       * reload without persisting the data URL itself.
+       */
+      source?: ImageTabSource;
+      loadError?: string;
+    }
+  | {
+      id: string;
+      kind: 'subagent';
+      title: string;
+      sessionId: string;
+      rootToolCallId: string;
+      rootTool: ACPToolCall;
+      workspaceCwd?: string;
+    }
+  | {
+      id: string;
+      kind: 'pending';
+      title: string;
+      targetKind:
+        | 'review'
+        | 'artifact'
+        | 'scheduled_task'
+        | 'subagent'
+        | 'monitor'
+        | 'shell';
+      sourceSessionId: string;
+      sourceTurnId?: string;
+      sourceToolCallIds?: readonly string[];
+      artifactId?: string;
+      selectedPath?: string;
+      toolCallId?: string;
+      rootToolCallId?: string;
+      taskId?: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      loadError?: string;
+    }
+  | {
+      id: string;
+      kind: 'monitor';
+      title: string;
+      task: DaemonSessionMonitorTaskStatus;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+    }
+  | {
+      id: string;
+      kind: 'shell';
+      title: string;
+      task: DaemonSessionShellTaskStatus;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+    }
+  | {
+      id: string;
+      kind: 'side_task';
+      title: string;
+      sessionId?: string;
+      parentSessionId: string;
+      workspaceCwd?: string;
+      nameFromFirstPrompt?: boolean;
+      initialPrompt?: string;
+    }
+  | {
+      id: string;
+      kind: 'terminal';
+      title: string;
+      workspaceCwd?: string;
+      initialized?: boolean;
+    }
+  | {
+      id: string;
+      kind: 'trajectory';
+      title: string;
+      sessionId: string;
+      /**
+       * Fetches transcript pages for `sessionId`. Not serialisable, so a
+       * restored tab carries none until the host rewires it — the panel shows
+       * its loading state until then.
+       */
+      loadPage?: TrajectoryPageLoader;
+      historyGapRevision?: number;
+    }
+  | {
+      id: string;
+      kind: 'token_usage';
+      title: string;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+      closeWithPane?: boolean;
+    }
+  | {
+      id: string;
+      kind: 'context_usage';
+      title: string;
+      sessionId: string;
+      sessionActions?: DaemonSessionActions;
+      closeWithPane?: boolean;
+    }
+  | {
+      id: string;
+      kind: 'workflow';
+      title: string;
+      sessionId?: string;
+    }
+  | {
+      id: 'turn_calls';
+      kind: 'turn_calls';
+      title: string;
+      sessionId?: string;
+      promptLabel?: string;
+      /** Id of the turn's leading user message, whose calls this tab lists. */
+      turnId: string;
+      recordId?: string;
+      promptId?: string;
+    };
+
+type WorkspaceScopedArtifactPanelTab = Extract<
+  ArtifactPanelTab,
+  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
+>;
+
+function isWorkspaceScopedTab(
+  tab: ArtifactPanelTab,
+): tab is WorkspaceScopedArtifactPanelTab {
+  return (
+    tab.kind === 'review' ||
+    tab.kind === 'file' ||
+    tab.kind === 'artifact' ||
+    tab.kind === 'scheduled_task'
+  );
+}
+
+function getArtifactPanelTabKind(
+  tab: ArtifactPanelTab,
+): Exclude<ArtifactPanelTab['kind'], 'pending'> {
+  return tab.kind === 'pending' ? tab.targetKind : tab.kind;
+}
+
+function imageDownloadName(src: string): string {
+  const match = src.match(/^data:image\/([a-z0-9+.+-]+)/i);
+  const ext = (match?.[1] ?? 'png').split('+')[0].toLowerCase();
+  return `image.${ext}`;
+}
+
+export interface SideTaskListItem {
+  sessionId: string;
+  title: string;
+  workspaceCwd?: string;
+  updatedAt?: string;
+  archivable?: boolean;
+}
+
+const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
+  'review',
+  'sideTask',
+];
+
+interface ArtifactPanelProps {
+  contextUsageControls?: Readonly<Record<string, ContextUsageControls>>;
+  artifacts: readonly DaemonSessionArtifact[];
+  tabs: readonly ArtifactPanelTab[];
+  activeTabId: string | null;
+  reviewChanges: readonly TurnOutputFileChange[];
+  selectedReviewPath: string | null;
+  panelWidth?: number;
+  workspaceCwd?: string;
+  loading?: boolean;
+  restoring?: boolean;
+  error?: string | null;
+  onSelectTurnCallsPrompt?: (
+    turnId: string,
+    recordId?: string,
+    promptId?: string,
+    promptLabel?: string,
+  ) => void;
+  onSelectTab: (tabId: string) => void;
+  onCloseTab: (tabId: string) => void;
+  onOpenFilePreview: (
+    change: TurnOutputFileChange | string,
+    workspaceCwd?: string,
+    workspaceId?: string,
+  ) => void;
+  /** Open a context-panel memory file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
+  latestReviewAvailable?: boolean;
+  onOpenLatestReview?: () => void;
+  /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
+  onOpenTerminal?: () => void;
+  /** Open this session's trajectory tab (shown as an empty-state action). */
+  onOpenTrajectory?: () => void;
+  /**
+   * Id of the tab `onOpenTrajectory` opens. Tabs can belong to other sessions
+   * — split view opens one per pane, and a restored tab keeps the session it
+   * was opened for — so the entry has to look for this session's tab rather
+   * than for any trajectory tab at all.
+   */
+  trajectoryTabId?: string;
+  onOpenFiles?: () => void;
+  onReferenceFile?: (path: string) => void;
+  onOpenWebPreview?: () => void;
+  onWebPreviewChange?: (tabId: string, state: WebPreviewState) => void;
+  items?: readonly WebShellRightPanelItem[];
+  sideTaskAvailable?: boolean;
+  sideTasks?: readonly SideTaskListItem[];
+  archivedSideTasks?: readonly SideTaskListItem[];
+  sideTasksLoading?: boolean;
+  onCreateSideTask?: () => void;
+  onOpenSideTask?: (sideTask: SideTaskListItem) => void;
+  onArchiveSideTasks?: (
+    sideTasks: readonly SideTaskListItem[],
+  ) => void | Promise<void>;
+  onUnarchiveSideTasks?: (
+    sideTasks: readonly SideTaskListItem[],
+  ) => void | Promise<void>;
+  onSideTaskMenuOpen?: () => void;
+  onCreateSideTaskSession?: (
+    tabId: string,
+    parentSessionId: string,
+    title: string,
+  ) => Promise<{ sessionId: string; displayName?: string }>;
+  onSideTaskCreated?: (tabId: string, sessionId: string) => void;
+  onSideTaskTitleChange?: (
+    tabId: string,
+    title: string,
+    fromFirstPrompt?: boolean,
+  ) => void;
+  onSideTaskInitialPromptRefused?: (tabId: string) => void;
+  onNestedRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onNestedArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+  ) => void;
+  onOpenNestedSubagent?: (
+    tool: ACPToolCall,
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => void;
+  agentTasks?: readonly EnvironmentAgentTask[];
+  agentTraceLoading?: boolean;
+  agentTraceError?: string;
+  onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
+  onError?: (error: unknown, fallback: string) => void;
+  sessionWorkflowEnabled?: boolean;
+  modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
+  workflow?: {
+    todos: readonly TodoItem[];
+    tools: readonly ACPToolCall[];
+    tasks: readonly DaemonSessionTaskStatus[];
+    /** Shared per-render projection; also feeds the cockpit and its graph. */
+    projection?: SessionWorkflowProjection;
+    artifacts: readonly DaemonSessionArtifact[];
+    selectedTodoId?: string;
+    onSelectedTodoIdChange: (todoId: string | undefined) => void;
+    onExpandGraph: () => void;
+    onOpenSubagent: (tool: ACPToolCall) => void;
+    onOpenArtifact?: (artifactId: string) => void;
+    canvasMode?: boolean;
+  };
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  deferSubagentMount?: boolean;
+  onClose: () => void;
+  variant?: 'docked' | 'drawer';
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
+}
+
+function WorkspaceFilesPane({
+  tab,
+  workspaceCwd,
+  onOpenFilePreview,
+  onReferenceFile,
+  onClose,
+}: {
+  onClose: () => void;
+  tab: Extract<ArtifactPanelTab, { kind: 'files' }>;
+} & Pick<
+  ArtifactPanelProps,
+  'workspaceCwd' | 'onOpenFilePreview' | 'onReferenceFile'
+>) {
+  const { t, language } = useI18n();
+  const daemonTarget = useDaemonTargetOptional();
+  const WorkspaceFileBrowser = useMemo(
+    () => lazy(loadWorkspaceFileBrowser),
+    [],
+  );
+  const PierreFilePreview = useMemo(() => lazy(loadPierreFilePreview), []);
+  const target = useArtifactWorkspaceTarget(tab.workspaceCwd);
+  const actions =
+    target?.workspaceId === tab.workspaceId ? target?.actions : undefined;
+  if (!actions) {
+    return (
+      <div className={styles.empty} role="alert">
+        {t('workspace.notFoundDescription')}
+      </div>
+    );
+  }
+  const failure = (error: Error, reset: () => void) => {
+    // Browsers cache rejected module imports too; only a page reload clears
+    // that cache. Renderer errors can remount locally without losing the tree.
+    const reload = error instanceof FilePaneImportError;
+    const canReload = () =>
+      Boolean(
+        daemonTarget &&
+          (!daemonTarget.activeToken || hasReloadSurvivableDaemonToken()),
+      );
+    if (reload && !canReload())
+      return (
+        <div role="alert" className={styles.empty}>
+          <p>{t('files.loadFailed')}</p>
+          <p>{t('files.reloadUnavailable')}</p>
+          <Button onClick={onClose}>{t('files.close')}</Button>
+        </div>
+      );
+    return (
+      <RootErrorFallback
+        error={error}
+        language={language}
+        retryMode={reload ? 'reload' : 'reset'}
+        onRetry={
+          reload
+            ? () => {
+                if (canReload()) window.location.reload();
+                else onClose();
+              }
+            : reset
+        }
+      />
+    );
+  };
+  return (
+    <ErrorBoundary label="workspace file browser" fallback={failure}>
+      <Suspense
+        fallback={
+          <div className={`${styles.empty} text-center`} role="status">
+            {t('common.loading')}
+          </div>
+        }
+      >
+        <WorkspaceFileBrowser
+          key={`${tab.workspaceCwd}:${tab.workspaceId ?? ''}`}
+          workspaceCwd={tab.workspaceCwd}
+          actions={actions}
+          onOpenPreview={(path) =>
+            onOpenFilePreview(path, tab.workspaceCwd, tab.workspaceId)
+          }
+          onReferenceFile={
+            tab.workspaceCwd === workspaceCwd ? onReferenceFile : undefined
+          }
+          renderPreview={(path, source, version) => (
+            <WorkspaceFilePreview
+              key={`${path}:${source}:${version}`}
+              workspacePath={path}
+              workspaceActions={actions}
+              previewKind={source ? 'source' : undefined}
+              sourceRenderer={(content) => (
+                <ErrorBoundary
+                  label="workspace file source"
+                  resetKeys={[path]}
+                  fallback={failure}
+                >
+                  <Suspense
+                    fallback={
+                      <div className={styles.empty}>{t('common.loading')}</div>
+                    }
+                  >
+                    <PierreFilePreview path={path} content={content} />
+                  </Suspense>
+                </ErrorBoundary>
+              )}
+            />
+          )}
+        />
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
+export function ArtifactPanel({
+  contextUsageControls,
+  artifacts,
+  tabs,
+  activeTabId,
+  reviewChanges,
+  selectedReviewPath,
+  panelWidth,
+  workspaceCwd,
+  loading,
+  restoring = false,
+  error,
+  onSelectTab,
+  onSelectTurnCallsPrompt,
+  onCloseTab,
+  onOpenFilePreview,
+  onOpenMemoryFile,
+  latestReviewAvailable = false,
+  onOpenLatestReview,
+  onOpenTerminal,
+  onOpenTrajectory,
+  trajectoryTabId,
+  onOpenFiles,
+  onReferenceFile,
+  onOpenWebPreview,
+  onWebPreviewChange,
+  items = DEFAULT_RIGHT_PANEL_ITEMS,
+  sideTaskAvailable = false,
+  sideTasks = [],
+  archivedSideTasks = [],
+  sideTasksLoading = false,
+  onCreateSideTask,
+  onOpenSideTask,
+  onArchiveSideTasks,
+  onUnarchiveSideTasks,
+  onSideTaskMenuOpen,
+  onCreateSideTaskSession,
+  onSideTaskCreated,
+  onSideTaskTitleChange,
+  onSideTaskInitialPromptRefused,
+  onNestedRightPanelOpen,
+  onNestedArtifactsChange,
+  onOpenNestedSubagent,
+  agentTasks = [],
+  agentTraceLoading = false,
+  agentTraceError,
+  onOpenWorkflowAgent,
+  onError,
+  sessionWorkflowEnabled,
+  modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
+  workflow,
+  onImageIngestionNotice,
+  deferSubagentMount = false,
+  onClose,
+  variant = 'docked',
+  fullscreen = false,
+  onToggleFullscreen,
+}: ArtifactPanelProps) {
+  const { t } = useI18n();
+  const workspace = useWorkspace();
+  const filesOwner = resolveArtifactWorkspaceOwner(
+    workspace.capabilities,
+    workspaceCwd,
+  );
+  const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
+  const [previewAttachmentId, setPreviewAttachmentId] = useState<string>();
+  const sideTaskMenuCloseTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const openSideTaskMenu = useCallback(() => {
+    if (sideTaskMenuCloseTimerRef.current) {
+      clearTimeout(sideTaskMenuCloseTimerRef.current);
+      sideTaskMenuCloseTimerRef.current = null;
+    }
+    setSideTaskMenuOpen(true);
+  }, []);
+  const scheduleSideTaskMenuClose = useCallback(() => {
+    if (sideTaskMenuCloseTimerRef.current) {
+      clearTimeout(sideTaskMenuCloseTimerRef.current);
+    }
+    sideTaskMenuCloseTimerRef.current = setTimeout(() => {
+      setSideTaskMenuOpen(false);
+      sideTaskMenuCloseTimerRef.current = null;
+    }, 120);
+  }, []);
+  useEffect(() => {
+    if (sideTaskMenuOpen) onSideTaskMenuOpen?.();
+  }, [onSideTaskMenuOpen, sideTaskMenuOpen]);
+  useEffect(
+    () => () => {
+      if (sideTaskMenuCloseTimerRef.current) {
+        clearTimeout(sideTaskMenuCloseTimerRef.current);
+      }
+    },
+    [],
+  );
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const sourceHtmlPreview =
+    activeTab?.kind === 'file' &&
+    activeTab.sourcePreview &&
+    (/\.html?$/i.test(activeTab.workspacePath) ||
+      normalizeArtifactMimeType(
+        activeTab.previewMimeType || activeTab.previewData?.type,
+      ) === 'text/html');
+  const canPreviewAttachment =
+    activeTab?.kind === 'file' &&
+    activeTab.previewOnly === true &&
+    !sourceHtmlPreview &&
+    /\.(?:html?|md|markdown)$/i.test(activeTab.workspacePath) &&
+    (activeTab.previewContent !== undefined ||
+      !activeTab.previewData ||
+      Boolean(
+        normalizeTextMediaType(
+          activeTab.previewMimeType || activeTab.previewData.type,
+          activeTab.workspacePath,
+        ),
+      ));
+  const attachmentPreview = previewAttachmentId === activeTab?.id;
+  const showReviewMenuItem =
+    items.includes('review') &&
+    !tabs.some((tab) => getArtifactPanelTabKind(tab) === 'review');
+  const showSideTaskMenuItems =
+    items.includes('sideTask') &&
+    sideTaskAvailable &&
+    Boolean(onCreateSideTask);
+  const hasArchivableSideTasks = sideTasks.some(
+    (sideTask) => sideTask.archivable === true,
+  );
+  const showTerminalMenuItem = Boolean(onOpenTerminal);
+  const showWebPreviewMenuItem =
+    items.includes('webPreview') && Boolean(onOpenWebPreview);
+  const showTrajectoryMenuItem =
+    items.includes('trajectory') &&
+    Boolean(onOpenTrajectory) &&
+    !tabs.some((tab) => tab.id === trajectoryTabId);
+  const showFilesMenuItem =
+    items.includes('files') &&
+    Boolean(onOpenFiles) &&
+    !tabs.some(
+      (tab) =>
+        tab.kind === 'files' &&
+        tab.workspaceCwd === workspaceCwd &&
+        tab.workspaceId === filesOwner?.id,
+    );
+  const showAddMenu =
+    Boolean(activeTab) &&
+    (showFilesMenuItem ||
+      showReviewMenuItem ||
+      showSideTaskMenuItems ||
+      showTerminalMenuItem ||
+      showWebPreviewMenuItem ||
+      showTrajectoryMenuItem);
+  const activeWorkspaceIdentity =
+    activeTab && isWorkspaceScopedTab(activeTab)
+      ? {
+          workspaceCwd: activeTab.workspaceCwd,
+          workspaceId: activeTab.workspaceId,
+        }
+      : undefined;
+  const activeWorkspaceTarget = useArtifactWorkspaceTarget(
+    activeWorkspaceIdentity?.workspaceCwd,
+  );
+  const activeWorkspaceActions =
+    activeWorkspaceTarget?.workspaceId === activeWorkspaceIdentity?.workspaceId
+      ? activeWorkspaceTarget?.actions
+      : undefined;
+  const activeTabArtifact =
+    activeTab?.kind === 'artifact'
+      ? artifacts.find((item) => item.id === activeTab.artifactId)
+      : undefined;
+
+  return (
+    <aside
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''} ${fullscreen ? styles.panelFullscreen : ''}`}
+      style={
+        variant === 'docked' && panelWidth && !fullscreen
+          ? { flexBasis: panelWidth, width: panelWidth }
+          : undefined
+      }
+      aria-label="Right panel"
+    >
+      <div className={styles.header}>
+        {tabs.length > 0 && (
+          <div className={styles.tabs} role="tablist" aria-label="Right panel">
+            {tabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={[
+                  styles.tabItem,
+                  tab.id === activeTab?.id ? styles.tabActive : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={tab.id === activeTab?.id}
+                  className={styles.tab}
+                  onClick={() => onSelectTab(tab.id)}
+                  onMouseEnter={(event) =>
+                    measureSessionTitleScroll(event.currentTarget)
+                  }
+                  onFocus={(event) =>
+                    measureSessionTitleScroll(event.currentTarget)
+                  }
+                  title={
+                    tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title
+                  }
+                >
+                  <span
+                    className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
+                    aria-hidden="true"
+                  >
+                    {getArtifactPanelTabKind(tab) === 'review' ? (
+                      <TabReviewIcon />
+                    ) : tab.kind === 'files' ? (
+                      <FilesIcon className={styles.tabIconSvg} />
+                    ) : tab.kind === 'workflow' ? (
+                      <NetworkIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'file' ? (
+                      <FileTypeIcon
+                        name={tab.workspacePath}
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : getArtifactPanelTabKind(tab) === 'artifact' ? (
+                      <ArtifactIcon
+                        artifact={artifacts.find(
+                          (artifact) =>
+                            'artifactId' in tab &&
+                            artifact.id === tab.artifactId,
+                        )}
+                        className={styles.tabIconSvg}
+                      />
+                    ) : getArtifactPanelTabKind(tab) === 'subagent' ? (
+                      <TabSubagentIcon />
+                    ) : getArtifactPanelTabKind(tab) === 'monitor' ? (
+                      <SquareActivityIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : getArtifactPanelTabKind(tab) === 'shell' ? (
+                      <SquareTerminalIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : getArtifactPanelTabKind(tab) === 'side_task' ? (
+                      <MessageCirclePlusIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'web_preview' ? (
+                      <GlobeIcon className={styles.tabIconSvg} />
+                    ) : tab.kind === 'terminal' ? (
+                      <SquareTerminalIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : getArtifactPanelTabKind(tab) === 'image' ? (
+                      <ImageIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'context_usage' ? (
+                      <LayersIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'token_usage' ? (
+                      <GaugeIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'turn_calls' ? (
+                      <WrenchIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'trajectory' ? (
+                      <ListTreeIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : (
+                      <TabScheduledTaskIcon />
+                    )}
+                  </span>
+                  <span
+                    className={styles.tabTitle}
+                    data-web-shell-session-title
+                  >
+                    <span className={styles.tabTitleInner}>
+                      {tab.kind === 'turn_calls'
+                        ? t('turnCalls.title')
+                        : tab.title}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.tabCloseButton}
+                  onClick={() => onCloseTab(tab.id)}
+                  aria-label={`Close ${tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title}`}
+                  title="Close"
+                >
+                  <CloseIcon />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className={styles.headerActions}>
+          {showAddMenu && (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={`${styles.iconButton} ${styles.addButton}`}
+                  aria-label={t('rightPanel.add')}
+                  title={t('rightPanel.add')}
+                >
+                  <PlusIcon className={styles.toolbarIcon} />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                {showFilesMenuItem && (
+                  <DropdownMenuItem onSelect={onOpenFiles}>
+                    <FilesIcon />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('files.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {showReviewMenuItem && (
+                  <DropdownMenuItem
+                    disabled={!latestReviewAvailable || !onOpenLatestReview}
+                    onSelect={onOpenLatestReview}
+                  >
+                    <TabReviewIcon />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('turnOutputs.review')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {showReviewMenuItem && showSideTaskMenuItems && (
+                  <DropdownMenuSeparator />
+                )}
+                {showSideTaskMenuItems && (
+                  <DropdownMenuItem
+                    disabled={sideTasksLoading}
+                    onSelect={onCreateSideTask}
+                  >
+                    <MessageCirclePlusIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('sideTask.create')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {showTerminalMenuItem &&
+                  (showReviewMenuItem || showSideTaskMenuItems) && (
+                    <DropdownMenuSeparator />
+                  )}
+                {showTerminalMenuItem && (
+                  <DropdownMenuItem onSelect={() => onOpenTerminal?.()}>
+                    <SquareTerminalIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('terminal.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {showWebPreviewMenuItem && (
+                  <DropdownMenuItem onSelect={onOpenWebPreview}>
+                    <GlobeIcon className={styles.sideTaskNewIcon} />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('webPreview.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {showTrajectoryMenuItem && (
+                  <DropdownMenuItem onSelect={() => onOpenTrajectory?.()}>
+                    <ListTreeIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('trajectory.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              className={`${styles.iconButton} ${styles.fullscreenButton} ${fullscreen ? styles.iconButtonActive : ''}`}
+              onClick={onToggleFullscreen}
+              aria-label={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+              aria-pressed={fullscreen}
+              title={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+            >
+              {fullscreen ? (
+                <ShrinkIcon className={styles.toolbarIcon} aria-hidden />
+              ) : (
+                <ExpandIcon className={styles.toolbarIcon} aria-hidden />
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            className={`${styles.iconButton} ${styles.panelToggleButton}`}
+            onClick={onClose}
+            aria-label={t('chatHeader.toggleRightPanel')}
+            aria-pressed="true"
+            title={t('chatHeader.toggleRightPanel')}
+          >
+            <PanelRightIcon className={styles.panelToggleIcon} />
+          </button>
+        </div>
+      </div>
+      {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
+      <div
+        className={`${styles.body} ${
+          activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
+            ? styles.bodySideTask
+            : ''
+        }`.trim()}
+      >
+        {tabs
+          .filter((tab) => tab.kind === 'web_preview')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              className="h-full"
+              hidden={tab.id !== activeTab?.id}
+            >
+              <WebPreviewPanel
+                state={tab}
+                onChange={(state) => onWebPreviewChange?.(tab.id, state)}
+              />
+            </div>
+          ))}
+        {tabs
+          .filter((tab) => tab.kind === 'files')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              className="h-full"
+              hidden={tab.id !== activeTab?.id}
+            >
+              <WorkspaceFilesPane
+                onClose={() => onCloseTab(tab.id)}
+                tab={tab}
+                workspaceCwd={workspaceCwd}
+                onOpenFilePreview={onOpenFilePreview}
+                onReferenceFile={onReferenceFile}
+              />
+            </div>
+          ))}
+        {tabs
+          .filter((tab) => tab.kind === 'terminal')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              className={`${styles.terminalPane} ${
+                tab.id === activeTab?.id ? '' : styles.terminalPaneHidden
+              }`.trim()}
+              aria-hidden={tab.id === activeTab?.id ? undefined : true}
+            >
+              <TerminalPanel
+                terminalId={tab.id}
+                cwd={tab.workspaceCwd ?? workspaceCwd}
+                active={tab.id === activeTab?.id}
+                enabled={tab.initialized !== false}
+              />
+            </div>
+          ))}
+        {canPreviewAttachment && (
+          <button
+            type="button"
+            className={styles.attachmentPreviewButton}
+            onClick={() =>
+              setPreviewAttachmentId(
+                attachmentPreview ? undefined : activeTab?.id,
+              )
+            }
+            aria-label={t(
+              attachmentPreview
+                ? 'attachment.showSource'
+                : 'attachment.showPreview',
+            )}
+            aria-pressed={attachmentPreview}
+          >
+            {attachmentPreview ? (
+              <Code2Icon aria-hidden />
+            ) : (
+              <EyeIcon aria-hidden />
+            )}
+            {t(
+              attachmentPreview
+                ? 'attachment.showSource'
+                : 'attachment.showPreview',
+            )}
+          </button>
+        )}
+        {restoring && !activeTab ? (
+          <div
+            className="flex flex-col gap-4 p-5"
+            data-testid="right-panel-loading-skeleton"
+            role="status"
+            aria-label={t('common.loading')}
+          >
+            <Skeleton className="h-5 w-2/5" />
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-4 w-4/5" />
+            <Skeleton className="h-4 w-3/5" />
+          </div>
+        ) : activeTab?.kind === 'terminal' ||
+          activeTab?.kind === 'web_preview' ||
+          activeTab?.kind === 'files' ? null : !activeTab ? (
+          <div
+            className={styles.emptyActions}
+            data-testid="right-panel-empty-actions"
+          >
+            {items.includes('files') && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                disabled={!onOpenFiles}
+                onClick={onOpenFiles}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <FilesIcon />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('files.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('files.description')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            {items.includes('review') && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                disabled={!latestReviewAvailable || !onOpenLatestReview}
+                onClick={onOpenLatestReview}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <TabReviewIcon />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('turnOutputs.review')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('turnOutputs.reviewLatest')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            {items.includes('sideTask') &&
+              sideTaskAvailable &&
+              onCreateSideTask &&
+              (sideTasks.length === 0 && archivedSideTasks.length === 0 ? (
+                <button
+                  type="button"
+                  className={styles.emptyAction}
+                  disabled={sideTasksLoading}
+                  aria-busy={sideTasksLoading}
+                  onClick={onCreateSideTask}
+                >
+                  <span className={styles.emptyActionIcon} aria-hidden="true">
+                    <MessageCirclePlusIcon strokeWidth={1.6} />
+                  </span>
+                  <span className={styles.emptyActionTitle}>
+                    {t('sideTask.title')}
+                  </span>
+                  <span className={styles.emptyActionHint}>
+                    {t('sideTask.description')}
+                  </span>
+                  <ChevronRightIcon
+                    className={styles.emptyActionChevron}
+                    strokeWidth={1.6}
+                    aria-hidden="true"
+                  />
+                </button>
+              ) : (
+                <DropdownMenu
+                  open={sideTaskMenuOpen}
+                  onOpenChange={setSideTaskMenuOpen}
+                  modal={false}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className={styles.emptyAction}
+                      aria-expanded={sideTaskMenuOpen}
+                      onMouseEnter={openSideTaskMenu}
+                      onMouseLeave={scheduleSideTaskMenuClose}
+                    >
+                      <span
+                        className={styles.emptyActionIcon}
+                        aria-hidden="true"
+                      >
+                        <MessageCirclePlusIcon strokeWidth={1.6} />
+                      </span>
+                      <span className={styles.emptyActionTitle}>
+                        {t('sideTask.title')}
+                      </span>
+                      <span className={styles.emptyActionHint}>
+                        {t('sideTask.description')}
+                      </span>
+                      <ChevronRightIcon
+                        className={styles.emptyActionChevron}
+                        strokeWidth={1.6}
+                        aria-hidden="true"
+                      />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="end"
+                    className="w-80"
+                    onMouseEnter={openSideTaskMenu}
+                    onMouseLeave={scheduleSideTaskMenuClose}
+                  >
+                    {sideTasks.map((sideTask) => {
+                      const content = (
+                        <>
+                          <span className={styles.sideTaskListTitle}>
+                            {sideTask.title}
+                          </span>
+                          {sideTask.updatedAt && (
+                            <span className={styles.sideTaskListTime}>
+                              {formatRelativeTime(sideTask.updatedAt, t)}
+                            </span>
+                          )}
+                        </>
+                      );
+                      if (!onArchiveSideTasks) {
+                        return (
+                          <DropdownMenuItem
+                            key={sideTask.sessionId}
+                            onSelect={() => onOpenSideTask?.(sideTask)}
+                          >
+                            {content}
+                          </DropdownMenuItem>
+                        );
+                      }
+                      return (
+                        <DropdownMenuSub key={sideTask.sessionId}>
+                          <DropdownMenuSubTrigger>
+                            {content}
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent
+                            onMouseEnter={openSideTaskMenu}
+                            onMouseLeave={scheduleSideTaskMenuClose}
+                          >
+                            <DropdownMenuItem
+                              onSelect={() => onOpenSideTask?.(sideTask)}
+                            >
+                              <EyeIcon />
+                              {t('common.open')}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={sideTask.archivable !== true}
+                              title={
+                                sideTask.archivable === true
+                                  ? undefined
+                                  : t('sideTask.archiveUnavailable')
+                              }
+                              onSelect={() => {
+                                void onArchiveSideTasks([sideTask]);
+                              }}
+                            >
+                              <ArchiveIcon />
+                              {t('sidebar.archive')}
+                            </DropdownMenuItem>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      );
+                    })}
+                    {onArchiveSideTasks && sideTasks.length > 0 && (
+                      <DropdownMenuSeparator />
+                    )}
+                    {onArchiveSideTasks && sideTasks.length > 0 && (
+                      <DropdownMenuItem
+                        disabled={!hasArchivableSideTasks}
+                        onSelect={() => {
+                          void onArchiveSideTasks(sideTasks);
+                        }}
+                      >
+                        <ArchiveIcon />
+                        <span className={styles.sideTaskListTitle}>
+                          {t('sideTask.archiveCompleted')}
+                        </span>
+                      </DropdownMenuItem>
+                    )}
+                    {onUnarchiveSideTasks && archivedSideTasks.length > 0 && (
+                      <>
+                        {sideTasks.length > 0 && <DropdownMenuSeparator />}
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            <ArchiveRestoreIcon />
+                            <span className={styles.sideTaskListTitle}>
+                              {t('sidebar.archivedTitle')} (
+                              {archivedSideTasks.length})
+                            </span>
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent
+                            className="max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto"
+                            onMouseEnter={openSideTaskMenu}
+                            onMouseLeave={scheduleSideTaskMenuClose}
+                          >
+                            {archivedSideTasks.map((sideTask) => (
+                              <DropdownMenuItem
+                                key={sideTask.sessionId}
+                                onSelect={() => {
+                                  void onUnarchiveSideTasks([sideTask]);
+                                }}
+                              >
+                                <ArchiveRestoreIcon />
+                                <span className={styles.sideTaskListTitle}>
+                                  {sideTask.title}
+                                </span>
+                                <span className={styles.sideTaskListTime}>
+                                  {t('sidebar.unarchive')}
+                                </span>
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      </>
+                    )}
+                    {sideTasks.length > 0 && <DropdownMenuSeparator />}
+                    <DropdownMenuItem onSelect={onCreateSideTask}>
+                      <CirclePlusIcon
+                        className={styles.sideTaskNewIcon}
+                        strokeWidth={1.6}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.sideTaskListTitle}>
+                        {t('sideTask.new')}
+                      </span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ))}
+            {showWebPreviewMenuItem && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                data-testid="right-panel-open-web-preview"
+                onClick={onOpenWebPreview}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <GlobeIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('webPreview.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('webPreview.openHint')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            {showTrajectoryMenuItem && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={() => onOpenTrajectory?.()}
+                data-testid="right-panel-open-trajectory"
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <ListTreeIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('trajectory.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('trajectory.description')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            {onOpenTerminal && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={() => onOpenTerminal()}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <SquareTerminalIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('terminal.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('terminal.open')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+          </div>
+        ) : activeTab.kind === 'pending' ? (
+          <div
+            className={styles.empty}
+            role={activeTab.loadError ? 'alert' : 'status'}
+          >
+            {activeTab.loadError ?? t('common.loading')}
+          </div>
+        ) : activeTab.kind === 'workflow' ? (
+          activeTab.sessionId ? (
+            <AgentWorkflow
+              tasks={agentTasks}
+              loading={agentTraceLoading}
+              error={agentTraceError}
+              onOpenAgent={onOpenWorkflowAgent}
+            />
+          ) : workflow ? (
+            <SessionWorkflowInspector {...workflow} />
+          ) : (
+            <div className={styles.empty}>{t('workflow.empty.title')}</div>
+          )
+        ) : isWorkspaceScopedTab(activeTab) &&
+          (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
+          (activeTab.kind !== 'file' || !activeTab.previewOnly) &&
+          (activeTab.kind !== 'artifact' ||
+            activeTabArtifact?.metadata?.['artifactType'] !==
+              'web_preview_snapshot') &&
+          !activeWorkspaceActions ? (
+          <div className={styles.empty} role="alert">
+            {t('workspace.notFoundDescription')}
+          </div>
+        ) : activeTab.kind === 'review' ? (
+          <ReviewChanges
+            changes={activeTab.changes ?? reviewChanges}
+            selectedPath={activeTab.selectedPath ?? selectedReviewPath}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            onOpenFilePreview={(change) =>
+              onOpenFilePreview(
+                change,
+                activeTab.workspaceCwd ?? workspaceCwd,
+                activeTab.workspaceId,
+              )
+            }
+            onDownloadFile={(change, isCancelled) =>
+              downloadWorkspaceFile(
+                activeWorkspaceActions!,
+                change.path,
+                getReviewDownloadMimeType(change.path),
+                isCancelled,
+              )
+            }
+            onDownloadError={(downloadError) => {
+              const message = t('common.downloadFailed', {
+                message: extractErrorDetail(downloadError),
+              });
+              if (onError) {
+                onError(new Error(message, { cause: downloadError }), message);
+              } else {
+                console.error(message, downloadError);
+              }
+            }}
+          />
+        ) : activeTab.kind === 'file' ? (
+          activeTab.attachmentId &&
+          !activeTab.previewData &&
+          activeTab.previewContent === undefined ? (
+            <div
+              className={styles.empty}
+              role={activeTab.loadError ? 'alert' : 'status'}
+            >
+              {activeTab.loadError ?? t('common.loading')}
+            </div>
+          ) : activeTab.sourcePreview &&
+            activeTab.previewData &&
+            !isDocxFile(
+              activeTab.workspacePath,
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) &&
+            !isExcelFile(
+              activeTab.workspacePath,
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) &&
+            !isPdfArtifact({
+              workspacePath: activeTab.workspacePath,
+              mimeType: activeTab.previewMimeType || activeTab.previewData.type,
+            }) &&
+            !normalizeTextMediaType(
+              activeTab.previewMimeType || activeTab.previewData.type,
+              activeTab.workspacePath,
+            ) ? (
+            <SourceBlobPreview
+              data={activeTab.previewData}
+              title={activeTab.title}
+              image={
+                Boolean(getImageMimeTypeFromPath(activeTab.workspacePath)) &&
+                activeTab.previewData.type.startsWith('image/')
+              }
+            />
+          ) : (
+            <WorkspaceFilePreview
+              key={activeTab.id}
+              workspacePath={activeTab.workspacePath}
+              artifactVersion={String(activeTab.previewVersion ?? 0)}
+              workspaceActions={activeWorkspaceActions!}
+              previewContent={activeTab.previewContent}
+              previewData={activeTab.previewData}
+              previewMimeType={activeTab.previewMimeType}
+              previewOnly={activeTab.previewOnly}
+              previewKind={
+                sourceHtmlPreview ||
+                (activeTab.previewOnly && !attachmentPreview)
+                  ? 'source'
+                  : undefined
+              }
+            />
+          )
+        ) : activeTab.kind === 'source' ? (
+          <SourceDetail key={activeTab.id} tab={activeTab} />
+        ) : activeTab.kind === 'artifact' ? (
+          <ArtifactDetailTab
+            key={activeTab.id}
+            artifacts={artifacts}
+            artifactId={activeTab.artifactId}
+            sourceSessionId={activeTab.sourceSessionId}
+            workspaceActions={activeWorkspaceActions!}
+            previewContent={activeTab.previewContent}
+            loading={loading}
+            error={error}
+          />
+        ) : activeTab.kind === 'subagent' ? (
+          deferSubagentMount ? null : (
+            <SubagentDetail
+              sessionId={activeTab.sessionId}
+              rootToolCallId={activeTab.rootToolCallId}
+              initialRootTool={activeTab.rootTool}
+              workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+              onRightPanelOpen={onNestedRightPanelOpen}
+              onArtifactsChange={onNestedArtifactsChange}
+              onOpenSubagent={onOpenNestedSubagent}
+              onError={onError}
+            />
+          )
+        ) : activeTab.kind === 'monitor' ? (
+          <MonitorTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'shell' ? (
+          <ShellTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'side_task' ? (
+          <SideTaskPanel
+            key={activeTab.id}
+            tabId={activeTab.id}
+            sessionId={activeTab.sessionId}
+            parentSessionId={activeTab.parentSessionId}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            title={activeTab.title}
+            shouldNameFromFirstPrompt={activeTab.nameFromFirstPrompt}
+            initialPrompt={activeTab.initialPrompt}
+            createSession={
+              onCreateSideTaskSession ?? rejectMissingSideTaskCreate
+            }
+            onCreated={onSideTaskCreated ?? ignoreSideTaskCreated}
+            onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
+            onInitialPromptRefused={onSideTaskInitialPromptRefused}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
+            onError={onError}
+            sessionWorkflowEnabled={sessionWorkflowEnabled}
+            modelManagement={modelManagement}
+            unavailableModels={unavailableModels}
+            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
+            onImageIngestionNotice={onImageIngestionNotice}
+          />
+        ) : activeTab.kind === 'image' ? (
+          activeTab.src ? (
+            <div className={styles.imagePreviewWrap}>
+              <img
+                src={activeTab.src}
+                alt={activeTab.alt ?? activeTab.title}
+                className={styles.imagePreview}
+              />
+              <a
+                className={styles.imageDownloadButton}
+                href={activeTab.src}
+                download={imageDownloadName(activeTab.src)}
+                aria-label={t('common.download')}
+                title={t('common.download')}
+              >
+                <DownloadIcon size={16} strokeWidth={1.8} />
+              </a>
+            </div>
+          ) : (
+            <div
+              className={styles.empty}
+              role={activeTab.loadError ? 'alert' : 'status'}
+            >
+              {activeTab.loadError ?? t('common.loading')}
+            </div>
+          )
+        ) : activeTab.kind === 'context_usage' ? (
+          <ContextUsagePanel
+            key={activeTab.id}
+            controls={contextUsageControls?.[activeTab.sessionId]}
+            sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+            onOpenMemoryFile={onOpenMemoryFile}
+          />
+        ) : activeTab.kind === 'trajectory' ? (
+          <TrajectoryPanel
+            key={activeTab.id}
+            loadPage={activeTab.loadPage}
+            historyGapRevision={activeTab.historyGapRevision}
+          />
+        ) : activeTab.kind === 'token_usage' ? (
+          <TokenUsagePanel
+            key={activeTab.id}
+            sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+          />
+        ) : activeTab.kind === 'turn_calls' ? (
+          <TurnCallsPanel
+            key={`${activeTab.sessionId}:${workspaceCwd}`}
+            turnId={activeTab.turnId}
+            ownerSessionId={activeTab.sessionId}
+            recordId={activeTab.recordId}
+            promptId={activeTab.promptId}
+            promptLabel={activeTab.promptLabel}
+            onSelectPrompt={onSelectTurnCallsPrompt}
+            workspaceCwd={workspaceCwd}
+            onOpenFile={onNestedRightPanelOpen}
+            onOpenAgent={onOpenNestedSubagent}
+          />
+        ) : (
+          <ScheduledTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeWorkspaceActions}
+          />
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function TabSubagentIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="8" r="3" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M6.5 19c.7-3.1 2.5-4.7 5.5-4.7s4.8 1.6 5.5 4.7"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg
+      className={styles.tabCloseIcon}
+      viewBox="0 0 16 16"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="m4.5 4.5 7 7M11.5 4.5l-7 7"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function TabReviewIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+    >
+      <rect
+        x="3"
+        y="3"
+        width="18"
+        height="18"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <path
+        d="M9 9.5h6M12 6.5v6"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <path
+        d="M9 16h6"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function TabScheduledTaskIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+    >
+      <rect
+        x="4"
+        y="4"
+        width="16"
+        height="16"
+        rx="3"
+        stroke="currentColor"
+        strokeWidth="1.8"
+      />
+      <path
+        d="M12 8v4l3 2"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ArtifactDetailTab({
+  artifacts,
+  artifactId,
+  sourceSessionId,
+  workspaceActions,
+  previewContent,
+  loading,
+  error,
+}: {
+  artifacts: readonly DaemonSessionArtifact[];
+  artifactId: string;
+  sourceSessionId?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  previewContent?: string;
+  loading?: boolean;
+  error?: string | null;
+}) {
+  const artifact = artifacts.find((item) => item.id === artifactId);
+  if (artifact) {
+    return (
+      <ArtifactDetail
+        artifact={artifact}
+        sourceSessionId={sourceSessionId}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+      />
+    );
+  }
+  if (loading) {
+    return <div className={styles.empty}>Loading artifact...</div>;
+  }
+  if (error) {
+    return <div className={styles.empty}>{error}</div>;
+  }
+  return <div className={styles.empty}>Artifact not found.</div>;
+}
+
+function ScheduledTaskDetail({
+  task,
+  actions,
+}: {
+  task: TurnOutputScheduledTask;
+  actions: ArtifactWorkspaceActions | undefined;
+}) {
+  const { t } = useI18n();
+  const [loadedTask, setLoadedTask] = useState<DaemonScheduledTask | null>(
+    null,
+  );
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const [prompt, setPrompt] = useState(task.prompt);
+  const [builder, setBuilder] = useState<BuilderState>(() =>
+    parseCronToBuilder(task.cron),
+  );
+  const [showForm, setShowForm] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const requestRef = useRef(0);
+  const loadRequestRef = useRef(0);
+  const requestScopeRef = useRef({
+    actions,
+    taskId: task.id,
+    workspaceId: task.workspaceId,
+  });
+  requestScopeRef.current = {
+    actions,
+    taskId: task.id,
+    workspaceId: task.workspaceId,
+  };
+  const isCurrentRequest = useCallback(
+    (
+      request: number,
+      requestActions: ArtifactWorkspaceActions,
+      taskId: string,
+      workspaceId: string | undefined,
+    ) => {
+      const scope = requestScopeRef.current;
+      return (
+        request === requestRef.current &&
+        scope.actions === requestActions &&
+        scope.taskId === taskId &&
+        scope.workspaceId === workspaceId
+      );
+    },
+    [],
+  );
+  const isCurrentLoad = useCallback(
+    (
+      request: number,
+      requestActions: ArtifactWorkspaceActions,
+      taskId: string,
+      workspaceId: string | undefined,
+    ) => {
+      const scope = requestScopeRef.current;
+      return (
+        request === loadRequestRef.current &&
+        scope.actions === requestActions &&
+        scope.taskId === taskId &&
+        scope.workspaceId === workspaceId
+      );
+    },
+    [],
+  );
+  useEffect(
+    () => () => {
+      requestRef.current += 1;
+      loadRequestRef.current += 1;
+    },
+    [],
+  );
+  useEffect(() => {
+    setBusy(false);
+    setSubmitting(false);
+    setFormError(null);
+  }, [actions, task.id, task.workspaceId]);
+
+  const loadTask = useCallback(async () => {
+    const request = ++requestRef.current;
+    const loadRequest = ++loadRequestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
+    if (!task.durable || !actions) {
+      setLoadedTask(null);
+      setName('');
+      setPrompt(task.prompt);
+      setBuilder(parseCronToBuilder(task.cron));
+      setLoadError(null);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const tasks = await actions.listScheduledTasks(workspaceId);
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
+      const match = tasks.find((item) => item.id === task.id) ?? null;
+      setLoadedTask(match);
+      if (match) {
+        setName(match.name ?? '');
+        setPrompt(match.prompt);
+        setBuilder(parseCronToBuilder(match.cron));
+      } else {
+        setName('');
+        setPrompt(task.prompt);
+        setBuilder(parseCronToBuilder(task.cron));
+      }
+    } catch (err) {
+      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
+        setLoading(false);
+      }
+    }
+  }, [
+    actions,
+    isCurrentLoad,
+    isCurrentRequest,
+    task.cron,
+    task.durable,
+    task.id,
+    task.prompt,
+    task.workspaceId,
+  ]);
+
+  useEffect(() => {
+    void loadTask();
+  }, [loadTask]);
+
+  const isSessionScoped = !task.durable;
+  const isDeleted = task.durable && !loading && !loadError && !loadedTask;
+  const canEdit = Boolean(loadedTask);
+  const detailTitle = loadedTask?.name || loadedTask?.prompt || task.title;
+  const detailPrompt = loadedTask?.prompt ?? task.prompt;
+  const detailCron = loadedTask?.cron ?? task.cron;
+  const detailRecurring = loadedTask?.recurring ?? task.recurring;
+  const detailEnabled = loadedTask?.enabled;
+
+  const openEdit = useCallback(() => {
+    if (!loadedTask) return;
+    setName(loadedTask.name ?? '');
+    setPrompt(loadedTask.prompt);
+    setBuilder(parseCronToBuilder(loadedTask.cron));
+    setFormError(null);
+    setShowForm(true);
+  }, [loadedTask]);
+
+  const closeEdit = useCallback(() => {
+    setShowForm(false);
+    setFormError(null);
+    if (!loadedTask) return;
+    setName(loadedTask.name ?? '');
+    setPrompt(loadedTask.prompt);
+    setBuilder(parseCronToBuilder(loadedTask.cron));
+  }, [loadedTask]);
+
+  const handleSave = useCallback(async () => {
+    if (!loadedTask || !actions) return;
+    const cron = buildCron(builder);
+    if (!cron) {
+      setFormError(t('scheduledTasks.error.invalidSchedule'));
+      return;
+    }
+    if (prompt.trim().length === 0) {
+      setFormError(t('scheduledTasks.error.emptyPrompt'));
+      return;
+    }
+    const request = ++requestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
+    setSubmitting(true);
+    setFormError(null);
+    try {
+      const updated = await actions.updateScheduledTask(
+        loadedTask.id,
+        {
+          cron,
+          prompt: prompt.trim(),
+          name: name.trim() || null,
+        },
+        workspaceId,
+      );
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
+      setLoadedTask(updated);
+      setName(updated.name ?? '');
+      setPrompt(updated.prompt);
+      setBuilder(parseCronToBuilder(updated.cron));
+      setShowForm(false);
+    } catch (err) {
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setFormError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setSubmitting(false);
+      }
+    }
+  }, [
+    actions,
+    builder,
+    isCurrentRequest,
+    loadedTask,
+    name,
+    prompt,
+    t,
+    task.id,
+    task.workspaceId,
+  ]);
+
+  const handleToggle = useCallback(async () => {
+    if (!loadedTask || !actions) return;
+    const request = ++requestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
+    setBusy(true);
+    setFormError(null);
+    try {
+      const updated = await actions.updateScheduledTask(
+        loadedTask.id,
+        {
+          enabled: !loadedTask.enabled,
+        },
+        workspaceId,
+      );
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
+      setLoadedTask(updated);
+    } catch (err) {
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setFormError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setBusy(false);
+      }
+    }
+  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
+
+  const handleDelete = useCallback(async () => {
+    if (!loadedTask || !actions) return;
+    const request = ++requestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
+    setBusy(true);
+    setFormError(null);
+    try {
+      await actions.deleteScheduledTask(loadedTask.id, workspaceId);
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
+      setLoadedTask(null);
+      setShowDeleteConfirm(false);
+    } catch (err) {
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setFormError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setBusy(false);
+      }
+    }
+  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
+
+  const previewCron = buildCron(builder);
+  const previewLabel = previewCron ? describeCron(previewCron, t) : null;
+
+  return (
+    <div className={styles.detail}>
+      {loading && (
+        <div className={styles.empty}>{t('scheduledTasks.loading')}</div>
+      )}
+      {loadError && <div className={taskStyles.loadError}>{loadError}</div>}
+      {isDeleted && (
+        <div className={styles.empty}>
+          {t('scheduledTasks.deletedSnapshot')}
+        </div>
+      )}
+      {isSessionScoped && (
+        <div className={styles.empty}>
+          {t('scheduledTasks.sessionScopedSnapshot')}
+        </div>
+      )}
+      {!isDeleted && (
+        <div className={styles.section}>
+          <div className={styles.fieldGrid}>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.name')}
+            </span>
+            <span className={styles.fieldValue}>{detailTitle}</span>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.taskId')}
+            </span>
+            <span className={styles.fieldValue}>{task.id}</span>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.schedule')}
+            </span>
+            <span className={styles.fieldValue}>
+              {describeCron(detailCron, t)}
+            </span>
+            <span className={styles.fieldLabel}>Cron</span>
+            <span className={styles.fieldValue}>{detailCron}</span>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.type')}
+            </span>
+            <span className={styles.fieldValue}>
+              {detailRecurring
+                ? t('scheduledTasks.repeats')
+                : t('scheduledTasks.runsOnce')}
+            </span>
+            {detailEnabled !== undefined && (
+              <>
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.status')}
+                </span>
+                <span className={styles.fieldValue}>
+                  {detailEnabled
+                    ? t('scheduledTasks.enable')
+                    : t('scheduledTasks.disable')}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!isDeleted && (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Prompt</div>
+          <div className={styles.description}>{detailPrompt}</div>
+        </div>
+      )}
+
+      {formError && <div className={taskStyles.formError}>{formError}</div>}
+
+      <div className={styles.actionsRow}>
+        <button
+          type="button"
+          className={taskStyles.primaryButton}
+          disabled={!canEdit || busy}
+          onClick={openEdit}
+        >
+          {t('scheduledTasks.edit')}
+        </button>
+        <button
+          type="button"
+          className={taskStyles.secondaryButton}
+          disabled={!canEdit || busy}
+          onClick={() => void handleToggle()}
+        >
+          {loadedTask?.enabled
+            ? t('scheduledTasks.disable')
+            : t('scheduledTasks.enable')}
+        </button>
+        <button
+          type="button"
+          className={taskStyles.secondaryButton}
+          disabled={!canEdit || busy}
+          onClick={() => setShowDeleteConfirm(true)}
+        >
+          {t('scheduledTasks.delete')}
+        </button>
+      </div>
+
+      {showDeleteConfirm && loadedTask && (
+        <DialogShell
+          title={t('scheduledTasks.deleteConfirmTitle')}
+          size="sm"
+          onClose={() => setShowDeleteConfirm(false)}
+        >
+          <div className={taskStyles.formFields}>
+            <div className={styles.description}>
+              {t('scheduledTasks.deleteConfirm', {
+                name: loadedTask.name || loadedTask.prompt,
+              })}
+            </div>
+            {formError && (
+              <div className={taskStyles.formError}>{formError}</div>
+            )}
+            <div className={taskStyles.formActions}>
+              <button
+                type="button"
+                className={taskStyles.secondaryButton}
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={busy}
+              >
+                {t('scheduledTasks.cancel')}
+              </button>
+              <button
+                type="button"
+                className={taskStyles.primaryButton}
+                onClick={() => void handleDelete()}
+                disabled={busy}
+              >
+                {t('scheduledTasks.delete')}
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      )}
+
+      {showForm && (
+        <DialogShell
+          title={t('scheduledTasks.editTitle')}
+          size="md"
+          onClose={closeEdit}
+        >
+          <div className={taskStyles.formFields}>
+            <label className={taskStyles.field}>
+              <span className={taskStyles.fieldLabel}>
+                {t('scheduledTasks.name')}
+              </span>
+              <input
+                className={taskStyles.input}
+                type="text"
+                value={name}
+                maxLength={200}
+                placeholder={t('scheduledTasks.namePlaceholder')}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </label>
+
+            <label className={taskStyles.field}>
+              <span className={taskStyles.fieldLabel}>
+                {t('scheduledTasks.prompt')}
+                <span className={taskStyles.required}>*</span>
+              </span>
+              <textarea
+                className={taskStyles.textarea}
+                value={prompt}
+                rows={4}
+                maxLength={100_000}
+                placeholder={t('scheduledTasks.promptPlaceholder')}
+                onChange={(e) => setPrompt(e.target.value)}
+              />
+            </label>
+
+            <div className={taskStyles.scheduleRow}>
+              <label className={taskStyles.field}>
+                <span className={taskStyles.fieldLabel}>
+                  {t('scheduledTasks.frequency')}
+                </span>
+                <select
+                  className={taskStyles.select}
+                  value={builder.frequency}
+                  onChange={(e) => {
+                    const frequency = e.target.value as Frequency;
+                    setBuilder((value) => ({
+                      ...value,
+                      frequency,
+                      ...(frequency === 'hourly' ? { time: '00:00' } : {}),
+                    }));
+                  }}
+                >
+                  {FREQUENCIES.map((frequency) => (
+                    <option key={frequency} value={frequency}>
+                      {t(`scheduledTasks.freq.${frequency}`)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {(builder.frequency === 'daily' ||
+                builder.frequency === 'weekdays' ||
+                builder.frequency === 'weekly') && (
+                <label className={taskStyles.field}>
+                  <span className={taskStyles.fieldLabel}>
+                    {t('scheduledTasks.time')}
+                  </span>
+                  <input
+                    className={taskStyles.input}
+                    type="time"
+                    value={builder.time}
+                    onChange={(e) =>
+                      setBuilder((value) => ({
+                        ...value,
+                        time: e.target.value,
+                      }))
+                    }
+                  />
+                </label>
+              )}
+
+              {builder.frequency === 'weekly' && (
+                <label className={taskStyles.field}>
+                  <span className={taskStyles.fieldLabel}>
+                    {t('scheduledTasks.weekday')}
+                  </span>
+                  <select
+                    className={taskStyles.select}
+                    value={builder.weekday}
+                    onChange={(e) =>
+                      setBuilder((value) => ({
+                        ...value,
+                        weekday: Number(e.target.value),
+                      }))
+                    }
+                  >
+                    {t('scheduledTasks.weekdayNames')
+                      .split(',')
+                      .map((label, index) => (
+                        <option key={index} value={index}>
+                          {label}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
+
+              {builder.frequency === 'minutes' && (
+                <label className={taskStyles.field}>
+                  <span className={taskStyles.fieldLabel}>
+                    {t('scheduledTasks.interval')}
+                  </span>
+                  <select
+                    className={taskStyles.select}
+                    value={builder.minuteInterval}
+                    onChange={(e) =>
+                      setBuilder((value) => ({
+                        ...value,
+                        minuteInterval: Number(e.target.value),
+                      }))
+                    }
+                  >
+                    {MINUTE_INTERVALS.map((minute) => (
+                      <option key={minute} value={minute}>
+                        {minute}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {builder.frequency === 'custom' && (
+                <label
+                  className={`${taskStyles.field} ${taskStyles.fieldGrow}`}
+                >
+                  <span className={taskStyles.fieldLabel}>
+                    {t('scheduledTasks.cron')}
+                  </span>
+                  <input
+                    className={taskStyles.input}
+                    type="text"
+                    value={builder.customCron}
+                    spellCheck={false}
+                    placeholder="0 9 * * 1-5"
+                    onChange={(e) =>
+                      setBuilder((value) => ({
+                        ...value,
+                        customCron: e.target.value,
+                      }))
+                    }
+                  />
+                </label>
+              )}
+            </div>
+
+            <div className={taskStyles.preview}>
+              {previewLabel ? (
+                <>
+                  <span className={taskStyles.previewLabel}>
+                    {previewLabel}
+                  </span>
+                  <code className={taskStyles.previewCron}>{previewCron}</code>
+                </>
+              ) : (
+                <span className={taskStyles.previewInvalid}>
+                  {t('scheduledTasks.error.invalidSchedule')}
+                </span>
+              )}
+            </div>
+
+            {formError && (
+              <div className={taskStyles.formError}>{formError}</div>
+            )}
+
+            <div className={taskStyles.formActions}>
+              <button
+                type="button"
+                className={taskStyles.secondaryButton}
+                onClick={closeEdit}
+                disabled={submitting}
+              >
+                {t('scheduledTasks.cancel')}
+              </button>
+              <button
+                type="button"
+                className={taskStyles.primaryButton}
+                onClick={() => void handleSave()}
+                disabled={submitting}
+              >
+                {submitting
+                  ? t('scheduledTasks.saving')
+                  : t('scheduledTasks.save')}
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      )}
+    </div>
+  );
+}
+
+function ReviewChanges({
+  changes,
+  selectedPath,
+  workspaceCwd,
+  onOpenFilePreview,
+  onDownloadFile,
+  onDownloadError,
+}: {
+  changes: readonly TurnOutputFileChange[];
+  selectedPath: string | null;
+  workspaceCwd?: string;
+  onOpenFilePreview: (change: TurnOutputFileChange) => void;
+  onDownloadFile: (
+    change: TurnOutputFileChange,
+    isCancelled: () => boolean,
+  ) => Promise<void>;
+  onDownloadError: (error: unknown) => void;
+}) {
+  const { t } = useI18n();
+  const [isTreeOpen, setIsTreeOpen] = useState(false);
+  const [isFileListOpen, setIsFileListOpen] = useState(true);
+  const [isReviewStacked, setIsReviewStacked] = useState(false);
+  const [reviewListWidth, setReviewListWidth] = useState(520);
+  const reviewListWidthRef = useRef(reviewListWidth);
+  const reviewContentRef = useRef<HTMLDivElement | null>(null);
+  const reviewResizeCleanupRef = useRef<(() => void) | null>(null);
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [downloadingPaths, setDownloadingPaths] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // StrictMode replays setup -> cleanup -> setup without re-running useRef's
+    // initializer, so restore the flag or every download looks cancelled.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const showTree = isTreeOpen;
+  const fileTree = useMemo(
+    () => buildFileTree(changes, workspaceCwd),
+    [changes, workspaceCwd],
+  );
+
+  useEffect(() => {
+    setExpandedPath(selectedPath);
+  }, [selectedPath]);
+
+  useEffect(() => {
+    reviewListWidthRef.current = reviewListWidth;
+  }, [reviewListWidth]);
+
+  useEffect(() => {
+    const container = reviewContentRef.current;
+    if (!container) return;
+    const update = () => {
+      setIsReviewStacked(container.clientWidth < MAX_REVIEW_SIDE_BY_SIDE_WIDTH);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [isFileListOpen]);
+
+  useEffect(() => () => reviewResizeCleanupRef.current?.(), []);
+
+  const handleReviewSplitResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const container = reviewContentRef.current;
+      if (!container) return;
+      event.preventDefault();
+      const resizeHandle = event.currentTarget;
+      resizeHandle.setPointerCapture(event.pointerId);
+      const startX = event.clientX;
+      const startWidth = reviewListWidthRef.current;
+      const containerWidth = container.getBoundingClientRect().width;
+      const maxWidth = Math.max(180, containerWidth - 180);
+      const previousCursor = document.body.style.cursor;
+      const previousUserSelect = document.body.style.userSelect;
+      let pendingWidth = startWidth;
+      let animationFrame: number | null = null;
+
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
+      const flushWidth = () => {
+        animationFrame = null;
+        setReviewListWidth(pendingWidth);
+      };
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        pendingWidth = Math.min(
+          maxWidth,
+          Math.max(180, startWidth + (moveEvent.clientX - startX)),
+        );
+        if (animationFrame === null) {
+          animationFrame = window.requestAnimationFrame(flushWidth);
+        }
+      };
+      let handlePointerUp: () => void = () => {};
+      const cleanupResize = (commitWidth: boolean) => {
+        reviewResizeCleanupRef.current = null;
+        if (animationFrame !== null) {
+          window.cancelAnimationFrame(animationFrame);
+          animationFrame = null;
+        }
+        if (commitWidth) setReviewListWidth(pendingWidth);
+        if (resizeHandle.hasPointerCapture(event.pointerId)) {
+          resizeHandle.releasePointerCapture(event.pointerId);
+        }
+        document.body.style.cursor = previousCursor;
+        document.body.style.userSelect = previousUserSelect;
+        window.removeEventListener('pointermove', handlePointerMove);
+        window.removeEventListener('pointerup', handlePointerUp);
+        window.removeEventListener('pointercancel', handlePointerUp);
+      };
+      handlePointerUp = () => cleanupResize(true);
+      reviewResizeCleanupRef.current = () => cleanupResize(false);
+      window.addEventListener('pointermove', handlePointerMove);
+      window.addEventListener('pointerup', handlePointerUp);
+      window.addEventListener('pointercancel', handlePointerUp);
+    },
+    [],
+  );
+  if (changes.length === 0) {
+    return <div className={styles.empty}>No file changes to review.</div>;
+  }
+
+  const totals = sumLineStats(changes);
+  const toggleDiff = (path: string) => {
+    setExpandedPath((current) => (current === path ? null : path));
+  };
+  const downloadFile = async (change: TurnOutputFileChange) => {
+    if (downloadingPaths.has(change.path)) return;
+    setDownloadingPaths((current) => new Set(current).add(change.path));
+    try {
+      await onDownloadFile(change, () => !mountedRef.current);
+    } catch (error) {
+      if (mountedRef.current) onDownloadError(error);
+    } finally {
+      setDownloadingPaths((current) => {
+        const next = new Set(current);
+        next.delete(change.path);
+        return next;
+      });
+    }
+  };
+
+  return (
+    <div className={styles.review}>
+      <div className={styles.reviewToolbar}>
+        <div className={styles.reviewToolbarTitle}>
+          <span>{t('turnOutputs.previousTurn')}</span>
+          <LineStats
+            additions={totals?.additions}
+            deletions={totals?.deletions}
+            className={styles.lineStats}
+            additionsClassName={styles.additions}
+            deletionsClassName={styles.deletions}
+          />
+        </div>
+        <div className={styles.reviewToolbarActions}>
+          <button
+            type="button"
+            className={styles.reviewTotalsButton}
+            onClick={() => setIsFileListOpen((value) => !value)}
+            aria-expanded={isFileListOpen}
+          >
+            <span>{t('turnOutputs.fileCount', { count: changes.length })}</span>
+            <span
+              className={[
+                styles.chevron,
+                isFileListOpen ? styles.chevronOpen : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              aria-hidden="true"
+            >
+              <ChevronIcon />
+            </span>
+          </button>
+          <button
+            type="button"
+            className={[
+              styles.iconButton,
+              isTreeOpen ? styles.iconButtonActive : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            onClick={() => setIsTreeOpen((value) => !value)}
+            aria-label={
+              isTreeOpen
+                ? t('turnOutputs.closeFileTree')
+                : t('turnOutputs.openFileTree')
+            }
+            title={
+              isTreeOpen
+                ? t('turnOutputs.closeFileTree')
+                : t('turnOutputs.openFileTree')
+            }
+          >
+            {isTreeOpen ? <FolderOpenIcon /> : <FolderIcon />}
+          </button>
+        </div>
+      </div>
+      {isFileListOpen && (
+        <div
+          ref={reviewContentRef}
+          className={[
+            styles.reviewContent,
+            showTree ? '' : styles.reviewContentListOnly,
+            showTree && isReviewStacked ? styles.reviewContentStacked : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          style={
+            {
+              '--review-list-width': `${reviewListWidth}px`,
+            } as CSSProperties
+          }
+        >
+          <div
+            className={[
+              styles.reviewList,
+              expandedPath ? styles.reviewListWithExpanded : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
+            {changes.map((change) => {
+              const isExpanded = expandedPath === change.path;
+              const canOpenPreview = isRenderedFilePath(change.path);
+              const canDownload = isDownloadableReviewFilePath(change.path);
+              return (
+                <div
+                  key={`${change.toolCallId}:${change.path}`}
+                  className={[
+                    styles.reviewItem,
+                    isExpanded ? styles.reviewItemExpanded : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                >
+                  <div
+                    className={styles.reviewRow}
+                    data-selected={change.path === selectedPath || undefined}
+                  >
+                    <button
+                      type="button"
+                      className={styles.reviewRowToggle}
+                      onClick={() => toggleDiff(change.path)}
+                      aria-label={change.path}
+                      aria-expanded={isExpanded}
+                    />
+                    <span className={styles.fileIcon}>
+                      {fileExtensionLabel(change.path)}
+                    </span>
+                    <span className={styles.reviewFileName}>
+                      <PathText
+                        path={displayPath(change.path, workspaceCwd)}
+                        title={change.path}
+                      />
+                      {canOpenPreview && (
+                        <button
+                          type="button"
+                          className={styles.reviewOpenButton}
+                          onClick={() => onOpenFilePreview(change)}
+                          title={`${t('turnOutputs.preview')} ${change.path}`}
+                        >
+                          {t('turnOutputs.preview')}
+                        </button>
+                      )}
+                      {canDownload && (
+                        <button
+                          type="button"
+                          className={styles.reviewOpenButton}
+                          onClick={() => void downloadFile(change)}
+                          title={`${t('common.download')} ${change.path}`}
+                          disabled={downloadingPaths.has(change.path)}
+                        >
+                          {t(
+                            downloadingPaths.has(change.path)
+                              ? 'common.downloading'
+                              : 'common.download',
+                          )}
+                        </button>
+                      )}
+                    </span>
+                    <LineStats
+                      additions={change.additions}
+                      deletions={change.deletions}
+                      className={styles.lineStats}
+                      additionsClassName={styles.additions}
+                      deletionsClassName={styles.deletions}
+                    />
+                    <span
+                      className={[
+                        styles.chevron,
+                        isExpanded ? styles.chevronOpen : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      aria-hidden="true"
+                    >
+                      <ChevronIcon />
+                    </span>
+                  </div>
+                  {isExpanded && <DiffPreview change={change} />}
+                </div>
+              );
+            })}
+          </div>
+          {showTree && !isReviewStacked && (
+            <div
+              className={styles.reviewSplitHandle}
+              role="separator"
+              aria-orientation="vertical"
+              onPointerDown={handleReviewSplitResizeStart}
+            />
+          )}
+          {showTree && (
+            <div className={styles.tree}>
+              {fileTree.children.map((child) => (
+                <TreeNode
+                  key={child.path}
+                  node={child}
+                  depth={0}
+                  selectedPath={selectedPath}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiffPreview({ change }: { change: TurnOutputFileChange }) {
+  if (change.diffs.length === 0) {
+    return <div className={styles.diffEmpty}>No diff available.</div>;
+  }
+  const diffs = getDisplayDiffs(change.diffs);
+  return (
+    <div className={styles.diffPreview}>
+      {diffs.map((diff, index) =>
+        diff.fileDiff && !diff.fullContent ? (
+          <DiffView key={index} diff={diff.fileDiff} />
+        ) : (
+          <CodeMirrorDiff
+            key={index}
+            oldText={diff.oldText}
+            newText={diff.newText}
+          />
+        ),
+      )}
+    </div>
+  );
+}
+
+function getDisplayDiffs(
+  diffs: readonly TurnOutputFileDiff[],
+): readonly TurnOutputFileDiff[] {
+  for (let index = diffs.length - 1; index >= 0; index--) {
+    const diff = diffs[index];
+    if (diff?.fullContent) return diffs.slice(index);
+  }
+  return diffs;
+}
+
+function CodeMirrorDiff({
+  oldText,
+  newText,
+}: {
+  oldText: string;
+  newText: string;
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const [isWide, setIsWide] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const update = () => setIsWide(host.clientWidth >= 720);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || isWide === null) return;
+    host.replaceChildren();
+    setError(null);
+    let cancelled = false;
+    let view: { destroy(): void } | null = null;
+
+    const extensions = [
+      basicSetup,
+      EditorView.editable.of(false),
+      EditorState.readOnly.of(true),
+      EditorView.lineWrapping,
+    ];
+    const diffConfig = { scanLimit: 1_000, timeout: 500 };
+    const collapseUnchanged = { margin: 3, minSize: 8 };
+
+    void import('@codemirror/merge')
+      .then(({ MergeView, unifiedMergeView }) => {
+        if (cancelled) return;
+        try {
+          if (isWide) {
+            view = new MergeView({
+              a: { doc: oldText, extensions },
+              b: { doc: newText, extensions },
+              parent: host,
+              highlightChanges: true,
+              gutter: true,
+              revertControls: undefined,
+              collapseUnchanged,
+              diffConfig,
+            });
+            return;
+          }
+
+          view = new EditorView({
+            doc: newText,
+            extensions: [
+              ...extensions,
+              unifiedMergeView({
+                original: oldText,
+                highlightChanges: true,
+                gutter: true,
+                mergeControls: false,
+                allowInlineDiffs: true,
+                collapseUnchanged,
+                diffConfig,
+              }),
+            ],
+            parent: host,
+          });
+        } catch (err) {
+          if (!cancelled) {
+            setError(err instanceof Error ? err.message : String(err));
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      cancelled = true;
+      view?.destroy();
+    };
+  }, [isWide, newText, oldText]);
+
+  return (
+    <div className={styles.codeMirrorDiffWrap}>
+      <div ref={hostRef} className={styles.codeMirrorDiff} />
+      {error && (
+        <div className={styles.diffError}>Diff unavailable: {error}</div>
+      )}
+    </div>
+  );
+}
+
+interface FileTreeNode {
+  name: string;
+  path: string;
+  file?: TurnOutputFileChange;
+  children: FileTreeNode[];
+}
+
+function TreeNode({
+  node,
+  depth,
+  selectedPath,
+}: {
+  node: FileTreeNode;
+  depth: number;
+  selectedPath: string | null;
+}) {
+  const isFile = Boolean(node.file);
+  const [isOpen, setIsOpen] = useState(true);
+  const rowClassName = [
+    styles.treeRow,
+    isFile ? styles.treeFile : styles.treeFolder,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const rowStyle = {
+    paddingLeft: 10 + depth * 18,
+    '--tree-row-line-left': `${19 + Math.max(0, depth - 1) * 18}px`,
+  } as CSSProperties;
+  const childrenStyle = {
+    '--tree-children-line-left': `${19 + depth * 18}px`,
+  } as CSSProperties;
+  const rowContent = (
+    <>
+      <span className={styles.treeTwisty}>
+        {!isFile && (
+          <span
+            className={[
+              styles.treeChevron,
+              isOpen ? '' : styles.treeChevronClosed,
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
+            <TreeChevronIcon />
+          </span>
+        )}
+      </span>
+      <span className={styles.treeContent}>
+        {isFile && (
+          <span className={styles.fileIcon}>
+            {fileExtensionLabel(node.path)}
+          </span>
+        )}
+        <span className={styles.treeName}>{node.name}</span>
+      </span>
+      {node.file?.isArtifact && (
+        <span className={styles.reviewBadge}>artifact</span>
+      )}
+    </>
+  );
+
+  return (
+    <div className={styles.treeNode}>
+      {isFile ? (
+        <div
+          className={rowClassName}
+          data-selected={node.file?.path === selectedPath || undefined}
+          data-depth={depth}
+          style={rowStyle}
+          title={node.path}
+        >
+          {rowContent}
+        </div>
+      ) : (
+        <button
+          type="button"
+          className={rowClassName}
+          data-depth={depth}
+          style={rowStyle}
+          title={node.path}
+          aria-expanded={isOpen}
+          onClick={() => setIsOpen((value) => !value)}
+        >
+          {rowContent}
+        </button>
+      )}
+      {!isFile && isOpen && node.children.length > 0 && (
+        <div className={styles.treeChildren} style={childrenStyle}>
+          {node.children.map((child) => (
+            <TreeNode
+              key={child.path}
+              node={child}
+              depth={depth + 1}
+              selectedPath={selectedPath}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PathText({ path, title }: { path: string; title?: string }) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const [display, setDisplay] = useState(() => splitReviewPath(path));
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const update = () => setDisplay(compactReviewPath(path, node));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [path]);
+  return (
+    <span ref={ref} className={styles.reviewPath} title={title ?? path}>
+      {display.prefix && (
+        <span className={styles.pathPrefix}>{display.prefix}</span>
+      )}
+      <span className={styles.pathFileName}>{display.leaf}</span>
+    </span>
+  );
+}
+
+function splitReviewPath(path: string) {
+  const slashIndex = path.lastIndexOf('/');
+  return slashIndex < 0
+    ? { prefix: '', leaf: path }
+    : {
+        prefix: path.slice(0, slashIndex + 1),
+        leaf: path.slice(slashIndex + 1),
+      };
+}
+
+let measureCanvas: HTMLCanvasElement | null = null;
+
+function compactReviewPath(path: string, container: HTMLElement) {
+  const full = splitReviewPath(path);
+  const width = container.clientWidth;
+  if (width <= 0) return full;
+  const measure = createTextMeasurer(container);
+  if (measure(path) <= width) return full;
+  const parts = path.split('/').filter(Boolean);
+  const leaf = parts.at(-1) ?? path;
+  const fileWidth = measure(leaf);
+  if (parts.length <= 1 || fileWidth + measure('.../') > width) {
+    return { prefix: '', leaf };
+  }
+  let prefix = '.../';
+  for (let dirCount = 1; dirCount < parts.length; dirCount++) {
+    const dirs = parts.slice(parts.length - 1 - dirCount, -1);
+    const candidate = `.../${dirs.join('/')}/`;
+    if (measure(candidate) + fileWidth > width) break;
+    prefix = candidate;
+  }
+  return { prefix, leaf };
+}
+
+function createTextMeasurer(element: HTMLElement) {
+  measureCanvas ??= document.createElement('canvas');
+  const context = measureCanvas.getContext('2d');
+  const style = window.getComputedStyle(element);
+  if (context) {
+    context.font = [
+      style.fontStyle,
+      style.fontVariant,
+      style.fontWeight,
+      style.fontSize,
+      style.fontFamily,
+    ].join(' ');
+  }
+  return (text: string) => context?.measureText(text).width ?? text.length * 8;
+}
+
+function FolderIcon() {
+  return (
+    <svg
+      className={styles.toolbarIcon}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="M3.5 7.5h6l1.6 2h9.4v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M3.5 7.5V5.8a1.5 1.5 0 0 1 1.5-1.5h4l1.8 2.1h7.2a1.5 1.5 0 0 1 1.5 1.5v1.6"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FolderOpenIcon() {
+  return (
+    <svg
+      className={styles.toolbarIcon}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="M3.5 8.2V5.8A1.5 1.5 0 0 1 5 4.3h4l1.8 2.1h7.2a1.5 1.5 0 0 1 1.5 1.5v1.4"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4.8 19.7h12.9a2 2 0 0 0 1.9-1.4l2-7H6.4l-2.8 7.1a.9.9 0 0 0 1.2 1.3Z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg
+      className={styles.chevronIcon}
+      viewBox="0 0 16 16"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="m6 4 4 4-4 4"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TreeChevronIcon() {
+  return (
+    <svg
+      className={styles.treeChevronIcon}
+      viewBox="0 0 16 16"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="m4 6 4 4 4-4"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function buildFileTree(
+  changes: readonly TurnOutputFileChange[],
+  workspaceCwd?: string,
+): FileTreeNode {
+  const root: FileTreeNode = { name: '', path: '', children: [] };
+  for (const change of changes) {
+    const parts = displayPath(change.path, workspaceCwd)
+      .split('/')
+      .filter(Boolean);
+    let current = root;
+    for (let index = 0; index < parts.length; index++) {
+      const part = parts[index]!;
+      const path = parts.slice(0, index + 1).join('/');
+      let child = current.children.find((node) => node.name === part);
+      if (!child) {
+        child = { name: part, path, children: [] };
+        current.children.push(child);
+      }
+      if (index === parts.length - 1) child.file = change;
+      current = child;
+    }
+  }
+  sortTree(root);
+  return root;
+}
+
+function sortTree(node: FileTreeNode) {
+  node.children.sort((left, right) => {
+    if (Boolean(left.file) !== Boolean(right.file)) return left.file ? 1 : -1;
+    return left.name.localeCompare(right.name);
+  });
+  for (const child of node.children) sortTree(child);
+}
+
+function fileName(value: string) {
+  const parts = normalizePath(value).split('/').filter(Boolean);
+  return parts.at(-1) ?? value;
+}
+
+function fileExtensionLabel(value: string) {
+  const name = fileName(value);
+  const extension = name.includes('.')
+    ? name.split('.').pop()?.toLowerCase()
+    : '';
+  if (!extension) return 'FILE';
+  const labels: Record<string, string> = {
+    css: 'CSS',
+    html: 'HTML',
+    js: 'JS',
+    json: 'JSON',
+    jsx: 'JSX',
+    md: 'MD',
+    ts: 'TS',
+    tsx: 'TSX',
+  };
+  return labels[extension] ?? extension.slice(0, 3).toUpperCase();
+}
+
+function ArtifactDetail({
+  artifact,
+  sourceSessionId,
+  workspaceActions,
+  previewContent,
+}: {
+  artifact: DaemonSessionArtifact;
+  sourceSessionId?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  previewContent?: string;
+}) {
+  const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
+  const location = getArtifactLocation(artifact);
+  const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
+  const isAutomationSnapshot =
+    artifact.metadata?.['artifactType'] === 'automation_snapshot';
+  const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
+  const canPreviewWorkspaceFile =
+    artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
+  const imageMimeType = getArtifactImageMimeType(artifact);
+
+  if (artifact.metadata?.['artifactType'] === 'web_preview_snapshot') {
+    return (
+      <SavedWebPreview artifact={artifact} sourceSessionId={sourceSessionId} />
+    );
+  }
+
+  if (isCodeReview) {
+    if (artifact.status !== 'available') {
+      return <CodeReviewUnavailable status={artifact.status} />;
+    }
+    if (!canPreviewWorkspaceFile || !artifact.workspacePath) {
+      return <CodeReviewWorkspaceRequired />;
+    }
+    return (
+      <CodeReviewArtifactDetail
+        workspacePath={artifact.workspacePath}
+        artifactVersion={getArtifactFreshnessKey(artifact)}
+        workspaceActions={workspaceActions}
+      />
+    );
+  }
+
+  if (canPreviewWorkspaceFile && artifact.workspacePath) {
+    if (
+      isDownloadOnlyWorkspaceArtifact(artifact) ||
+      ((isDocxFile(artifact.workspacePath, artifact.mimeType) ||
+        isExcelFile(artifact.workspacePath, artifact.mimeType) ||
+        isPdfArtifact(artifact)) &&
+        artifact.status !== 'available' &&
+        artifact.status !== 'changed')
+    ) {
+      return (
+        <DownloadableWorkspaceArtifact
+          artifact={artifact}
+          workspaceActions={workspaceActions}
+        />
+      );
+    }
+    return (
+      <WorkspaceFilePreview
+        workspacePath={artifact.workspacePath}
+        artifactVersion={getArtifactFreshnessKey(artifact)}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+        previewSizeBytes={artifact.sizeBytes}
+        previewMimeType={
+          isPdfArtifact(artifact) ? 'application/pdf' : artifact.mimeType
+        }
+        imageMimeType={imageMimeType}
+        previewKind={
+          isHtmlArtifact(artifact)
+            ? 'html'
+            : isMarkdownArtifact(artifact)
+              ? 'markdown'
+              : imageMimeType
+                ? 'image'
+                : 'source'
+        }
+      />
+    );
+  }
+
+  return (
+    <div className={styles.detail}>
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>
+          {isAutomationSnapshot ? 'Automation Snapshot' : 'Artifact'}
+        </div>
+        <div className={styles.fieldGrid}>
+          <Field
+            label="Type"
+            value={artifactKindLabel(artifact.kind, artifact.workspacePath)}
+          />
+          <Field label="Storage" value={artifact.storage} />
+          <Field label="Status" value={artifact.status} />
+          <Field label="Source" value={artifact.source} />
+          <Field label="Size" value={formatArtifactSize(artifact.sizeBytes)} />
+          <Field label="Created" value={artifact.createdAt} />
+          <Field label="Updated" value={artifact.updatedAt} />
+          {artifact.toolName && (
+            <Field label="Tool" value={artifact.toolName} />
+          )}
+          {artifact.toolCallId && (
+            <Field label="Tool call" value={artifact.toolCallId} />
+          )}
+        </div>
+      </div>
+
+      {artifact.description && (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Description</div>
+          <div className={styles.description}>{artifact.description}</div>
+        </div>
+      )}
+
+      {isAutomationSnapshot && artifact.metadata && (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Details</div>
+          <div className={styles.fieldGrid}>
+            {metadataField(artifact.metadata, 'automationId', 'Automation ID')}
+            {metadataField(artifact.metadata, 'schedule', 'Schedule')}
+            {metadataField(artifact.metadata, 'timezone', 'Timezone')}
+            {metadataField(artifact.metadata, 'status', 'Status')}
+            {metadataField(artifact.metadata, 'nextRunAt', 'Next run')}
+            {metadataField(artifact.metadata, 'prompt', 'Prompt')}
+          </div>
+        </div>
+      )}
+
+      {(location || safeUrl) && (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Location</div>
+          {safeUrl ? (
+            <div className={styles.locationRow}>
+              <a
+                className={styles.link}
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => openExternalLink(event, safeUrl)}
+              >
+                {safeUrl}
+              </a>
+              <a
+                className={styles.openButton}
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => openExternalLink(event, safeUrl)}
+              >
+                {t('artifact.openLink')}
+              </a>
+            </div>
+          ) : (
+            <div className={styles.meta}>{location}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodeReviewUnavailable({ status }: { status: string }) {
+  const { t } = useI18n();
+  return (
+    <div className={styles.previewError} role="alert">
+      {t('codeReview.unavailable', { status })}
+    </div>
+  );
+}
+
+function CodeReviewWorkspaceRequired() {
+  const { t } = useI18n();
+  return (
+    <div className={styles.previewError} role="alert">
+      {t('codeReview.workspaceRequired')}
+    </div>
+  );
+}
+
+function isHtmlArtifact(artifact: DaemonSessionArtifact) {
+  const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
+  return (
+    artifact.kind === 'html' ||
+    path.endsWith('.html') ||
+    path.endsWith('.htm') ||
+    mimeType === 'text/html'
+  );
+}
+
+function isMarkdownArtifact(artifact: DaemonSessionArtifact) {
+  const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
+  return (
+    path.endsWith('.md') ||
+    path.endsWith('.markdown') ||
+    mimeType === 'text/markdown'
+  );
+}
+
+function DownloadableWorkspaceArtifact({
+  artifact,
+  workspaceActions,
+}: {
+  artifact: Pick<
+    DaemonSessionArtifact,
+    'kind' | 'workspacePath' | 'mimeType' | 'sizeBytes' | 'status'
+  >;
+  workspaceActions: ArtifactWorkspaceActions;
+}) {
+  const { t } = useI18n();
+  const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const mountedRef = useRef(true);
+  const location = artifact.workspacePath;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const download = async () => {
+    if (!artifact.workspacePath) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      await downloadWorkspaceFile(
+        workspaceActions,
+        artifact.workspacePath,
+        artifact.mimeType,
+        () => !mountedRef.current,
+      );
+    } catch (err: unknown) {
+      if (!mountedRef.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (mountedRef.current) {
+        setDownloading(false);
+      }
+    }
+  };
+
+  return (
+    <div className={styles.detail}>
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>{t('common.download')}</div>
+        <div className={styles.fieldGrid}>
+          <Field
+            label="Type"
+            value={artifactKindLabel(artifact.kind, artifact.workspacePath)}
+          />
+          <Field label="Size" value={formatArtifactSize(artifact.sizeBytes)} />
+          {location ? <Field label="Location" value={location} /> : null}
+          {artifact.status !== 'available' && artifact.status !== 'changed' ? (
+            <Field label="Status" value={artifact.status ?? 'missing'} />
+          ) : null}
+        </div>
+        <div className={styles.downloadRow}>
+          <button
+            type="button"
+            className={styles.downloadButton}
+            onClick={() => {
+              void download();
+            }}
+            disabled={
+              downloading ||
+              (artifact.status !== 'available' && artifact.status !== 'changed')
+            }
+          >
+            {downloading ? t('common.downloading') : t('common.download')}
+          </button>
+        </div>
+        {error && <div className={styles.previewError}>{error}</div>}
+      </div>
+    </div>
+  );
+}
+
+function SourceDetail({
+  tab,
+}: {
+  tab: Extract<ArtifactPanelTab, { kind: 'source' }>;
+}) {
+  const { t } = useI18n();
+  const connection = useConnection();
+  const target = useArtifactWorkspaceTarget(tab.workspaceCwd);
+  const workspaceActions = target?.actions;
+  const openExternal = useExternalLinkOpener();
+  const [attempt, setAttempt] = useState(0);
+  const [data, setData] = useState<Blob>();
+  const [error, setError] = useState<string>();
+  const [downloadUrl, setDownloadUrl] = useState<string>();
+  const source = tab.source;
+  const locator = source.locator;
+  const valid =
+    tab.owner.isCurrent() &&
+    connection.sessionId === tab.sourceSessionId &&
+    connection.capabilities?.features.includes('session_sources') &&
+    target?.workspaceId === tab.workspaceId &&
+    (Boolean(target) ||
+      (tab.workspaceCwd === undefined && locator.type !== 'workspace_file')) &&
+    (locator.type !== 'workspace_file' ||
+      source.workspaceCwd === connection.workspaceCwd);
+  const path =
+    locator.type === 'workspace_file'
+      ? locator.workspacePath
+      : locator.type === 'attachment'
+        ? locator.attachmentId
+        : '';
+  const isPdf = isPdfArtifact({ workspacePath: path });
+  useEffect(() => {
+    let cancelled = false;
+    setData(undefined);
+    setError(undefined);
+    setDownloadUrl(undefined);
+    if (!valid || locator.type === 'url') return;
+    const load = async () => {
+      if (locator.type === 'attachment') {
+        const attachment = await tab.sessionActions.readAttachment(
+          locator.attachmentId,
+        );
+        if (cancelled || !tab.owner.isCurrent()) return;
+        const bytes = Uint8Array.from(atob(attachment.data), (character) =>
+          character.charCodeAt(0),
+        );
+        setData(new Blob([bytes], { type: attachment.mimeType }));
+      } else if (isPdf && workspaceActions) {
+        const blob = await readWorkspaceFileAsBlob(
+          workspaceActions.readFileBytes,
+          path,
+          'application/pdf',
+          {
+            statFile: workspaceActions.stat,
+            isCancelled: () => cancelled || !tab.owner.isCurrent(),
+          },
+        );
+        if (!cancelled && tab.owner.isCurrent()) setData(blob);
+      }
+    };
+    void load().catch((err: unknown) => {
+      if (!cancelled && tab.owner.isCurrent())
+        setError(extractErrorDetail(err));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    attempt,
+    valid,
+    locator,
+    path,
+    isPdf,
+    tab.owner,
+    tab.sessionActions,
+    workspaceActions,
+  ]);
+  if (valid && locator.type === 'url')
+    return (
+      <div className="flex flex-col gap-3 p-4">
+        <h3>{source.title}</h3>
+        {source.description && <p>{source.description}</p>}
+        <p className="break-all text-sm text-muted-foreground">{locator.url}</p>
+        {isSafeHref(locator.url) && (
+          <a
+            className="text-primary underline"
+            href={locator.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => openExternal(event, locator.url)}
+          >
+            {t('sources.openOriginal')}
+          </a>
+        )}
+      </div>
+    );
+  if (!valid || (!target && locator.type !== 'attachment'))
+    return (
+      <div className={styles.empty} role="alert">
+        {t('sources.unavailable')}
+      </div>
+    );
+  const unsupported =
+    locator.type === 'workspace_file' &&
+    !isPdf &&
+    isDownloadOnlyWorkspaceArtifact({ workspacePath: path });
+  return (
+    <div className="flex h-full min-h-0 flex-1 flex-col">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <span className="truncate text-xs text-muted-foreground" title={path}>
+          {path}
+        </span>
+        <div className="flex shrink-0 items-center gap-1">
+          {downloadUrl && (
+            <Button variant="ghost" size="icon-sm" asChild>
+              <a
+                href={downloadUrl}
+                download={source.title}
+                aria-label={`Download ${source.title}`}
+                title={t('common.download')}
+              >
+                <DownloadIcon />
+              </a>
+            </Button>
+          )}
+          {error && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setAttempt((value) => value + 1)}
+            >
+              {t('common.retry')}
+            </Button>
+          )}
+        </div>
+      </div>
+      {error ? (
+        <div className={styles.previewError} role="alert">
+          {error}
+        </div>
+      ) : unsupported ? (
+        <div className="p-4">
+          <p>{t('attachment.previewUnsupported')}</p>
+          <Button
+            onClick={() =>
+              void downloadWorkspaceFile(
+                workspaceActions!,
+                path,
+                'application/octet-stream',
+                () => !tab.owner.isCurrent(),
+              ).catch((err: unknown) => {
+                if (tab.owner.isCurrent()) setError(extractErrorDetail(err));
+              })
+            }
+          >
+            {t('common.download')}
+          </Button>
+        </div>
+      ) : (locator.type === 'attachment' || isPdf) && !data ? (
+        <div className={styles.empty} role="status">
+          {t('common.loading')}
+        </div>
+      ) : data &&
+        !isDocxFile(path, data.type) &&
+        !isExcelFile(path, data.type) &&
+        !isPdfArtifact({ workspacePath: path, mimeType: data.type }) &&
+        !normalizeTextMediaType(data.type, path) ? (
+        <SourceBlobPreview
+          data={data}
+          title={source.title}
+          onDownloadUrl={setDownloadUrl}
+          showDownload={false}
+          image={
+            Boolean(getImageMimeTypeFromPath(path)) &&
+            data.type.startsWith('image/')
+          }
+        />
+      ) : (
+        <div className="relative min-h-0 flex-1 overflow-auto">
+          <WorkspaceFilePreview
+            key={attempt}
+            workspacePath={path}
+            workspaceActions={workspaceActions!}
+            onLoadError={setError}
+            previewData={data}
+            previewOnly={locator.type === 'attachment'}
+            downloadName={
+              locator.type === 'attachment' ? source.title : undefined
+            }
+            previewMimeType={data?.type}
+            previewKind={
+              /\.html?$/i.test(path) ||
+              normalizeArtifactMimeType(data?.type) === 'text/html'
+                ? 'source'
+                : undefined
+            }
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SourceBlobPreview({
+  data,
+  title,
+  image,
+  onDownloadUrl,
+  showDownload = true,
+}: {
+  data: Blob;
+  title: string;
+  image: boolean;
+  onDownloadUrl?: (url: string) => void;
+  showDownload?: boolean;
+}) {
+  const [url, setUrl] = useState<string>();
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(data);
+    setUrl(objectUrl);
+    onDownloadUrl?.(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [data, onDownloadUrl]);
+  return url ? (
+    <div className={styles.imagePreviewWrap}>
+      {image ? (
+        <img className={styles.imagePreview} src={url} alt={title} />
+      ) : (
+        <UnsupportedAttachmentPreview
+          name={title}
+          mimeType={data.type}
+          size={data.size}
+        />
+      )}
+      {showDownload && (
+        <a href={url} download={title} aria-label={`Download ${title}`}>
+          <DownloadIcon />
+        </a>
+      )}
+    </div>
+  ) : null;
+}
+
+function WorkspaceFilePreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  previewSizeBytes,
+  previewData,
+  previewMimeType,
+  imageMimeType,
+  previewKind,
+  previewOnly,
+  onLoadError,
+  sourceRenderer,
+  downloadName,
+}: {
+  sourceRenderer?: (content: string) => ReactNode;
+  downloadName?: string;
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  previewContent?: string;
+  previewSizeBytes?: number;
+  previewData?: Blob;
+  previewMimeType?: string;
+  imageMimeType?: string;
+  previewKind?: 'html' | 'markdown' | 'image' | 'source';
+  previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
+}) {
+  const { t } = useI18n();
+  if (isDocxFile(workspacePath, previewMimeType || previewData?.type)) {
+    return (
+      <DocxPreview
+        workspacePath={workspacePath}
+        workspaceActions={workspaceActions}
+        data={previewData}
+        artifactVersion={artifactVersion}
+        downloadName={downloadName}
+      />
+    );
+  }
+  if (isExcelFile(workspacePath, previewMimeType || previewData?.type)) {
+    return (
+      <ErrorBoundary
+        resetKeys={[
+          workspacePath,
+          workspaceActions,
+          previewData,
+          artifactVersion,
+        ]}
+        fallback={
+          <div>
+            <div role="alert" className={styles.previewError}>
+              {t('excel.invalid')}
+            </div>
+            {previewData ? (
+              <SourceBlobPreview
+                data={previewData}
+                title={workspacePath.split(/[/\\]/).pop()!}
+                image={false}
+              />
+            ) : workspaceActions ? (
+              <DownloadableWorkspaceArtifact
+                key={workspacePath}
+                artifact={{
+                  workspacePath,
+                  kind: 'document',
+                  mimeType: previewMimeType,
+                  status: 'available',
+                }}
+                workspaceActions={workspaceActions}
+              />
+            ) : null}
+          </div>
+        }
+      >
+        <Suspense
+          fallback={
+            <div className={styles.empty} role="status">
+              {t('common.loading')}
+            </div>
+          }
+        >
+          <SpreadsheetPreview
+            workspacePath={workspacePath}
+            workspaceActions={workspaceActions}
+            data={previewData}
+            artifactVersion={artifactVersion}
+          />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
+  if (previewData) {
+    return (
+      <AttachmentBlobPreview
+        workspacePath={workspacePath}
+        workspaceActions={workspaceActions}
+        data={previewData}
+        mimeType={previewMimeType}
+        previewKind={previewKind}
+        onLoadError={onLoadError}
+      />
+    );
+  }
+  if (isPdfArtifact({ workspacePath, mimeType: previewMimeType })) {
+    return (
+      <WorkspacePdfPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        onLoadError={onLoadError}
+      />
+    );
+  }
+  const path = workspacePath.toLowerCase();
+  const resolvedImageMimeType =
+    imageMimeType ?? getImageMimeTypeFromPath(workspacePath);
+  const resolvedPreviewKind =
+    previewKind ??
+    (path.endsWith('.html') || path.endsWith('.htm')
+      ? 'html'
+      : path.endsWith('.md') || path.endsWith('.markdown')
+        ? 'markdown'
+        : resolvedImageMimeType
+          ? 'image'
+          : 'source');
+  if (resolvedPreviewKind === 'html') {
+    return (
+      <HtmlArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+        previewSizeBytes={previewSizeBytes}
+        previewOnly={previewOnly}
+        onLoadError={onLoadError}
+      />
+    );
+  }
+  if (resolvedPreviewKind === 'markdown') {
+    return (
+      <MarkdownArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+        previewSizeBytes={previewSizeBytes}
+        previewOnly={previewOnly}
+        onLoadError={onLoadError}
+      />
+    );
+  }
+  if (resolvedPreviewKind === 'image' && resolvedImageMimeType) {
+    return (
+      <ImageArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        mimeType={resolvedImageMimeType}
+        onLoadError={onLoadError}
+      />
+    );
+  }
+  return (
+    <FileArtifactPreview
+      sourceRenderer={sourceRenderer}
+      workspacePath={workspacePath}
+      artifactVersion={artifactVersion}
+      workspaceActions={workspaceActions}
+      previewContent={previewContent}
+      previewOnly={previewOnly}
+      onLoadError={onLoadError}
+    />
+  );
+}
+
+function AttachmentBlobPreview({
+  workspacePath,
+  workspaceActions,
+  data,
+  mimeType,
+  previewKind,
+  onLoadError,
+}: {
+  workspacePath: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  data: Blob;
+  mimeType?: string;
+  previewKind?: 'html' | 'markdown' | 'image' | 'source';
+  onLoadError?: (error: string) => void;
+}) {
+  const resolvedMimeType = (mimeType || data.type || 'application/octet-stream')
+    .split(';', 1)[0]!
+    .trim()
+    .toLowerCase();
+  if (isPdfArtifact({ workspacePath, mimeType: resolvedMimeType })) {
+    return (
+      <PdfAttachmentPreview
+        data={data}
+        mimeType="application/pdf"
+        title={workspacePath}
+      />
+    );
+  }
+  if (!normalizeTextMediaType(resolvedMimeType, workspacePath)) {
+    return (
+      <UnsupportedAttachmentPreview
+        name={workspacePath}
+        mimeType={resolvedMimeType}
+        size={data.size}
+      />
+    );
+  }
+  return (
+    <TextAttachmentPreview
+      workspacePath={workspacePath}
+      workspaceActions={workspaceActions}
+      data={data}
+      previewKind={previewKind}
+      onLoadError={onLoadError}
+    />
+  );
+}
+
+function TextAttachmentPreview({
+  workspacePath,
+  workspaceActions,
+  data,
+  previewKind,
+  onLoadError,
+}: {
+  workspacePath: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  data: Blob;
+  previewKind?: 'html' | 'markdown' | 'image' | 'source';
+  onLoadError?: (error: string) => void;
+}) {
+  const { t } = useI18n();
+  const [content, setContent] = useState<string>();
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    const reader = new FileReader();
+    setContent(undefined);
+    setError(undefined);
+    reader.onload = () => setContent(String(reader.result ?? ''));
+    reader.onerror = () => {
+      const message = t('attachment.readFailed');
+      setError(message);
+      onLoadError?.(message);
+    };
+    reader.readAsText(data);
+    return () => {
+      if (reader.readyState === FileReader.LOADING) reader.abort();
+    };
+  }, [data, onLoadError, t]);
+  if (error) return <div className={styles.previewError}>{error}</div>;
+  if (content === undefined) {
+    return <div className={styles.empty}>{t('attachment.loadingFile')}</div>;
+  }
+  return (
+    <WorkspaceFilePreview
+      workspacePath={workspacePath}
+      workspaceActions={workspaceActions}
+      previewContent={content}
+      previewSizeBytes={data.size}
+      previewOnly
+      previewKind={previewKind}
+    />
+  );
+}
+
+function WorkspacePdfPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  onLoadError,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  onLoadError?: (error: string) => void;
+}) {
+  const { t } = useI18n();
+  const [data, setData] = useState<Blob>();
+  const [error, setError] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setData(undefined);
+    setError(undefined);
+    void readWorkspaceFileAsBlob(
+      workspaceActions.readFileBytes,
+      workspacePath,
+      'application/pdf',
+      { statFile: workspaceActions.stat, isCancelled: () => cancelled },
+    ).then(
+      (blob) => {
+        if (!cancelled) setData(blob);
+      },
+      (err: unknown) => {
+        if (cancelled) return;
+        const message = extractErrorDetail(err);
+        setError(message);
+        onLoadError?.(message);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath, workspaceActions, artifactVersion, attempt, onLoadError]);
+  if (error) {
+    return (
+      <div className={styles.empty}>
+        <div role="alert" className={styles.previewError}>
+          {error}
+        </div>
+        <Button onClick={() => setAttempt((value) => value + 1)}>
+          {t('common.retry')}
+        </Button>
+      </div>
+    );
+  }
+  return data ? (
+    <PdfAttachmentPreview
+      data={data}
+      mimeType="application/pdf"
+      title={workspacePath}
+    />
+  ) : (
+    <div className={styles.empty} role="status">
+      {t('attachment.loadingPreview')}
+    </div>
+  );
+}
+
+function PdfAttachmentPreview({
+  data,
+  mimeType,
+  title,
+}: {
+  data: Blob;
+  mimeType: string;
+  title: string;
+}) {
+  const { t } = useI18n();
+  const [src, setSrc] = useState<string>();
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(
+      data.type === mimeType ? data : new Blob([data], { type: mimeType }),
+    );
+    setSrc(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [data, mimeType]);
+  return src ? (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex justify-end border-b border-border p-1">
+        <Button variant="ghost" size="sm" asChild>
+          <a
+            href={src}
+            download={fileName(title)}
+            aria-label={`Download ${fileName(title)}`}
+          >
+            <DownloadIcon aria-hidden="true" />
+            {t('common.download')}
+          </a>
+        </Button>
+      </div>
+      {navigator.pdfViewerEnabled === false ? (
+        <div className={styles.empty}>{t('attachment.previewUnsupported')}</div>
+      ) : (
+        <iframe
+          className={`${styles.pdfAttachmentPreview} min-h-0 flex-1`}
+          src={src}
+          title={`Preview ${title}`}
+        />
+      )}
+    </div>
+  ) : (
+    <div className={styles.empty}>{t('attachment.loadingPreview')}</div>
+  );
+}
+
+function UnsupportedAttachmentPreview({
+  name,
+  mimeType,
+  size,
+}: {
+  name: string;
+  mimeType: string;
+  size: number;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className={styles.unsupportedAttachmentPreview}>
+      <FileTypeIcon name={name} mimeType={mimeType} aria-hidden="true" />
+      <div>{t('attachment.previewUnsupported')}</div>
+      <div className={styles.unsupportedAttachmentMeta}>
+        {mimeType} · {formatArtifactSize(size)}
+      </div>
+    </div>
+  );
+}
+
+function ImageArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  mimeType,
+  onLoadError,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  mimeType: string;
+  onLoadError?: (error: string) => void;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | undefined;
+    setSrc(null);
+    setError(null);
+    readWorkspaceFileAsBlob(
+      (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
+      workspacePath,
+      mimeType,
+      {
+        statFile: (filePath) => workspaceActions.stat(filePath),
+        isCancelled: () => cancelled,
+      },
+    )
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        onLoadError?.(message);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [artifactVersion, mimeType, onLoadError, workspaceActions, workspacePath]);
+
+  return (
+    <div className={styles.imagePreviewWrap}>
+      {src ? (
+        <>
+          <img
+            className={styles.imagePreview}
+            src={src}
+            alt={fileName(workspacePath)}
+          />
+          <a
+            className={styles.imageDownloadButton}
+            href={src}
+            download={fileName(workspacePath)}
+            aria-label={`Download ${fileName(workspacePath)}`}
+            title="Download"
+          >
+            <DownloadIcon size={16} strokeWidth={1.8} />
+          </a>
+        </>
+      ) : !error ? (
+        <div className={styles.empty}>Loading image...</div>
+      ) : null}
+      {error && <div className={styles.previewError}>{error}</div>}
+    </div>
+  );
+}
+
+function useWorkspaceFileContent({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  previewOnly,
+  onLoadError,
+  maxPreviewBytes,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  previewContent?: string;
+  previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
+  maxPreviewBytes?: number;
+}) {
+  const { t } = useI18n();
+  const [content, setContent] = useState<string | null>(previewContent ?? null);
+  const [sizeBytes, setSizeBytes] = useState<number>();
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setContent(previewContent ?? null);
+    setError(null);
+    setSizeBytes(undefined);
+    if (previewOnly) return undefined;
+    workspaceActions
+      .stat(workspacePath)
+      .then((stat) => {
+        if (cancelled) return;
+        if (stat.type === 'directory') {
+          throw new Error('Directories cannot be opened as artifacts.');
+        }
+        if (maxPreviewBytes !== undefined && stat.sizeBytes > maxPreviewBytes)
+          throw new Error(t('files.sourceTooLarge'));
+        return workspaceActions.readWorkspaceFile(workspacePath, {
+          maxBytes: 256 * 1024,
+        });
+      })
+      .then(async (file) => {
+        if (cancelled || !file || !file.truncated) return file;
+        const blob = await readWorkspaceFileAsBlob(
+          (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
+          workspacePath,
+          'application/octet-stream',
+          {
+            statFile: (filePath) => workspaceActions.stat(filePath),
+            isCancelled: () => cancelled,
+            maxBytes: maxPreviewBytes,
+          },
+        );
+        return {
+          sizeBytes: blob.size,
+          content: new TextDecoder(file.encoding || 'utf-8').decode(
+            await blob.arrayBuffer(),
+          ),
+        };
+      })
+      .then((file) => {
+        if (cancelled || !file) return;
+        setSizeBytes(file.sizeBytes);
+        setContent(file.content);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        onLoadError?.(message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    artifactVersion,
+    previewContent,
+    previewOnly,
+    onLoadError,
+    workspaceActions,
+    workspacePath,
+    maxPreviewBytes,
+    t,
+  ]);
+
+  return { content, error, sizeBytes };
+}
+
+function HtmlArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  previewSizeBytes,
+  previewOnly,
+  onLoadError,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  previewContent?: string;
+  previewSizeBytes?: number;
+  previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
+}) {
+  const { content, error, sizeBytes } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    previewContent,
+    previewOnly,
+    onLoadError,
+  });
+
+  return (
+    <div className={styles.htmlPreviewWrap}>
+      {content === null ? (
+        !error && <div className={styles.empty}>Loading preview...</div>
+      ) : (
+        <LargeDocumentPreview
+          content={content}
+          sizeBytes={sizeBytes ?? previewSizeBytes}
+          workspacePath={workspacePath}
+          workspaceActions={workspaceActions}
+        >
+          {() => (
+            <RenderedHtmlPreview
+              content={content}
+              workspacePath={workspacePath}
+            />
+          )}
+        </LargeDocumentPreview>
+      )}
+      {error && <div className={styles.previewError}>{error}</div>}
+    </div>
+  );
+}
+
+function RenderedHtmlPreview({
+  content,
+  workspacePath,
+}: {
+  content: string;
+  workspacePath: string;
+}) {
+  const title = `Preview ${workspacePath}`;
+  const { t } = useI18n();
+  const [document, setDocument] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    setDocument(null);
+    setError(null);
+    void loadArtifactPreviewDocument(content, title, controller.signal).then(
+      (document) => {
+        if (!controller.signal.aborted) setDocument(document);
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) setError(extractErrorDetail(error));
+      },
+    );
+    return () => controller.abort();
+  }, [content, title]);
+  if (error)
+    return (
+      <div className={styles.previewError}>
+        {t('artifact.previewFailed', { message: error })}
+      </div>
+    );
+  if (document === null)
+    return <div className={styles.empty}>{t('attachment.loadingPreview')}</div>;
+  return (
+    <iframe
+      className={styles.htmlPreview}
+      referrerPolicy="no-referrer"
+      sandbox="allow-scripts"
+      srcDoc={document}
+      title={title}
+    />
+  );
+}
+
+function FileArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  previewOnly,
+  onLoadError,
+  sourceRenderer,
+}: {
+  sourceRenderer?: (content: string) => ReactNode;
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  previewContent?: string;
+  previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const { content, error } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    previewContent,
+    previewOnly,
+    onLoadError,
+    maxPreviewBytes: sourceRenderer ? 4 * 1024 * 1024 : undefined,
+  });
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || content === null) return;
+    host.replaceChildren();
+    setRenderError(null);
+    let view: EditorView;
+    try {
+      view = new EditorView({
+        doc: content,
+        extensions: [
+          basicSetup,
+          EditorView.editable.of(false),
+          EditorState.readOnly.of(true),
+          EditorView.lineWrapping,
+        ],
+        parent: host,
+      });
+    } catch (err) {
+      setRenderError(err instanceof Error ? err.message : String(err));
+      return undefined;
+    }
+    return () => view.destroy();
+  }, [content, sourceRenderer]);
+
+  return (
+    <div className={styles.filePreviewWrap}>
+      {content === null ? (
+        !error && <div className={styles.empty}>Loading file...</div>
+      ) : sourceRenderer ? (
+        <div className={styles.codeMirrorFile}>{sourceRenderer(content)}</div>
+      ) : (
+        <div ref={hostRef} className={styles.codeMirrorFile} />
+      )}
+      {(error || renderError) && (
+        <div className={styles.previewError}>{error || renderError}</div>
+      )}
+    </div>
+  );
+}
+
+function LargeDocumentPreview({
+  content,
+  sizeBytes,
+  workspacePath,
+  workspaceActions,
+  children,
+}: {
+  content: string;
+  sizeBytes?: number;
+  workspacePath: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  children: () => ReactNode;
+}) {
+  const { t } = useI18n();
+  const [renderedContent, setRenderedContent] = useState<string | null>(null);
+  const large = useMemo(
+    () =>
+      (sizeBytes ?? new TextEncoder().encode(content).byteLength) > 1024 * 1024,
+    [content, sizeBytes],
+  );
+  if (!large) return children();
+  const rendered = renderedContent === content;
+  return (
+    <div className="absolute inset-3 flex min-h-0 flex-col gap-2">
+      <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
+        <span>{t('artifact.longDocument')}</span>
+        <Button
+          className="ml-auto shrink-0"
+          variant="outline"
+          size="sm"
+          onClick={() => setRenderedContent(rendered ? null : content)}
+        >
+          {t(rendered ? 'artifact.showSource' : 'artifact.renderFullPreview')}
+        </Button>
+      </div>
+      <div className="relative min-h-0 flex-1 overflow-auto">
+        {rendered ? (
+          children()
+        ) : (
+          <FileArtifactPreview
+            workspacePath={workspacePath}
+            workspaceActions={workspaceActions}
+            previewContent={content}
+            previewOnly
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MarkdownArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  previewSizeBytes,
+  previewOnly,
+  onLoadError,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  previewContent?: string;
+  previewSizeBytes?: number;
+  previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
+}) {
+  const { content, error, sizeBytes } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    previewContent,
+    previewOnly,
+    onLoadError,
+  });
+
+  return (
+    <div className={styles.htmlPreviewWrap}>
+      {content === null ? (
+        !error && <div className={styles.empty}>Loading preview...</div>
+      ) : (
+        <LargeDocumentPreview
+          content={content}
+          sizeBytes={sizeBytes ?? previewSizeBytes}
+          workspacePath={workspacePath}
+          workspaceActions={workspaceActions}
+        >
+          {() => (
+            <div className={styles.markdownPreviewWrap}>
+              <Markdown content={content} />
+            </div>
+          )}
+        </LargeDocumentPreview>
+      )}
+      {error && <div className={styles.previewError}>{error}</div>}
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value?: string }) {
+  if (!value) return null;
+  return (
+    <>
+      <span className={styles.fieldLabel}>{label}</span>
+      <span className={styles.fieldValue}>{value}</span>
+    </>
+  );
+}
+
+function metadataField(
+  metadata: NonNullable<DaemonSessionArtifact['metadata']>,
+  key: string,
+  label: string,
+) {
+  const value = metadata[key];
+  if (value === undefined || value === null || value === '') return null;
+  return <Field key={key} label={label} value={String(value)} />;
+}

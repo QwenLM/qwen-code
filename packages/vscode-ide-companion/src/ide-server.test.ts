@@ -13,9 +13,13 @@ import * as http from 'node:http';
 import { IDEServer } from './ide-server.js';
 import type { DiffManager } from './diff-manager.js';
 
-vi.mock('node:crypto', () => ({
-  randomUUID: vi.fn(() => 'test-auth-token'),
-}));
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...actual,
+    randomUUID: vi.fn(() => 'test-auth-token'),
+  };
+});
 
 const mocks = vi.hoisted(() => ({
   diffManager: {
@@ -104,6 +108,7 @@ describe('IDEServer', () => {
       environmentVariableCollection: {
         replace: vi.fn(),
         clear: vi.fn(),
+        get: vi.fn(),
       },
     } as unknown as vscode.ExtensionContext;
   });
@@ -193,12 +198,28 @@ describe('IDEServer', () => {
     expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
-  it('should set an empty string if no folders are open', async () => {
+  it('should still record an empty workspace path when nothing was persisted', async () => {
     vscodeMock.workspace.workspaceFolders = [];
+    vi.mocked(mockContext.environmentVariableCollection.get).mockImplementation(
+      (name) =>
+        name === 'QWEN_CODE_IDE_SERVER_PORT'
+          ? ({
+              value: '12345',
+              type: 1,
+              options: {},
+            } as unknown as vscode.EnvironmentVariableMutator)
+          : undefined,
+    );
 
     await ideServer.start(mockContext);
     const replaceMock = mockContext.environmentVariableCollection.replace;
 
+    expect(replaceMock).toHaveBeenCalledWith(
+      'QWEN_CODE_IDE_SERVER_PORT',
+      expect.any(String),
+    );
+    // The empty value is a real signal: it tells the CLI a window is open with
+    // no folder, which is a different diagnosis from an absent variable.
     expect(replaceMock).toHaveBeenCalledWith(
       'QWEN_CODE_IDE_WORKSPACE_PATH',
       '',
@@ -223,6 +244,99 @@ describe('IDEServer', () => {
       expectedContent,
     );
     expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
+    expect(
+      mockContext.environmentVariableCollection.clear,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('should restore the persisted path when folders appear after activation', async () => {
+    vscodeMock.workspace.workspaceFolders = [];
+    vi.mocked(mockContext.environmentVariableCollection.get).mockImplementation(
+      (name) =>
+        name === 'QWEN_CODE_IDE_WORKSPACE_PATH'
+          ? ({
+              value: '/remote/workspace',
+              type: 1,
+              options: {},
+            } as unknown as vscode.EnvironmentVariableMutator)
+          : undefined,
+    );
+
+    await ideServer.start(mockContext);
+
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: { fsPath: '/remote/workspace' } },
+    ];
+    await ideServer.syncEnvVars();
+
+    const replaceMock = mockContext.environmentVariableCollection.replace;
+    expect(replaceMock).toHaveBeenCalledWith(
+      'QWEN_CODE_IDE_WORKSPACE_PATH',
+      '/remote/workspace',
+    );
+
+    const port = getPortFromMock(replaceMock);
+    const lockFile = path.join('/home/test', '.qwen', 'ide', `${port}.lock`);
+    expect(fs.writeFile).toHaveBeenLastCalledWith(
+      lockFile,
+      JSON.stringify({
+        port: parseInt(port, 10),
+        workspacePath: '/remote/workspace',
+        ppid: process.ppid,
+        authToken: 'test-auth-token',
+        ideName: 'VS Code',
+      }),
+    );
+  });
+
+  it('should keep a persisted workspace path when no folders are open', async () => {
+    vscodeMock.workspace.workspaceFolders = [];
+    vi.mocked(mockContext.environmentVariableCollection.get).mockImplementation(
+      (name) =>
+        name === 'QWEN_CODE_IDE_WORKSPACE_PATH'
+          ? ({
+              value: '/remote/workspace',
+              type: 1,
+              options: {},
+            } as unknown as vscode.EnvironmentVariableMutator)
+          : undefined,
+    );
+
+    await ideServer.start(mockContext);
+    const replaceMock = mockContext.environmentVariableCollection.replace;
+
+    expect(replaceMock).toHaveBeenCalledWith(
+      'QWEN_CODE_IDE_SERVER_PORT',
+      expect.any(String),
+    );
+
+    const wsCall = vi
+      .mocked(replaceMock)
+      .mock.calls.find((call) => call[0] === 'QWEN_CODE_IDE_WORKSPACE_PATH');
+    expect(wsCall).toBeUndefined();
+
+    const port = getPortFromMock(replaceMock);
+    const expectedLockFile = path.join(
+      '/home/test',
+      '.qwen',
+      'ide',
+      `${port}.lock`,
+    );
+    const expectedContent = JSON.stringify({
+      port: parseInt(port, 10),
+      workspacePath: '/remote/workspace',
+      ppid: process.ppid,
+      authToken: 'test-auth-token',
+      ideName: 'VS Code',
+    });
+    expect(fs.writeFile).toHaveBeenCalledWith(
+      expectedLockFile,
+      expectedContent,
+    );
+    expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
+    expect(
+      mockContext.environmentVariableCollection.clear,
+    ).not.toHaveBeenCalled();
   });
 
   it('should update the path when workspace folders change', async () => {
@@ -471,6 +585,7 @@ describe('IDEServer HTTP endpoints', () => {
       environmentVariableCollection: {
         replace: vi.fn(),
         clear: vi.fn(),
+        get: vi.fn(),
       },
     } as unknown as vscode.ExtensionContext;
     await ideServer.start(mockContext);

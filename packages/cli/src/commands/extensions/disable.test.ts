@@ -9,7 +9,9 @@ import { disableCommand, handleDisable } from './disable.js';
 import yargs from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 
-const mockDisableExtension = vi.hoisted(() => vi.fn());
+const mockDisableExtension = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ warnings: [] }),
+);
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
@@ -72,6 +74,21 @@ describe('extensions disable command', () => {
 describe('handleDisable', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDisableExtension.mockResolvedValue({ warnings: [] });
+  });
+
+  it('prints committed activation warnings', async () => {
+    mockDisableExtension.mockResolvedValueOnce({
+      warnings: [
+        { code: 'extension_runtime_refresh_failed', error: 'refresh failed' },
+      ],
+    });
+
+    await handleDisable({ name: 'test-extension', scope: 'user' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'extension_runtime_refresh_failed: refresh failed',
+    );
   });
 
   it('should disable an extension with user scope', async () => {

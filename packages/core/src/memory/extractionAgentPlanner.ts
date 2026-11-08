@@ -6,158 +6,40 @@
 
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
-import type { PermissionManager } from '../permissions/permission-manager.js';
-import type {
-  PermissionCheckContext,
-  PermissionDecision,
-} from '../permissions/types.js';
 import {
+  MEMORY_CATEGORY_SECTION,
   MEMORY_FRONTMATTER_EXAMPLE,
   TYPES_SECTION_INDIVIDUAL,
   WHAT_NOT_TO_SAVE_SECTION,
 } from './prompt.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
-  isAnyAutoMemPath,
 } from './paths.js';
 import type { AutoMemoryType } from './types.js';
 import {
   scanAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
-} from './scan.js';
+  type ScannedAutoMemoryDocument,
+} from './structured-scan.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
+import {
+  formatDateForContext,
+  stripSystemReminderBlocks,
+} from '../core/environmentContext.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACTION_AGENT');
-
-type MemoryScopedPermissionManager = Pick<
-  PermissionManager,
-  | 'evaluate'
-  | 'findMatchingDenyRule'
-  | 'hasMatchingAskRule'
-  | 'hasRelevantRules'
-  | 'isToolEnabled'
->;
-
-function isScopedTool(toolName: string): boolean {
-  return (
-    toolName === ToolNames.SHELL ||
-    toolName === ToolNames.EDIT ||
-    toolName === ToolNames.WRITE_FILE
-  );
-}
-
-function mergePermissionDecision(
-  scopedDecision: PermissionDecision,
-  baseDecision: PermissionDecision,
-): PermissionDecision {
-  const priority: Record<PermissionDecision, number> = {
-    deny: 4,
-    ask: 3,
-    allow: 2,
-    default: 1,
-  };
-  return priority[baseDecision] > priority[scopedDecision]
-    ? baseDecision
-    : scopedDecision;
-}
-
-async function evaluateScopedDecision(
-  ctx: PermissionCheckContext,
-  projectRoot: string,
-): Promise<PermissionDecision> {
-  switch (ctx.toolName) {
-    case ToolNames.SHELL: {
-      if (!ctx.command) {
-        return 'deny';
-      }
-      const isReadOnly = await isShellCommandReadOnlyAST(
-        stripShellWrapper(ctx.command),
-      );
-      return isReadOnly ? 'allow' : 'deny';
-    }
-    case ToolNames.EDIT:
-    case ToolNames.WRITE_FILE:
-      return ctx.filePath && isAnyAutoMemPath(ctx.filePath, projectRoot)
-        ? 'allow'
-        : 'deny';
-    default:
-      return 'default';
-  }
-}
-
-function getScopedDenyRule(
-  ctx: PermissionCheckContext,
-  projectRoot: string,
-): string | undefined {
-  switch (ctx.toolName) {
-    case ToolNames.SHELL:
-      return 'ManagedAutoMemory(run_shell_command: read-only only)';
-    case ToolNames.EDIT:
-      return `ManagedAutoMemory(edit: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()})`;
-    case ToolNames.WRITE_FILE:
-      return `ManagedAutoMemory(write_file: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()})`;
-    default:
-      return undefined;
-  }
-}
-
-function createMemoryScopedAgentConfig(
-  config: Config,
-  projectRoot: string,
-): Config {
-  const basePm = config.getPermissionManager?.();
-  const scopedPm: MemoryScopedPermissionManager = {
-    hasRelevantRules(ctx: PermissionCheckContext): boolean {
-      return isScopedTool(ctx.toolName) || !!basePm?.hasRelevantRules(ctx);
-    },
-    hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
-      return basePm?.hasMatchingAskRule(ctx) ?? false;
-    },
-    findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
-      const scoped = getScopedDenyRule(ctx, projectRoot);
-      if (scoped) {
-        return scoped;
-      }
-      return basePm?.findMatchingDenyRule(ctx);
-    },
-    async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
-      const scopedDecision = await evaluateScopedDecision(ctx, projectRoot);
-      if (!basePm) {
-        return scopedDecision;
-      }
-      const baseDecision = basePm.hasRelevantRules(ctx)
-        ? await basePm.evaluate(ctx)
-        : 'default';
-      return mergePermissionDecision(scopedDecision, baseDecision);
-    },
-    async isToolEnabled(toolName: string): Promise<boolean> {
-      // Registry-level check: is this tool type allowed at all?
-      // Scoped tools (SHELL/EDIT/WRITE_FILE) are enabled — per-invocation
-      // restrictions are enforced in evaluate().
-      if (isScopedTool(toolName)) {
-        return true;
-      }
-      if (basePm) {
-        return basePm.isToolEnabled(toolName);
-      }
-      return true;
-    },
-  };
-
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
-}
 
 const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   'You are now acting as the managed memory extraction subagent for an AI coding assistant.',
@@ -166,17 +48,28 @@ const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   '',
   'Rules:',
   '- Read existing memory files first to avoid creating duplicates.',
+  '- When editing an existing memory file, preserve its existing emphasis delimiter style (`_text_` or `*text*`); do not mix styles for italic emphasis within a file. For new files, follow the format reference and keep emphasis style consistent within each file.',
+  '- Keep a blank line before and after lists.',
   '- Extract only durable facts stated by the user.',
   '- Ignore temporary, session-specific, speculative, or question content.',
   '- If the user explicitly asks the assistant to remember something durable, preserve it.',
   '- Use one of the allowed topics: user, feedback, project, reference.',
   '- Keep entries concise and suitable for bullet points. No leading bullet markers.',
+  '- Keep one independently retrievable durable fact or rule per file.',
+  '- Create a separate file when new information has different usage scenarios, keywords, or staleness.',
+  '- Keep each memory body near or below 1,200 characters.',
+  '- Choose exactly one fixed category for every memory.',
+  '- Add 1-3 usage_scenarios (at most 64 characters each) for future tasks where this memory would help. Do not repeat the description.',
+  '- Add 2-6 discriminative retrieval terms or short phrases (at most 64 characters each, unique case-insensitively); prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+  '- Reuse an existing canonical term or phrase when it fits; otherwise create a new one.',
+  '- When updating a file, refresh its description, category, usage_scenarios, and full keyword list from the complete content.',
   '- Do not investigate repository code, git history, or unrelated files.',
   '- Work only from the conversation history in your context and the existing memory files.',
   '- If nothing durable should be saved, make no file changes.',
   '',
   ...TYPES_SECTION_INDIVIDUAL,
   ...WHAT_NOT_TO_SAVE_SECTION,
+  ...MEMORY_CATEGORY_SECTION,
   '',
   'Memory file format reference:',
   ...MEMORY_FRONTMATTER_EXAMPLE,
@@ -189,35 +82,50 @@ export interface AutoMemoryExtractionExecutionResult {
   /** True when at least one file inside the user-level memory root was written/edited. */
   touchedUserScope: boolean;
   systemMessage?: string;
+  hasToolActivity: boolean;
+  extractorEngaged?: boolean;
 }
 
 /**
- * Ensure the history slice ends with a `model` text message so that
- * agent-headless can send the task prompt as the first user turn without
- * creating consecutive user messages (Gemini API constraint).
- *
- * - Trailing `user` message: drop it.
- * - Last `model` message has open function calls: close them with placeholder
- *   responses and append a model ack so the sequence stays valid.
- * - Otherwise: return a shallow copy as-is.
+ * Drop runtime reminders and hidden reasoning while preserving tool traffic,
+ * which tells the extractor when the turn only read existing memory.
+ * The resulting history must end with a model text message.
  */
 function buildAgentHistory(history: Content[]): Content[] {
-  if (history.length === 0) return [];
-  const last = history[history.length - 1];
-  if (last.role !== 'model') {
-    return history.slice(0, -1);
+  const sanitized = history.flatMap((message) => {
+    const parts = (message.parts ?? []).flatMap((part) => {
+      if (part.thought) return [];
+      if (typeof part.text !== 'string') return [part];
+      const text = stripSystemReminderBlocks(part.text).trim();
+      return text ? [{ ...part, text }] : [];
+    });
+    return parts.length > 0 ? [{ ...message, parts }] : [];
+  });
+  if (sanitized.length === 0) return [];
+  const last = sanitized[sanitized.length - 1];
+  if (last.role === 'model') {
+    const openCalls = (last.parts ?? []).filter((part) => part.functionCall);
+    if (openCalls.length === 0) return sanitized;
+    return [
+      ...sanitized,
+      {
+        role: 'user' as const,
+        parts: buildFunctionResponseParts(
+          last,
+          'Background extraction started.',
+        ),
+      },
+      { role: 'model' as const, parts: [{ text: 'Acknowledged.' }] },
+    ];
   }
-  const openCalls = (last.parts ?? []).filter((p) => p.functionCall);
-  if (openCalls.length === 0) {
-    return [...history];
-  }
-  const toolResponses = buildFunctionResponseParts(
-    last,
-    'Background extraction started.',
-  );
+  // The tail is a `user` turn — an unanswered prompt or tool responses.
+  // Sanitization above can delete whole messages, so this turn may be the one
+  // that triggered extraction; popping it would silently cost the extractor
+  // the most recent content and can also leave an earlier `functionCall`
+  // dangling at the tail. Appending the model ack satisfies the same
+  // user/model alternation the task prompt needs without discarding anything.
   return [
-    ...history,
-    { role: 'user' as const, parts: toolResponses },
+    ...sanitized,
     { role: 'model' as const, parts: [{ text: 'Acknowledged.' }] },
   ];
 }
@@ -230,7 +138,14 @@ function truncate(text: string, maxChars: number): string {
   return `${normalized.slice(0, maxChars).trimEnd()}…`;
 }
 
-async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
+async function buildExistingMemoryContext(projectRoot: string): Promise<{
+  topicSummaries: string;
+  keywordVocabularySnapshot: string;
+}> {
+  // Deliberately capped, unlike recall (recall.ts) and forget (forget.ts):
+  // every doc is rendered into the extraction agent's task prompt below, so
+  // an uncapped scan would grow that prompt without bound. Anything past the
+  // cap stays reachable — the agent holds read_file/grep/glob/ls.
   // User-level scan is best-effort: a read failure on `~/.qwen/memories/`
   // must not deny the extraction agent its view of existing project-level
   // memories (which it uses to avoid creating duplicates).
@@ -258,18 +173,25 @@ async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
     ].join('\n');
   };
 
+  const docs: ScannedAutoMemoryDocument[] = [...userDocs, ...projectDocs];
   const blocks = [
     ...userDocs.map((doc) => renderDoc(doc, 'user')),
     ...projectDocs.map((doc) => renderDoc(doc, 'project')),
   ];
 
-  return blocks.join('\n\n');
+  return {
+    topicSummaries: blocks.join('\n\n'),
+    keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(docs, {
+      scopes: ['user', 'project'],
+    }),
+  };
 }
 
 function buildTaskPrompt(
   projectMemoryRoot: string,
   userMemoryRoot: string,
   topicSummaries: string,
+  keywordVocabularySnapshot: string,
 ): string {
   return [
     'Managed memory has TWO directories. Choose which one to write each memory into using the per-type `<scope>` guidance in your system instructions:',
@@ -278,12 +200,20 @@ function buildTaskPrompt(
     '',
     'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
     '',
-    'Available tools in this run: `read_file`, `grep_search`, `glob`, `list_directory`, read-only `run_shell_command`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
+    // Inherited history is scrubbed of `<system-reminder>` blocks above, and
+    // those are the only place a date reaches the model (the startup prelude
+    // and the per-turn refresh). Passing extraHistory also suppresses the
+    // fork's own env bootstrap, so the date has to be stated here or the
+    // "convert relative dates to absolute ones" instruction is unanswerable.
+    `Today's date is ${formatDateForContext()} — use it to turn any relative date in the history into an absolute one before saving.`,
+    '',
+    'Available tools in this run: `read_file`, `grep_search`, `glob`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
     '- Do not use any other tools.',
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
     '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
     '- Do not inspect repository code, git history, or unrelated files.',
-    '- Prefer updating an existing memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
+    `- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory in either managed memory root as protected read-only records. You may read them to avoid duplicates, but never modify, overwrite, rename, merge into, or delete them, and do not intentionally remove their valid entries from \`${AUTO_MEMORY_INDEX_FILENAME}\`.`,
+    '- Prefer updating an existing writable memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
     '- Keep one durable memory per file under `user/`, `feedback/`, `project/`, or `reference/` inside the chosen directory.',
     '',
     '## How to save memories',
@@ -296,6 +226,8 @@ function buildTaskPrompt(
     '## Existing memory files (across both directories)',
     '',
     topicSummaries || '(none yet)',
+    '',
+    keywordVocabularySnapshot,
   ].join('\n');
 }
 
@@ -368,23 +300,136 @@ function touchedTopicsFromFilePaths(
   };
 }
 
+/**
+ * #13004: the parked skipped slice and the captured tail both come from the
+ * same live history, and the tail usually still holds the slice — the skip
+ * window (≤ half the tail) makes that the common case, not the exception.
+ * Concatenating both then forks those turns twice. The slice is raw while the
+ * tail is curated and slimmed, so coverage cannot come from raw offsets or
+ * whole-entry equality. The caller slims the slice exactly as the capture
+ * does, and coverage is proved over each side's flattened part sequence —
+ * curation merges adjacent user entries but never rewrites their parts:
+ *
+ * - The tail may begin before the slice (the close-flush shape, where the
+ *   tail is the whole short history): the whole slice then appears as one
+ *   contiguous run inside the tail, so drop it entirely.
+ * - The tail may begin inside the slice: a suffix of the slice, starting at
+ *   one of its entries, is then the tail's prefix; the whole overlap must
+ *   match, so a single repeated value cannot cut turns the tail never held.
+ *
+ * When neither proof holds (curation dropped an invalid model turn inside the
+ * slice), the slice passes through whole — a duplicate, never a loss.
+ */
+function uncoveredParkedPrefix(
+  skippedHistory: Content[],
+  capturedTail: Content[],
+): Content[] {
+  if (skippedHistory.length === 0 || capturedTail.length === 0) {
+    return skippedHistory;
+  }
+  // Texts, tool names, tool arguments and media payloads survive the
+  // capture's shallow copy unchanged. A part with none of them has no stable
+  // key and blocks every
+  // proof it falls in, failing safe toward a duplicate. Arguments keep the
+  // key injective: two `read_file` calls on different paths are not the same
+  // turn.
+  const partKey = (part: NonNullable<Content['parts']>[number]): string => {
+    if (typeof part.text === 'string') return `text:${part.text}`;
+    if (part.functionCall) {
+      return `call:${part.functionCall.name ?? ''}:${JSON.stringify(
+        part.functionCall.args ?? null,
+      )}`;
+    }
+    if (part.functionResponse) {
+      return `response:${part.functionResponse.name ?? ''}:${
+        part.functionResponse.id ?? ''
+      }`;
+    }
+    if (part.inlineData) {
+      return `media:${part.inlineData.mimeType ?? ''}:${part.inlineData.data ?? ''}`;
+    }
+    if (part.fileData) {
+      return `file:${part.fileData.mimeType ?? ''}:${part.fileData.fileUri ?? ''}`;
+    }
+    return '';
+  };
+  const flatten = (entries: Content[]) => {
+    const keys: string[] = [];
+    const entryStarts: number[] = [];
+    for (const entry of entries) {
+      entryStarts.push(keys.length);
+      for (const part of entry.parts ?? []) {
+        const key = partKey(part);
+        keys.push(key === '' ? '' : `${entry.role ?? ''}|${key}`);
+      }
+    }
+    return { keys, entryStarts };
+  };
+  const slice = flatten(skippedHistory);
+  const tail = flatten(capturedTail).keys;
+  const runMatches = (from: number, tailStart: number, count: number) => {
+    for (let k = 0; k < count; k++) {
+      const key = slice.keys[from + k];
+      if (key === '' || key !== tail[tailStart + k]) return false;
+    }
+    return true;
+  };
+
+  const count = slice.keys.length;
+  for (let start = 0; count > 0 && start + count <= tail.length; start++) {
+    if (runMatches(0, start, count)) return [];
+  }
+  for (let i = skippedHistory.length - 1; i >= 1; i--) {
+    const from = slice.entryStarts[i];
+    const overlap = count - from;
+    if (overlap > 0 && overlap <= tail.length && runMatches(from, 0, overlap)) {
+      return skippedHistory.slice(0, i);
+    }
+  }
+  return skippedHistory;
+}
+
 export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
+  skippedHistory: Content[] = [],
+  abortSignal?: AbortSignal,
 ): Promise<AutoMemoryExtractionExecutionResult> {
-  const cacheSafe = getCacheSafeParams();
+  abortSignal?.throwIfAborted();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(
       'runAutoMemoryExtractionByAgent: no cache-safe params available; ' +
         'extraction must run after a completed main turn.',
     );
   }
-  const extraHistory = buildAgentHistory(cacheSafe.history);
+  // Render the parked slice as the capture rendered the tail: the same
+  // placeholders keep stripped media from shipping again, and let media
+  // entries prove coverage.
+  const parked = slimCompactionInput(
+    skippedHistory,
+    config.getEffectiveInputModalities(),
+  ).slimmedHistory;
+  const extraHistory = buildAgentHistory([
+    ...uncoveredParkedPrefix(parked, cacheSafe.history),
+    ...cacheSafe.history,
+  ]);
 
-  const topicSummaries = await buildTopicSummaryBlock(projectRoot);
+  const { topicSummaries, keywordVocabularySnapshot } =
+    await buildExistingMemoryContext(projectRoot);
   const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
   const userMemoryRoot = getUserAutoMemoryRoot();
-  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot);
+  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
+    protectPinnedMemory: true,
+    // Same read confinement the two sibling memory agents pass for this
+    // read-only-memory job (remember.ts, user-dream-agent-planner.ts). The task
+    // prompt already forbids inspecting repository code; without this the
+    // prompt would be the only thing standing between the inherited (untrusted)
+    // history and read_file/grep_search over the whole filesystem. Reads inside
+    // both managed memory roots stay allowed, and `buildExistingMemoryContext`
+    // above runs in the parent, so this does not narrow the parent's own scan.
+    restrictReadsToMemoryPaths: true,
+  });
 
   const result = await runForkedAgent({
     name: 'managed-auto-memory-extractor',
@@ -393,36 +438,46 @@ export async function runAutoMemoryExtractionByAgent(
       projectMemoryRoot,
       userMemoryRoot,
       topicSummaries,
+      keywordVocabularySnapshot,
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
-    maxTurns: 5,
-    maxTimeMinutes: 2,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? 5,
+    maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? 2,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
       ToolNames.GLOB,
-      ToolNames.LS,
-      ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],
     extraHistory,
+    abortSignal,
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: this planner passes no abortSignal, so
+    // runForkedAgent cannot resolve 'cancelled' here.
     throw new Error(
-      result.terminateReason ||
+      terminateReasonMessage(
+        result.terminateReason,
         'Extraction agent did not complete successfully',
+      ),
     );
   }
 
   const { topics, touchedProjectScope, touchedUserScope } =
-    touchedTopicsFromFilePaths(result.filesTouched, projectRoot);
+    touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot);
+  const accessed = touchedTopicsFromFilePaths(
+    [...(result.filesRead ?? []), ...(result.filesWritten ?? [])],
+    projectRoot,
+  );
 
   return {
     touchedTopics: topics,
     touchedProjectScope,
     touchedUserScope,
+    hasToolActivity: result.filesTouched.length > 0,
+    extractorEngaged: accessed.touchedProjectScope || accessed.touchedUserScope,
     systemMessage:
       topics.length > 0
         ? `Managed auto-memory updated: ${topics.map((t) => `${t}.md`).join(', ')}`

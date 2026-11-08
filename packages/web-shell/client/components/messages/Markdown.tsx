@@ -1,23 +1,71 @@
-import { memo, useEffect, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  createElement,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from 'react';
 import { useTheme } from '../../themeContext';
-import ReactMarkdown from 'react-markdown';
-import type { Components } from 'react-markdown';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import type { Components, Options, ExtraProps } from 'react-markdown';
+import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { codeToHtml, type BundledLanguage } from 'shiki';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
+import {
+  getCachedHtml,
+  getCodeHighlighter,
+  highlightToHtmlSync,
+  isTooLargeToHighlight,
+} from './codeHighlighter';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import {
   useWebShellCustomization,
+  type MarkdownTableMode,
   type MarkdownContentSource,
 } from '../../customization';
+import { ErrorBoundary } from '../ErrorBoundary';
+import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import { FootnoteSection, FootnoteSup } from './FootnoteCard';
+import { rehypeFootnoteCards } from './rehype-footnote-cards';
+import {
+  DEFAULT_WEB_SHELL_MARKDOWN_CHART,
+  WebShellMarkdownChartProvider,
+  createWebShellMarkdownChartPre,
+} from './MarkdownChartRenderer';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
   content: string;
   source?: MarkdownContentSource;
-  deferMermaid?: boolean;
+  /**
+   * True while the message is still streaming in. Used to defer expensive,
+   * per-chunk rendering (Mermaid diagrams and Shiki syntax highlighting) until
+   * the content settles, avoiding flicker and wasted re-tokenization.
+   */
+  isStreaming?: boolean;
+  tableMode?: MarkdownTableMode;
 }
+
+// Keep the cost of repeatedly parsing a growing stream bounded. Short streams
+// retain live Markdown; large ones settle into full Markdown once at the end.
+const STREAMING_MARKDOWN_PARSE_LIMIT = 32_000;
 
 const SUPPORTED_LANGUAGES = new Set([
   'javascript',
@@ -29,14 +77,15 @@ const SUPPORTED_LANGUAGES = new Set([
   'c',
   'cpp',
   'csharp',
+  'fsharp',
   'ruby',
   'php',
   'swift',
   'kotlin',
   'scala',
-  'shell',
+  // `shell` and `zsh` are intentionally absent: LANGUAGE_ALIASES maps them to
+  // `bash`, which resolveFenceLanguage applies before this membership check.
   'bash',
-  'zsh',
   'fish',
   'powershell',
   'sql',
@@ -67,8 +116,59 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
+// Common fence aliases → Shiki's canonical language id. This keeps shorthand
+// tags like ```ts and punctuation tags like ```c++ highlighted under the
+// language ids Shiki actually supports.
+const LANGUAGE_ALIASES: Record<string, string> = {
+  'c++': 'cpp',
+  'c#': 'csharp',
+  'f#': 'fsharp',
+  ts: 'typescript',
+  js: 'javascript',
+  py: 'python',
+  rb: 'ruby',
+  rs: 'rust',
+  kt: 'kotlin',
+  cs: 'csharp',
+  sh: 'bash',
+  zsh: 'bash',
+  shell: 'bash',
+  yml: 'yaml',
+  md: 'markdown',
+  golang: 'go',
+  ps1: 'powershell',
+  docker: 'dockerfile',
+};
+
+export interface ResolvedFenceLanguage {
+  /** What the user typed, in its original case, shown in the code-block header. */
+  label: string;
+  /** Canonical language id (aliases resolved); also used to detect mermaid. */
+  lang: string;
+  /** A supported Shiki language id, or 'text' when unsupported (no highlight). */
+  resolvedLang: string;
+}
+
+export function resolveFenceLanguage(
+  rawLang: string | undefined,
+): ResolvedFenceLanguage {
+  const normalized = (rawLang || '').toLowerCase();
+  // `Object.hasOwn` guard: a bracket read like `LANGUAGE_ALIASES['__proto__']`
+  // would otherwise return an inherited prototype value (an object/function),
+  // violating the `lang: string` contract.
+  const lang = Object.hasOwn(LANGUAGE_ALIASES, normalized)
+    ? LANGUAGE_ALIASES[normalized]
+    : normalized;
+  const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
+  // Header label preserves the original case (` ```TypeScript ` shows
+  // "TypeScript", not "typescript"); alias resolution uses the lowercased form.
+  return { label: (rawLang || '').trim() || 'text', lang, resolvedLang };
+}
+
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
-const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
+const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp|bmp);base64,/i;
+const SAFE_DOCUMENT_IMAGE_DATA_URI =
+  /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}$/i;
 
 export function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
@@ -79,112 +179,315 @@ export function isSafeHref(url: string | undefined): boolean {
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
-export function isSafeImageSrc(url: string | undefined): boolean {
+export function isSafeImageSrc(
+  url: string | undefined,
+  documentMode = false,
+): boolean {
   if (!url) return false;
   const trimmed = url.trim();
   if (!trimmed) return false;
+  if (documentMode) return SAFE_DOCUMENT_IMAGE_DATA_URI.test(trimmed);
   if (trimmed.startsWith('#')) return true;
   if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
   if (SAFE_IMAGE_DATA_URI.test(trimmed)) return true;
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
-const SHIKI_CACHE_MAX = 128;
-const shikiCache = new Map<string, string>();
-
-function cachedCodeToHtml(
-  code: string,
-  lang: string,
-  theme: string,
-): Promise<string> {
-  const key = `${lang}\0${theme}\0${code}`;
-  const cached = shikiCache.get(key);
-  if (cached !== undefined) return Promise.resolve(cached);
-  return codeToHtml(code, {
-    lang: lang as BundledLanguage,
-    theme,
-  }).then((html) => {
-    if (shikiCache.size >= SHIKI_CACHE_MAX) {
-      const first = shikiCache.keys().next().value;
-      if (first !== undefined) shikiCache.delete(first);
-    }
-    shikiCache.set(key, html);
-    return html;
-  });
-}
-
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
-let lastMermaidTheme: string | undefined;
+let lastMermaidConfigKey: string | undefined;
+let mermaidRenderQueue: Promise<void> = Promise.resolve();
 let mermaidRenderId = 0;
+const MAX_MERMAID_TEXT_CHARS = 50_000;
+const MAX_MERMAID_EDGES = 500;
+const MERMAID_RENDER_TIMEOUT_MS = 10_000;
+// Must match `.mermaidZoomWrapper`'s padding in Markdown.module.css: the canvas
+// height is set from the diagram's own height plus this both sides.
+const MERMAID_CANVAS_PADDING_PX = 16;
 
 function MermaidBlock({ code }: { code: string }) {
   const { t } = useI18n();
   const appTheme = useTheme();
+  // Document mode no longer reaches this component: since #11091 CodeBlock
+  // renders a mermaid fence as a plain <pre> there, so the export bundle can
+  // drop mermaid entirely. The render limits below were never about the export
+  // format though — they are about rendering a transcript the viewer did not
+  // author and cannot interrupt, which is equally true of readonly replay.
+  const untrustedMode = useTranscriptRenderMode() !== 'interactive';
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
+  const [zoom, setZoom] = useState(1);
+  const [isDragging, setIsDragging] = useState(false);
+  // The canvas is the viewport: panning moves its scroll position, so a drag
+  // and the scrollbar are one mechanism, and the reachable range is the one the
+  // browser already reports for the scaled diagram.
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [isPanned, setIsPanned] = useState(false);
+  // Whether the diagram reaches past the canvas, i.e. whether dragging it has
+  // anywhere to go.
+  const [canPan, setCanPan] = useState(false);
+  // The box the zoom scales, and the height the canvas is held at so that
+  // zooming never reflows the transcript. Both are read off the rendered svg.
+  const [diagramBox, setDiagramBox] = useState<{
+    stageWidth: number;
+    canvasHeight: number;
+  } | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    startLeft: number;
+    startTop: number;
+  } | null>(null);
   const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
+
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 3;
+  const ZOOM_STEP = 0.25;
+
+  const handleZoomIn = () => {
+    setZoom((z) => Math.min(ZOOM_MAX, Math.round((z + ZOOM_STEP) * 100) / 100));
+  };
+  const handleZoomOut = () => {
+    setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 100) / 100));
+  };
+  const resetZoomAndPan = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
+    setZoom(1);
+    const viewport = viewportRef.current;
+    if (viewport) {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    }
+    setIsPanned(false);
+  }, []);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    e.preventDefault();
+    setIsDragging(true);
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: viewport.scrollLeft,
+      startTop: viewport.scrollTop,
+    };
+  }, []);
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollLeft, scrollTop } = e.currentTarget;
+    setIsPanned(scrollLeft !== 0 || scrollTop !== 0);
+  }, []);
+
+  const syncViewport = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    setCanPan(
+      viewport.scrollWidth > viewport.clientWidth ||
+        viewport.scrollHeight > viewport.clientHeight,
+    );
+    setIsPanned(viewport.scrollLeft !== 0 || viewport.scrollTop !== 0);
+  }, []);
+
+  // Mermaid sizes every diagram it renders in a `viewBox`, and that is the size
+  // it designed: the box the zoom scales, and the height the canvas keeps.
+  // Outside `flowchart` — where this component asks for `useMaxWidth: false` —
+  // mermaid also marks the svg `width="100%"`, so those diagrams shrink to the
+  // canvas instead of sitting at their design size. Measuring them here is what
+  // keeps both cases working: a `fit-content` box cannot resolve that percentage
+  // and falls back to the 300x150 default object size.
+  const measureDiagram = useCallback(() => {
+    const viewport = viewportRef.current;
+    const svgEl = stageRef.current?.querySelector('svg');
+    if (!viewport || !svgEl) return;
+    const [, , boxWidth, boxHeight] = (svgEl.getAttribute('viewBox') ?? '')
+      .split(/[\s,]+/)
+      .map(Number);
+    const declaredWidth = (svgEl.getAttribute('width') ?? '').trim();
+    const declaredHeight = Number.parseFloat(
+      svgEl.getAttribute('height') ?? '',
+    );
+    const hasViewBox = boxWidth > 0 && boxHeight > 0;
+    const width = hasViewBox ? boxWidth : Number.parseFloat(declaredWidth);
+    const height = hasViewBox ? boxHeight : declaredHeight;
+    if (!(width > 0) || !(height > 0)) {
+      setDiagramBox(null);
+      return;
+    }
+    const available = viewport.clientWidth - MERMAID_CANVAS_PADDING_PX * 2;
+    const stageWidth =
+      declaredWidth.endsWith('%') && available > 0
+        ? Math.min(width, available)
+        : width;
+    // A classic (space-taking) scrollbar would otherwise be taken out of the
+    // height the canvas is held at, and hide the bottom of a diagram that
+    // exactly fills it. Overlay scrollbars measure zero.
+    const scrollbar = Math.max(
+      0,
+      viewport.offsetHeight - viewport.clientHeight,
+    );
+    setDiagramBox({
+      stageWidth,
+      canvasHeight:
+        (stageWidth * height) / width +
+        MERMAID_CANVAS_PADDING_PX * 2 +
+        scrollbar,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const viewport = viewportRef.current;
+      const drag = dragRef.current;
+      if (!viewport || !drag) return;
+      // Grab semantics: the diagram follows the pointer, so the scroll position
+      // moves against it. The browser clamps at both ends, which is what keeps
+      // the leading edge of an over-wide diagram reachable.
+      viewport.scrollLeft = drag.startLeft - (e.clientX - drag.startX);
+      viewport.scrollTop = drag.startTop - (e.clientY - drag.startY);
+      // Scroll events arrive asynchronously, so report the position the browser
+      // just settled on (assignments are clamped) instead of waiting for one.
+      setIsPanned(viewport.scrollLeft !== 0 || viewport.scrollTop !== 0);
+    };
+
+    const onMouseUp = () => {
+      dragRef.current = null;
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('blur', onMouseUp);
+    };
+  }, [isDragging]);
+
+  useEffect(() => {
+    resetZoomAndPan();
+  }, [code, resetZoomAndPan]);
+
+  // Both the box and the drag affordance follow the rendered diagram, so they are
+  // re-read when it arrives, when the zoom changes (a diagram can reach past the
+  // canvas at one zoom and not another), and when the view is remounted.
+  useLayoutEffect(() => {
+    measureDiagram();
+    syncViewport();
+  }, [svg, zoom, viewMode, measureDiagram, syncViewport]);
+
+  // A narrower column changes both a `width="100%"` diagram's size and whether
+  // there is anything to pan, without either of those React values changing.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(() => {
+      measureDiagram();
+      syncViewport();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [svg, viewMode, measureDiagram, syncViewport]);
 
   useEffect(() => {
     let cancelled = false;
     setSvg(null);
     setError(null);
     const timer = setTimeout(() => {
-      import('mermaid').then(async (mod) => {
-        if (cancelled) return;
-        const mermaid = mod.default;
-        if (lastMermaidTheme !== mermaidTheme) {
-          mermaid.initialize({
-            startOnLoad: false,
-            theme: mermaidTheme,
-            securityLevel: 'strict',
-            suppressErrorRendering: true,
+      import('mermaid')
+        .then(async (mod) => {
+          if (cancelled) return;
+          const mermaid = mod.default;
+          const configKey = `${mermaidTheme}:${untrustedMode ? 'hardened' : 'runtime'}`;
+          const render = mermaidRenderQueue.then(async () => {
+            if (cancelled) throw new Error('Mermaid render skipped');
+            if (lastMermaidConfigKey !== configKey) {
+              mermaid.initialize({
+                startOnLoad: false,
+                theme: mermaidTheme,
+                securityLevel: 'strict',
+                suppressErrorRendering: true,
+                ...(untrustedMode
+                  ? {
+                      maxTextSize: MAX_MERMAID_TEXT_CHARS,
+                      maxEdges: MAX_MERMAID_EDGES,
+                    }
+                  : {}),
+                flowchart: {
+                  wrappingWidth: 300,
+                  useMaxWidth: false,
+                },
+              });
+              lastMermaidConfigKey = configKey;
+            }
+            const id = `mermaid-${++mermaidRenderId}`;
+            if (!untrustedMode) return mermaid.render(id, code.trim());
+            let timeoutId: ReturnType<typeof setTimeout> | undefined;
+            try {
+              return await Promise.race([
+                mermaid.render(id, code.trim()),
+                new Promise<never>((_resolve, reject) => {
+                  timeoutId = setTimeout(
+                    () => reject(new Error('Mermaid render timed out')),
+                    MERMAID_RENDER_TIMEOUT_MS,
+                  );
+                }),
+              ]);
+            } finally {
+              if (timeoutId !== undefined) clearTimeout(timeoutId);
+            }
           });
-          lastMermaidTheme = mermaidTheme;
-        }
-        try {
-          const id = `mermaid-${++mermaidRenderId}`;
-          const { svg } = await mermaid.render(id, code.trim());
+          mermaidRenderQueue = render.then(
+            () => undefined,
+            () => undefined,
+          );
+          const { svg } = await render;
           // No additional sanitization needed: securityLevel:'strict' uses
           // DOMPurify internally to sanitize SVG output.
-          if (!cancelled) {
-            setSvg(svg);
-          }
-        } catch (error: unknown) {
+          if (!cancelled) setSvg(svg);
+        })
+        .catch((error: unknown) => {
           if (!cancelled) {
             setError(
               error instanceof Error ? error.message : 'Mermaid render failed',
             );
           }
-        }
-      });
+        });
     }, 150);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code, mermaidTheme]);
+  }, [code, untrustedMode, mermaidTheme]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      },
-      () => {},
-    );
+    void writeClipboardText(code)
+      .then(() => {
+        flashCopied();
+      })
+      .catch(warnClipboardWriteFailure);
   };
 
   if (error) {
     return (
-      <div className={styles.codeBlock}>
-        <div className={styles.codeBlockHeader}>
-          <span className={styles.codeBlockLang}>mermaid (error)</span>
+      <div className={styles.codeBlock} data-selection-code-language="mermaid">
+        <div className={styles.codeBlockHeader} data-selection-copy-ignore>
+          <span className={styles.codeBlockLang}>
+            {t('mermaid.errorLabel')}
+          </span>
         </div>
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       </div>
@@ -192,10 +495,38 @@ function MermaidBlock({ code }: { code: string }) {
   }
 
   return (
-    <div className={styles.codeBlock}>
-      <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>mermaid</span>
+    <div className={styles.codeBlock} data-selection-code-language="mermaid">
+      <div className={styles.codeBlockHeader} data-selection-copy-ignore>
+        <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
+          {viewMode === 'diagram' && (
+            <>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomOut}
+                title={t('mermaid.zoomOut')}
+                disabled={zoom <= ZOOM_MIN}
+              >
+                {t('mermaid.zoomOut')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={resetZoomAndPan}
+                title={t('mermaid.zoomReset')}
+                disabled={zoom === 1 && !isPanned}
+              >
+                {t('mermaid.zoomReset')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomIn}
+                title={t('mermaid.zoomIn')}
+                disabled={zoom >= ZOOM_MAX}
+              >
+                {t('mermaid.zoomIn')}
+              </button>
+            </>
+          )}
           <button
             className={styles.codeBlockCopy}
             onClick={() =>
@@ -212,20 +543,47 @@ function MermaidBlock({ code }: { code: string }) {
         </span>
       </div>
       {viewMode === 'code' ? (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       ) : !svg ? (
         <div
           className={`${styles.mermaidBlock} ${styles.mermaidLoading} ${styles.mermaidInline}`}
+          data-selection-copy-ignore
+          data-selection-copy-gesture
         >
           <span>{t('mermaid.rendering')}</span>
         </div>
       ) : (
         <div
-          className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
+          className={`${styles.mermaidZoomWrapper} ${canPan ? styles.mermaidPannable : ''} ${
+            canPan && isDragging ? styles.mermaidDragging : ''
+          }`}
+          ref={viewportRef}
+          data-selection-copy-ignore
+          data-selection-copy-gesture
+          style={diagramBox ? { height: diagramBox.canvasHeight } : undefined}
+          onMouseDown={handleMouseDown}
+          onDoubleClick={resetZoomAndPan}
+          onScroll={handleScroll}
+        >
+          <div
+            className={`${styles.mermaidBlock} ${styles.mermaidStage}`}
+            ref={stageRef}
+            style={{
+              ...(diagramBox ? { width: diagramBox.stageWidth } : {}),
+              // `zoom` rather than a transform: it resizes the layout, so the
+              // scroll range follows the scaled diagram. Scaling by transform
+              // leaves Chrome computing that range from the full-size box, which
+              // lets a zoomed-out diagram be scrolled off its own canvas.
+              ...(zoom === 1 ? {} : { zoom }),
+            }}
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        </div>
       )}
     </div>
   );
@@ -234,83 +592,118 @@ function MermaidBlock({ code }: { code: string }) {
 function CodeBlock({
   className,
   children,
-  deferMermaid,
+  isStreaming,
 }: {
   className?: string;
   children: string;
-  deferMermaid?: boolean;
+  isStreaming?: boolean;
 }) {
   const { t } = useI18n();
   const appTheme = useTheme();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [html, setHtml] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
 
-  const match = className?.match(/language-(\w+)/);
-  const lang = match?.[1] || '';
+  const { label, lang, resolvedLang } = resolveFenceLanguage(
+    extractRawFenceLanguage(className),
+  );
   const code = String(children).replace(/\n$/, '');
-  const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
   const shikiTheme =
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
   useEffect(() => {
-    if (lang === 'mermaid' || resolvedLang === 'text') {
+    // Stream code as plain text. Highlighting a growing fence on every chunk
+    // repeatedly tokenizes its entire contents and can dominate rendering for
+    // long responses; the settled render below highlights the final text once.
+    if (
+      documentMode ||
+      isStreaming ||
+      lang === 'mermaid' ||
+      resolvedLang === 'text' ||
+      isTooLargeToHighlight(code)
+    ) {
       setHtml(null);
       return;
     }
 
-    const cacheKey = `${resolvedLang}\0${shikiTheme}\0${code}`;
-    if (shikiCache.has(cacheKey)) {
-      setHtml(shikiCache.get(cacheKey)!);
+    // Already-highlighted exact code/lang/theme (settled re-render, or a block
+    // that re-mounted): return it synchronously without needing the highlighter.
+    const cached = getCachedHtml(code, resolvedLang, shikiTheme);
+    if (cached !== null) {
+      setHtml(cached);
       return;
     }
 
-    let cancelled = false;
+    const warmHtml = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
+    if (warmHtml !== null) {
+      setHtml(warmHtml);
+      return;
+    }
+
+    // Cold path: the grammar isn't loaded yet. Drop any HTML still held from a
+    // previous `code` (e.g. this reused CodeBlock instance just switched to a
+    // not-yet-loaded language on regeneration) so we render the current code as
+    // plain text — not the prior block's stale highlight — until the load
+    // resolves. Then re-check cancellation *before* the synchronous tokenization
+    // so a superseded settled block does not run codeToHtml.
     setHtml(null);
-    const timer = setTimeout(() => {
-      cachedCodeToHtml(code, resolvedLang, shikiTheme)
-        .then((result) => {
-          if (!cancelled) setHtml(result);
-        })
-        .catch(() => {
-          if (!cancelled) setHtml(null);
-        });
-    }, 120);
+    let cancelled = false;
+    getCodeHighlighter(resolvedLang)
+      .then(() => {
+        if (cancelled) return;
+        const cold = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
+        if (cold !== null) setHtml(cold);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn(
+          '[web-shell] highlight failed for lang=%s',
+          resolvedLang,
+          err,
+        );
+        setHtml(null);
+      });
 
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
-  }, [code, lang, resolvedLang, shikiTheme]);
+  }, [code, documentMode, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      },
-      () => {},
-    );
+    void writeClipboardText(code)
+      .then(() => {
+        flashCopied();
+      })
+      .catch(warnClipboardWriteFailure);
   };
 
-  if (lang === 'mermaid' && !deferMermaid) {
+  // In document mode a mermaid fence falls through to the plain <pre> below,
+  // holding its own source: the same degradation this component already applies
+  // to syntax highlighting there, and what lets the export bundle drop mermaid
+  // and its graph dependencies (#11091).
+  if (lang === 'mermaid' && !isStreaming && !documentMode) {
     return <MermaidBlock code={code} />;
   }
 
   return (
-    <div className={styles.codeBlock}>
-      <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>{lang || 'text'}</span>
+    <div className={styles.codeBlock} data-selection-code-language={lang}>
+      <div className={styles.codeBlockHeader} data-selection-copy-ignore>
+        <span className={styles.codeBlockLang}>{label}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {html ? (
+      {!documentMode && !isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
+          dir="auto"
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       )}
@@ -318,104 +711,619 @@ function CodeBlock({
   );
 }
 
-function InlineCode({ children }: { children: ReactNode }) {
-  return <code className={styles.inlineCode}>{children}</code>;
+function extractRawFenceLanguage(className: string | undefined): string {
+  const token = className?.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? '';
+  const match = token.match(/^([\w+.#-]+)/);
+  if (!match) return '';
+  const language = match[1] ?? '';
+  const nextChar = token[language.length];
+  return !nextChar || nextChar === '{' || nextChar === ':' ? language : '';
 }
 
-function createComponents(deferMermaid?: boolean): Components {
-  return {
-    code({
-      className,
-      children,
-    }: {
-      className?: string;
-      children?: ReactNode;
-    }) {
-      const isBlock =
-        className?.startsWith('language-') ||
-        (typeof children === 'string' && children.includes('\n'));
+function InlineCode({ children }: { children: ReactNode }) {
+  return (
+    <code className={styles.inlineCode} dir="auto">
+      {children}
+    </code>
+  );
+}
 
-      if (isBlock) {
+function PlainMarkdownTable({ children }: { children?: ReactNode }) {
+  return (
+    <div className={styles.tableWrapper}>
+      <table className={styles.table}>{children}</table>
+    </div>
+  );
+}
+
+// Carries the streaming flag to CodeBlock via context instead of a closure, so
+// the `code` renderer below can be a single stable reference. Toggling
+// isStreaming then no longer changes the `code` element type, so React reuses
+// the same CodeBlock instance across the streaming→settled transition
+// (preserving its highlighted `html` state) instead of remounting it.
+const IsStreamingContext = createContext(false);
+const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
+  undefined,
+);
+const MarkdownDocumentContext = createContext<string | undefined>(undefined);
+
+interface PositionedCodeNode {
+  readonly position?: {
+    readonly start: { readonly offset?: number };
+    readonly end: { readonly offset?: number };
+  };
+}
+
+function isIncompleteTailFence(
+  document: string | undefined,
+  node: PositionedCodeNode | undefined,
+  isStreaming: boolean,
+): boolean {
+  if (!isStreaming || document === undefined) return false;
+  const start = node?.position?.start.offset;
+  const end = node?.position?.end.offset;
+  if (start === undefined || end === undefined) return false;
+  return (
+    !isMarkdownFenceClosed(document.slice(start, end)) &&
+    document.slice(end).trim().length === 0
+  );
+}
+
+function MarkdownCode({
+  className,
+  children,
+  node,
+}: {
+  className?: string;
+  children?: ReactNode;
+  node?: PositionedCodeNode;
+}) {
+  const isStreaming = useContext(IsStreamingContext);
+  const document = useContext(MarkdownDocumentContext);
+  const isBlock =
+    className?.startsWith('language-') ||
+    (typeof children === 'string' && children.includes('\n'));
+
+  if (isBlock) {
+    return (
+      <MarkdownFencedCode
+        className={className}
+        isStreaming={isStreaming}
+        isIncomplete={isIncompleteTailFence(document, node, isStreaming)}
+      >
+        {children}
+      </MarkdownFencedCode>
+    );
+  }
+  return <InlineCode>{children}</InlineCode>;
+}
+
+function MarkdownFencedCode({
+  className,
+  children,
+  isStreaming,
+  isIncomplete,
+}: {
+  className?: string;
+  children?: ReactNode;
+  isStreaming?: boolean;
+  isIncomplete?: boolean;
+}) {
+  const source = useContext(MarkdownSourceContext);
+  const appTheme = useTheme();
+  const { markdown } = useWebShellCustomization();
+  const rawCode = String(children);
+  const code = rawCode.replace(/\n$/, '');
+  const fallback = (
+    <CodeBlock className={className} isStreaming={isStreaming}>
+      {rawCode}
+    </CodeBlock>
+  );
+  const language = extractRawFenceLanguage(className);
+  const { resolvedLang: resolvedLanguage } = resolveFenceLanguage(language);
+  const canUseCustomRenderer = !!source && !!className && !!language;
+
+  if (canUseCustomRenderer) {
+    try {
+      const custom = markdown?.renderCodeBlock?.({
+        language,
+        resolvedLanguage,
+        className,
+        code,
+        isStreaming: !!isStreaming,
+        isIncomplete: !!isIncomplete,
+        source,
+        theme: appTheme,
+      });
+      if (custom != null && typeof custom !== 'boolean') {
         return (
-          <CodeBlock className={className} deferMermaid={deferMermaid}>
-            {String(children)}
-          </CodeBlock>
+          <ErrorBoundary
+            fallback={fallback}
+            label={`custom code block component render (lang=${language})`}
+            resetKeys={[
+              language,
+              source,
+              appTheme,
+              isStreaming ? 'streaming' : 'settled',
+              isIncomplete ? 'incomplete' : 'complete',
+              code,
+            ]}
+          >
+            {custom}
+          </ErrorBoundary>
         );
       }
-      return <InlineCode>{children}</InlineCode>;
-    },
-    pre({ children }: { children?: ReactNode }) {
-      return <>{children}</>;
-    },
-    a({ href, children }: { href?: string; children?: ReactNode }) {
-      const safeHref = isSafeHref(href) ? href : undefined;
-      return (
-        <a
-          href={safeHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={styles.link}
-        >
-          {children}
-        </a>
+    } catch (error) {
+      console.error(
+        '[web-shell] custom code block renderer call failed (lang=%s):',
+        language,
+        error,
       );
-    },
+    }
+  }
+
+  return fallback;
+}
+
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  return <>{children}</>;
+}
+
+/** `qwen-session://<id>` links are intercepted and dispatched as a DOM event
+ * (`qwen:open-session`) so the app shell can navigate to the session without
+ * the markdown renderer needing to know about session management. */
+const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
+
+/**
+ * react-markdown sanitizes every href through `defaultUrlTransform`, which
+ * allows only `http(s)`, `irc(s)`, `mailto` and `xmpp` and rewrites everything
+ * else to `''`. Without this, `qwen-session://<id>` never reaches
+ * {@link MarkdownLink} with its scheme intact, the interception below is dead
+ * code, and the link renders as an inert anchor.
+ *
+ * Letting the scheme through is safe: `MarkdownLink` never puts it in the DOM.
+ * It renders `href="#"` and dispatches the id as an event, so nothing navigates
+ * to a `qwen-session:` URL — and an unknown scheme is inert in a browser anyway.
+ * Every other href keeps the default sanitizer.
+ */
+export function markdownUrlTransform(
+  url: string,
+  documentMode = false,
+): string {
+  if (documentMode && SAFE_DOCUMENT_IMAGE_DATA_URI.test(url.trim())) {
+    return url;
+  }
+  return QWEN_SESSION_SCHEME.test(url.trim()) ? url : defaultUrlTransform(url);
+}
+
+function MarkdownLink({
+  href,
+  children,
+  node,
+  id,
+  'aria-label': ariaLabel,
+  'aria-describedby': ariaDescribedBy,
+}: ComponentProps<'a'> & ExtraProps) {
+  const renderMode = useTranscriptRenderMode();
+  const openExternalLink = useExternalLinkOpener();
+  const footnote =
+    node?.properties.dataFootnoteRef !== undefined ||
+    node?.properties.dataFootnoteBackref !== undefined;
+  if (footnote && href?.startsWith('#')) {
+    return (
+      <a
+        id={id}
+        href={href}
+        className={styles.link}
+        aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
+        data-footnote-ref={
+          node?.properties.dataFootnoteRef !== undefined ? '' : undefined
+        }
+        data-footnote-backref={
+          node?.properties.dataFootnoteBackref !== undefined ? '' : undefined
+        }
+        onClick={(event) => {
+          const root = event.currentTarget.getRootNode() as
+            | Document
+            | ShadowRoot;
+          const target = root.getElementById(href.slice(1));
+          if (!target) return;
+          event.preventDefault();
+          target.scrollIntoView({ block: 'nearest' });
+          if (!target.hasAttribute('tabindex') && target.tagName !== 'BUTTON')
+            target.tabIndex = -1;
+          target.focus({ preventScroll: true });
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
+  if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    if (renderMode !== 'interactive') {
+      return <span className={styles.link}>{children}</span>;
+    }
+    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    return (
+      <a
+        href="#"
+        role="button"
+        className={styles.link}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('qwen:open-session', { detail: sessionId }),
+          );
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
+  const safeHref = isSafeHref(href) ? href : undefined;
+  return (
+    <a
+      href={safeHref}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={styles.link}
+      onClick={(event) => openExternalLink(event, safeHref)}
+    >
+      {children}
+    </a>
+  );
+}
+
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const renderMode = useTranscriptRenderMode();
+  const safeSrc = isSafeImageSrc(src, renderMode === 'document')
+    ? src
+    : undefined;
+  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+}
+
+/**
+ * Throttles a rapidly changing value (like a streaming string) to prevent
+ * O(n²) re-parsing of the entire Markdown AST on every token.
+ */
+function useThrottledValue(
+  value: string,
+  isStreaming: boolean | undefined,
+  intervalMs: number = 80,
+): string {
+  const [throttled, setThrottled] = useState(value);
+  const throttledRef = useRef(throttled);
+  throttledRef.current = throttled;
+  const lastRunRef = useRef(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      // Flush immediately when streaming stops
+      if (throttledRef.current !== value) {
+        setThrottled(value);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - lastRunRef.current;
+
+    if (elapsed >= intervalMs) {
+      lastRunRef.current = now;
+      setThrottled(valueRef.current);
+    } else if (!timeoutRef.current) {
+      timeoutRef.current = setTimeout(() => {
+        lastRunRef.current = Date.now();
+        timeoutRef.current = null;
+        setThrottled(valueRef.current);
+      }, intervalMs - elapsed);
+    }
+  }, [value, isStreaming, intervalMs]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  if (!isStreaming) return value;
+
+  // Bypass throttle for non-monotonic changes
+  if (
+    typeof value === 'string' &&
+    typeof throttled === 'string' &&
+    !value.startsWith(throttled)
+  ) {
+    return value;
+  }
+
+  return throttled;
+}
+
+// `code`/`pre`/`a`/`img` are stable references; only `table` is created per
+// call (it closes over tableMode/tableResetKey). Recreating the components
+// object for a table reset therefore never changes the `code` element type, so
+// code blocks are not remounted.
+function createComponents(
+  tableMode: MarkdownTableMode = 'basic',
+  tableResetKey = '',
+): Components {
+  return {
+    code: MarkdownCode,
+    pre: MarkdownPre,
+    a: MarkdownLink,
+    img: MarkdownImage,
+    sup: FootnoteSup,
+    section: FootnoteSection,
     table({ children }: { children?: ReactNode }) {
-      return (
-        <div className={styles.tableWrapper}>
-          <table className={styles.table}>{children}</table>
-        </div>
-      );
-    },
-    img({ src, alt }: { src?: string; alt?: string }) {
-      const safeSrc = isSafeImageSrc(src) ? src : undefined;
-      return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+      if (tableMode === 'advanced') {
+        const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
+        return (
+          <ErrorBoundary
+            fallback={fallback}
+            label="enhanced markdown table"
+            resetKeys={[tableResetKey]}
+          >
+            <EnhancedMarkdownTable fallback={fallback}>
+              {children}
+            </EnhancedMarkdownTable>
+          </ErrorBoundary>
+        );
+      }
+      return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
     },
   };
 }
 
 const COMPONENTS_DEFAULT = createComponents();
-const COMPONENTS_DEFER_MERMAID = createComponents(true);
+
+/**
+ * Isolated memoized renderer. This ensures react-markdown ONLY re-parses
+ * when the throttled content or plugin references actually change.
+ */
+const MemoizedMarkdownRenderer = memo(function MemoizedMarkdownRenderer({
+  content,
+  components,
+  remarkPlugins,
+  rehypePlugins,
+  urlTransform,
+}: {
+  content: string;
+  components: Options['components'];
+  remarkPlugins: Options['remarkPlugins'];
+  rehypePlugins: Options['rehypePlugins'];
+  urlTransform: Options['urlTransform'];
+}) {
+  return (
+    <ReactMarkdown
+      components={components}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={urlTransform}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
 
 export const Markdown = memo(function Markdown({
   content,
   source,
-  deferMermaid,
+  isStreaming,
+  tableMode,
 }: MarkdownProps) {
-  const { markdown } = useWebShellCustomization();
+  const { markdown, markdownTableMode } = useWebShellCustomization();
+  const theme = useTheme();
+  const documentMode = useTranscriptRenderMode() === 'document';
+  const footnotePrefix = `footnote-${useId()}-`;
+  const sourceMarkdown = source ? markdown : undefined;
+
+  const throttledContent = useThrottledValue(content ?? '', isStreaming);
+  const renderStreamingPlainText =
+    isStreaming === true &&
+    throttledContent.length > STREAMING_MARKDOWN_PARSE_LIMIT;
+  const renderedContent = useMemo(
+    () =>
+      throttledContent && source && sourceMarkdown?.transformMarkdown
+        ? sourceMarkdown.transformMarkdown(throttledContent, {
+            source,
+            isStreaming: isStreaming === true,
+          })
+        : throttledContent,
+    [source, sourceMarkdown, throttledContent, isStreaming],
+  );
+
+  const effectiveTableMode = isStreaming
+    ? 'basic'
+    : (tableMode ?? markdownTableMode ?? 'basic');
+
+  // Memoize components so references stay stable during throttle window
+  const components = useMemo(() => {
+    if (effectiveTableMode === 'advanced') {
+      return createComponents('advanced', renderedContent);
+    }
+    return COMPONENTS_DEFAULT;
+  }, [effectiveTableMode, renderedContent]);
+
+  const sourceComponents = sourceMarkdown?.components;
+  const inlineFootnoteIcon = sourceMarkdown?.getInlineFootnoteIcon;
+  const mountFootnotePreview = sourceMarkdown?.mountFootnotePreview;
+  const renderedComponents = useMemo(() => {
+    if (!sourceComponents && !inlineFootnoteIcon && !mountFootnotePreview)
+      return components;
+    const rendered = {
+      ...components,
+      ...sourceComponents,
+      ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
+    };
+    const SourceLink = sourceComponents?.a;
+    if (sourceComponents) {
+      rendered.a = (props) => {
+        const footnote =
+          props.node?.properties.dataFootnoteRef !== undefined ||
+          props.node?.properties.dataFootnoteBackref !== undefined;
+        if (footnote || !SourceLink) return <MarkdownLink {...props} />;
+        if (typeof SourceLink !== 'string')
+          return createElement(SourceLink, props);
+        const { node: _node, ...elementProps } = props;
+        return createElement(SourceLink, elementProps);
+      };
+    }
+    if (!sourceComponents?.sup) {
+      rendered.sup = (props) => (
+        <FootnoteSup
+          {...props}
+          linkComponent={SourceLink}
+          iconResolver={inlineFootnoteIcon}
+          mountPreview={mountFootnotePreview}
+        />
+      );
+      rendered.section = (props) => (
+        <FootnoteSection
+          {...props}
+          sectionComponent={sourceComponents?.section}
+        />
+      );
+    }
+    return rendered;
+  }, [
+    components,
+    effectiveTableMode,
+    sourceComponents,
+    inlineFootnoteIcon,
+    mountFootnotePreview,
+  ]);
+  const chart =
+    !documentMode &&
+    source === 'assistant' &&
+    !sourceComponents?.code &&
+    !sourceComponents?.pre
+      ? (sourceMarkdown?.chart ??
+        (sourceMarkdown?.renderCodeBlock
+          ? undefined
+          : DEFAULT_WEB_SHELL_MARKDOWN_CHART))
+      : undefined;
+  const chartPre = useMemo(
+    () =>
+      chart
+        ? createWebShellMarkdownChartPre(chart.registry, {
+            chartClassName: chart.chartClassName,
+            chartStyle: { minHeight: 360, ...chart.chartStyle },
+          })
+        : undefined,
+    [chart],
+  );
+  const componentsWithCharts = useMemo(
+    () =>
+      chartPre
+        ? {
+            ...renderedComponents,
+            pre: chartPre,
+          }
+        : renderedComponents,
+    [chartPre, renderedComponents],
+  );
+
+  // Memoize plugins so their array references remain stable.
+  const remarkPlugins = useMemo(() => {
+    return sourceMarkdown?.remarkPlugins
+      ? [
+          remarkGfm,
+          remarkMath,
+          remarkCjkFriendly,
+          ...sourceMarkdown.remarkPlugins,
+        ]
+      : [remarkGfm, remarkMath, remarkCjkFriendly];
+  }, [sourceMarkdown?.remarkPlugins]);
+
+  const rehypePlugins = useMemo(() => {
+    return [
+      rehypeKatex,
+      ...(sourceMarkdown?.rehypePlugins ?? []),
+      [
+        rehypeFootnoteCards,
+        {
+          prefix: footnotePrefix,
+          group: !documentMode && !sourceComponents?.sup,
+          safeHref: isSafeHref,
+          safeImage: isSafeImageSrc,
+          transformUrl: markdownUrlTransform,
+        },
+      ],
+    ] satisfies NonNullable<Options['rehypePlugins']>;
+  }, [
+    sourceMarkdown?.rehypePlugins,
+    footnotePrefix,
+    documentMode,
+    sourceComponents?.sup,
+  ]);
+  const urlTransform = useMemo(
+    () => (url: string) => markdownUrlTransform(url, documentMode),
+    [documentMode],
+  );
 
   if (!content) return null;
 
-  const sourceMarkdown = source ? markdown : undefined;
-  const renderedContent =
-    source && sourceMarkdown?.transformMarkdown
-      ? sourceMarkdown.transformMarkdown(content, { source })
-      : content;
-  const components = deferMermaid
-    ? COMPONENTS_DEFER_MERMAID
-    : COMPONENTS_DEFAULT;
-  const renderedComponents = sourceMarkdown?.components
-    ? { ...components, ...sourceMarkdown.components }
-    : components;
-  const remarkPlugins = sourceMarkdown?.remarkPlugins
-    ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
-    : [remarkGfm, remarkMath];
-  const rehypePlugins = sourceMarkdown?.rehypePlugins
-    ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-    : [rehypeKatex];
+  if (renderStreamingPlainText) {
+    return (
+      <div
+        className={source !== 'thinking' ? styles.content : undefined}
+        data-markdown-source={source}
+        dir="auto"
+        data-markdown-streaming-plain-text="true"
+      >
+        <pre className={styles.streamingPlainText}>{renderedContent}</pre>
+      </div>
+    );
+  }
+
+  const renderedMarkdown = (
+    <MemoizedMarkdownRenderer
+      content={renderedContent}
+      components={componentsWithCharts}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={urlTransform}
+    />
+  );
+  const chartAwareMarkdown = chart ? (
+    <WebShellMarkdownChartProvider
+      customization={chart}
+      source={renderedContent}
+      streaming={!!isStreaming}
+      theme={theme}
+    >
+      {renderedMarkdown}
+    </WebShellMarkdownChartProvider>
+  ) : (
+    renderedMarkdown
+  );
 
   return (
     <div
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
+      dir="auto"
     >
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
-        components={renderedComponents}
-      >
-        {renderedContent}
-      </ReactMarkdown>
+      <IsStreamingContext.Provider value={!!isStreaming}>
+        <MarkdownSourceContext.Provider value={source}>
+          <MarkdownDocumentContext.Provider value={renderedContent}>
+            {chartAwareMarkdown}
+          </MarkdownDocumentContext.Provider>
+        </MarkdownSourceContext.Provider>
+      </IsStreamingContext.Provider>
     </div>
   );
 });

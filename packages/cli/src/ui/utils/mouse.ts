@@ -18,6 +18,15 @@ const ESC = '\x1b';
 export const SGR_EVENT_PREFIX = `${ESC}[<`;
 export const X11_EVENT_PREFIX = `${ESC}[M`;
 
+/**
+ * Upper bound on an SGR mouse sequence's length while still incomplete. SGR
+ * sequences (`\x1b[<btn;col;rowM`) are short; once a buffer exceeds this
+ * without a terminator it is treated as garbage and abandoned so it doesn't
+ * swallow real input. Shared by isIncompleteMouseSequence and the SGR
+ * reassembly buffer in KeypressContext.
+ */
+export const MAX_SGR_MOUSE_SEQUENCE_LENGTH = 50;
+
 // eslint-disable-next-line no-control-regex
 export const SGR_MOUSE_REGEX = /^\x1b\[<(\d+);(\d+);(\d+)([mM])/;
 // eslint-disable-next-line no-control-regex
@@ -179,23 +188,52 @@ export function isIncompleteMouseSequence(buffer: string): boolean {
     return buffer.length < X11_EVENT_PREFIX.length + 3;
   }
   if (buffer.startsWith(SGR_EVENT_PREFIX)) {
-    // SGR ends with 'm' or 'M'. Cap at 50 bytes to fail garbage early.
-    return !/[mM]/.test(buffer) && buffer.length < 50;
+    // SGR ends with 'm' or 'M'. Cap the length to fail garbage early.
+    return (
+      !/[mM]/.test(buffer) && buffer.length < MAX_SGR_MOUSE_SEQUENCE_LENGTH
+    );
   }
   // Prefix of the prefix (e.g. "ESC" or "ESC [")
   return true;
 }
 
-// `?1002h` = button-event tracking (presses, releases, drags, wheel).
-// `?1006h` = SGR extended coordinates (handles cols/rows beyond 223).
-// Sent together — most terminals ignore unknown modes silently.
-const ENABLE_SGR_MOUSE = '\x1b[?1002h\x1b[?1006h';
-const DISABLE_SGR_MOUSE = '\x1b[?1006l\x1b[?1002l';
+/**
+ * Mouse tracking level:
+ * - `'button'` (`?1002h`): button-event tracking — presses, releases, wheel,
+ *   and motion *while a button is held down* (drag). Does NOT report bare
+ *   hover. This is the cheaper mode used by scroll/drag consumers.
+ * - `'any'` (`?1003h`): any-event tracking — everything `'button'` reports
+ *   plus bare pointer motion (hover) with no button down. Required for
+ *   hover highlighting; the cost is a continuous stream of motion events and
+ *   suppression of the terminal's native click-drag text selection (holding
+ *   Shift/Option lets the user select text regardless).
+ *
+ * `?1006h` = SGR extended coordinates (handles cols/rows beyond 223), enabled
+ * for both levels. Modes are sent together — most terminals ignore unknown
+ * modes silently. 1002 and 1003 are mutually exclusive on the terminal, so
+ * switching levels must disable the old one (see useMouseEvents).
+ */
+export type MouseTracking = 'button' | 'any';
 
-export function enableMouseEvents(stdout: NodeJS.WriteStream): void {
-  stdout.write(ENABLE_SGR_MOUSE);
+const ENABLE_SGR_MOUSE: Record<MouseTracking, string> = {
+  button: '\x1b[?1002h\x1b[?1006h',
+  any: '\x1b[?1003h\x1b[?1006h',
+};
+const DISABLE_SGR_MOUSE: Record<MouseTracking, string> = {
+  button: '\x1b[?1006l\x1b[?1002l',
+  any: '\x1b[?1006l\x1b[?1003l',
+};
+
+export function enableMouseEvents(
+  stdout: NodeJS.WriteStream,
+  tracking: MouseTracking = 'button',
+): void {
+  stdout.write(ENABLE_SGR_MOUSE[tracking]);
 }
 
-export function disableMouseEvents(stdout: NodeJS.WriteStream): void {
-  stdout.write(DISABLE_SGR_MOUSE);
+export function disableMouseEvents(
+  stdout: NodeJS.WriteStream,
+  tracking: MouseTracking = 'button',
+): void {
+  stdout.write(DISABLE_SGR_MOUSE[tracking]);
 }

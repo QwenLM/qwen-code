@@ -14,6 +14,7 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   resolveAndValidatePath,
+  formatDisplayPath,
   resolvePath,
   isSubpath,
   unescapePath,
@@ -21,7 +22,7 @@ import {
 
 import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { isGitRepository } from '../utils/gitUtils.js';
+import { isGitRepository, NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
@@ -282,6 +283,14 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
         resultFilePaths,
+        // This render is already bounded, so the scheduler must not measure
+        // its own body and report it as the raw size. The pre-reduction size
+        // existed only inside the append loop that skipped it, and rebuilding
+        // the full render to count it is the allocation the limit avoids;
+        // declare it unknown instead (#13652 R2-5).
+        ...(truncatedByLineLimit || truncatedByCharLimit
+          ? { rawOutputSize: null, truncatedByProducer: true }
+          : {}),
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);
@@ -407,7 +416,11 @@ class GrepToolInvocation extends BaseToolInvocation<
    * @returns A string describing the grep
    */
   getDescription(): string {
-    let description = `'${this.params.pattern}' in path '${this.params.path || './'}'`;
+    const displayPath = formatDisplayPath(
+      this.params.path || '.',
+      this.config.getTargetDir(),
+    );
+    let description = `'${this.params.pattern}' in ${displayPath}`;
     if (this.params.glob) {
       description += ` (filter: '${this.params.glob}')`;
     }
@@ -436,13 +449,23 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       if (gitAvailable) {
         strategyUsed = 'git grep';
+        // The pattern goes behind `-e` so that one beginning with a dash is
+        // read as the pattern instead of as an option. Passed positionally,
+        // `git grep -E '-n'` consumes the `-n` as an option and then fails with
+        // `fatal: no pattern given` -- and that failure is swallowed by the
+        // fallback below, which has the same flaw with a quieter symptom.
         const gitArgs = [
+          // `git grep` refreshes the index, which is what runs a
+          // repository-planted `core.fsmonitor` helper; only the `--untracked`
+          // below keeps this particular argv from doing so.
+          ...NO_EXEC_CONFIG,
           'grep',
           '--untracked',
           '-n',
           '-z',
           '-E',
           '--ignore-case',
+          '-e',
           pattern,
         ];
         if (glob) {
@@ -515,7 +538,12 @@ class GrepToolInvocation extends BaseToolInvocation<
         if (glob) {
           grepArgs.push(`--include=${glob}`);
         }
-        grepArgs.push(pattern);
+        // Same reason as the `-e` above, but this strategy fails silently
+        // rather than loudly: with the pattern passed positionally, grep
+        // consumes a leading-dash pattern as an option and promotes the `.`
+        // search path to be the pattern, which matches every line of every
+        // file. The model is handed the whole tree as if it were the result.
+        grepArgs.push('-e', pattern);
         grepArgs.push('.');
 
         try {
@@ -664,7 +692,7 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     super(
       GrepTool.Name,
       ToolDisplayNames.GREP,
-      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n',
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n',
       Kind.Search,
       {
         properties: {

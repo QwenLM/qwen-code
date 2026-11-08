@@ -1,0 +1,589 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
+  lastHistoryContentFromRecords,
+  restorableAskUserQuestionCallIds,
+  type ChatRecord,
+  type Config,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type HistoryGap,
+  type SessionTranscriptCursorState,
+  type SessionTranscriptRecordPage,
+} from '@qwen-code/qwen-code-core';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
+import { Buffer } from 'node:buffer';
+import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
+import { HistoryReplayer } from './history-replayer.js';
+import type { PendingReplayToolCall } from './history-replayer.js';
+import type { CumulativeUsage, SessionEmitterContext } from './types.js';
+
+interface ReplayLogger {
+  warn(message: string, ...args: unknown[]): void;
+}
+
+export class HistoryReplayLimitError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly reason: 'bytes' | 'updates',
+    readonly observed: number,
+    readonly limit: number,
+  ) {
+    super(
+      `Transcript replay for session ${sessionId} exceeds the ${reason} limit (${observed}, max ${limit})`,
+    );
+    this.name = 'HistoryReplayLimitError';
+  }
+}
+
+export interface HistoryReplayLimits {
+  maxBytes: number;
+  maxUpdates: number;
+}
+
+export function createReplayCumulativeUsage(): CumulativeUsage {
+  return {
+    promptTokens: 0,
+    cachedTokens: 0,
+    candidateTokens: 0,
+    apiTimeMs: 0,
+  };
+}
+
+export function copyCumulativeUsage(
+  target: CumulativeUsage,
+  source: CumulativeUsage,
+): void {
+  target.promptTokens = source.promptTokens;
+  target.cachedTokens = source.cachedTokens;
+  target.candidateTokens = source.candidateTokens;
+  target.apiTimeMs = source.apiTimeMs;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isCumulativeUsage(value: unknown): value is CumulativeUsage {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['promptTokens'] === 'number' &&
+    Number.isFinite(value['promptTokens']) &&
+    typeof value['cachedTokens'] === 'number' &&
+    Number.isFinite(value['cachedTokens']) &&
+    typeof value['candidateTokens'] === 'number' &&
+    Number.isFinite(value['candidateTokens']) &&
+    typeof value['apiTimeMs'] === 'number' &&
+    Number.isFinite(value['apiTimeMs'])
+  );
+}
+
+function isPendingReplayToolCall(
+  value: unknown,
+): value is PendingReplayToolCall {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['callId'] === 'string' &&
+    typeof value['toolName'] === 'string' &&
+    (value['timestamp'] === undefined ||
+      typeof value['timestamp'] === 'string') &&
+    typeof value['recordId'] === 'string'
+  );
+}
+
+function isCurrentPendingReplayToolCall(
+  value: unknown,
+): value is TranscriptReplayStateV1['pendingToolCalls'][number] {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['callId'] === 'string' &&
+    typeof value['toolName'] === 'string' &&
+    typeof value['sourceRecordId'] === 'string' &&
+    (value['sourceTimestamp'] === undefined ||
+      typeof value['sourceTimestamp'] === 'string')
+  );
+}
+
+function parseTranscriptReplayState(
+  replay: unknown,
+  logger?: ReplayLogger,
+): {
+  pendingToolCalls: PendingReplayToolCall[];
+  cumulativeUsage: CumulativeUsage;
+  goalState?: GoalSnapshotV2;
+  goalCause?: GoalStateCause;
+} {
+  if (!isObjectRecord(replay)) {
+    return {
+      pendingToolCalls: [],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    };
+  }
+  if ('v' in replay && replay['v'] !== 1) {
+    throw new TypeError('Unsupported transcript replay state version.');
+  }
+  const rawPending = replay['pendingToolCalls'];
+  const pendingToolCalls = Array.isArray(rawPending)
+    ? rawPending.flatMap((pending): PendingReplayToolCall[] => {
+        if (isPendingReplayToolCall(pending)) return [pending];
+        if (isCurrentPendingReplayToolCall(pending)) {
+          return [
+            {
+              callId: pending.callId,
+              toolName: pending.toolName,
+              ...(pending.resolvedToolName
+                ? { resolvedToolName: pending.resolvedToolName }
+                : {}),
+              recordId: pending.sourceRecordId,
+              ...(pending.sourceTimestamp
+                ? { timestamp: pending.sourceTimestamp }
+                : {}),
+              ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+              ...(pending.timingMatched
+                ? { timingMatched: true as const }
+                : {}),
+            },
+          ];
+        }
+        return [];
+      })
+    : [];
+  if (
+    logger &&
+    Array.isArray(rawPending) &&
+    pendingToolCalls.length !== rawPending.length
+  ) {
+    const dropped = rawPending.length - pendingToolCalls.length;
+    logger.warn(
+      `[transcript] replay state dropped ${dropped} of ${rawPending.length} malformed pending tool calls`,
+    );
+  }
+  const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
+    ? { ...replay['cumulativeUsage'] }
+    : createReplayCumulativeUsage();
+  const rawGoalState = replay['goalState'];
+  const goalState =
+    rawGoalState === undefined ? undefined : parseGoalSnapshotV2(rawGoalState);
+  if (logger && rawGoalState !== undefined && !goalState) {
+    logger.warn('[transcript] replay state dropped a malformed Goal state');
+  }
+  const rawGoalCause = replay['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (logger && rawGoalCause !== undefined && !goalCause) {
+    logger.warn('[transcript] replay state dropped a malformed Goal cause');
+  }
+  return {
+    pendingToolCalls,
+    cumulativeUsage,
+    ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
+  };
+}
+
+/**
+ * Copy a replayed update with its MCP App `html` blanked, or undefined
+ * when the update carries no App html to lose. `fallbackText` stays: the
+ * client renders it in place of the App. App html is the one replay field
+ * that can reach multiple MiB (bounded only by the per-server App
+ * resource limit), so it is the field a page-level byte budget degrades.
+ */
+export function blankReplayedMcpAppHtml(
+  update: SessionUpdate,
+): SessionUpdate | undefined {
+  const record = update as unknown as Record<string, unknown>;
+  if (record['sessionUpdate'] !== 'tool_call_update') return undefined;
+  const rawOutput = record['rawOutput'];
+  if (
+    !isObjectRecord(rawOutput) ||
+    rawOutput['type'] !== 'mcp_app' ||
+    typeof rawOutput['html'] !== 'string' ||
+    rawOutput['html'] === ''
+  ) {
+    return undefined;
+  }
+  const blanked = {
+    ...record,
+    rawOutput: {
+      ...rawOutput,
+      html: '',
+      fallbackText:
+        rawOutput['fallbackText'] ||
+        'MCP App HTML omitted because the restored page exceeds its size limit.',
+    },
+  };
+  // Blanking can inject `fallbackText`, so the swapped frame may serialize
+  // larger than the one it replaces; the reclaim loops apply that signed
+  // delta. Compare whole frames, and report no App html to lose when the
+  // swap would not shrink one.
+  if (
+    Buffer.byteLength(JSON.stringify(blanked), 'utf8') >=
+    Buffer.byteLength(JSON.stringify(record), 'utf8')
+  ) {
+    return undefined;
+  }
+  return blanked as unknown as SessionUpdate;
+}
+
+/**
+ * Blank replayed MCP App `html` oldest-first until the serialized
+ * envelope fits `maxBytes`. The replay accounting bounds the updates
+ * array itself; this backstop covers the envelope wrapper so validation
+ * cannot fail closed on a page whose App documents degrade cleanly. A
+ * page that still does not fit after every App is degraded is left for
+ * the caller's validator.
+ */
+export function degradeReplayEnvelopeAppHtml(
+  envelope: { updates: SessionUpdate[] },
+  maxBytes: number,
+): void {
+  let pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  for (let i = 0; i < envelope.updates.length && pageBytes > maxBytes; i++) {
+    const update = envelope.updates[i]!;
+    const blanked = blankReplayedMcpAppHtml(update);
+    if (blanked === undefined) continue;
+    pageBytes +=
+      Buffer.byteLength(JSON.stringify(blanked), 'utf8') -
+      Buffer.byteLength(JSON.stringify(update), 'utf8');
+    envelope.updates[i] = blanked;
+  }
+}
+
+function replayContext(
+  sessionId: string,
+  updates: SessionUpdate[],
+  cumulativeUsage: CumulativeUsage,
+  config?: Config,
+  limits?: HistoryReplayLimits,
+): SessionEmitterContext {
+  let activeRecordId: string | null = null;
+  let serializedUpdateBytes = 2;
+  return {
+    sessionId,
+    sendUpdate: async (update) => {
+      const projectedUpdate = projectAcpToolResultUpdate(update);
+      const updateWithRecordId = (() => {
+        if (activeRecordId === null) return projectedUpdate;
+        const record = projectedUpdate as unknown as Record<string, unknown>;
+        const meta = isObjectRecord(record['_meta']) ? record['_meta'] : {};
+        return {
+          ...record,
+          _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
+        } as unknown as SessionUpdate;
+      })();
+      let deliveredUpdate = liftSessionUpdateTimestamp(updateWithRecordId);
+      observeAcpToolResultProjection(
+        update,
+        projectedUpdate,
+        sessionId,
+        deliveredUpdate,
+      );
+      if (limits) {
+        const updateCount = updates.length + 1;
+        if (updateCount > limits.maxUpdates) {
+          throw new HistoryReplayLimitError(
+            sessionId,
+            'updates',
+            updateCount,
+            limits.maxUpdates,
+          );
+        }
+        let updateBytes =
+          (updates.length === 0 ? 0 : 1) +
+          Buffer.byteLength(JSON.stringify(deliveredUpdate), 'utf8');
+        if (serializedUpdateBytes + updateBytes > limits.maxBytes) {
+          // A page holding several ceiling-size App documents serializes
+          // past the envelope cap; blank App html oldest-first — the
+          // client renders `fallbackText` instead — rather than failing
+          // the whole load closed.
+          for (
+            let i = 0;
+            i < updates.length &&
+            serializedUpdateBytes + updateBytes > limits.maxBytes;
+            i++
+          ) {
+            const blanked = blankReplayedMcpAppHtml(updates[i]!);
+            if (blanked === undefined) continue;
+            serializedUpdateBytes -=
+              Buffer.byteLength(JSON.stringify(updates[i]!), 'utf8') -
+              Buffer.byteLength(JSON.stringify(blanked), 'utf8');
+            updates[i] = blanked;
+          }
+          if (serializedUpdateBytes + updateBytes > limits.maxBytes) {
+            const blanked = blankReplayedMcpAppHtml(deliveredUpdate);
+            if (blanked !== undefined) {
+              deliveredUpdate = blanked;
+              updateBytes =
+                (updates.length === 0 ? 0 : 1) +
+                Buffer.byteLength(JSON.stringify(blanked), 'utf8');
+            }
+          }
+        }
+        serializedUpdateBytes += updateBytes;
+        if (serializedUpdateBytes > limits.maxBytes) {
+          throw new HistoryReplayLimitError(
+            sessionId,
+            'bytes',
+            serializedUpdateBytes,
+            limits.maxBytes,
+          );
+        }
+      }
+      updates.push(deliveredUpdate);
+    },
+    setActiveRecordId: (recordId: string | null) => {
+      activeRecordId = recordId;
+    },
+    cumulativeUsage,
+    ...(config ? { config } : {}),
+  };
+}
+
+export async function collectHistoryReplayUpdates({
+  sessionId,
+  config,
+  records,
+  gaps,
+  cumulativeUsage,
+  logger,
+  replayState,
+  goalBootstrap,
+  limits,
+  suppressRestoreAskUserQuestion,
+  finalizeDangling,
+  branchPointsByAssistantUuid,
+}: {
+  sessionId: string;
+  config?: Config;
+  records: ChatRecord[];
+  gaps?: HistoryGap[];
+  cumulativeUsage: CumulativeUsage;
+  logger?: ReplayLogger;
+  replayState?: unknown;
+  goalBootstrap?: import('./history-replayer.js').HistoryReplayGoalBootstrap;
+  limits?: HistoryReplayLimits;
+  /**
+   * The daemon declined the re-hang (no attached client / fork restore):
+   * finalize the trailing ask_user_question normally instead of skipping it,
+   * so the replayed card doesn't spin forever with no restore prompt coming.
+   */
+  suppressRestoreAskUserQuestion?: boolean;
+  /**
+   * Ungated live-session loads (qwen/session/loadUpdates) while the
+   * session still has an active turn must not finalize dangling calls: a
+   * trailing unmatched call is in-flight, not abandoned, and its result
+   * arrives through the live stream (#9704). The gated live loadSession
+   * path and non-live loads pass true.
+   */
+  finalizeDangling?: boolean;
+  /**
+   * Branch checkpoints keyed by assistant record uuid, stamped onto the
+   * replayed updates so a session restored from disk still offers Branch.
+   */
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
+}): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
+  const updates: SessionUpdate[] = [];
+  let replayError: string | undefined;
+  try {
+    const initial = parseTranscriptReplayState(replayState, logger);
+    // Prefer live chat when it is initialized (authoritative after startChat
+    // preserve). Cold bulk replay runs before startChat — `getChat()` throws
+    // — so fall back to the transcript tail instead of finalizing the
+    // dangling question that load is about to re-hang.
+    let skipFinalizeCallIds: Set<string> | undefined;
+    if (
+      suppressRestoreAskUserQuestion !== true &&
+      config?.getRestoreAskUserQuestion?.() === true
+    ) {
+      const replayClient = config.getLlmClient?.();
+      const lastHistoryContent =
+        replayClient?.isInitialized?.() === true
+          ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
+            lastHistoryContentFromRecords(records))
+          : lastHistoryContentFromRecords(records);
+      skipFinalizeCallIds =
+        restorableAskUserQuestionCallIds(lastHistoryContent);
+    }
+    await new HistoryReplayer(
+      replayContext(sessionId, updates, cumulativeUsage, config, limits),
+    ).replay(records, gaps, {
+      ...(initial.goalState ? { initialGoalState: initial.goalState } : {}),
+      ...(initial.goalCause ? { initialGoalCause: initial.goalCause } : {}),
+      ...(goalBootstrap ? { goalBootstrap } : {}),
+      ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
+      ...(finalizeDangling === undefined ? {} : { finalizeDangling }),
+    });
+  } catch (error) {
+    if (error instanceof HistoryReplayLimitError) throw error;
+    replayError = error instanceof Error ? error.message : String(error);
+    logger?.warn(
+      '[historyReplay] History replay failed for session %s (partial updates: %d):',
+      sessionId,
+      updates.length,
+      error,
+    );
+  }
+  if (branchPointsByAssistantUuid) {
+    stampBranchPoints(updates, branchPointsByAssistantUuid);
+  }
+  return replayError === undefined ? { updates } : { updates, replayError };
+}
+
+function liftSessionUpdateTimestamp(update: SessionUpdate): SessionUpdate {
+  const record = update as Record<string, unknown>;
+  const meta = record['_meta'];
+  const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
+  return typeof timestamp === 'number' || typeof timestamp === 'string'
+    ? ({ ...record, timestamp } as unknown as SessionUpdate)
+    : update;
+}
+
+export interface ReplayedTranscriptPage {
+  updates: SessionUpdate[];
+  nextCursor?: string;
+  hasMore: boolean;
+  startTime: string;
+  lastUpdated: string;
+  partial?: true;
+  replayError?: string;
+}
+
+function readTranscriptSourceRecordIds(
+  update: SessionUpdate,
+): string[] | undefined {
+  const value = update as unknown as Record<string, unknown>;
+  const meta =
+    value['_meta'] && typeof value['_meta'] === 'object'
+      ? (value['_meta'] as Record<string, unknown>)
+      : undefined;
+  const transcript =
+    meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const sourceRecordIds = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(sourceRecordIds)) return undefined;
+  return sourceRecordIds.filter((id): id is string => typeof id === 'string');
+}
+
+// A checkpoint marks the END of its source record, which can replay as
+// several chunks (text/thought/text). Only the LAST visible assistant chunk
+// of the record may expose the branch point: an earlier chunk would restore
+// the record's later content when branched from, and an empty-text usage
+// chunk normalizes to `assistant.usage`, which drops the metadata.
+function stampBranchPoints(
+  updates: SessionUpdate[],
+  branchPoints: Readonly<Record<string, string>>,
+): void {
+  const lastChunkIndexByRecordId = new Map<string, number>();
+  updates.forEach((update, index) => {
+    if (update.sessionUpdate !== 'agent_message_chunk') return;
+    const text = (update as { content?: { text?: unknown } }).content?.text;
+    if (typeof text !== 'string' || text.length === 0) return;
+    for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+      // Own-property check: transcript record uuids are untrusted input,
+      // and names like 'toString' would otherwise pass via the prototype
+      // chain.
+      if (Object.hasOwn(branchPoints, recordId)) {
+        lastChunkIndexByRecordId.set(recordId, index);
+      }
+    }
+  });
+  const decoratedIndexes = new Set<number>();
+  for (const [recordId, index] of lastChunkIndexByRecordId) {
+    if (decoratedIndexes.has(index)) continue;
+    decoratedIndexes.add(index);
+    const value = updates[index] as unknown as Record<string, unknown>;
+    const meta =
+      value['_meta'] && typeof value['_meta'] === 'object'
+        ? (value['_meta'] as Record<string, unknown>)
+        : undefined;
+    const transcript =
+      meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+        ? (meta['qwenTranscript'] as Record<string, unknown>)
+        : undefined;
+    value['_meta'] = {
+      ...meta,
+      qwenTranscript: {
+        ...transcript,
+        branchRecordId: branchPoints[recordId],
+      },
+    };
+  }
+}
+
+export async function replayTranscriptRecordPage({
+  sessionId,
+  page,
+  config,
+  encodeCursor,
+  logger,
+  finalizeDangling = true,
+}: {
+  sessionId: string;
+  page: SessionTranscriptRecordPage;
+  config?: Config;
+  encodeCursor: (state: SessionTranscriptCursorState) => string;
+  logger?: ReplayLogger;
+  finalizeDangling?: boolean;
+}): Promise<ReplayedTranscriptPage> {
+  const state = parseTranscriptReplayState(page.replay, logger);
+  const updates: SessionUpdate[] = [];
+  const replayer = new HistoryReplayer(
+    replayContext(sessionId, updates, state.cumulativeUsage, config),
+  );
+  let replayState: TranscriptReplayStateV1;
+  let replayError: string | undefined;
+  try {
+    const replayPageState = await replayer.replayPage(page.records, {
+      pendingToolCalls:
+        page.direction === 'backward' ? [] : state.pendingToolCalls,
+      finalizeDangling:
+        finalizeDangling && (page.direction === 'backward' || !page.hasMore),
+      gaps: page.gaps,
+      // Paged replay is where trajectory inspection reads from, and its pages
+      // are bounded by records and bytes rather than by an update count.
+      includeTiming: true,
+      ...(state.goalState ? { goalState: state.goalState } : {}),
+      ...(state.goalCause ? { goalCause: state.goalCause } : {}),
+    });
+    replayState = replayPageState.replay;
+  } catch (error) {
+    logger?.warn(
+      '[historyReplay] Paged history replay failed for session %s (partial updates: %d):',
+      sessionId,
+      updates.length,
+      error,
+    );
+    replayState = replayer.getReplayState();
+    replayError = 'Replay conversion failed for this page';
+  }
+
+  if (page.branchPointsByAssistantUuid) {
+    stampBranchPoints(updates, page.branchPointsByAssistantUuid);
+  }
+
+  const nextCursor =
+    page.nextCursorState && replayError === undefined
+      ? encodeCursor({
+          ...page.nextCursorState,
+          ...(page.direction === 'backward' ? {} : { replay: replayState }),
+        })
+      : undefined;
+
+  return {
+    updates,
+    ...(nextCursor ? { nextCursor } : {}),
+    hasMore: replayError === undefined && page.hasMore,
+    startTime: page.startTime,
+    lastUpdated: page.lastUpdated,
+    ...(replayError ? { partial: true, replayError } : {}),
+  };
+}

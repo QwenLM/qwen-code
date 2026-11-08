@@ -94,6 +94,12 @@ describe('availableModels', () => {
             authType: AuthType.QWEN_OAUTH,
             isVision: false,
           },
+          {
+            id: 'image',
+            label: 'Image',
+            authType: AuthType.QWEN_OAUTH,
+            imageOnly: true,
+          },
         ]),
       } as unknown as Config;
 
@@ -170,6 +176,15 @@ describe('availableModels', () => {
       process.env['OPENAI_MODEL'] = 'gpt-4-turbo';
       const models = getAvailableModelsForAuthType(AuthType.USE_OPENAI);
       expect(models[0].id).toBe('gpt-4-turbo');
+    });
+
+    it('should return env model for openai responses without config', () => {
+      process.env['OPENAI_MODEL'] = 'gpt-5';
+      process.env['OPENAI_API_KEY'] = 'test-key';
+      const models = getAvailableModelsForAuthType(
+        AuthType.USE_OPENAI_RESPONSES,
+      );
+      expect(models[0].id).toBe('gpt-5');
     });
 
     it('should return empty array for openai without config or env', () => {

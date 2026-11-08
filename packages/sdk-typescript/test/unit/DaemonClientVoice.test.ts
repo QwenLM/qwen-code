@@ -1,0 +1,339 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
+
+interface CapturedRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: BodyInit | null;
+  signal?: AbortSignal | null;
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function recordingFetch(
+  reply: (req: CapturedRequest) => Response | Promise<Response>,
+): { fetch: typeof globalThis.fetch; calls: CapturedRequest[] } {
+  const calls: CapturedRequest[] = [];
+  const fetchImpl = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const headers: Record<string, string> = {};
+      if (init?.headers) {
+        const h = new Headers(init.headers);
+        h.forEach((v, k) => (headers[k.toLowerCase()] = v));
+      }
+      const captured = {
+        url,
+        method: init?.method ?? 'GET',
+        headers,
+        body: init?.body ?? null,
+        signal: init?.signal ?? null,
+      };
+      calls.push(captured);
+      return reply(captured);
+    },
+  ) as unknown as typeof globalThis.fetch;
+  return { fetch: fetchImpl, calls };
+}
+
+describe('DaemonClient voice helpers', () => {
+  it('GETs workspace voice status', async () => {
+    const body = {
+      v: 1,
+      workspaceCwd: '/work',
+      enabled: false,
+      mode: 'hold',
+      language: '',
+      voiceModel: null,
+      availableVoiceModels: [],
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(client.workspaceVoice()).resolves.toEqual(body);
+    expect(calls[0]?.url).toBe('http://daemon/workspace/voice');
+    expect(calls[0]?.method).toBe('GET');
+  });
+
+  it('POSTs workspace voice settings with client identity', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        v: 1,
+        workspaceCwd: '/work',
+        enabled: true,
+        mode: 'tap',
+        language: 'english',
+        voiceModel: 'qwen3-asr-flash',
+        availableVoiceModels: [],
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await client.setWorkspaceVoice(
+      { enabled: true, mode: 'tap', language: 'english' },
+      'client-1',
+    );
+
+    expect(calls[0]?.url).toBe('http://daemon/workspace/voice');
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['content-type']).toBe('application/json');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({
+      enabled: true,
+      mode: 'tap',
+      language: 'english',
+    });
+  });
+
+  it('POSTs binary voice audio with content type and optional voice model', async () => {
+    const response = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, response));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const audio = new Uint8Array([1, 2, 3]);
+
+    await expect(
+      client.transcribeWorkspaceVoice(audio, {
+        mimeType: 'audio/wav',
+        voiceModel: 'qwen3-asr-flash',
+        clientId: 'client-1',
+      }),
+    ).resolves.toEqual(response);
+
+    expect(calls[0]?.url).toBe(
+      'http://daemon/workspace/voice/transcribe?voiceModel=qwen3-asr-flash',
+    );
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['content-type']).toBe('audio/wav');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(calls[0]?.body).toBe(audio);
+  });
+
+  it('uses the encoded workspace selector for qualified Voice requests', async () => {
+    const status = {
+      v: 1,
+      workspaceCwd: '/work with space',
+      enabled: true,
+      mode: 'hold',
+      language: '',
+      voiceModel: 'qwen3-asr-flash',
+      availableVoiceModels: [],
+    };
+    const transcription = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.includes('/transcribe')
+        ? jsonResponse(200, transcription)
+        : jsonResponse(200, status),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const workspace = client.workspaceByCwd('/work with space');
+
+    await expect(workspace.workspaceVoice('client-1')).resolves.toEqual(status);
+    await expect(
+      workspace.setWorkspaceVoice({ enabled: true }, 'client-2'),
+    ).resolves.toEqual(status);
+    await expect(
+      workspace.transcribeWorkspaceVoice(new Uint8Array([1, 2]), {
+        mimeType: 'audio/wav',
+        voiceModel: 'qwen3 asr',
+        clientId: 'client-3',
+      }),
+    ).resolves.toEqual(transcription);
+
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://daemon/workspaces/%2Fwork%20with%20space/voice',
+      'http://daemon/workspaces/%2Fwork%20with%20space/voice',
+      'http://daemon/workspaces/%2Fwork%20with%20space/voice/transcribe?voiceModel=qwen3+asr',
+    ]);
+    expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-2');
+    expect(calls[2]?.headers['content-type']).toBe('audio/wav');
+    expect(calls[2]?.headers['x-qwen-client-id']).toBe('client-3');
+  });
+
+  it('applies a custom timeout to qualified Voice transcription', async () => {
+    vi.useFakeTimers();
+    try {
+      let requestSignal: AbortSignal | null | undefined;
+      const fetch = vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) => {
+          requestSignal = init?.signal;
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          });
+        },
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = client
+        .workspaceById('secondary-id')
+        .transcribeWorkspaceVoice(new Uint8Array([1]), {
+          mimeType: 'audio/wav',
+          timeoutMs: 25,
+        });
+      const settled = result.catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(25);
+      await settled;
+
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses the REST endpoint for binary voice audio when ACP transport is configured', async () => {
+    const response = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, response));
+    const acpTransport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: false,
+      connected: true,
+      fetch: vi.fn(async () => {
+        throw new Error('ACP transport cannot carry binary voice bodies');
+      }),
+      subscribeEvents: vi.fn(() => emptyAsyncEvents()),
+      dispose: vi.fn(),
+    };
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      fetch,
+      transport: acpTransport,
+    });
+
+    await expect(
+      client.transcribeWorkspaceVoice(new Uint8Array([1, 2, 3]), {
+        mimeType: 'audio/wav',
+      }),
+    ).resolves.toEqual(response);
+
+    expect(acpTransport.fetch).not.toHaveBeenCalled();
+    expect(calls[0]?.url).toBe('http://daemon/workspace/voice/transcribe');
+    expect(calls[0]?.method).toBe('POST');
+  });
+
+  it('uses REST for every qualified Voice method when ACP transport is configured', async () => {
+    const status = {
+      v: 1,
+      workspaceCwd: '/secondary',
+      enabled: false,
+      mode: 'hold',
+      language: '',
+      voiceModel: null,
+      availableVoiceModels: [],
+    };
+    const transcription = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const { fetch, calls } = recordingFetch((request) =>
+      jsonResponse(
+        200,
+        request.url.endsWith('/transcribe') ? transcription : status,
+      ),
+    );
+    const acpTransport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: false,
+      connected: true,
+      fetch: vi.fn(async () => {
+        throw new Error('qualified Voice must not use ACP route mapping');
+      }),
+      subscribeEvents: vi.fn(() => emptyAsyncEvents()),
+      dispose: vi.fn(),
+    };
+    const workspace = new DaemonClient({
+      baseUrl: 'http://daemon',
+      fetch,
+      transport: acpTransport,
+    }).workspaceById('secondary-id');
+
+    await expect(workspace.workspaceVoice()).resolves.toEqual(status);
+    await expect(
+      workspace.setWorkspaceVoice({ enabled: false }),
+    ).resolves.toEqual(status);
+    await expect(
+      workspace.transcribeWorkspaceVoice(new Uint8Array([1]), {
+        mimeType: 'audio/wav',
+      }),
+    ).resolves.toEqual(transcription);
+
+    expect(acpTransport.fetch).not.toHaveBeenCalled();
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'GET http://daemon/workspaces/secondary-id/voice',
+      'POST http://daemon/workspaces/secondary-id/voice',
+      'POST http://daemon/workspaces/secondary-id/voice/transcribe',
+    ]);
+  });
+
+  it('allows voice transcription to run longer than the client default timeout', async () => {
+    const response = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const fetch = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(
+              init.signal!.reason ?? new DOMException('aborted', 'AbortError'),
+            );
+          });
+          setTimeout(() => resolve(jsonResponse(200, response)), 20);
+        }),
+    ) as unknown as typeof globalThis.fetch;
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      fetch,
+      fetchTimeoutMs: 1,
+    });
+
+    await expect(
+      client.transcribeWorkspaceVoice(new Uint8Array([1, 2, 3]), {
+        mimeType: 'audio/wav',
+      }),
+    ).resolves.toEqual(response);
+  });
+});
+
+async function* emptyAsyncEvents() {
+  yield* [];
+}

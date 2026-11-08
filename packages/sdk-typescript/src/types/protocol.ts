@@ -1,6 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { PermissionMode } from './permission-mode.js';
+
+export type { PermissionMode } from './permission-mode.js';
 export interface Annotation {
   type: string;
   value: string;
@@ -92,6 +95,7 @@ export interface APIAssistantMessage {
 
 export interface SDKUserMessage {
   type: 'user';
+  origin?: { kind: 'human' };
   uuid?: string;
   session_id: string;
   message: APIUserMessage;
@@ -120,7 +124,7 @@ export interface SDKSystemMessage {
     status: string;
   }>;
   model?: string;
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   slash_commands?: string[];
   qwen_code_version?: string;
   output_style?: string;
@@ -230,16 +234,16 @@ export interface SDKPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
-
 /**
  * Authentication types supported by the CLI.
  * Aligns with CLI's --auth-type parameter.
  */
 export type AuthType =
   | 'openai'
+  | 'openai-responses'
   | 'anthropic'
   | 'qwen-oauth'
+  | 'qwen-subscription'
   | 'gemini'
   | 'vertex-ai';
 
@@ -269,6 +273,15 @@ export interface CLIControlInterruptRequest {
   subtype: 'interrupt';
 }
 
+/**
+ * Continue the most recent unfinished turn from existing history without
+ * sending a new user message. The reply reports whether a continuation was
+ * accepted; the resumed turn's output then flows as regular stream messages.
+ */
+export interface CLIControlContinueLastTurnRequest {
+  subtype: 'continue_last_turn';
+}
+
 export interface CLIControlPermissionRequest {
   subtype: 'can_use_tool';
   tool_name: string;
@@ -294,6 +307,9 @@ export interface MCPServerConfig {
   headers?: Record<string, string>;
   tcp?: string;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -348,6 +364,12 @@ export interface CLIControlInitializeRequest {
    */
   mcpServers?: Record<string, MCPServerConfig>;
   agents?: SubagentConfig[];
+  /**
+   * Initial reasoning effort tier: 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+   * Applied at session start via config.setReasoningEffort().
+   */
+  effort?: string;
+  workflowMode?: boolean;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -391,8 +413,32 @@ export interface CLIControlGetContextUsageRequest {
   show_details?: boolean;
 }
 
+export interface CLIControlSetEffortRequest {
+  subtype: 'set_effort';
+  effort: string;
+}
+
+export interface CLIControlGetWorkflowModeRequest {
+  subtype: 'get_workflow_mode';
+}
+
+export interface CLIControlSetWorkflowModeRequest {
+  subtype: 'set_workflow_mode';
+  enabled: boolean;
+}
+
+export interface CLIControlGetAvailableModelsRequest {
+  subtype: 'get_available_models';
+}
+
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
+  | CLIControlContinueLastTurnRequest
   | CLIControlPermissionRequest
   | CLIControlInitializeRequest
   | CLIControlSetPermissionModeRequest
@@ -401,7 +447,12 @@ export type ControlRequestPayload =
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlSetEffortRequest
+  | CLIControlGetWorkflowModeRequest
+  | CLIControlSetWorkflowModeRequest
+  | CLIControlGetAvailableModelsRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
@@ -569,6 +620,8 @@ export interface SubagentConfig {
   model?: string;
   runConfig?: Partial<RunConfig>;
   color?: string;
+  /** Requires container execution; cannot lower the operator's backend policy. */
+  executionBackend?: 'container';
   readonly isBuiltin?: boolean;
 }
 
@@ -592,9 +645,15 @@ export enum ControlRequestType {
   // SystemController requests
   INITIALIZE = 'initialize',
   INTERRUPT = 'interrupt',
+  CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
+  GET_WORKFLOW_MODE = 'get_workflow_mode',
+  SET_WORKFLOW_MODE = 'set_workflow_mode',
+  SET_EFFORT = 'set_effort',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',
+  GET_AVAILABLE_MODELS = 'get_available_models',
+  GET_USAGE_INFO = 'get_usage_info',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',

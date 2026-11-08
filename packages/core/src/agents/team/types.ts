@@ -82,8 +82,6 @@ export interface TeamMember {
   cwd: string;
   /** Tmux pane ID (empty string for in-process). */
   tmuxPaneId: string;
-  /** Git worktree path if isolated. */
-  worktreePath?: string;
   /** Backend type used to spawn this member. */
   backendType?: DisplayMode;
   /** false = idle, undefined/true = active. */
@@ -92,6 +90,8 @@ export interface TeamMember {
   subscriptions: string[];
   /** Whether plan mode is required for this member. */
   planModeRequired?: boolean;
+  /** Whether this member is restricted to read-only investigation. */
+  readOnly?: boolean;
   /** Permission mode for this member. */
   mode?: PermissionMode;
   /** Phase 2: member's session UUID. */
@@ -168,6 +168,8 @@ export interface TeammateIdentity {
   color?: string;
   /** Whether this agent is the team leader. */
   isTeamLead: boolean;
+  /** Whether this teammate must submit its plan for leader approval. */
+  planModeRequired?: boolean;
   /** Session ID of the parent (leader) session. */
   parentSessionId?: string;
 }

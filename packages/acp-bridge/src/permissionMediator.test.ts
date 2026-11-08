@@ -83,6 +83,7 @@ function makeRecord(
   return {
     requestId: overrides.requestId ?? 'req-1',
     sessionId: overrides.sessionId ?? 'sess-1',
+    ...('promptId' in overrides ? { promptId: overrides.promptId } : {}),
     originatorClientId:
       'originatorClientId' in overrides
         ? overrides.originatorClientId
@@ -131,7 +132,7 @@ describe('MultiClientPermissionMediator — first-responder', () => {
 
   it('synchronously registers pending in `request()` (N1 invariant)', () => {
     const { mediator } = makeMediator();
-    const record = makeRecord();
+    const record = makeRecord({ promptId: 'prompt-permission' });
 
     // The Promise returned by request() must be already-pending; the
     // pending entry must be visible to peekSessionFor BEFORE we await.
@@ -144,7 +145,7 @@ describe('MultiClientPermissionMediator — first-responder', () => {
 
   it('resolves on first valid vote and emits permission_resolved with voter clientId as originator (O8)', async () => {
     const { mediator, calls, events } = makeMediator();
-    const record = makeRecord();
+    const record = makeRecord({ promptId: 'prompt-permission' });
     const promise = mediator.request(record, 5_000);
 
     const outcome = mediator.vote(makeVote({ clientId: 'client_B' }));
@@ -166,6 +167,7 @@ describe('MultiClientPermissionMediator — first-responder', () => {
       sessionId: 'sess-1',
       event: {
         type: 'permission_resolved',
+        promptId: 'prompt-permission',
         data: {
           requestId: 'req-1',
           outcome: { outcome: 'selected', optionId: 'proceed_once' },
@@ -194,7 +196,7 @@ describe('MultiClientPermissionMediator — first-responder', () => {
 
   it('omits both voterClientId and originatorClientId on permission_resolved when voter has no clientId', async () => {
     const { mediator, events } = makeMediator();
-    const record = makeRecord();
+    const record = makeRecord({ promptId: 'prompt-permission' });
     const promise = mediator.request(record, 5_000);
 
     mediator.vote(makeVote({ clientId: undefined }));
@@ -209,7 +211,7 @@ describe('MultiClientPermissionMediator — first-responder', () => {
 
   it('returns already_resolved on a duplicate vote and re-emits the SSE notification', async () => {
     const { mediator, events } = makeMediator();
-    const record = makeRecord();
+    const record = makeRecord({ promptId: 'prompt-permission' });
     const promise = mediator.request(record, 5_000);
 
     mediator.vote(makeVote({ clientId: 'client_A' }));
@@ -234,6 +236,7 @@ describe('MultiClientPermissionMediator — first-responder', () => {
       'permission_already_resolved',
     ]);
     const lateEvent = events[1]!;
+    expect(lateEvent.event.promptId).toBe('prompt-permission');
     expect(lateEvent.event.data).toEqual({
       requestId: 'req-1',
       sessionId: 'sess-1',
@@ -486,6 +489,77 @@ describe('MultiClientPermissionMediator — forgetSession', () => {
   });
 });
 
+describe('MultiClientPermissionMediator — cancelForPrompt', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('cancels only the pending requests attributed to the finished turn', async () => {
+    const { mediator, events } = makeMediator();
+    const promiseTurn = mediator.request(
+      makeRecord({
+        requestId: 'req-turn',
+        sessionId: 'sess-1',
+        promptId: 'turn-1',
+      }),
+      5_000,
+    );
+    const promiseUser = mediator.request(
+      makeRecord({
+        requestId: 'req-user',
+        sessionId: 'sess-1',
+        promptId: 'user-1',
+      }),
+      5_000,
+    );
+    const promiseOtherSession = mediator.request(
+      makeRecord({
+        requestId: 'req-other',
+        sessionId: 'sess-2',
+        promptId: 'turn-1',
+      }),
+      5_000,
+    );
+
+    mediator.cancelForPrompt('sess-1', 'turn-1');
+
+    await expect(promiseTurn).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'agent_cancelled',
+    });
+    // Same session but a live user prompt: untouched.
+    expect(mediator.peekSessionFor('req-user')).toBe('sess-1');
+    // Same turnId on a different session: untouched.
+    expect(mediator.peekSessionFor('req-other')).toBe('sess-2');
+    const resolved = events.filter(
+      (e) => e.event.type === 'permission_resolved',
+    );
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].sessionId).toBe('sess-1');
+    expect(resolved[0].event.promptId).toBe('turn-1');
+
+    mediator.forgetSession('sess-1');
+    mediator.forgetSession('sess-2');
+    await Promise.all([promiseUser, promiseOtherSession]);
+  });
+
+  it('is a no-op when nothing pending matches the prompt', () => {
+    const { mediator, events } = makeMediator();
+    void mediator.request(
+      makeRecord({ requestId: 'req-1', promptId: 'user-1' }),
+      5_000,
+    );
+
+    mediator.cancelForPrompt('sess-1', 'turn-gone');
+    expect(events).toHaveLength(0);
+
+    mediator.forgetSession('sess-1');
+  });
+});
+
 describe('MultiClientPermissionMediator — timeout', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -496,7 +570,7 @@ describe('MultiClientPermissionMediator — timeout', () => {
 
   it('resolves cancelled when the timer fires before any vote', async () => {
     const { mediator, events, calls } = makeMediator();
-    const record = makeRecord();
+    const record = makeRecord({ promptId: 'prompt-timeout' });
     const promise = mediator.request(record, 5_000);
 
     vi.advanceTimersByTime(5_000);
@@ -508,6 +582,7 @@ describe('MultiClientPermissionMediator — timeout', () => {
     // must omit `originatorClientId` rather than spread `undefined`.
     expect(events).toHaveLength(1);
     expect(events[0]!.event.type).toBe('permission_resolved');
+    expect(events[0]!.event.promptId).toBe('prompt-timeout');
     expect(events[0]!.event).not.toHaveProperty('originatorClientId');
 
     expect(calls.map((c) => c.kind)).toEqual([
@@ -618,7 +693,10 @@ describe('MultiClientPermissionMediator — designated', () => {
 
   it('rejects votes from non-originators with permission_forbidden', async () => {
     const { mediator, events, calls } = makeMediator('designated');
-    const record = makeRecord({ originatorClientId: 'client_A' });
+    const record = makeRecord({
+      promptId: 'prompt-forbidden',
+      originatorClientId: 'client_A',
+    });
     const promise = mediator.request(record, 5_000);
     const outcome = mediator.vote(makeVote({ clientId: 'client_B' }));
     expect(outcome).toEqual({
@@ -626,6 +704,7 @@ describe('MultiClientPermissionMediator — designated', () => {
       reason: 'designated_mismatch',
     });
     expect(events.map((e) => e.event.type)).toEqual(['permission_forbidden']);
+    expect(events[0]!.event.promptId).toBe('prompt-forbidden');
     expect(events[0]!.event.data).toEqual({
       requestId: 'req-1',
       sessionId: 'sess-1',
@@ -672,7 +751,7 @@ describe('MultiClientPermissionMediator — consensus', () => {
       'consensus',
       new Set(['client_A', 'client_B', 'client_C']),
     );
-    const record = makeRecord();
+    const record = makeRecord({ promptId: 'prompt-consensus' });
     const promise = mediator.request(record, 5_000);
 
     const v1 = mediator.vote(makeVote({ clientId: 'client_A' }));
@@ -680,6 +759,7 @@ describe('MultiClientPermissionMediator — consensus', () => {
     expect(events.map((e) => e.event.type)).toEqual([
       'permission_partial_vote',
     ]);
+    expect(events[0]!.event.promptId).toBe('prompt-consensus');
     expect(events[0]!.event.data).toEqual({
       requestId: 'req-1',
       sessionId: 'sess-1',
@@ -700,6 +780,7 @@ describe('MultiClientPermissionMediator — consensus', () => {
       'permission_partial_vote',
       'permission_resolved',
     ]);
+    expect(events[1]!.event.promptId).toBe('prompt-consensus');
 
     const decisionReason = calls.find((c) => c.kind === 'resolved')!
       .args[2] as PermissionDecisionReason;

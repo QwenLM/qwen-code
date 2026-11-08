@@ -66,6 +66,22 @@ Your PR should have a clear, descriptive title and a detailed description of the
 
 In the PR description, explain the "why" behind your changes and link to the relevant issue (e.g., `Fixes #123`).
 
+### Adding a Provider Preset
+
+A built-in preset is an **endorsement**, not just a convenience. Users route API keys and full prompt data through these endpoints, so the bar is high.
+
+**Tier 1 — Built-in Preset** requires all of the following:
+
+- **Affiliation Disclosure** — PR author must disclose any relationship with the provider.
+- **Operational Maturity** — publicly operational with demonstrated uptime; public SLA or status page preferred.
+- **Organic User Demand** — evidence of community demand (issues, discussions), not just a self-listing.
+- **Data and Security Transparency** — provider's data handling practices must be publicly documented.
+- **Maintenance Commitment** — provider team commits to tracking Qwen Code protocol changes.
+
+**Default Path — Custom Provider**: for providers that don't meet Tier 1, users connect via the built-in custom-provider flow (`/auth` or `/model` → Custom Provider). No code change or project endorsement needed.
+
+**If a Tier 1 preset is approved**, the PR should follow the existing `openrouter.ts` / `requesty.ts` pattern: use `customHeaders` for attribution, implement `ownsModel` with a dual-gate (env key + hostname), and add the env key to `SECRET_ENV_VARS` in `packages/cli/src/serve/envSnapshot.ts` with corresponding test assertions in `auth.test.ts` and `provider-config.test.ts`.
+
 ## Development Setup and Workflow
 
 This section guides contributors on how to build, modify, and understand the development setup of this project.
@@ -88,11 +104,13 @@ git clone https://github.com/QwenLM/qwen-code.git # Or your fork's URL
 cd qwen-code
 ```
 
-To install dependencies defined in `package.json` as well as root dependencies:
+To install dependencies defined in `package.json` as well as root dependencies, use the pnpm version the repository pins in `packageManager` (Corepack, bundled with Node.js, fetches it):
 
 ```bash
-npm install
+corepack pnpm install --frozen-lockfile
 ```
+
+The install also applies `patches/ink+7.0.3.patch` through the root `postinstall` (`patch-package`). `packages/cli` compiles against the `ink` frame-controller types that patch adds, and no published `ink` release exports them, so an install that skipped lifecycle scripts (`--ignore-scripts`, or `ignore-scripts=true` in your npm/pnpm config) leaves the build failing with many `Module 'ink' has no exported member ...` errors. `npm run build` re-applies the patch when it is missing; to apply it by hand, run `npm run postinstall`.
 
 To build the entire project (all packages):
 
@@ -122,7 +140,7 @@ To start the Qwen Code application from the source code (after building), run th
 npm start
 ```
 
-If you'd like to run the source build outside of the qwen-code folder, you can utilize `npm link path/to/qwen-code/packages/cli` (see: [docs](https://docs.npmjs.com/cli/v9/commands/npm-link)) to run with `qwen-code`
+If you'd like to run the source build outside of the qwen-code folder, you can utilize `npm link path/to/qwen-code/packages/cli` (see: [docs](https://docs.npmjs.com/cli/v9/commands/npm-link)) to run with `qwen`
 
 ### Running Tests
 
@@ -267,10 +285,10 @@ Alternatively, you can use the "Launch Program" configuration in VS Code if you 
 To hit a breakpoint inside the sandbox container run:
 
 ```bash
-DEBUG=1 qwen-code
+DEBUG=1 qwen
 ```
 
-**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect qwen-code due to automatic exclusion. Use `.qwen-code/.env` files for qwen-code specific debug settings.
+**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect qwen-code due to automatic exclusion. Use `.qwen/.env` files for qwen-code specific debug settings.
 
 ### React DevTools
 
@@ -309,7 +327,7 @@ We publish an artifact for each commit to our internal registry. But if you need
 
 ```
 npm run clean
-npm install
+corepack pnpm install --frozen-lockfile
 npm run auth
 npm run prerelease:dev
 npm publish --workspaces

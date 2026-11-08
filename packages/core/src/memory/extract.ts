@@ -23,6 +23,8 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
+import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
+import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -33,13 +35,40 @@ const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
 export interface AutoMemoryExtractResult {
   touchedTopics: AutoMemoryType[];
+  touchedUserScope?: boolean;
   skippedReason?:
     | 'already_running'
     | 'queued'
     | 'memory_tool'
-    | 'memory_pressure';
+    | 'memory_pressure'
+    | 'session_mismatch'
+    | 'cadence';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
+  /** The extractor ran and used a tool (read or wrote memory files). */
+  extractorEngaged?: boolean;
+  /** Tool activity or a saved topic, independent of the replay cursor floor. */
+  madeGenuineProgress?: boolean;
+}
+
+function getSessionMismatchResult(
+  sessionId: string,
+  expectedSessionId: string,
+  now: Date,
+): AutoMemoryExtractResult | null {
+  const cachedSessionId = getCacheSafeParamsSessionId();
+  if (cachedSessionId === undefined || cachedSessionId === expectedSessionId) {
+    return null;
+  }
+  debugLogger.debug('Skipping auto-memory extract: session_mismatch.');
+  return {
+    touchedTopics: [],
+    skippedReason: 'session_mismatch',
+    cursor: {
+      sessionId,
+      updatedAt: now.toISOString(),
+    },
+  };
 }
 
 async function readExtractCursor(
@@ -105,8 +134,30 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
+  skippedHistory?: Content[];
+  // Only the close-time cadence flush (#13004) sets this: an abandoned flush
+  // run aborts here instead of keeping a fork alive past its boundary.
+  abortSignal?: AbortSignal;
+  // Only the close-time cadence flush (#13004) sets this: the replayed
+  // snapshot's history can be shorter than the cursor a later run already
+  // persisted, so this run's write must not move that cursor backwards.
+  flushReplay?: boolean;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
+  if (!params.config) {
+    throw new Error(
+      'Managed auto-memory extraction requires config for forked-agent execution.',
+    );
+  }
+  params.abortSignal?.throwIfAborted();
+  const expectedSessionId = params.config.getSessionId();
+  const earlyMismatch = getSessionMismatchResult(
+    params.sessionId,
+    expectedSessionId,
+    now,
+  );
+  if (earlyMismatch) return earlyMismatch;
+
   // Per-project scaffold is required (extraction cursor + metadata live
   // there). User-level scaffold is optional — a brand-new user without
   // write access to `~/.qwen/memories/` should still be able to use
@@ -120,15 +171,10 @@ export async function runAutoMemoryExtract(params: {
     );
   }
 
-  if (!params.config) {
-    throw new Error(
-      'Managed auto-memory extraction requires config for forked-agent execution.',
-    );
-  }
-
   // Read the cursor first, then scan only the unprocessed slice. The old
   // code ran partToString().replace() over EVERY message but the resulting
-  // text was never read — fork agent context comes from getCacheSafeParams().
+  // text was never read — fork agent context comes from the session-scoped
+  // cache-safe params lookup.
   const currentCursor = await readExtractCursor(params.projectRoot);
   const rawOffset =
     currentCursor.sessionId === params.sessionId
@@ -141,12 +187,18 @@ export async function runAutoMemoryExtract(params: {
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. partToString runs only on this small slice and without the
   // global whitespace regex — the .trim().length check preserves the old
-  // behaviour of ignoring empty-text user turns.
-  const hasNewUserMessages = params.history
-    .slice(startOffset)
-    .some(
-      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
-    );
+  // behaviour of ignoring empty-text user turns. A parked supplement
+  // (#13004) counts as new content on its own: the turns it holds are owed
+  // to the extractor, and an image-only live tail must not let this run
+  // advance the cursor past them without a fork.
+  const hasNewUserMessages =
+    (params.skippedHistory?.length ?? 0) > 0 ||
+    params.history
+      .slice(startOffset)
+      .some(
+        (m) =>
+          m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+      );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
@@ -157,9 +209,18 @@ export async function runAutoMemoryExtract(params: {
     return { touchedTopics: [], cursor };
   }
 
+  const lateMismatch = getSessionMismatchResult(
+    params.sessionId,
+    expectedSessionId,
+    now,
+  );
+  if (lateMismatch) return lateMismatch;
+
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
+    params.skippedHistory,
+    params.abortSignal,
   );
 
   if (agentResult.touchedTopics.length > 0) {
@@ -195,11 +256,25 @@ export async function runAutoMemoryExtract(params: {
         })
       : Promise.resolve();
     await Promise.all([projectRebuild, userRebuild]);
+    await refreshMemoryInstruction(params.config, {
+      logContext: 'managed auto-memory extraction',
+    });
   }
+
+  const madeGenuineProgress =
+    agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: params.history.length,
+    // A flush replay runs a parked snapshot whose history a later non-forking
+    // run may have already advanced the cursor past, so writing the snapshot's
+    // own offset would move that project cursor backwards and make the next run
+    // re-scan everything after it. Only the replay is floored: a genuine
+    // post-compaction run must still be able to move the cursor down.
+    processedOffset: Math.max(
+      params.flushReplay ? rawOffset : 0,
+      madeGenuineProgress ? params.history.length : startOffset,
+    ),
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);
@@ -210,7 +285,10 @@ export async function runAutoMemoryExtract(params: {
 
   return {
     touchedTopics: agentResult.touchedTopics,
+    touchedUserScope: agentResult.touchedUserScope,
     cursor,
     systemMessage: agentResult.systemMessage,
+    extractorEngaged: agentResult.extractorEngaged === true,
+    madeGenuineProgress,
   };
 }

@@ -30,6 +30,10 @@ describe('lspCommand', () => {
     ]);
   });
 
+  it('opts in to running during streaming', () => {
+    expect(lspCommand.canRunDuringStreaming).toBe(true);
+  });
+
   it('returns an error when config is unavailable in non-interactive mode', async () => {
     if (!lspCommand.action) {
       throw new Error('lspCommand must have an action');
@@ -178,7 +182,7 @@ describe('lspCommand', () => {
     expect(result.content).toContain(
       '| pyright | `pyright-langserver` | python | FAILED - startup failed |',
     );
-    expect(result.content).not.toMatch(/[✅⏳❌⚪❓]/u);
+    expect(result.content).not.toMatch(/[✅⏳❌✓◌✗⚪❓]/u);
     expect(context.ui.addItem).not.toHaveBeenCalled();
   });
 

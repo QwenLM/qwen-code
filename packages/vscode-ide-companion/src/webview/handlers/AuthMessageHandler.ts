@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
@@ -11,11 +12,14 @@ import {
   ALL_PROVIDERS,
   ALIBABA_PROVIDERS,
   AuthType,
+  QWENCLOUD_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
+  resolveModelProtocol,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  type ModelWireApi,
   type ProviderConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
@@ -33,14 +37,35 @@ export class AuthMessageHandler extends BaseMessageHandler {
     | ((config: ProviderConfig, inputs: ProviderSetupInputs) => Promise<void>)
     | null = null;
 
+  private subscriptionAuthHandler?: (
+    action?: 'logout' | 'upgrade',
+  ) => Promise<void>;
+
+  setSubscriptionAuthHandler(
+    handler: (action?: 'logout' | 'upgrade') => Promise<void>,
+  ): void {
+    this.subscriptionAuthHandler = handler;
+  }
+
   canHandle(messageType: string): boolean {
-    return ['auth', 'getAccountInfo'].includes(messageType);
+    return ['auth', 'logout', 'upgrade', 'getAccountInfo'].includes(
+      messageType,
+    );
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
     switch (message.type) {
       case 'auth':
-        await this.handleAuthInteractive();
+        await this.handleAuthInteractive(
+          (message.data as { subscriptionEnabled?: boolean } | undefined)
+            ?.subscriptionEnabled === true,
+        );
+        break;
+
+      case 'logout':
+      case 'upgrade':
+        if (this.subscriptionAuthHandler)
+          await this.subscriptionAuthHandler(message.type);
         break;
 
       case 'getAccountInfo':
@@ -48,10 +73,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         break;
 
       default:
-        console.warn(
-          '[AuthMessageHandler] Unknown message type:',
-          message.type,
-        );
+        logger.warn('[AuthMessageHandler] Unknown message type:', message.type);
         break;
     }
   }
@@ -85,7 +107,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       });
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      console.error('[AuthMessageHandler] getAccountInfo failed:', error);
+      logger.error('[AuthMessageHandler] getAccountInfo failed:', error);
       this.sendToWebView({
         type: 'accountInfo',
         data: { error: errorMsg },
@@ -111,6 +133,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     items: Array<{
       label: string;
       description?: string;
+      detail?: string;
       value: T;
       kind?: vscode.QuickPickItemKind;
     }>,
@@ -120,6 +143,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     const choice = await vscode.window.showQuickPick(items, {
       title,
       placeHolder,
+      ignoreFocusOut: true,
     });
     if (!choice || choice.kind === vscode.QuickPickItemKind.Separator) {
       this.notifyAuthCancelled();
@@ -145,6 +169,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       placeHolder: opts.placeHolder,
       value: opts.value,
       password: opts.password ?? false,
+      ignoreFocusOut: true,
       validateInput: opts.required
         ? (v) => (!v?.trim() ? 'This field is required' : null)
         : undefined,
@@ -164,12 +189,15 @@ export class AuthMessageHandler extends BaseMessageHandler {
    * Handle auth — full interactive auth flow.
    * Dynamically generates provider choices from the shared registry.
    */
-  private async handleAuthInteractive(): Promise<void> {
+  private async handleAuthInteractive(
+    subscriptionEnabled: boolean,
+  ): Promise<void> {
     try {
       // Build grouped provider menu
       const items: Array<{
         label: string;
         description?: string;
+        detail?: string;
         value: string;
         kind?: vscode.QuickPickItemKind;
       }> = [];
@@ -193,6 +221,14 @@ export class AuthMessageHandler extends BaseMessageHandler {
         }
       };
 
+      if (subscriptionEnabled) {
+        items.push({
+          label: 'Qwen Account with Subscription',
+          detail: 'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+          value: AuthType.QWEN_SUBSCRIPTION,
+        });
+      }
+      addGroup('QwenCloud', QWENCLOUD_PROVIDERS);
       addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
       addGroup('Third Party', THIRD_PARTY_PROVIDERS);
 
@@ -212,10 +248,16 @@ export class AuthMessageHandler extends BaseMessageHandler {
         'Choose how to connect',
       );
       if (!selectedId) return;
+      if (selectedId === AuthType.QWEN_SUBSCRIPTION) {
+        if (!this.subscriptionAuthHandler)
+          throw new Error('Subscription authentication is unavailable.');
+        await this.subscriptionAuthHandler();
+        return;
+      }
 
       const provider = ALL_PROVIDERS.find((p) => p.id === selectedId);
       if (!provider) {
-        console.error('[AuthMessageHandler] Provider not found:', selectedId);
+        logger.error('[AuthMessageHandler] Provider not found:', selectedId);
         return;
       }
 
@@ -223,7 +265,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       await this.runProviderSetupFlow(provider);
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      console.error('[AuthMessageHandler] auth failed:', error);
+      logger.error('[AuthMessageHandler] auth failed:', error);
       this.sendToWebView({
         type: 'authError',
         data: { message: `Auth failed: ${errorMsg}` },
@@ -265,6 +307,20 @@ export class AuthMessageHandler extends BaseMessageHandler {
       protocol = selected as AuthType;
     }
 
+    let wireApi: ModelWireApi | undefined;
+    if (shouldShowStep(provider, 'wireApi', protocol ?? provider.protocol)) {
+      const selected = await this.pick(
+        [
+          { label: 'Chat Completions', value: 'chat-completions' },
+          { label: 'Responses', value: 'responses' },
+        ],
+        `${flowTitle}: API`,
+        'Select OpenAI API',
+      );
+      if (!selected) return;
+      wireApi = selected as ModelWireApi;
+    }
+
     // Step 1: Base URL (if needed)
     let baseUrl: string;
     if (shouldShowStep(provider, 'baseUrl')) {
@@ -288,7 +344,14 @@ export class AuthMessageHandler extends BaseMessageHandler {
         // doesn't silently write the OpenAI endpoint when the user hits
         // Enter on the OpenAI default. Defaults come from core's shared
         // getDefaultBaseUrlForProtocol so CLI and VS Code stay in sync.
-        const effectiveProtocol = protocol ?? provider.protocol;
+        // The effective route includes the API step's pick: a Responses
+        // choice dials the /v1-less default endpoint, so deriving the
+        // fallback from the raw bucket protocol would persist the Chat
+        // Completions endpoint on the Responses wire.
+        const effectiveProtocol =
+          resolveModelProtocol(protocol ?? provider.protocol, { wireApi }) ??
+          protocol ??
+          provider.protocol;
         // No local fallback: getDefaultBaseUrlForProtocol owns the defaults.
         // Adding an OpenAI fallback here would silently mask a new AuthType
         // that core hadn't been taught about, diverging from the CLI flow
@@ -407,7 +470,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
 
     // Submit
     if (!this.authInteractiveHandler) {
-      console.error(
+      logger.error(
         '[AuthMessageHandler] authInteractiveHandler not set; cannot apply provider config.',
       );
       // No authCancelled — see the base-URL validation note above.
@@ -422,6 +485,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
     await this.authInteractiveHandler(provider, {
       protocol,
+      ...(wireApi ? { wireApi } : {}),
       baseUrl,
       apiKey,
       modelIds,

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 16">
+  <rect x="1.2" y="8.8" width="6" height="6" stroke="currentColor" stroke-width="1.2" />
+  <rect x="1.2" y="2.8" width="6" height="6" stroke="currentColor" stroke-width="1.2" />
+  <g transform="matrix(0.86602545 0.50000006 -0.50000006 0.86602545 2.21032266 -5.24903863)">
+    <rect x="10.9" y="1.5" width="4.3" height="4.3" stroke="currentColor" stroke-width="1.2" />
+  </g>
+  <rect x="7.2" y="8.8" width="6" height="6" stroke="currentColor" stroke-width="1.2" />
+</svg>

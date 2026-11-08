@@ -5,8 +5,34 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { SettingScope } from './settings.js';
-import { getPersistScopeForModelSelection } from './modelProvidersScope.js';
+import { SettingScope, type LoadedSettings } from './settings.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+  getWritableScopes,
+} from './modelProvidersScope.js';
+
+// A LoadedSettings stub exposing forScope()/user/workspace/isTrusted — enough
+// for the scope-resolution helpers, which only read those.
+function makeLoaded({
+  isTrusted,
+  user = {},
+  workspace = {},
+}: {
+  isTrusted: boolean;
+  user?: Record<string, unknown>;
+  workspace?: Record<string, unknown>;
+}): LoadedSettings {
+  return {
+    isTrusted,
+    user: { settings: user },
+    workspace: { settings: workspace },
+    forScope: (scope: SettingScope) =>
+      scope === SettingScope.Workspace
+        ? { settings: workspace }
+        : { settings: user },
+  } as unknown as LoadedSettings;
+}
 
 function makeSettings({
   isTrusted,
@@ -37,6 +63,23 @@ function makeSettings({
 }
 
 describe('getPersistScopeForModelSelection', () => {
+  it.each([true, false])(
+    'keeps subscription selection in its owning workspace only when trusted (%s)',
+    (isTrusted) => {
+      const settings = makeLoaded({
+        isTrusted,
+        workspace: {
+          security: { auth: { selectedType: 'qwen-subscription' } },
+          model: { name: 'removed-model' },
+        },
+        user: { modelProviders: { openai: [] } },
+      });
+      expect(getPersistScopeForModelSelection(settings)).toBe(
+        isTrusted ? SettingScope.Workspace : SettingScope.User,
+      );
+    },
+  );
+
   it('prefers workspace when trusted and workspace defines modelProviders', () => {
     const settings = makeSettings({
       isTrusted: true,
@@ -83,5 +126,67 @@ describe('getPersistScopeForModelSelection', () => {
       workspaceModelProviders: undefined,
     });
     expect(getPersistScopeForModelSelection(untrusted)).toBe(SettingScope.User);
+  });
+});
+
+describe('getWritableScopes', () => {
+  it('lists workspace then user when trusted', () => {
+    expect(getWritableScopes(makeLoaded({ isTrusted: true }))).toEqual([
+      SettingScope.Workspace,
+      SettingScope.User,
+    ]);
+  });
+
+  it('lists only user when untrusted (workspace is ignored on merge)', () => {
+    expect(getWritableScopes(makeLoaded({ isTrusted: false }))).toEqual([
+      SettingScope.User,
+    ]);
+  });
+});
+
+describe('getOwnKeyScope', () => {
+  it('prefers workspace when trusted and workspace owns the key', () => {
+    const loaded = makeLoaded({
+      isTrusted: true,
+      workspace: { modelFallbacks: 'a,b' },
+      user: { modelFallbacks: 'c' },
+    });
+    expect(getOwnKeyScope(loaded, 'modelFallbacks')).toBe(
+      SettingScope.Workspace,
+    );
+  });
+
+  it('falls back to user when only user owns the key', () => {
+    const loaded = makeLoaded({
+      isTrusted: true,
+      workspace: {},
+      user: { modelFallbacks: 'c' },
+    });
+    expect(getOwnKeyScope(loaded, 'modelFallbacks')).toBe(SettingScope.User);
+  });
+
+  it('ignores a workspace-owned key when untrusted', () => {
+    const loaded = makeLoaded({
+      isTrusted: false,
+      workspace: { modelFallbacks: 'a,b' },
+      user: {},
+    });
+    expect(getOwnKeyScope(loaded, 'modelFallbacks')).toBeUndefined();
+  });
+
+  it('returns undefined when no writable scope owns the key', () => {
+    const loaded = makeLoaded({ isTrusted: true, workspace: {}, user: {} });
+    expect(getOwnKeyScope(loaded, 'modelFallbacks')).toBeUndefined();
+  });
+
+  it('treats an explicitly-set falsy value as owned (hasOwnProperty, not truthiness)', () => {
+    const loaded = makeLoaded({
+      isTrusted: true,
+      workspace: { modelFallbacks: '' },
+      user: {},
+    });
+    expect(getOwnKeyScope(loaded, 'modelFallbacks')).toBe(
+      SettingScope.Workspace,
+    );
   });
 });

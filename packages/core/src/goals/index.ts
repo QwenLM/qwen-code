@@ -4,33 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export * from './goal-protocol.js';
+export {
+  GoalConflictError,
+  GoalInvalidTransitionError,
+  elapsedActiveTime,
+  parseGoalControlRequest,
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
+  parseGoalStateRecordPayloadV2,
+  reduceGoalControl,
+  reduceGoalTurnFinished,
+} from './goal-reducer.js';
 export type {
-  ActiveGoal,
-  GoalTerminalEvent,
-  GoalTerminalKind,
-  GoalTerminalObserver,
-} from './activeGoalStore.js';
+  GoalControlTransition,
+  GoalTurnFinishedTransition,
+} from './goal-reducer.js';
+export * from './goal-persistence.js';
+export * from './goal-legacy-cards.js';
 export {
-  activeGoalEquals,
-  getActiveGoal,
-  setActiveGoal,
-  clearActiveGoal,
-  recordGoalIteration,
-  setGoalTerminalObserver,
-  clearGoalTerminalObserver,
-  notifyGoalTerminal,
-  getLastGoalTerminal,
-  setLastGoalTerminal,
-  __resetActiveGoalStoreForTests,
-} from './activeGoalStore.js';
+  isGoalCheckpointBookkeepingRecord,
+  projectGoalCard,
+} from './goal-card.js';
+export type { GoalCard, GoalCardKind } from './goal-card.js';
+export * from './goal-evidence.js';
+export * from './goal-tool-result-provenance.js';
+export * from './goal-verifier.js';
+export * from './goal-runtime.js';
 export {
-  MAX_GOAL_ITERATIONS,
-  GOAL_HOOK_TIMEOUT_MS,
-  GOAL_HOOK_TIMEOUT_SECONDS,
-  createGoalStopHookCallback,
-  abortGoalForStopHookCap,
-  registerGoalHook,
-  unregisterGoalHook,
-} from './goalHook.js';
-export { judgeGoal } from './goalJudge.js';
-export type { JudgeResult } from './goalJudge.js';
+  applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
+  ProposeGoalTool,
+} from './goal-tools.js';
+export type { PendingGoalProposal } from './goal-tools.js';
+export { goalTurnContext } from './goal-turn-context.js';
+export {
+  buildGoalContinuationParts,
+  renderGoalContinuationPrompt,
+  renderGoalContinuationTurn,
+} from './goal-continuation-prompt.js';
+export type {
+  GoalContinuationPromptInput,
+  GoalContinuationTurn,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';

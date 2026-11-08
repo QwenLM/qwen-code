@@ -18,6 +18,8 @@ vi.mock('../telemetry/index.js', () => ({
   })),
   DEFAULT_TELEMETRY_TARGET: 'none',
   DEFAULT_OTLP_ENDPOINT: '',
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
   refreshSessionContext: vi.fn(),
@@ -73,8 +75,8 @@ vi.mock('../ide/ide-client.js', () => ({
     }),
   },
 }));
-vi.mock('../memory/const.js', () => ({
-  setGeminiMdFilename: vi.fn(),
+vi.mock('../utils/memory-constants.js', () => ({
+  setMemoryFilename: vi.fn(),
 }));
 
 import * as fs from 'node:fs';
@@ -166,5 +168,34 @@ describe('Workflow anti-recursion guard', () => {
       '../agents/runtime/agent-core.js'
     );
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.WORKFLOW)).toBe(true);
+  });
+
+  it('artifact tools are in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.ARTIFACT)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.RECORD_ARTIFACT)).toBe(
+      true,
+    );
+  });
+
+  it('TodoWrite is in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TODO_WRITE)).toBe(true);
+  });
+
+  it('memory recall tools are in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SEARCH_MEMORY)).toBe(
+      true,
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.MANAGE_MEMORY)).toBe(
+      true,
+    );
   });
 });

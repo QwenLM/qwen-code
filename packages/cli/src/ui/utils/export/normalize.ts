@@ -4,11 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
+import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import type { Part } from '@google/genai';
-import { ToolNames } from '@qwen-code/qwen-code-core';
-import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
+import type { ChatRecord, Kind } from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
-import type { ExportMessage, ExportSessionData } from './types.js';
+import { getToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
+import { sanitizeTerminalText } from '../textUtils.js';
+import type {
+  ExportConfig,
+  ExportMessage,
+  ExportSessionData,
+} from './types.js';
 
 /**
  * Normalizes export session data by merging tool call information from tool_result records.
@@ -17,7 +29,7 @@ import type { ExportMessage, ExportSessionData } from './types.js';
 export function normalizeSessionData(
   sessionData: ExportSessionData,
   originalRecords: ChatRecord[],
-  config: Config,
+  config: ExportConfig,
 ): ExportSessionData {
   const normalized = [...sessionData.messages];
   const toolCallIndexById = new Map<string, number>();
@@ -32,14 +44,19 @@ export function normalizeSessionData(
   // Build index of assistant messages by uuid for usageMetadata merging
   const assistantMessageIndexByUuid = new Map<string, number>();
   normalized.forEach((message, index) => {
-    if (message.type === 'assistant') {
+    if (
+      message.type === 'assistant' &&
+      (message.message?.role !== 'thinking' ||
+        !assistantMessageIndexByUuid.has(message.uuid))
+    ) {
       assistantMessageIndexByUuid.set(message.uuid, index);
     }
   });
 
   // Merge tool result information into tool call messages
   for (const record of originalRecords) {
-    if (record.type !== 'tool_result') continue;
+    if (record.type !== 'tool_result' || isInternalCodeModeToolResult(record))
+      continue;
 
     const toolCallMessage = buildToolCallMessageFromResult(record, config);
     if (!toolCallMessage?.toolCall) continue;
@@ -100,6 +117,9 @@ function mergeToolCallData(
   if (existing.status === 'pending' || existing.status === 'in_progress') {
     existing.status = incoming.status;
   }
+  if (incoming.rawOutput !== undefined) {
+    existing.rawOutput = incoming.rawOutput;
+  }
   if (!existing.rawInput && incoming.rawInput) {
     existing.rawInput = incoming.rawInput;
   }
@@ -123,7 +143,7 @@ function mergeToolCallData(
  */
 function buildToolCallMessageFromResult(
   record: ChatRecord,
-  config: Config,
+  config: ExportConfig,
 ): ExportMessage | null {
   const toolCallResult = record.toolCallResult;
   const toolName = extractToolNameFromRecord(record);
@@ -134,7 +154,7 @@ function buildToolCallMessageFromResult(
     return null;
   }
 
-  const toolCallId = toolCallResult?.callId ?? record.uuid;
+  const toolCallId = getToolResultCallId(record);
   const functionCallArgs = extractFunctionCallArgs(record);
   const { kind, title, locations } = resolveToolMetadata(
     config,
@@ -147,9 +167,23 @@ function buildToolCallMessageFromResult(
       (toolCallResult as { args?: unknown } | undefined)?.args,
   );
 
-  const content =
+  const resultContent =
     extractDiffContent(toolCallResult?.resultDisplay) ??
     transformPartsToToolCallContent(record.message?.parts ?? []);
+  const content = isVisionBridgeNoticeDisplay(toolCallResult?.resultDisplay)
+    ? [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: sanitizeTerminalText(
+              formatVisionBridgeNoticeDisplay(toolCallResult.resultDisplay),
+            ),
+          },
+        },
+        ...resultContent,
+      ]
+    : resultContent;
 
   return {
     uuid: record.uuid,
@@ -163,6 +197,9 @@ function buildToolCallMessageFromResult(
       title,
       status: toolCallResult?.error ? 'failed' : 'completed',
       rawInput,
+      ...(isShellResultDisplay(toolCallResult?.resultDisplay)
+        ? { rawOutput: toolCallResult.resultDisplay }
+        : {}),
       content,
       locations,
       timestamp: Date.parse(record.timestamp),
@@ -210,7 +247,7 @@ function extractFunctionCallArgs(
  * Resolves tool metadata (kind, title, locations) from tool registry.
  */
 function resolveToolMetadata(
-  config: Config,
+  config: ExportConfig,
   toolName: string,
   args?: Record<string, unknown>,
 ): {
@@ -225,7 +262,7 @@ function resolveToolMetadata(
   let locations: Array<{ path: string; line?: number | null }> | undefined;
   const kind = mapToolKind(tool?.kind as Kind | undefined, toolName);
 
-  if (tool && args) {
+  if (tool?.build && args) {
     try {
       const invocation = tool.build(args);
       title = `${title}: ${invocation.getDescription()}`;
@@ -303,7 +340,10 @@ function extractDiffContent(
     return [
       {
         type: 'diff',
-        path: display['fileName'] as string,
+        path:
+          typeof display['filePath'] === 'string'
+            ? display['filePath']
+            : (display['fileName'] as string),
         oldText: (display['originalContent'] as string) ?? '',
         newText: display['newContent'] as string,
       },

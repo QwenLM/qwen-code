@@ -41,8 +41,8 @@ stateDiagram-v2
     Live --> RestoreInProgress: POST /session/:id/load or /resume
     RestoreInProgress --> Live: restoreState cached on entry
     RestoreInProgress --> Live: RestoreInProgressError (coalesce waiters)
-    Live --> Closed: DELETE /session/:id (last client)
-    Live --> Died: ACP child exit / channel.exited fired
+    Live --> Closed: DELETE /session/:id (last client) or confirmed workspace runtime stop
+    Live --> Died: ACP child exit / channel.exited outside a confirmed workspace stop, or daemon shutdown
     Closed --> [*]: session_closed terminal frame
     Died --> [*]: session_died terminal frame
 ```
@@ -56,6 +56,8 @@ Under `sessionScope: 'thread'`, each thread can mint a distinct session. The cal
 ### Identity
 
 `X-Qwen-Client-Id` is **optional** but **strongly recommended**. The daemon does not generate one on the caller's behalf — clients pick their own and reuse it across requests so the daemon can attribute votes, audit events, and detect reconnects.
+
+Each independent controller should use a distinct, stable ID. Web Shell preserves the historical `webui_` prefix for compatibility. A host and an embedded Web Shell should share an ID only when they intentionally act as one logical controller; once shared, daemon logs cannot distinguish which one originated a request.
 
 Validation rules:
 
@@ -100,13 +102,17 @@ sequenceDiagram
 
 ### Load / resume
 
-`POST /session/:id/load` — replays full ACP history (`session/load` notifications fire before the response returns).
+`POST /session/:id/load` — restores a persisted session and returns the current bounded replay snapshot window (`session/load` notifications or response-mode replay are seeded before the response returns).
 `POST /session/:id/resume` — restores without replay (`connection.unstable_resumeSession`, exposed under the stable `session_resume` daemon capability; `unstable_session_resume` remains a deprecated alias).
 
 Both:
 
 1. Use a per-session `pendingRestoreIds` set on the channel so concurrent restore calls coalesce (`RestoreInProgressError`).
 2. Cache `restoreState` on the entry so a late attacher gets the same payload the original restorer did.
+
+For a persisted Part 4A worktree session, restore is an integrity-gated extension of this lifecycle. The sidecar identifies the requested workspace root explicitly, the checkout must be canonically contained below the corresponding `.qwen/worktrees/` directory, and its marker must be a single-link regular file containing the exact restored session ID. The daemon relocates an idle restored child only after those checks; an active child is accepted only when its reported cwd already equals the worktree, and an active child whose reported cwd is absent or elsewhere fails closed instead of being relocated under its prompt — except for a cold restore that could not defer its restore-prompt (`suppressWorktreeContextRestore` off, so the bridge fired the re-hung question instead of parking it): that shape keeps the pre-4B outcome, returning canonical worktree metadata without `worktreeState`, unrelocated, with the session surviving. The relocated and accepted responses return canonical worktree metadata with `worktreeState: "persisted-v1"`. A sidecar carrying `supersededBy` never restores: the route returns `409 worktree_session_superseded` with the replacement session id, a classification decided from that link alone before any marker read, so callers redirect and heal their bookkeeping only once a load of that id has succeeded — a pre-commit interrupted transfer names a replacement that is not the marker owner, cannot itself be restored, and is reaped by the retried reset; a restored replacement whose `supersedes` link agrees with the old sidecar while the marker never moved — or is absent — returns `409 worktree_reset_interrupted`, whose repair is retrying the reset against the superseded session; and a missing marker without that agreeing link pair returns `409 worktree_marker_missing`, whose repair is resetting the task rather than retrying the restore, because no restore path recreates a marker. The interrupted classification is checked first. Invalid Part 4A state detaches an existing attachment or kills a cold restore with `requireZeroAttaches`; a missing sidecar likewise yields no attestation. Whenever the effective restore source is Channel-owned, the route suppresses the ACP agent's best-effort cleanup for Part 4A or unclassifiable sidecar state, so validation failure preserves the uncertain checkout evidence. Persisted source metadata takes precedence; when it is absent, the load/resume request supplies the effective source. A structurally valid legacy sidecar without `workspaceCwd` instead retains the existing best-effort agent restore: it must identify either the requested workspace root or its Git repository top-level, is containment-checked without marker attestation, may be cleaned up by the agent, and may return `worktree` without `worktreeState`. Apart from that explicit legacy compatibility case, only sessions whose effective restore source is not Channel-owned retain the existing best-effort cleanup before route validation.
+
+Worktree ownership transfer (`POST /session/:id/worktree-reset`, advertised by `session_worktree_reset_v1`) extends this lifecycle for Channel task resets: the daemon spawns a fresh thread-scoped replacement in the root workspace, relocates it into the verified checkout, links the sidecar pair (`supersededBy` on the old session first, then `supersedes` on the replacement), flips the marker to the replacement under a per-checkout route lock and an admission barrier that fences prompt admission plus the seven other writers that start work in the checkout or move the session cwd (rewind, cwd change, branch, fork, shell, goal control, workflow-task action), while the release and stop paths stay unfenced by design, and then severs the superseded session's client registrations and in-memory worktree association. The sever reports whether the superseded session is actually gone: a survivor whose child still holds background work keeps the barrier armed, is logged, and is reported to the caller as `supersededSessionLive: true` rather than being papered over by the success response. A fenced writer admitted on the superseded session mid-transfer is refused with `409 worktree_reset_active`; the full failure taxonomy, including which crash windows a retry rolls back and which fail closed for operator repair, is documented with the route in `qwen-serve-protocol.md`.
 
 ### Heartbeat
 
@@ -124,12 +130,12 @@ A successful update fans `session_metadata_updated` to every subscriber.
 
 ### Termination
 
-| Terminal frame   | Trigger                                                                                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_closed` | `DELETE /session/:id` (client_close) or programmatic close.                                                                                                   |
-| `session_died`   | `channel.exited` fires for any reason (crash, child kill). Carries `exitCode?` + `signalCode?` when the OS exit path was used.                                |
-| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed. |
-| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                             |
+| Terminal frame   | Trigger                                                                                                                                                                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_closed` | `DELETE /session/:id` (client_close), programmatic close, or confirmed workspace runtime stop (`cause: workspace_runtime_stop`). A stop-associated fatal exit also carries `persistenceUnconfirmed: true`.                                                                       |
+| `session_died`   | `channel.exited` outside a confirmed workspace stop (crash or daemon-initiated kill, e.g. unknown-close-outcome recovery), or daemon shutdown (`reason: daemon_shutdown`, published without a channel exit). Carries `exitCode?` + `signalCode?` when the OS exit path was used. |
+| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed.                                                                                                                    |
+| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                                                                                                                                                |
 
 Pending permissions are resolved as `{kind:'cancelled', reason:'session_closed'}` via `mediator.forgetSession(sessionId)` at every termination path.
 
@@ -188,13 +194,55 @@ cache path for a single-turn, no-tool LLM call and returns
 `{ sessionId, answer: string | null }`. The implementation enforces
 `BTW_MAX_INPUT_LENGTH`, cross-session leakage guards, and timeout handling.
 
+### Streaming BTW (`session_btw_stream` capability tag)
+
+`POST /session/:id/btw/stream` accepts `{ question, requestId, resume? }` and
+emits accumulated `answer` snapshots and terminal `done` or `error` events.
+Check this independent capability before calling; an absent flag uses the
+existing JSON BTW API. Once streaming starts, errors must not trigger a second
+JSON request. The route resolves the live session owner and its trust boundary.
+
+Disconnecting a subscriber keeps generation running. Reuse the same request ID,
+question and client identity to receive the latest retained snapshot. The SDK
+retries without `resume` until a successful HTTP response was observed, then
+uses `resume: true`; missing retained state on resume returns 410 and cannot
+start another generation. Retention is up to 60 seconds and the runtime cache
+holds at most 32 entries, evicting the earliest registered terminal entry when
+needed. Active entries are not evicted. `DELETE /session/:id/btw/stream/:requestId`
+explicitly cancels the matching generation. Neither route interrupts the main
+prompt. See the [wire contract](../qwen-serve-protocol.md#post-sessionidbtwstream)
+for input limits, deadlines and error codes.
+
+Side requests, including legacy BTW, recap and stateless generation, count as
+local work and prevent idle cleanup or required-idle close until they settle.
+This does not change each route's existing archive admission rules. Streaming
+BTW holds shared archive admission
+only during request registration, so an abandoned subscriber cannot keep that
+admission held for the generation lifetime.
+
 ### Shell Command Execution
 
 `POST /session/:id/shell` executes a shell command directly on the daemon host,
 without routing through the LLM. It streams output on the session SSE bus via
 `user_shell_command` / `user_shell_result` events and injects the command plus
 result into the LLM conversation history. The response is
-`{ exitCode, output, aborted }`.
+`{ exitCode, output, aborted }`. For a live secondary-workspace session, the
+singular REST route resolves the session owner and executes on that runtime's
+bridge, so the command starts in the owning workspace cwd. The route does not
+provide a path sandbox. Workspace-qualified ACP clients may continue to use
+`_qwen/session/shell` on the owning workspace connection.
+
+### Session Rewind
+
+`GET /session/:id/rewind/snapshots` and `POST /session/:id/rewind` resolve the
+owning live workspace runtime. Persisted sessions must be loaded or resumed
+before rewind. Rewind truncates conversation history and optionally restores
+files tracked by `edit` and `write_file`; it does not undo shell commands, Git,
+scripts, or manual changes. File restoration is best-effort, so a response may
+report `rewound: false` and `filesFailed[]` after the conversation history has
+already moved. SDK rewind calls always use owner-aware REST, including when the
+client otherwise uses ACP transport, because the mutation must retain strict
+REST authentication.
 
 ### Session Detach
 
@@ -205,8 +253,53 @@ attach or subscriber remains, the session is reaped. The endpoint returns 204.
 ### Batch Session Delete
 
 `POST /sessions/delete` accepts `{ sessionIds: string[] }` (up to 100 ids),
-closes bridge sessions, and deletes transcript files. It uses
-`Promise.allSettled` for resilience and returns `{ removed, notFound, errors }`.
+closes bridge sessions, and deletes active or archived transcript files. If both
+active and archived JSONL files exist for the same id, hard delete removes both
+so operators can clear the conflict. It cleans active and archived worktree
+sidecars, but leaves file-history snapshots, subagent transcripts, and runtime
+sidecars intact. It uses `Promise.allSettled` for resilience and returns
+`{ removed, notFound, errors }`.
+
+### Session Archive
+
+`POST /sessions/archive` moves inactive session JSONL files from `chats/` into
+`chats/archive/`. If the target session is live, the daemon first enters a
+per-session archive gate and performs a strict close that requires the ACP child
+to flush `ChatRecordingService`; archive leaves the JSONL in place if close or
+flush fails.
+
+`POST /sessions/unarchive` moves archived JSONL files back to `chats/`. This is
+only a storage-state transition; clients must call `session/load` or
+`session/resume` afterward. Archived sessions return `409 session_archived` for
+load/resume, and mutations racing an archive transition return
+`409 session_archiving`.
+
+Empty, damaged, and orphaned regular transcript files remain eligible for these
+lifecycle operations even when they cannot be loaded as conversations.
+Ownership-safety checks can intentionally fail closed and require operator
+intervention. A file changed after a writer sealed its certified handoff proof
+fails with `SessionTranscriptChangedError` until the operator resolves the
+sealed lock and changed bytes. A JSON-shaped first physical record that exceeds
+the bounded ownership-read window fails with
+`SessionTranscriptIdentityUnavailableError` until the record is repaired or
+reduced; oversized damaged records with a non-object prefix remain eligible. A
+parseable recovered record must contain string `sessionId` and `cwd` ownership
+fields, and mixed local/foreign archive states also fail closed. When
+`session_storage_conflict_repair` is advertised, archive and unarchive accept
+`resolveConflicts: true`: archive keeps the archived copy, while unarchive keeps
+the active copy. Without that option, active/archive conflicts do not move,
+remove, or overwrite either persisted copy and are returned in the batch
+`errors` array. Archive still strictly closes a live session before classifying
+the conflict, which may flush queued records to the active transcript.
+Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
+instead of their earlier HTTP `409 session_conflict` response.
+
+When `session_archive_idle_guard` is advertised, archive also accepts
+`requireIdle: true`. The owning runtime then confirms the session is idle
+immediately before entering the close transition. Active, unknown, or
+unsupported work remains active and is returned in the batch `errors` array;
+a persisted session whose live child has already been reaped can still be
+archived.
 
 ### Context Usage (`session_context_usage` capability tag)
 
@@ -217,12 +310,21 @@ closes bridge sessions, and deletes transcript files. It uses
 
 `GET /session/:id/stats` returns usage statistics: model metrics
 (input/output tokens, cache reads/writes, total cost), per-tool call counts and
-latencies, and file edit counts.
+latencies, file edit counts, and per-skill invocation counts for the live
+session. The `skills` block reflects skill body loads and skill slash commands
+within this session only; it is not a cross-session activity aggregate.
 
 ### Session Tasks (`session_tasks` capability tag)
 
 `GET /session/:id/tasks` returns a background-task snapshot for agent tasks,
-shell tasks, monitor tasks, and their lifecycle states.
+shell tasks, monitor tasks, and their lifecycle states. Agent entries spawned
+by another sub-agent carry optional lineage fields (`parentAgentId`,
+`parentName`, `depth`) so clients can render nested sub-agents as a tree; see
+the payload example in `qwen-serve-protocol.md`.
+
+The `session_monitor_tool_correlation` capability additionally guarantees that
+monitor entries carry `toolUseId`, allowing clients to correlate a transcript
+tool call with its task details.
 
 ### Session LSP Status (`session_lsp` capability tag)
 
@@ -235,28 +337,62 @@ not as a transport error.
 ### Compacted Replay
 
 `POST /session/:id/load` now returns a `BridgeRestoredSession` that can include
-`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`, and
-`lastEventId?: number`. `compactedReplay` is produced by
+`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`,
+`lifecycleReplay?: BridgeEvent[]`, `lifecycleReplayIncomplete?: boolean`, and
+`lastEventId?: number`. The optional lifecycle supplement contains up to 1024
+metadata-only frames from the in-memory replay window when refreshing a
+persisted page, and may overlap that page. An incomplete flag reports
+unavailable, degraded, or truncated lifecycle coverage. Clients must apply
+replayed lifecycle records idempotently without treating starts as proof of
+currently running work; a false flag does not establish complete history. These fields are the daemon's bounded in-memory replay
+window for a live session, not a full transcript API. The default window cap is
+4 MiB per live session (`--compacted-replay-max-bytes`), and boot rejects
+invalid caps; the hard ceiling is 256 MiB. `compactedReplay` is produced by
 `TurnBoundaryCompactionEngine`: at turn boundaries it folds consecutive text /
 thought blocks, collapses tool-call sequences to their final state, discards
 transient signals, and produces O(turns) replay logs instead of O(tokens) logs
-(typically a 25-30x reduction).
+(typically a 25-30x reduction). When older replay entries have been dropped
+from that byte window, `compactedReplay[0]` is a synthetic id-less
+`history_truncated` marker with `{reason: 'replay_window_exceeded',
+truncatedEvents, retainedEvents, maxBytes, truncatedTurns?,
+fullTranscriptAvailable: boolean}`. `fullTranscriptAvailable` is a capability
+flag: `true` means the client can page the full persisted transcript with
+`GET /session/:id/transcript`, while `false` means only the bounded replay is
+available. Clients should render it as status and apply the retained replay
+normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
 
-`bridge.preheat()` warms the ACP child process before the first session so that
-the first real session avoids cold-start latency. It pairs with
-`channelIdleTimeoutMs`, which keeps the ACP child alive after the last session
-closes, and skip-relaunch behavior, which reuses an already idle child when a
-new session arrives.
+`bridge.preheat()` remains available to explicit embedders, but `qwen serve`
+also attempts to preheat the trusted primary child after startup for
+compatibility. A failed preheat is non-fatal and the next runtime command or
+Session retries; trusted secondaries start on first use. The Workspace Runtime
+owns the child while work is active. After all Session and management leases
+drain, an omitted or zero `channelIdleTimeoutMs` reaps the child immediately;
+plain preheat itself is preserved for first use and does not arm that reaper.
+A positive configured delay or active keepalive keeps the child reusable for
+the longer remaining window. The public Workspace Runtime `ensure`
+command adds a renewable ten-minute workspace lease; each successful call
+resets that window, including when the channel was already live.
 
 ## Configuration
 
-- `BridgeOptions.maxSessions` (default 20) — cap.
+- `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
-- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
-- `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
-- Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `session_lsp`, `non_blocking_prompt`.
+- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP child startup
+  deadline (Channel factory + `initialize` handshake) and default request
+  timeout.
+- `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
+- `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
+- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
+
+### Stateless generation (`session_generation` capability tag)
+
+`POST /session/:id/generate` accepts `{ "prompt": string }` and returns a
+request-scoped SSE stream with `started`, optional `thinking`, `delta`, `done`,
+or `error` events. The request reads no conversation history, records no turn,
+and exposes no tools. The ACP child uses a valid configured fast model when
+available and otherwise uses the session's main model.
 
 ## Caveats & Known Limits
 

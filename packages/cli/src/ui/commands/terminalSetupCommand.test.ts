@@ -20,6 +20,7 @@ describe('terminalSetupCommand', () => {
     expect(terminalSetupCommand.name).toBe('terminal-setup');
     expect(terminalSetupCommand.description).toContain('multiline input');
     expect(terminalSetupCommand.kind).toBe('built-in');
+    expect(terminalSetupCommand.canRunDuringStreaming).toBe(true);
   });
 
   it('should return success message when terminal setup succeeds', async () => {

@@ -1,0 +1,5139 @@
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from 'vitest';
+
+const {
+  mockSendQQMessage,
+  mockRequestQQApi,
+  mockFetchAccessToken,
+  mockHandleInbound,
+  pendingDispatches,
+} = vi.hoisted(() => ({
+  mockSendQQMessage: vi.fn(),
+  mockRequestQQApi: vi.fn(),
+  mockFetchAccessToken: vi.fn(),
+  mockHandleInbound: vi.fn(),
+  pendingDispatches: [] as Array<Promise<unknown>>,
+}));
+
+const { MockWebSocket } = vi.hoisted(() => {
+  class MockWebSocket {
+    static OPEN = 1;
+    readyState = MockWebSocket.OPEN;
+    send = vi.fn();
+    close = vi.fn();
+    private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+    constructor(_url: string) {}
+    on(event: string, listener: (...args: unknown[]) => void): this {
+      const arr = this.listeners.get(event) ?? [];
+      arr.push(listener);
+      this.listeners.set(event, arr);
+      return this;
+    }
+    emit(event: string, ...args: unknown[]): void {
+      for (const l of this.listeners.get(event) ?? []) l(...args);
+    }
+  }
+  return { MockWebSocket };
+});
+vi.mock('ws', () => ({
+  default: MockWebSocket,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    existsSync: vi.fn(() => false),
+    renameSync: vi.fn(),
+  };
+});
+
+vi.mock('./api.js', () => ({
+  sendQQMessage: mockSendQQMessage,
+  requestQQApi: mockRequestQQApi,
+  getApiBase: () => 'https://api.sgroup.qq.com',
+  fetchAccessToken: mockFetchAccessToken,
+  fetchGatewayUrl: vi.fn(),
+}));
+
+vi.mock('./accounts.js', () => ({
+  getCredsFilePath: () => '/tmp/test-creds.json',
+  loadCredentials: () => null,
+  saveCredentials: vi.fn(),
+}));
+
+vi.mock('./login.js', () => ({
+  qrCodeLogin: vi.fn(),
+}));
+
+// The purge's routing-key shape helpers and the sanitizers are pure: keep the
+// shipped implementations in the double below rather than mirrors, so the mock
+// cannot diverge from what production imports. The test double suite at the
+// bottom of this file pins every one of those exports to the real module, so a
+// reintroduced hand mirror reddens instead of silently drifting.
+const realChannelBase = await vi.importActual<
+  typeof import('@qwen-code/channel-base')
+>('@qwen-code/channel-base');
+
+vi.mock('@qwen-code/channel-base', () => ({
+  singleScopeRoutingKey: realChannelBase.singleScopeRoutingKey,
+  unwrapMessageRoutingKey: realChannelBase.unwrapMessageRoutingKey,
+  wrapMessageRoutingKey: realChannelBase.wrapMessageRoutingKey,
+  ChannelBase: class {
+    protected config: Record<string, unknown> = {};
+    protected bridge: Record<string, unknown> = {};
+    protected router: Record<string, unknown> = {};
+    protected name: string = '';
+    constructor(
+      name: string,
+      config: Record<string, unknown>,
+      bridge: Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ) {
+      this.name = name;
+      this.config = config;
+      this.bridge = bridge;
+      this.router = (options?.['router'] ?? {}) as Record<string, unknown>;
+    }
+    protected handleInbound(env: unknown): Promise<void> {
+      mockHandleInbound(env);
+      return Promise.resolve();
+    }
+    protected getResponseMessageId(_sessionId: string): string | undefined {
+      return undefined;
+    }
+    protected isProactivePromptTurn(_sessionId: string): boolean {
+      return false;
+    }
+    protected disableLoopJobsForChat(_chatId: string): Promise<number> {
+      return Promise.resolve(0);
+    }
+    protected getResponseSenderId(_sessionId: string): string | undefined {
+      return undefined;
+    }
+    protected prepareThenHandleInbound(
+      env: unknown,
+      prepare: () => Promise<boolean | void>,
+    ): Promise<void> {
+      const dispatch = (async () => {
+        await prepare();
+        return this.handleInbound(env);
+      })();
+      pendingDispatches.push(dispatch);
+      return dispatch;
+    }
+    protected onSessionDied(_sessionId: string): void {
+      // no-op in mock
+    }
+    setBridge(bridge: Record<string, unknown>): void {
+      // Mirrors ChannelBase.setBridge's observable effect for the adapter:
+      // the replacement bridge becomes the one adapters register against.
+      this.bridge = bridge;
+    }
+  },
+  SessionRouter: class {
+    restoreSessions(): Promise<void> {
+      return Promise.resolve();
+    }
+    getAll(): Array<{ key: string; sessionId: string; target: unknown }> {
+      return [];
+    }
+    removeSessionId(_sessionId: string): boolean {
+      return false;
+    }
+  },
+  getGlobalQwenDir: () => '/tmp/test-qwen',
+  truncateUtf16Units: realChannelBase.truncateUtf16Units,
+  sanitizeLogText: realChannelBase.sanitizeLogText,
+  sanitizeSenderName: realChannelBase.sanitizeSenderName,
+  sanitizePromptText: realChannelBase.sanitizePromptText,
+  truncateCodePoints: realChannelBase.truncateCodePoints,
+}));
+
+const { QQChannel } = await import('./QQChannel.js');
+type Envelope = import('@qwen-code/channel-base').Envelope;
+import type {
+  QQMessageEvent,
+  QQGroupMessageEvent,
+  GroupAddRobotEvent,
+  GroupDelRobotEvent,
+  GroupMsgToggleEvent,
+} from './types.js';
+import { Intent } from './types.js';
+import {
+  QQ_FILE_MAX_BYTES,
+  QQ_IMAGE_MAX_BYTES,
+  QQ_VOICE_MAX_BYTES,
+} from './media.js';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const suiteTmpDir = await mkdtemp(join(tmpdir(), 'qwen-qqbot-media-'));
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MP4_BYTES = Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+function stubFetchBytes(bytes: Buffer, contentType = 'image/jpeg'): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(bytes, { headers: { 'content-type': contentType } }),
+    ),
+  );
+}
+
+function makeChannel(
+  configOverrides?: Record<string, unknown>,
+  bridgeOverrides?: Record<string, unknown>,
+  optionsOverrides?: Record<string, unknown>,
+): InstanceType<typeof QQChannel> {
+  const ch = new QQChannel(
+    'test-bot',
+    {
+      type: 'qq',
+      token: '',
+      senderPolicy: 'open' as const,
+      allowedUsers: [],
+      sessionScope: 'user' as const,
+      cwd: '/tmp',
+      groupPolicy: 'disabled' as const,
+      groups: {},
+      appID: 'test-app-id',
+      appSecret: 'test-secret',
+      groupAllPolicy: 'log',
+      keywordTriggers: ['help', '问答'],
+      ...configOverrides,
+    },
+    {
+      ...bridgeOverrides,
+    } as unknown as import('@qwen-code/channel-base').AcpBridge,
+    optionsOverrides as never,
+  );
+  return ch;
+}
+
+type QQChannelRaw = Record<string, (...args: unknown[]) => unknown>;
+
+function makeC2CEvent(overrides?: Partial<QQMessageEvent>): QQMessageEvent {
+  return {
+    id: 'msg-c2c-001',
+    author: {
+      user_openid: 'user-openid-1',
+      id: 'user-legacy-1',
+      username: 'Alice',
+    },
+    content: '你好，帮我查一下天气',
+    ...overrides,
+  };
+}
+
+function makeGroupEvent(
+  overrides?: Partial<QQGroupMessageEvent>,
+): QQGroupMessageEvent {
+  return {
+    id: 'msg-group-001',
+    author: {
+      member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+      user_openid: 'ABCDEF0123456789ABCDEF0123456789',
+      username: 'Bob',
+    },
+    content: '<@OPENID_BOT> 你好',
+    group_openid: 'group-openid-1',
+    ...overrides,
+  };
+}
+
+function makeGroupAllEvent(
+  overrides?: Partial<QQGroupMessageEvent>,
+): QQGroupMessageEvent {
+  return {
+    id: 'msg-groupall-001',
+    author: {
+      member_openid: 'FEDCBA9876543210FEDCBA9876543210',
+      username: 'Charlie',
+    },
+    content: '大家早上好',
+    group_openid: 'group-openid-1',
+    mentions: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Await every dispatch started through the mocked base so a late continuation
+ * can never land in the next test (or after an assertion).
+ */
+async function settleDispatches(): Promise<void> {
+  const pending = pendingDispatches.splice(0);
+  if (pending.length === 0) return;
+  await Promise.allSettled(pending);
+  // dispatchInbound's finally runs just after the tracked promise resolves.
+  await Promise.resolve();
+}
+
+beforeEach(() => {
+  pendingDispatches.length = 0;
+  vi.clearAllMocks();
+  mockHandleInbound.mockClear();
+  vi.useFakeTimers();
+});
+
+beforeAll(() => {
+  vi.stubEnv('TMPDIR', suiteTmpDir);
+  vi.stubEnv('TMP', suiteTmpDir);
+  vi.stubEnv('TEMP', suiteTmpDir);
+});
+
+afterEach(async () => {
+  await settleDispatches();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  await rm(suiteTmpDir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// isDuplicate
+// ---------------------------------------------------------------------------
+describe('isDuplicate', () => {
+  it('首次消息不重复', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    expect(pvt['isDuplicate']('evt-001')).toBe(false);
+  });
+
+  it('相同 ID 第二次返回 true（重复）', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['isDuplicate']('evt-001');
+    expect(pvt['isDuplicate']('evt-001')).toBe(true);
+  });
+
+  it('5 分钟后旧条目被清理，相同 ID 不再重复', () => {
+    vi.setSystemTime(0);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['isDuplicate']('evt-001');
+    vi.advanceTimersByTime(360_001);
+    expect(pvt['isDuplicate']('evt-001')).toBe(false);
+  });
+
+  it('自动启动 seenCleanupTimer', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    expect(
+      (ch as unknown as Record<string, unknown>)['seenCleanupTimer'],
+    ).toBeNull();
+    pvt['isDuplicate']('evt-001');
+    expect(
+      (ch as unknown as Record<string, unknown>)['seenCleanupTimer'],
+    ).not.toBeNull();
+  });
+
+  it('不同 ID 不重复', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    expect(pvt['isDuplicate']('evt-001')).toBe(false);
+    expect(pvt['isDuplicate']('evt-002')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleC2C
+// ---------------------------------------------------------------------------
+describe('handleC2C', () => {
+  it('设置 chatTypeMap 为 c2c', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](makeC2CEvent());
+    const chatTypeMap = (ch as unknown as Record<string, unknown>)[
+      'chatTypeMap'
+    ] as Map<string, string>;
+    expect(chatTypeMap.get('user-openid-1')).toBe('c2c');
+  });
+
+  it('设置 replyMsgId', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](makeC2CEvent());
+    const replyMsgId = (ch as unknown as Record<string, unknown>)[
+      'replyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    const entry = replyMsgId.get('user-openid-1');
+    expect(entry?.msgId).toBe('msg-c2c-001');
+  });
+
+  it('触发 handleInbound 带正确参数', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](makeC2CEvent());
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['isGroup']).toBe(false);
+    expect(env['isMentioned']).toBe(true);
+    expect(env['senderId']).toBe('user-openid-1');
+    expect(env['chatId']).toBe('user-openid-1');
+    expect(env['text']).toBe('[atMention=true] [Alice]: 你好，帮我查一下天气');
+  });
+
+  it('斜杠命令不包装 atMention', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](makeC2CEvent({ content: '/help' }));
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('/help');
+  });
+
+  it('空消息（纯图片/贴纸）不触发 handleInbound', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](makeC2CEvent({ content: '   ' }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('重复消息不触发 handleInbound', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const evt = makeC2CEvent();
+    pvt['handleC2C'](evt);
+    pvt['handleC2C'](evt);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+  });
+
+  it('作者名含 [ ] 字符时被清理', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        author: { user_openid: 'user-openid-2', username: '[GM] Eve' },
+        content: 'hello',
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('[atMention=true] [GM  Eve]: hello');
+  });
+
+  it('missing author 时不触发 handleInbound', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({ author: undefined } as Partial<QQMessageEvent>),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('runs a C2C slash command without the wrapper', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](makeC2CEvent({ content: '/status' }));
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toBe('/status');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('forwards bot C2C messages with a [bot] tag when forwardBotMessages is on', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({ author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.text).toContain('你好，帮我查一下天气');
+  });
+
+  it('tags a non-boolean bot flag (truthiness, same as the drop guard)', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        author: { bot: 1 as unknown as boolean, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.senderTag).toBe('bot');
+  });
+
+  it('logs a forwarded bot message once per chat per minute', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    const forwardedLines = () =>
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ).length;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm1', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm2', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(forwardedLines()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm3', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(forwardedLines()).toBe(2);
+    stderr.mockRestore();
+  });
+
+  it('forwards a routed bot !command to the model instead of the shell', async () => {
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '!echo hi',
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    // The routed text must reach matchMessageRoute unmarked, so the bot marker
+    // rides on the envelope and ChannelBase renders it after routing/sanitizing.
+    expect(env.text).toBe('!echo hi');
+    expect(env.senderTag).toBe('bot');
+  });
+
+  it('forwards a bot slash command to the model instead of running it', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '/clear',
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.text).toContain('/clear');
+    expect(env.text.startsWith('/')).toBe(false);
+  });
+
+  it('drops bot C2C messages unless forwardBotMessages is on', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({ author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGroup
+// ---------------------------------------------------------------------------
+describe('handleGroup', () => {
+  it('设置 chatTypeMap 为 group', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](makeGroupEvent());
+    const chatTypeMap = (ch as unknown as Record<string, unknown>)[
+      'chatTypeMap'
+    ] as Map<string, string>;
+    expect(chatTypeMap.get('group-openid-1')).toBe('group');
+  });
+
+  it('设置 replyMsgId', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    const replyMsgId = (ch as unknown as Record<string, unknown>)[
+      'replyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    const entry = replyMsgId.get('group-openid-1');
+    expect(entry?.msgId).toBe('msg-group-001');
+  });
+
+  it('触发 handleInbound 带正确参数：isGroup=true, isMentioned=true', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['isGroup']).toBe(true);
+    expect(env['isMentioned']).toBe(true);
+    expect(env['isReplyToBot']).toBe(true);
+    expect(env['chatId']).toBe('group-openid-1');
+    // allowMention defaults to true
+    expect(env['text']).toBe(
+      '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: 你好',
+    );
+  });
+
+  it('可见文本只移除机器人 mention', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> ask <@OPENID_ALICE> now',
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true },
+          { member_openid: 'alice-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain(']: ask <@OPENID_ALICE> now');
+  });
+
+  it('allowMention=false 时清理 <@OPENID> 标签', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> 帮我翻译这段',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // allowMention=false → 8-char disambiguation fragment + ellipsis instead of full OPENID
+    expect(env['text']).toBe('[atMention=true] [Bob(ABCDEF01…)]: 帮我翻译这段');
+  });
+
+  it('uses a neutral display name when QQ omits author.username', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: 'hello',
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderName']).toBe('QQ User');
+    expect(env['text']).toBe('[atMention=true] [QQ User(ABCDEF01…)]: hello');
+  });
+
+  it('does not duplicate an OPENID as both name and mention tag', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: 'hello',
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe(
+      '[atMention=true] [QQ User(ABCDEF0123456789ABCDEF0123456789)]: hello',
+    );
+  });
+
+  it('清理 <@OPENID> 标签后的空消息不触发', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](makeGroupEvent({ content: '<@OPENID_BOT>   ' }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('斜杠命令不包装 atMention', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '/status',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('/status');
+  });
+
+  it('keeps the sender wrapper and member mentions when the body repeats the name', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_OTHER> <@OPENID_BOT> please review hello',
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+          user_openid: 'ABCDEF0123456789ABCDEF0123456789',
+          username: '<@OPENID_OTHER>  please review hello',
+        },
+        mentions: [
+          { member_openid: 'other-openid', is_you: false },
+          { member_openid: '0123456789ABCDEF0123456789ABCDEF', is_you: true },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text.split('<@OPENID_OTHER>  please review hello')).toHaveLength(
+      3,
+    );
+    expect(env.text).toContain('[atMention=');
+    expect(env.text).toContain('[<@OPENID_OTHER>  please review hello(');
+    expect(env.text).toContain(
+      '机器人 OPENID: 0123456789ABCDEF0123456789ABCDEF',
+    );
+    expect(
+      env.text.endsWith(
+        'hello\n机器人 OPENID: 0123456789ABCDEF0123456789ABCDEF',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps a member mention in the message body', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> ask <@OPENID_OTHER> about the deploy',
+        mentions: [
+          { member_openid: '0123456789ABCDEF0123456789ABCDEF', is_you: true },
+          { member_openid: 'other-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('ask <@OPENID_OTHER> about the deploy');
+  });
+
+  it('其他成员 mention 后的斜杠命令仍被识别', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> <@OPENID_ALICE> /schedule list',
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true },
+          { member_openid: 'alice-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('/schedule list');
+  });
+
+  it('重复消息不触发', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const evt = makeGroupEvent({ mentions: [{ is_you: true }] });
+    pvt['handleGroup'](evt);
+    pvt['handleGroup'](evt);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+  });
+
+  it('缺失 group_openid 时直接 return', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        group_openid: undefined,
+      } as Partial<QQGroupMessageEvent>),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('@all (isAtBot=false) with no mentions defaults to isAtBot=true for GROUP_AT_MESSAGE_CREATE', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const replyMsgId = (ch as unknown as Record<string, unknown>)[
+      'replyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    replyMsgId.set('group-openid-1', { msgId: 'old-msg', timestamp: 0 });
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@all> 大家看看',
+        mentions: undefined,
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['isMentioned']).toBe(true);
+    expect(env['text']).toContain('[atMention=true]');
+    expect(replyMsgId.get('group-openid-1')?.msgId).toBe('msg-group-001');
+  });
+
+  it('groupActiveMsgEnabled=false 时 @bot 消息仍能通过（被动回复）', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+      'groupActiveMsgEnabled'
+    ] as Map<string, boolean>;
+    groupActiveMsgEnabled.set('group-openid-1', false);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+  });
+
+  it('bot 消息在 forwardBotMessages 开启时被转发并打 [bot] 标签', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('auto reply');
+  });
+
+  it('tags a group author whose bot flag is truthy but not boolean', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: {
+          member_openid: 'bot-1',
+          bot: 1 as unknown as boolean,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['senderTag']).toBe('bot');
+  });
+
+  it('logs the forwarded notice for a delivered group message', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const notices = stderr.mock.calls.filter(([line]) =>
+      String(line).includes('forwardBotMessages: bot-authored message'),
+    ).length;
+    expect(notices).toBe(1);
+    stderr.mockRestore();
+  });
+
+  it('forwarded bot slash messages in a group reach the model, not the command table', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> /clear',
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('/clear');
+    expect(String(env['text']).startsWith('/')).toBe(false);
+  });
+
+  it('keeps a routed bot !command in the model context instead of the bang gate', async () => {
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> !echo hi',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // Route matching sees the unmarked head; the marker is on the envelope so
+    // ChannelBase can render it after routing (and keep it out of the bang gate).
+    expect(env['text']).toBe('!echo hi');
+    expect(env['senderTag']).toBe('bot');
+  });
+
+  it('human routed messages keep their text unchanged (no [bot] tag)', async () => {
+    const ch = makeChannel({
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> !echo hi',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+        author: {
+          member_openid: 'human-1',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('!echo hi');
+  });
+
+  it('人类消息在 forwardBotMessages 开启时被转发且不打 [bot] 标签', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> human reply',
+        author: {
+          member_openid: 'human-1',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('human reply');
+    expect(env['text']).not.toContain('[bot] ');
+  });
+
+  it('bot 消息默认不被转发（forwardBotMessages 默认关闭）', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('用户消息里的 [bot] 被剥离，不能伪造机器人身份', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> [bot] 假装是机器人',
+        author: { member_openid: 'ABCDEF0123456789ABCDEF0123456789' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).not.toContain('[bot]');
+  });
+
+  it('senderOpenId 非 32 位 hex 时显示 8 位片段并打 stderr 日志', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // 校验不通过的 openid 显示 8 位片段（截断后加 …），而非完整 openid
+    expect(env['text']).toBe(
+      '[atMention=true] [Bob(ZZZ12345…)]: <@OPENID_BOT> 你好',
+    );
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some(
+        (c) =>
+          c.includes('Unexpected senderOpenId format') &&
+          c.includes('ZZZ12345'),
+      ),
+    ).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('31 位纯 hex senderOpenId 只违反长度约束时显示 8 位片段并告警', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // 31 hex chars: violates only the {32} length constraint, not the
+    // character set — so if {32} ever regresses to {32,} or +, this test
+    // fails instead of silently passing.
+    pvt['handleGroup'](
+      makeGroupEvent({
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF012345678',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // 校验不通过的 openid 显示 8 位片段（截断后加 …），而非完整 openid
+    expect(env['text']).toBe(
+      '[atMention=true] [Bob(ABCDEF01…)]: <@OPENID_BOT> 你好',
+    );
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some(
+        (c) =>
+          c.includes('Unexpected senderOpenId format') &&
+          c.includes('ABCDEF0123456789ABCDEF012345678'),
+      ),
+    ).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('同一 chatId + 同一非法 senderOpenId 只告警一次（去重）', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-warn-dup-1',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-warn-dup-2',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(2);
+    const warnCalls = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((c) => c.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(1);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('不同 chatId 下同一非法 senderOpenId 各告警一次（去重按 chatId 作用域）', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // 默认 group-openid-1
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'd1',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    // 另一个 chatId，同一非法 senderOpenId——去重键是 `${chatId}:${senderOpenId}`
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'd2',
+        group_openid: 'group-openid-2',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(2);
+    const warnCalls = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((c) => c.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(2);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('keeps malformed-sender warning keys distinct for long chat IDs', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const longChatId = 'g'.repeat(80);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'long-chat-warning-1',
+        group_openid: longChatId,
+        author: { member_openid: 'malformed-sender-one', username: 'Bob' },
+      }),
+    );
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'long-chat-warning-2',
+        group_openid: longChatId,
+        author: { member_openid: 'malformed-sender-two', username: 'Alice' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const warnCalls = stderrSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(2);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('caps malformed-sender warning keys at 64 Unicode code points', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const sharedPrefix = '😀'.repeat(64);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'unicode-warning-key-1',
+        author: { member_openid: `${sharedPrefix}A`, username: 'Bob' },
+      }),
+    );
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'unicode-warning-key-2',
+        author: { member_openid: `${sharedPrefix}B`, username: 'Alice' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const warningKeys = pvt['warnedSenderOpenIds'] as unknown as Set<string>;
+    expect(warningKeys).toHaveLength(1);
+    const [warningKey] = [...warningKeys];
+    const senderComponent = warningKey.slice('group-openid-1:'.length);
+    expect(Array.from(senderComponent)).toHaveLength(64);
+    expect(senderComponent).toBe(sharedPrefix);
+
+    const warnCalls = stderrSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(1);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('warnedSenderOpenIds 超过 500 条后重置，此前告警过的键重新告警', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // 501 条不同非法 senderOpenId（非 32-hex，能通过非空检查），同一 chatId。
+    // handleGroup/prepareGroupMessage 是同步的、stderr 告警即时发出，
+    // 因此循环内无需逐条 advance timers，最后统一推进一次即可。
+    for (let i = 0; i < 501; i++) {
+      pvt['handleGroup'](
+        makeGroupEvent({
+          id: `msg-warn-reset-${i}`,
+          author: {
+            member_openid: `ZZZ${String(i).padStart(3, '0')}`,
+            username: 'Bob',
+          },
+        }),
+      );
+    }
+    await vi.advanceTimersByTimeAsync(600);
+
+    // 第 501 条触发 size>500 清空，重置后第 1 条用过的非法 openid 重新告警
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-warn-reset-final',
+        author: {
+          member_openid: 'ZZZ000',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(502);
+    const warnCalls = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((c) => c.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(502);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('allowMention=false 时同昵称不同发送者用前 8 位消歧', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-disambig-1',
+        content: '第一个 Bob',
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+          username: 'Bob',
+        },
+      }),
+    );
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-disambig-2',
+        content: '第二个 Bob',
+        author: {
+          member_openid: 'FEDCBA9876543210FEDCBA9876543210',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(2);
+    const texts = mockHandleInbound.mock.calls.map(
+      (c) => (c[0] as Record<string, unknown>)['text'] as string,
+    );
+    // 两条消息昵称相同，但前缀分别带各自前 8 位片段（+ …）用于消歧
+    expect(texts[0]).toContain('[Bob(ABCDEF01…)]');
+    expect(texts[1]).toContain('[Bob(FEDCBA98…)]');
+  });
+
+  it('allowMention=false 时非法 senderOpenId 仍显示 8 位片段且不告警', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-invalid-fragment',
+        content: '查一下天气',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // 任意非空值都得到 8 位片段（截断后加 …，sanitizeSenderName 原样返回该值），
+    // 且 allowMention=false 门控抑制了格式告警
+    expect(env['text']).toBe('[atMention=true] [Bob(ZZZ12345…)]: 查一下天气');
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some((c) => c.includes('Unexpected senderOpenId format')),
+    ).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('allowMention=false 时 emoji 开头的非法 senderOpenId 截断不产生孤立代理项', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    // 'a😀😀😀😀' 非 32-hex、含多字节字符（U+1F600，UTF-16 下是代理对）。
+    // 统一兜底走 truncateCodePoints 按码点截断：5 个码点 ≤ 8 → 完整保留。
+    // 若按 UTF-16 单元 slice 会劈开代理对留下孤立代理项（渲染为 \uFFFD）。
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-surrogate',
+        content: '测试一下',
+        author: {
+          member_openid: 'a😀😀😀😀',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    const text = env['text'] as string;
+    // 8 位片段完整保留 5 个码点（+ 省略号），无替换符、无孤立代理项
+    expect(text).toBe('[atMention=true] [Bob(a😀😀😀😀…)]: 测试一下');
+    expect(text).not.toContain('\uFFFD');
+    expect(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+        text,
+      ),
+    ).toBe(false);
+  });
+
+  it('uses legacy author.id as the positional identity tag', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: 'hello',
+        author: {
+          id: 'legacy-user-id',
+          username: 'Eve(0123456789ABCDEF0123456789ABCDEF)',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderId']).toBe('legacy-user-id');
+    expect(env['text']).toBe(
+      '[atMention=true] [Eve(0123456789ABCDEF0123456789ABCDEF)(legacy-u…)]: hello',
+    );
+  });
+
+  it('uses a legacy-only author id as identity without an OPENID warning', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'legacy-only-author',
+        content: 'hello',
+        author: { id: 'legacy-user-id' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderId']).toBe('legacy-user-id');
+    expect(env['senderName']).toBe('QQ User');
+    expect(env['text']).toBe('[atMention=true] [QQ User(legacy-u…)]: hello');
+    expect(
+      stderrSpy.mock.calls.some(([message]) =>
+        String(message).includes('Unexpected senderOpenId format'),
+      ),
+    ).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('does not treat a hex-shaped legacy author id as a mentionable OPENID', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'hex-shaped-legacy-author',
+        content: 'hello',
+        author: { id: 'ABCDEF0123456789ABCDEF0123456789' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderName']).toBe('QQ User');
+    expect(env['text']).toBe('[atMention=true] [QQ User(ABCDEF01…)]: hello');
+    expect(
+      stderrSpy.mock.calls.some(([message]) =>
+        String(message).includes('Unexpected senderOpenId format'),
+      ),
+    ).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGroupAll
+// ---------------------------------------------------------------------------
+describe('handleGroupAll', () => {
+  it('默认 policy=log 时不触发 handleInbound', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](makeGroupAllEvent());
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('policy=log 时设置 chatTypeMap', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](makeGroupAllEvent());
+    const chatTypeMap = (ch as unknown as Record<string, unknown>)[
+      'chatTypeMap'
+    ] as Map<string, string>;
+    expect(chatTypeMap.get('group-openid-1')).toBe('group');
+  });
+
+  it('policy=all 时触发 handleInbound', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['isGroup']).toBe(true);
+    expect(env['text']).toContain('[atMention=false]');
+    expect(env['text']).toContain(']: hello world');
+  });
+
+  it('policy=keyword 时只有匹配关键词才触发', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: ['help', '问答'],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+
+    mockHandleInbound.mockClear();
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({ id: 'msg-002', content: '我需要 HELP' }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+  });
+
+  it('policy=keyword 时只有匹配中文关键词才触发', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: ['问答'],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: '有个问答想请教' }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+  });
+
+  it('policy=keyword word-boundary: 不含关键词子串不触发 (e.g. "helpful" ≠ "help")', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: ['help'],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({ content: 'this is helpful info' }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('sets replyMsgId for all messages passing the policy gate (including non-@)', () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({ content: 'hello', mentions: [] }),
+    );
+    const replyMsgId = (ch as unknown as Record<string, unknown>)[
+      'replyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    const entry = replyMsgId.get('group-openid-1');
+    expect(entry?.msgId).toBe('msg-groupall-001');
+  });
+
+  it('isAtBot=true 时设置 replyMsgId', () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '<@OPENID_BOT> hello',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    const replyMsgId = (ch as unknown as Record<string, unknown>)[
+      'replyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    const entry = replyMsgId.get('group-openid-1');
+    expect(entry?.msgId).toBe('msg-groupall-001');
+  });
+
+  it('斜杠命令（isAtBot + /prefix）用 cleanText 发送', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '<@OPENID_BOT> /help',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('/help');
+  });
+
+  it('bot 消息在 forwardBotMessages 开启时被 handleGroupAll 转发并打 [bot] 标签', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('auto reply');
+  });
+
+  it('does not announce a forwarded bot message that group-all policy drops', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'log', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+    // The notice means "dispatched", so a policy-dropped message must not print
+    // it — otherwise the two stderr lines contradict each other.
+    expect(
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ),
+    ).toHaveLength(0);
+    expect(
+      stderr.mock.calls.some(([line]) => String(line).includes('log policy')),
+    ).toBe(true);
+    stderr.mockRestore();
+  });
+
+  it('logs the forwarded notice for a delivered group-all message', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        mentions: [{ is_you: true }],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ),
+    ).toHaveLength(1);
+    stderr.mockRestore();
+  });
+
+  it('group-all routed bot messages keep route matching and carry the marker', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'route me',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('route me');
+    expect(env['senderTag']).toBe('bot');
+  });
+
+  it('bot 消息默认不被 handleGroupAll 转发', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('groupActiveMsgEnabled=false 时被阻断', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+      'groupActiveMsgEnabled'
+    ] as Map<string, boolean>;
+    groupActiveMsgEnabled.set('group-openid-1', false);
+
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello' }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('groupActiveMsgEnabled=false 但 @-bot 消息允许通过（被动回复）', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+      'groupActiveMsgEnabled'
+    ] as Map<string, boolean>;
+    groupActiveMsgEnabled.set('group-openid-1', false);
+
+    // @-bot mention passes through even when active messages disabled
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '<@OPENID_BOT> 你好',
+        mentions: [
+          {
+            member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['isMentioned']).toBe(true);
+  });
+
+  it('重复消息不触发', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const evt = makeGroupAllEvent({ content: 'hello' });
+    pvt['handleGroupAll'](evt);
+    pvt['handleGroupAll'](evt);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+  });
+
+  it('isAtBot=false 时的 text 格式正确', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({ content: 'hello world', mentions: [] }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // isAtBot=false → no botOpenId, no suffix, but senderOpenId displayed
+    expect(env['text']).toBe(
+      '[atMention=false] [Charlie(FEDCBA9876543210FEDCBA9876543210)]: hello world',
+    );
+  });
+
+  it('policy=keyword with empty keywordTriggers drops non-@-bot messages', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: [],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('no keywords configured'))).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('policy=keyword with all-empty-string keywordTriggers drops non-@-bot messages', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: ['', '', ''],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 群管理事件
+// ---------------------------------------------------------------------------
+describe('群管理事件', () => {
+  describe('handleGroupAddRobot', () => {
+    it('设置 chatTypeMap', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const evt: GroupAddRobotEvent = {
+        group_openid: 'group-new-1',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupAddRobot'](evt);
+      const chatTypeMap = (ch as unknown as Record<string, unknown>)[
+        'chatTypeMap'
+      ] as Map<string, string>;
+      expect(chatTypeMap.get('group-new-1')).toBe('group');
+    });
+  });
+
+  describe('handleGroupDelRobot', () => {
+    it('清理 chatTypeMap, groupActiveMsgEnabled, replyMsgId', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+
+      const chatTypeMap = (ch as unknown as Record<string, unknown>)[
+        'chatTypeMap'
+      ] as Map<string, string>;
+      const replyMsgId = (ch as unknown as Record<string, unknown>)[
+        'replyMsgId'
+      ] as Map<string, { msgId: string; timestamp: number }>;
+      const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+        'groupActiveMsgEnabled'
+      ] as Map<string, boolean>;
+
+      chatTypeMap.set('group-del-1', 'group');
+      replyMsgId.set('group-del-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      groupActiveMsgEnabled.set('group-del-1', true);
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: 'group-del-1',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      expect(chatTypeMap.has('group-del-1')).toBe(false);
+      expect(replyMsgId.has('group-del-1')).toBe(false);
+      expect(groupActiveMsgEnabled.has('group-del-1')).toBe(false);
+    });
+
+    it('drops the group from the recent-inbound ring', () => {
+      const ch = makeChannel({ moderationTools: true });
+      const pvt = ch as unknown as QQChannelRaw;
+      const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+        .recentInbound;
+      pvt['recordRecentInbound']('group-del-1', 'alice', 'msg-1');
+      expect(ring.has('group-del-1')).toBe(true);
+
+      pvt['handleGroupDelRobot']({
+        group_openid: 'group-del-1',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      } as GroupDelRobotEvent);
+
+      expect(ring.has('group-del-1')).toBe(false);
+    });
+
+    it('清理 cron buffer/timer（cron-msg-experimental 启用）', () => {
+      const ch = makeChannel({ 'cron-msg-experimental': true });
+      const pvt = ch as unknown as QQChannelRaw;
+
+      const router = (ch as unknown as Record<string, unknown>)['router'] as {
+        getTarget: ReturnType<typeof vi.fn>;
+      };
+      router.getTarget = vi.fn().mockReturnValue({
+        chatId: 'group-cron',
+      });
+
+      // Populate streamState so Fix 1's streamState-based matching works.
+      const streamState = (ch as unknown as Record<string, unknown>)[
+        'streamState'
+      ] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      const cronBuffer = (ch as unknown as Record<string, unknown>)[
+        'cronBuffer'
+      ] as Map<
+        string,
+        { buffer: string; timer: ReturnType<typeof setTimeout> | null }
+      >;
+      cronBuffer.set('cron-sid-1', {
+        buffer: 'pending cron text',
+        timer: setTimeout(() => {}, 9999),
+      });
+      cronBuffer.set('cron-sid-2', {
+        buffer: 'other cron text',
+        timer: setTimeout(() => {}, 8888),
+      });
+
+      streamState.set('cron-sid-1', {
+        chatId: 'group-cron',
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        msgId: undefined,
+        turn: 1,
+      });
+      streamState.set('cron-sid-2', {
+        chatId: 'group-cron',
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        msgId: undefined,
+        turn: 1,
+      });
+
+      const spy = vi.spyOn(globalThis, 'clearTimeout');
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: 'group-cron',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      expect(cronBuffer.has('cron-sid-1')).toBe(false);
+      expect(cronBuffer.has('cron-sid-2')).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(2);
+      spy.mockRestore();
+    });
+
+    // B1: streamState cleanup
+    it('clears streamState entries and cancels timers for removed group', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      // Pre-populate streamState with entries for the group
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+        }
+      >;
+      streamState.set('sid-1', {
+        chatId: 'group-del-stream',
+        buffer: 'pending text',
+        timer: setTimeout(() => {}, 9999),
+        retryCount: 0,
+      });
+      streamState.set('sid-2', {
+        chatId: 'other-group',
+        buffer: 'other text',
+        timer: null,
+        retryCount: 0,
+      });
+
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: 'group-del-stream',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Entry for removed group is deleted
+      expect(streamState.has('sid-1')).toBe(false);
+      // Entry for other group is preserved
+      expect(streamState.has('sid-2')).toBe(true);
+      expect(streamState.get('sid-2')!.chatId).toBe('other-group');
+      // Timer was cancelled
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+
+      clearTimeoutSpy.mockRestore();
+    });
+
+    // B2: detect type check — streamState entry has the right shape
+    it('detect type check: streamState entry has chatId and buffer fields for group-del cleanup', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const streamState = chp['streamState'] as Map<
+        string,
+        { chatId: string; buffer: string; timer: unknown; retryCount: number }
+      >;
+      streamState.set('sid-detect', {
+        chatId: 'group-detect',
+        buffer: 'test buffer',
+        timer: null,
+        retryCount: 0,
+      });
+
+      // Verify entry has correct shape before cleanup
+      const entry = streamState.get('sid-detect')!;
+      expect(entry.chatId).toBe('group-detect');
+      expect(entry.buffer).toBe('test buffer');
+      expect(entry.retryCount).toBe(0);
+
+      // handleGroupDelRobot iterates streamState checking state.chatId === groupId
+      // Verify the cleanup targets the right group
+      const evt: GroupDelRobotEvent = {
+        group_openid: 'group-detect',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      expect(streamState.has('sid-detect')).toBe(false);
+    });
+
+    // B3: full cleanup — reply anchor, msgSeqMap cascade, session sets,
+    // group-level state, onSessionDied
+    it('释放 sessionReplyMsgId 锚点并级联清理 msgSeqMap/会话集/group 级状态', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-full-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyMsgId = chp['replyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+      const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      const botOpenIdByGroup = chp['botOpenIdByGroup'] as Map<string, string>;
+      const _lastKeywordNoMatchLog = chp['_lastKeywordNoMatchLog'] as Map<
+        string,
+        number
+      >;
+
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-xyz', 3);
+      replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-xyz',
+        turn: 1,
+      });
+      // NOTE: no in-flight flush is seeded (no buffer/timer/flushingSessions)
+      // — the release runs FIRST under the fixed ordering, and with nothing
+      // still owning the msgId the orphaned msg_seq counter is cascaded away.
+      // Seeding a live flush here would (correctly, per the wenshao blocking-1
+      // fix) keep the counter until the flush settles instead.
+      pendingStreamDelete.add('sid-1');
+      flushedSessions.add('sid-1');
+      botOpenIdByGroup.set(groupId, 'bot-openid-1');
+      _lastKeywordNoMatchLog.set(groupId, Date.now());
+
+      // mockImplementation: let the real onSessionDied NOT run, so the
+      // assertions below are gated on handleGroupDelRobot's OWN cleanup loop
+      // (the delete/release statements before the call), not on the method
+      // body being re-entered (thread 68).
+      const onSessionDiedSpy = vi
+        .spyOn(ch, 'onSessionDied')
+        .mockImplementation(() => {});
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Reply anchor released (and msgSeqMap entry cascaded away)
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(msgSeqMap.has('msg-xyz')).toBe(false);
+      // Session sets cleaned
+      expect(flushingSessions.has('sid-1')).toBe(false);
+      expect(pendingStreamDelete.has('sid-1')).toBe(false);
+      expect(flushedSessions.has('sid-1')).toBe(false);
+      expect(streamState.has('sid-1')).toBe(false);
+      // Group-level state cleaned
+      expect(botOpenIdByGroup.has(groupId)).toBe(false);
+      expect(_lastKeywordNoMatchLog.has(groupId)).toBe(false);
+      // onSessionDied fired (sessionScope 'user' !== 'single')
+      expect(onSessionDiedSpy).toHaveBeenCalledWith('sid-1');
+
+      onSessionDiedSpy.mockRestore();
+    });
+
+    // B4: msgSeqMap guard — another live session still anchored to the
+    // same msgId keeps the seq counter alive
+    it('其他 session 仍锚定 msg-xyz 时保留 msgSeqMap 计数', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-guard-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyMsgId = chp['replyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      // sid-1 will be cleaned by handleGroupDelRobot; sid-2 is a live
+      // session anchored to the same msgId but routed to another group.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      sessionReplyMsgId.set('sid-2', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-xyz', 3);
+      replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
+      // Seed the paired context entry so handleGroupDelRobot's context loop
+      // actually reaches msg-xyz and runs its guard. The session anchor still
+      // exists at this point, so the old and widened predicates agree: this
+      // pins that the guard exists, not the predicate widening (see the
+      // moved-anchor case below).
+      replyContextByMessageId.set('msg-xyz', {
+        chatId: groupId,
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-xyz',
+        turn: 1,
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // sid-1's anchor is released, but sid-2 still anchors msg-xyz so the
+      // msgSeqMap counter is preserved
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.get('sid-2')!.msgId).toBe('msg-xyz');
+      expect(msgSeqMap.get('msg-xyz')).toBe(3);
+    });
+
+    // B5: wenshao §4 — the per-session release must run BEFORE the
+    // streamState/flushingSessions teardown in the cleanup loop, so the
+    // in-flight flush guard inside releaseSessionReplyAnchor can see the live
+    // tail send and keep the msg_seq counter. A delete-then-release order
+    // would drop the counter here and the in-flight send's re-flush would
+    // resolve nextSeq = 1 (QQ dedupes on msg_id + msg_seq and drops the tail).
+    it('releases before teardown while a flush is in flight, keeping the msg_seq counter (wenshao §4)', () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-flight-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+      const turnCounter = chp['turnCounter'] as Map<string, number>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { turn: number; text: string; pre?: string }
+      >;
+
+      // A streaming session in this group with its flush in flight: the
+      // entry still holds the msgId, flushingSessions is armed, and msg-X's
+      // counter has been consumed by a previous segment.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-X', 3);
+      // Seed the paired context entry so the context loop reaches msg-X and
+      // its guard runs. The session anchor still exists here, so the old and
+      // widened predicates agree: this pins that the guard exists, not the
+      // predicate widening.
+      replyContextByMessageId.set('msg-X', {
+        chatId: groupId,
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: 'pending tail',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-X',
+        turn: 1,
+      });
+      flushingSessions.set('sid-1', streamState.get('sid-1'));
+      turnCounter.set('sid-1', 1);
+      orphanBuffer.set('sid-1', {
+        turn: 1,
+        text: 'stray',
+      });
+
+      const releaseSpy = vi.spyOn(
+        ch as unknown as { releaseSessionReplyAnchor: (s: string) => void },
+        'releaseSessionReplyAnchor',
+      );
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Under single scope onSessionDied is NOT invoked, so the cleanup
+      // loop's own release is the only one — exactly once per session.
+      expect(releaseSpy).toHaveBeenCalledTimes(1);
+      // The release saw the live entry + flush marker and kept the counter.
+      expect(msgSeqMap.get('msg-X')).toBe(3);
+      // Everything the turn's flush touched is torn down, but the turn
+      // counter and orphan-buffer ownership stay with the prompt lifecycle
+      // (onPromptStart/onPromptEnd), not this group-removal loop: under
+      // 'single' scope the matched session is channel-wide and its live turn
+      // must not be reset by a group deletion.
+      expect(streamState.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(flushingSessions.has('sid-1')).toBe(false);
+      expect(turnCounter.get('sid-1')).toBe(1);
+      expect(orphanBuffer.get('sid-1')).toEqual({
+        turn: 1,
+        text: 'stray',
+      });
+
+      releaseSpy.mockRestore();
+    });
+
+    // B6: the widened predicate, where it genuinely differs from
+    // isMsgIdAnchoredBySession — the session anchor has moved to a different
+    // msgId while a streamState entry still carries the context msgId with a
+    // non-empty buffer. The anchor-only predicate would drop the counter; the
+    // shared predicate must keep it. The entry belongs to another chat, so this
+    // teardown does not destroy it and its veto is the legitimate one; an entry
+    // the same block deletes is covered by the case below.
+    it('keeps the counter when the session anchor moved but a surviving buffered entry still holds the context msgId', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-moved-1';
+      const otherGroupId = 'group-del-moved-other';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      // The session has already moved to a newer anchor (msg-Y), but its
+      // streamState entry still carries the older context msgId (msg-X) with
+      // a buffered residual. The predicate is keyed by msgId and is
+      // deliberately chat-agnostic, so the entry keeps the counter even though
+      // it belongs to another chat that this teardown leaves alone.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-Y',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-X', 3);
+      // This routing entry is only the trigger: handleGroupDelRobot's context
+      // loop matches it by chatId, deletes it, then calls reclaimMsgSeq('msg-X').
+      // Because the loop drops the entry before reclaiming, by the time
+      // isMsgSeqStillInUse runs the buffered streamState entry below is the
+      // only holder left — so this pins the streamState clause and not the
+      // routing-map fallback.
+      replyContextByMessageId.set('msg-X', {
+        chatId: groupId,
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
+      streamState.set('sid-1', {
+        chatId: otherGroupId,
+        buffer: 'pending tail',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-X',
+        turn: 1,
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // The context loop reclaimed msg-X, and the guard saw the buffered entry
+      // (whose chatId is another group, so this teardown leaves it in place) and
+      // kept the counter. Dropping `s.buffer ||` from the streamState clause
+      // makes reclaimMsgSeq('msg-X') succeed here and this assertion red.
+      expect(msgSeqMap.get('msg-X')).toBe(3);
+      expect(streamState.get('sid-1')!.buffer).toBe('pending tail');
+    });
+
+    it('cascades the msg_seq counter of a stream whose buffer it discards', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+      const groupId = 'group-del-orphan-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const streamState = chp['streamState'] as Map<string, unknown>;
+      (chp['setReplyMsgId'] as (c: string, m: string) => void)(
+        groupId,
+        'msg-1',
+      );
+      (chp['onPromptStart'] as (c: string, s: string, m: string) => void)(
+        groupId,
+        'sid-1',
+        'msg-1',
+      );
+      (chp['onResponseChunk'] as (c: string, t: string, s: string) => void)(
+        groupId,
+        'partial',
+        'sid-1',
+      );
+      msgSeqMap.set('msg-1', 2); // consumed by an earlier segment
+      expect((streamState.get('sid-1') as { buffer: string }).buffer).toBe(
+        'partial',
+      );
+      pvt['handleGroupDelRobot']({
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      });
+      expect(streamState.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(msgSeqMap.has('msg-1')).toBe(false);
+    });
+
+    // The release must carry the matched entry's msgId identity (the
+    // shared single-scope session may already belong to a newer turn) and
+    // must not touch the turn counter / orphan buffer, which the prompt
+    // lifecycle owns.
+    it("does not delete the shared single-scope session's newer anchor or turn state", () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-shared-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const turnCounter = chp['turnCounter'] as Map<string, number>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { turn: number; text: string; pre?: string }
+      >;
+
+      // The single-scope session is channel-wide: the entry this group's
+      // cleanup matches belongs to an older turn, while the session already
+      // holds a newer turn's anchor and buffered head.
+      sessionReplyMsgId.set('__single__', {
+        msgId: 'msg-live',
+        timestamp: Date.now(),
+      });
+      streamState.set('__single__', {
+        chatId: groupId,
+        buffer: 'pending',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-old',
+        turn: 1,
+      });
+      turnCounter.set('__single__', 2);
+      orphanBuffer.set('__single__', {
+        turn: 2,
+        text: 'live-head',
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // The matched stream entry is still torn down (rest of the loop), but
+      // the live anchor survives because the release is identity-gated.
+      expect(streamState.has('__single__')).toBe(false);
+      expect(sessionReplyMsgId.get('__single__')!.msgId).toBe('msg-live');
+      expect(turnCounter.get('__single__')).toBe(2);
+      expect(orphanBuffer.get('__single__')).toEqual({
+        turn: 2,
+        text: 'live-head',
+      });
+    });
+
+    // A matched entry with no msgId (proactive/loop turn) offers no
+    // identity to release against. Passing `undefined` to the release helper
+    // means "no identity expectation", which would delete the shared
+    // single-scope session's live anchor — the exact defect the identity gate
+    // exists to prevent.
+    it('does not release the shared anchor when the matched entry has no msgId', () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-no-msgid-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      // The matched entry belongs to a proactive/loop turn and carries no
+      // msgId, while the channel-wide session already holds a live anchor.
+      sessionReplyMsgId.set('__single__', {
+        msgId: 'msg-live',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-live', 3);
+      streamState.set('__single__', {
+        chatId: groupId,
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        turn: 1,
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // The matched stream entry is still torn down (rest of the loop), but
+      // with no identity to check the release is skipped — the live anchor and
+      // its msg_seq counter survive.
+      expect(streamState.has('__single__')).toBe(false);
+      expect(sessionReplyMsgId.get('__single__')!.msgId).toBe('msg-live');
+      expect(msgSeqMap.get('msg-live')).toBe(3);
+    });
+  });
+
+  describe('handleGroupMsgToggle', () => {
+    it('设置 groupActiveMsgEnabled=false (reject)', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+
+      const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+        'groupActiveMsgEnabled'
+      ] as Map<string, boolean>;
+      groupActiveMsgEnabled.set('group-reject-1', true);
+
+      const evt: GroupMsgToggleEvent = {
+        group_openid: 'group-reject-1',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupMsgToggle'](evt, false);
+      expect(groupActiveMsgEnabled.get('group-reject-1')).toBe(false);
+    });
+
+    it('设置 groupActiveMsgEnabled=true (receive)', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+
+      const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+        'groupActiveMsgEnabled'
+      ] as Map<string, boolean>;
+      groupActiveMsgEnabled.set('group-recv-1', false);
+
+      const evt: GroupMsgToggleEvent = {
+        group_openid: 'group-recv-1',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupMsgToggle'](evt, true);
+      expect(groupActiveMsgEnabled.get('group-recv-1')).toBe(true);
+    });
+  });
+  describe('sendIdentify intent subscription', () => {
+    it('includes GROUP_MESSAGE intent when groupAllPolicy=keyword', () => {
+      const ch = makeChannel({ groupAllPolicy: 'keyword' });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['_ready'] = true;
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.op).toBe(2); // IDENTIFY
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(
+        Intent.GROUP_MESSAGE,
+      );
+    });
+
+    it('includes GROUP_MESSAGE intent when groupAllPolicy=all', () => {
+      const ch = makeChannel({ groupAllPolicy: 'all' });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(
+        Intent.GROUP_MESSAGE,
+      );
+    });
+
+    it('includes GROUP_MESSAGE intent when groupAllPolicy=log', () => {
+      const ch = makeChannel({ groupAllPolicy: 'log' });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(
+        Intent.GROUP_MESSAGE,
+      );
+    });
+
+    it('excludes GROUP_MESSAGE intent when groupAllPolicy is undefined', () => {
+      const ch = makeChannel({ groupAllPolicy: undefined });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(0);
+    });
+  });
+
+  describe('INVALID_SESSION recovery', () => {
+    it('sets readyTimeout on re-IDENTIFY and triggers ws.close(4002) + connectReject if READY never arrives', () => {
+      vi.useFakeTimers();
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const wsClose = vi.fn();
+      const wsSend = vi.fn();
+      chp['ws'] = {
+        close: wsClose,
+        send: wsSend,
+        readyState: 1, // WebSocket.OPEN
+      };
+      const connectReject = vi.fn();
+      chp['connectReject'] = connectReject;
+
+      // Simulate INVALID_SESSION (op=9)
+      pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+      // Verify re-IDENTIFY was sent
+      expect(wsSend).toHaveBeenCalled();
+
+      // Verify readyTimeout was set (30s)
+      expect(chp['readyTimeout']).not.toBeNull();
+
+      // Advance time past the 30s timeout
+      vi.advanceTimersByTime(30_000);
+
+      // Verify WS closed with code 4002
+      expect(wsClose).toHaveBeenCalledWith(4002);
+
+      // Verify connectReject was invoked with timeout error
+      expect(connectReject).toHaveBeenCalledWith(
+        new Error('Timed out waiting for READY'),
+      );
+      expect(chp['connectReject']).toBeNull();
+
+      ch.disconnect();
+    });
+
+    it('readyTimeout does not fire if READY arrives before 30s', () => {
+      vi.useFakeTimers();
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const wsClose = vi.fn();
+      const wsSend = vi.fn();
+      chp['ws'] = {
+        close: wsClose,
+        send: wsSend,
+        readyState: 1,
+      };
+      chp['connectReject'] = vi.fn();
+
+      // Simulate INVALID_SESSION (op=9)
+      pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+      const timeoutBefore = chp['readyTimeout'];
+      expect(timeoutBefore).not.toBeNull();
+
+      // Simulate READY arriving before timeout
+      pvt['handleGatewayMessage'](
+        { op: 0, t: 'READY', s: 1, d: { session_id: 'sess-new' } },
+        () => {},
+      );
+
+      // Verify the old timeout was cleared
+      const timeoutAfter = chp['readyTimeout'];
+      expect(timeoutAfter).toBeNull();
+
+      // Advance past 30s — should NOT fire
+      vi.advanceTimersByTime(30_000);
+      expect(wsClose).not.toHaveBeenCalled();
+
+      ch.disconnect();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// connect() default instructions
+// ---------------------------------------------------------------------------
+describe('connect() default instructions', () => {
+  it('surfaces the [bot] meaning when forwardBotMessages is on', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    // The default prompt is assembled synchronously, before the first await.
+    const connectPromise = ch.connect().catch(() => undefined);
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    expect(config.instructions).toContain(
+      '消息前缀 [bot] 表示该消息来自另一个机器人',
+    );
+    // Drain the 3-attempt retry loop so its timers cannot leak.
+    await vi.advanceTimersByTimeAsync(4000);
+    await connectPromise;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
+
+  it('does not surface the [bot] meaning when forwardBotMessages is off', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel();
+    const connectPromise = ch.connect().catch(() => undefined);
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    expect(config.instructions).not.toContain('消息前缀 [bot]');
+    await vi.advanceTimersByTimeAsync(4000);
+    await connectPromise;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
+
+  it('appends the brake to operator instructions once, across reconnects', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      instructions: '回答要简洁',
+    });
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    const first = ch.connect().catch(() => undefined);
+    expect(config.instructions).toContain('回答要简洁');
+    expect(config.instructions).toContain('消息前缀 [bot]');
+    expect(config.instructions).toContain('<noreply>');
+    await vi.advanceTimersByTimeAsync(4000);
+    await first;
+    // connect() re-runs on reconnect: the append must not stack.
+    const second = ch.connect().catch(() => undefined);
+    expect(config.instructions?.split('消息前缀 [bot]').length).toBe(2);
+    expect(config.instructions?.split('<noreply>').length).toBe(2);
+    await vi.advanceTimersByTimeAsync(4000);
+    await second;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gateway message handling (RESUMED, INVALID_SESSION coldStart)
+// ---------------------------------------------------------------------------
+describe('Gateway message handling', () => {
+  it('RESUMED sets _ready to true and resets reconnect state', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['_ready'] = false;
+    chp['reconnectAttempts'] = 3;
+    chp['isReconnecting'] = true;
+
+    // Simulate RESUME event (op=0, t=RESUMED)
+    pvt['handleGatewayMessage']({ op: 0, t: 'RESUMED', s: 1, d: {} }, () => {});
+
+    expect(chp['_ready']).toBe(true);
+    expect(chp['reconnectAttempts']).toBe(0);
+    expect(chp['isReconnecting']).toBe(false);
+  });
+
+  it('RESUMED clears pending readyTimeout', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['readyTimeout'] = setTimeout(() => {}, 30000);
+
+    pvt['handleGatewayMessage']({ op: 0, t: 'RESUMED', s: 1, d: {} }, () => {});
+
+    expect(chp['readyTimeout']).toBeNull();
+
+    ch.disconnect();
+  });
+
+  it('RESUMED clears connectReject and starts heartbeat', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['connectReject'] = vi.fn();
+    chp['heartbeatTimer'] = null;
+
+    pvt['handleGatewayMessage']({ op: 0, t: 'RESUMED', s: 1, d: {} }, () => {});
+
+    expect(chp['connectReject']).toBeNull();
+    // heartbeatTimer was set (startHeartbeat was called)
+    expect(chp['heartbeatTimer']).not.toBeNull();
+
+    ch.disconnect();
+  });
+
+  it('INVALID_SESSION sets coldStart=true and _ready=false', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn(), readyState: 1 };
+    chp['accessToken'] = 'test-token';
+    chp['_ready'] = true;
+    chp['coldStart'] = false;
+    chp['tryResume'] = true;
+
+    // Simulate INVALID_SESSION (op=9)
+    pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+    expect(chp['coldStart']).toBe(true);
+    expect(chp['_ready']).toBe(false);
+    expect(chp['tryResume']).toBe(false);
+
+    ch.disconnect();
+  });
+
+  it('INVALID_SESSION flushes state and sends re-IDENTIFY', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const wsSend = vi.fn();
+    chp['ws'] = { send: wsSend, close: vi.fn(), readyState: 1 };
+    chp['accessToken'] = 'test-token';
+    chp['_ready'] = true;
+
+    // Simulate INVALID_SESSION (op=9)
+    pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+    // Should have sent IDENTIFY (not RESUME, since tryResume is set to false)
+    expect(wsSend).toHaveBeenCalled();
+    const sent = wsSend.mock.calls[0][0] as string;
+    const parsed = JSON.parse(sent);
+    // After INVALID_SESSION, tryResume=false, so it sends IDENTIFY (op=2)
+    expect(parsed.op).toBe(2);
+
+    ch.disconnect();
+  });
+
+  it('READY cold start: calls restoreQQState and restoreSessions', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    expect(chp['coldStart']).toBe(true);
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+    const restoreSessionsSpy = vi
+      .spyOn(
+        chp['router'] as unknown as { restoreSessions: () => Promise<void> },
+        'restoreSessions',
+      )
+      .mockResolvedValue(undefined);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    expect(restoreQQSpy).toHaveBeenCalled();
+    expect(restoreSessionsSpy).toHaveBeenCalled();
+    expect(chp['_ready']).toBe(true);
+    expect(chp['reconnectAttempts']).toBe(0);
+    expect(chp['isReconnecting']).toBe(false);
+    expect(chp['coldStart']).toBe(false);
+
+    restoreQQSpy.mockRestore();
+    restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY cold start: a failed restore still purges orphaned routes', async () => {
+    const ch = makeChannel({ sessionScope: 'thread' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+    // A partial restore: earlier sessions were loaded (each one is exactly what
+    // the purge releases) and a later one rejects.
+    const restoreSessionsSpy = vi
+      .spyOn(
+        chp['router'] as unknown as { restoreSessions: () => Promise<void> },
+        'restoreSessions',
+      )
+      .mockRejectedValue(new Error('half restored'));
+    const purgeSpy = vi.spyOn(
+      ch as unknown as { purgeSingleScopeOrphans: () => void },
+      'purgeSingleScopeOrphans',
+    );
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    // The repair branch runs in the rejected promise's catch: flush microtasks.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(purgeSpy).toHaveBeenCalled();
+
+    purgeSpy.mockRestore();
+    restoreQQSpy.mockRestore();
+    restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY cold start: purgeSingleScopeOrphans clears single-scope orphans, keeps live thread-scope keys', async () => {
+    // The purge must run as part of the READY restore chain and drop
+    // single-era orphan keys from the router (thread 62 gate: previously the
+    // purge had no wiring-level test).
+    const ch = makeChannel({
+      sessionScope: 'thread',
+      purgeLegacySessions: true,
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    expect(chp['coldStart']).toBe(true);
+
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
+    chp['router'] = {
+      restoreSessions: vi.fn().mockResolvedValue(undefined),
+      getAll: () => [
+        // Single-era orphan (exact-match on this channel's name).
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // User-scope key under thread scope: purged — unroutable under
+        // thread scope, where the routing key is channel:chatId.
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'user-era-1',
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
+        },
+        // Live thread-scope two-part key: never purged.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+      ],
+      removeSessionId,
+    };
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    // purgeSingleScopeOrphans ran inside the restore chain and removed both
+    // the single-scope orphan and this channel's unroutable user-scope key,
+    // keeping the live thread-scope key.
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-1');
+    expect(chp['_ready']).toBe(true);
+
+    restoreQQSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY warm reconnect: skips restore but calls finalizeReady', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    chp['coldStart'] = false;
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+    const restoreSessionsSpy = vi
+      .spyOn(
+        chp['router'] as unknown as { restoreSessions: () => Promise<void> },
+        'restoreSessions',
+      )
+      .mockResolvedValue(undefined);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-warm' } }, () => {});
+
+    expect(restoreQQSpy).not.toHaveBeenCalled();
+    expect(restoreSessionsSpy).not.toHaveBeenCalled();
+    expect(chp['_ready']).toBe(true);
+    expect(chp['reconnectAttempts']).toBe(0);
+    expect(chp['isReconnecting']).toBe(false);
+    expect(chp['coldStart']).toBe(false);
+
+    restoreQQSpy.mockRestore();
+    restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token refresh exhaustion (10 failures → reconnect)
+// ---------------------------------------------------------------------------
+describe('Token refresh exhaustion', () => {
+  it('calls disconnect after 10 consecutive token refresh failures', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    // Set up token expiry near future so scheduleTokenRefresh fires soon
+    chp['tokenExpiresAt'] = Date.now() + 20_000;
+    chp['accessToken'] = 'test-token';
+    chp['_reconnectId'] = 1;
+
+    mockFetchAccessToken.mockRejectedValue(new Error('token endpoint down'));
+
+    // Spy on disconnect to verify it's called
+    const disconnectSpy = vi.spyOn(
+      ch as unknown as { disconnect: () => void },
+      'disconnect',
+    );
+
+    // Spy on reconnectWithRetry
+    const reconnectSpy = vi
+      .spyOn(
+        ch as unknown as { reconnectWithRetry: () => Promise<void> },
+        'reconnectWithRetry',
+      )
+      .mockResolvedValue(undefined);
+
+    // Call scheduleTokenRefresh (private, accessed via type cast)
+    (chp['scheduleTokenRefresh'] as () => void).call(ch);
+
+    // Advance past the initial delay
+    // tokenExpiresAt = now + 20s
+    // ttl = 20s
+    // delay = min(20*0.8=16s, max(20-30=-10s, 10s)) = min(16s, 10s) = 10s
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // First fetchToken call was made and rejected
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(1);
+
+    // Now advance through the 10 retries (each 60s apart)
+    // After each rejection, a new setTimeout(60000) fires
+    for (let i = 1; i <= 10; i++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+
+    // After 10 failures (retryCount > 10), disconnect should have been called
+    expect(disconnectSpy).toHaveBeenCalled();
+
+    disconnectSpy.mockRestore();
+    reconnectSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('stale _reconnectId discards token refresh retry callbacks', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['tokenExpiresAt'] = Date.now() + 20_000;
+    chp['accessToken'] = 'test-token';
+    const originalReconnectId = chp['_reconnectId'] as number;
+
+    mockFetchAccessToken.mockRejectedValue(new Error('token endpoint down'));
+
+    // Spy on disconnect
+    const disconnectSpy = vi.spyOn(
+      ch as unknown as { disconnect: () => void },
+      'disconnect',
+    );
+
+    (chp['scheduleTokenRefresh'] as () => void).call(ch);
+
+    // Advance to trigger first fetchToken -> reject
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(1);
+
+    // Change _reconnectId before the retry fires (simulate disconnect/reconnect)
+    chp['_reconnectId'] = originalReconnectId + 1;
+
+    // Advance 60s for the retry
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // Stale _reconnectId check fires in the .catch() handler, not in
+    // fetchToken itself. fetchToken calls fetchAccessToken anyway,
+    // but the .catch() returns early due to _reconnectId mismatch.
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(2);
+    // disconnect was not called (guard returned early)
+    expect(disconnectSpy).not.toHaveBeenCalled();
+
+    disconnectSpy.mockRestore();
+    vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveRoute with chatTypes config fallback
+// ---------------------------------------------------------------------------
+describe('resolveRoute chatTypes fallback', () => {
+  it('uses chatTypes config when chatTypeMap has no entry', async () => {
+    const ch = makeChannel({
+      chatTypes: { 'config-chat-id': 'group' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | null>
+    )('config-chat-id');
+
+    expect(result).not.toBeNull();
+    expect(result!.path).toBe('/v2/groups/config-chat-id/messages');
+  });
+
+  it('prefers chatTypeMap over chatTypes config', async () => {
+    const ch = makeChannel({
+      chatTypes: { 'dual-chat-id': 'c2c' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    (chp['chatTypeMap'] as Map<string, string>).set('dual-chat-id', 'group');
+
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | null>
+    )('dual-chat-id');
+
+    expect(result).not.toBeNull();
+    expect(result!.path).toBe('/v2/groups/dual-chat-id/messages');
+  });
+
+  it('reports a permanent block when neither chatTypeMap nor chatTypes has entry', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('unknown-chat');
+
+    // resolveRoute names the retry class beside the guard that produced it.
+    expect(result).toEqual({ block: 'permanent' });
+  });
+
+  it('reports a permanent block for a chatId the API cannot address', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // A slash fails isValidChatId, so the retry can never resolve the route:
+    // the invalid-chatId guard must name the permanent class, not transient.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('bad/chat');
+
+    expect(result).toEqual({ block: 'permanent' });
+  });
+
+  it('reports a transient block when the refreshed token is empty', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = '';
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: '',
+      expiresIn: 7200,
+    });
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // An empty token is a recoverable token state: the guard must name the
+    // transient class so a cancelled turn's stashed head is re-attempted
+    // rather than dropped.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('group-1');
+
+    expect(result).toEqual({ block: 'transient' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractBotOpenId
+// ---------------------------------------------------------------------------
+describe('extractBotOpenId', () => {
+  it('returns empty string when no self-mention found', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )([], 'group-1');
+    expect(result).toBe('');
+  });
+
+  it('returns empty string for invalid botOpenId format', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )([
+      {
+        member_openid: 'not-hex!!',
+        is_you: true,
+        scope: 'single' as const,
+      },
+    ]);
+    expect(result).toBe('');
+  });
+
+  it('returns botOpenId and saves to botOpenIdByGroup when valid', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pvt = ch as unknown as QQChannelRaw;
+    const botOpenIdByGroup = chp['botOpenIdByGroup'] as Map<string, string>;
+
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )(
+      [
+        {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+          is_you: true,
+          scope: 'single' as const,
+        },
+      ],
+      'group-openid-1',
+    );
+
+    expect(result).toBe('ABCDEF0123456789ABCDEF0123456789');
+    expect(botOpenIdByGroup.get('group-openid-1')).toBe(
+      'ABCDEF0123456789ABCDEF0123456789',
+    );
+  });
+
+  it('prefers member_openid over id', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )([
+      {
+        member_openid: '11111111222222223333333344444444',
+        id: '99999999888888887777777766666666',
+        is_you: true,
+        scope: 'single' as const,
+      },
+    ]);
+    expect(result).toBe('11111111222222223333333344444444');
+  });
+
+  describe('WS close handler abnormal disconnect', () => {
+    it('sets coldStart=true and tryResume=false on abnormal WS close (code 4009 session timeout)', () => {
+      const ch = makeChannel();
+      const chp = ch as unknown as Record<string, unknown>;
+
+      chp['tryResume'] = true;
+      chp['coldStart'] = false;
+
+      // dialGateway creates the ws and registers close handler
+      (
+        chp['dialGateway'] as (
+          url: string,
+          resolve: () => void,
+          reject: (err: Error) => void,
+        ) => void
+      )('wss://gateway.test', vi.fn(), vi.fn());
+
+      const ws = chp['ws'] as {
+        emit: (event: string, ...args: unknown[]) => void;
+      };
+      ws.emit('close', 4009);
+
+      expect(chp['tryResume']).toBe(false);
+      expect(chp['coldStart']).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound media (images and videos)
+// ---------------------------------------------------------------------------
+describe('inbound media', () => {
+  const IMAGE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=image';
+  const VIDEO_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=video';
+  const FILE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=file';
+  const VOICE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=voice';
+  const VOICE_WAV_URL =
+    'https://multimedia.nt.qq.com.cn/download?fileid=voice-wav';
+
+  const DOCX_BYTES = Buffer.from('PK\u0003\u0004docx bytes');
+  const SILK_BYTES = Buffer.from('SILK voice bytes');
+  const WAV_BYTES = Buffer.from('RIFF....WAVEfmt ');
+
+  function imageAttachment(filename = 'photo.png') {
+    return { url: IMAGE_URL, content_type: 'image/jpeg', filename };
+  }
+
+  function videoAttachment(filename = 'clip.mp4') {
+    return { url: VIDEO_URL, content_type: 'video/mp4', filename };
+  }
+
+  function fileAttachment(filename = 'report.docx') {
+    return { url: FILE_URL, content_type: 'file', filename };
+  }
+
+  function voiceAttachment(voiceWavUrl?: string) {
+    return {
+      url: VOICE_URL,
+      content_type: 'voice',
+      ...(voiceWavUrl ? { voice_wav_url: voiceWavUrl } : {}),
+    };
+  }
+
+  function lastEnvelope(): Envelope {
+    return mockHandleInbound.mock.calls[0][0] as Envelope;
+  }
+
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs a turn for an image-only C2C message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    const attachments = env.attachments ?? [];
+    expect(attachments).toHaveLength(2);
+    const inline = attachments[0];
+    expect(inline?.type).toBe('image');
+    expect(inline?.mimeType).toBe('image/png');
+    expect(inline?.fileName).toBe('photo.png');
+    expect(inline?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(inline?.filePath).toBeUndefined();
+    const onDisk = attachments[1];
+    expect(onDisk?.type).toBe('file');
+    expect(onDisk?.mimeType).toBe('image/png');
+    expect(onDisk?.fileName).toBe('photo.png');
+    expect(onDisk?.data).toBeUndefined();
+    expect(onDisk?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(onDisk?.filePath?.endsWith('photo.png')).toBe(true);
+    await expect(readFile(onDisk!.filePath!)).resolves.toEqual(PNG_BYTES);
+    const stats = await stat(onDisk!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+
+    pvt['onPromptEnd'](env.chatId, 'session-1', env.messageId);
+
+    await expect(readFile(onDisk!.filePath!)).resolves.toEqual(PNG_BYTES);
+  });
+
+  it('runs a turn for an image-only group @ message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(env.attachments?.[0]?.filePath).toBeUndefined();
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for an image-only group all-messages message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        mentions: [{ is_you: true }],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.isMentioned).toBe(true);
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.filePath).toBeUndefined();
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.filePath).toBeDefined();
+  });
+
+  it('leaves a media-only forwarded bot group message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    // No self-prefix to keep: the base renders the [bot] attribution instead.
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('leaves a media-only forwarded bot group-all message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        mentions: [{ is_you: true }],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('leaves a media-only forwarded bot C2C message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('keeps the forwarded-bot marker when the media download fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline');
+      }),
+    );
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.senderTag).toBe('bot');
+  });
+
+  it('keeps the caption as user text when an image is attached', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '看看这张图', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: 看看这张图');
+    expect(env.syntheticText).toBeUndefined();
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(env.attachments?.[1]?.type).toBe('file');
+  });
+
+  it('writes a video to a temp path and attaches it by path', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [videoAttachment('../clip.mp4')],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(video)');
+    expect(env.syntheticText).toBe(true);
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('video');
+    expect(attachment?.mimeType).toBe('video/mp4');
+    expect(attachment?.fileName).toBe('clip.mp4');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith(attachment!.fileName!)).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(MP4_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('downloads a file attachment and keeps the caption', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '请审阅这个文件',
+        attachments: [fileAttachment()],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: 请审阅这个文件');
+    expect(env.syntheticText).toBeUndefined();
+    const attachments = env.attachments ?? [];
+    // A file is delivered once, by path — never as an inline image entry.
+    expect(attachments).toHaveLength(1);
+    const attachment = attachments[0];
+    // ChannelBase renders this entry into the prompt as
+    // `User sent a file "report.docx". It has been saved to: <path>`
+    // (ChannelBase.ts:7060), which is the line the agent actually sees.
+    expect(attachment?.type).toBe('file');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.mimeType).toBe('application/octet-stream');
+    expect(attachment?.fileName).toBe('report.docx');
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith('report.docx')).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(DOCX_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('runs a turn for a file-only C2C message with the (file) placeholder', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(file)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('file');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for a file-only group @ message with the (file) placeholder', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [fileAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(file)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('file');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('skips an over-limit file with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(DOCX_BYTES, {
+            headers: { 'content-length': String(QQ_FILE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping file attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps a file that is over the image cap under the file cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the file cap, so the download
+    // only succeeds when the file kind routes to QQ_FILE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(DOCX_BYTES, {
+            headers: {
+              'content-type': 'file',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('file');
+    expect(attachment?.fileName).toBe('report.docx');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(DOCX_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping file attachment'),
+      ),
+    ).toBe(false);
+    stderr.mockRestore();
+  });
+
+  it('preserves the sender extension for a file and falls back to .bin', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          fileAttachment('../report.docx'),
+          fileAttachment('README'),
+          fileAttachment('notes.<script>'),
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    expect(lastEnvelope().attachments?.map((a) => a.fileName)).toEqual([
+      'report.docx',
+      'README.bin',
+      'notes.bin',
+    ]);
+  });
+
+  it('prefers the converted WAV URL for a voice attachment', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(WAV_BYTES, { headers: { 'content-type': 'audio/wav' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [voiceAttachment(VOICE_WAV_URL)],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    // The WAV URL is fetched, not the original SILK one.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(VOICE_WAV_URL);
+    const attachments = env.attachments ?? [];
+    // A voice message is delivered once, by path — never as an inline entry.
+    expect(attachments).toHaveLength(1);
+    const attachment = attachments[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.mimeType).toBe('audio/wav');
+    // QQ sends no filename, so the stem falls back to `qq_voice`.
+    expect(attachment?.fileName).toBe('qq_voice.wav');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith('qq_voice.wav')).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(WAV_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('falls back to the original URL for a voice attachment without a WAV', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(SILK_BYTES, { headers: { 'content-type': 'voice' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(VOICE_URL);
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.mimeType).toBe('audio/silk');
+    expect(attachment?.fileName).toBe('qq_voice.silk');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(SILK_BYTES);
+  });
+
+  it('runs a turn for a voice-only C2C message with the (voice) placeholder', async () => {
+    stubFetchBytes(SILK_BYTES, 'voice');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('audio');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for a voice-only group @ message with the (voice) placeholder', async () => {
+    stubFetchBytes(SILK_BYTES, 'voice');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [voiceAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('audio');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('skips an over-limit voice attachment with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(SILK_BYTES, {
+            headers: { 'content-length': String(QQ_VOICE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping voice attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps a voice message over the image cap under the voice cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the voice cap, so the download
+    // only succeeds when the voice kind routes to QQ_VOICE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(SILK_BYTES, {
+            headers: {
+              'content-type': 'voice',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.fileName).toBe('qq_voice.silk');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(SILK_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping voice attachment'),
+      ),
+    ).toBe(false);
+    stderr.mockRestore();
+  });
+
+  it('ignores unsupported attachments and keeps the text', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: 'hello',
+        attachments: [
+          { url: IMAGE_URL, content_type: 'application/octet-stream' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: hello');
+    expect(env.attachments).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a message with no text and only unsupported attachments', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '   ',
+        attachments: [
+          { url: IMAGE_URL, content_type: 'application/octet-stream' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('skips an over-limit attachment with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(PNG_BYTES, {
+            headers: { 'content-length': String(QQ_IMAGE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping image attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('runs the turn with a failure placeholder when the download fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('nope', { status: 403 })),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping image attachment: HTTP 403'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps the other attachments when one download fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        call += 1;
+        return call === 1
+          ? new Response('nope', { status: 500 })
+          : new Response(PNG_BYTES, {
+              headers: { 'content-type': 'image/png' },
+            });
+      }),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment('a.png'), imageAttachment('b.png')],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.fileName).toBe('b.png');
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.fileName).toBe('b.png');
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping image attachment: HTTP 500'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('handles at most five attachments per message and logs the excess once', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: Array.from({ length: 6 }, (_, index) =>
+          imageAttachment(`photo-${index}.png`),
+        ),
+      }),
+    );
+
+    await settleDispatches();
+    // Five images, each contributing an inline entry and an on-disk file entry.
+    expect(lastEnvelope().attachments).toHaveLength(10);
+    const capLines = stderr.mock.calls.filter(([chunk]) =>
+      String(chunk).includes('over the per-message limit of 5'),
+    );
+    expect(capLines).toHaveLength(1);
+    expect(String(capLines[0]?.[0])).toContain('skipping 1 attachment(s)');
+    stderr.mockRestore();
+  });
+
+  it('names the on-disk video file from the resolved MIME', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          { url: VIDEO_URL, content_type: 'video/mp4' },
+          {
+            url: VIDEO_URL,
+            content_type: 'video/mp4',
+            filename: 'clip.txt',
+          },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachments = env.attachments ?? [];
+    expect(attachments).toHaveLength(2);
+    expect(attachments[0]?.fileName).toBe('qq_video.mp4');
+    expect(attachments[1]?.fileName).toBe('clip.mp4');
+    await expect(readFile(attachments[0]!.filePath!)).resolves.toEqual(
+      MP4_BYTES,
+    );
+    await expect(readFile(attachments[1]!.filePath!)).resolves.toEqual(
+      MP4_BYTES,
+    );
+  });
+
+  it('uses the sanitized body to detect a media-only group message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '[bot]',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+  });
+
+  it('keeps the video file after the prompt ends', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [videoAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const filePath = env.attachments?.[0]?.filePath;
+    expect(filePath).toBeDefined();
+    await expect(readFile(filePath!)).resolves.toEqual(MP4_BYTES);
+
+    pvt['onPromptEnd'](env.chatId, 'session-1', env.messageId);
+
+    await expect(readFile(filePath!)).resolves.toEqual(MP4_BYTES);
+  });
+
+  it('handles a C2C media event with no content field', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const event = makeC2CEvent({ attachments: [imageAttachment()] });
+    delete (event as { content?: string }).content;
+
+    pvt['handleC2C'](event);
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Malformed gateway message'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('caps the on-disk video name by bytes, not code points', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [videoAttachment('图'.repeat(200))],
+      }),
+    );
+
+    await settleDispatches();
+    const attachment = lastEnvelope().attachments?.[0];
+    expect(attachment?.fileName).toBeDefined();
+    expect(Buffer.byteLength(attachment!.fileName!)).toBeLessThanOrEqual(204);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(MP4_BYTES);
+  });
+
+  it('uses the capped list for the media placeholder', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          ...Array.from({ length: 5 }, (_, index) =>
+            videoAttachment(`clip-${index}.mp4`),
+          ),
+          imageAttachment(),
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(video)');
+    expect(env.attachments).toHaveLength(5);
+    expect(env.attachments?.every((entry) => entry.type === 'video')).toBe(
+      true,
+    );
+  });
+});
+
+// The moderation tools are what the model calls for group management, so the
+// registration path, the opt-in switch, and the recall target ring are pinned
+// here rather than only in the tool-unit tests.
+describe('qqbot moderation tools', () => {
+  const RECALL_WINDOW_MS = 120_000;
+
+  function registeredTools(
+    configOverrides?: Record<string, unknown>,
+  ): Array<{ name: string }> {
+    const registered: Array<{ name: string }> = [];
+    makeChannel(configOverrides, {
+      registerChannelTool: (tool: { name: string }) => registered.push(tool),
+    });
+    return registered;
+  }
+
+  it('registers nothing by default', () => {
+    expect(registeredTools()).toEqual([]);
+  });
+
+  it('registers the group-management tools when moderationTools is true', () => {
+    const names = registeredTools({ moderationTools: true }).map(
+      (tool) => tool.name,
+    );
+    expect(names).toHaveLength(18);
+    expect(names[0]).toBe('qq_recall_message');
+    expect(names).toContain('qq_kick_member');
+    expect(names).toContain('qq_execute_join_approval_strategy');
+  });
+
+  it('registers nothing when moderationTools is false', () => {
+    expect(registeredTools({ moderationTools: false })).toEqual([]);
+  });
+
+  it('registers nothing for a truthy but non-boolean value', () => {
+    expect(registeredTools({ moderationTools: 'yes' })).toEqual([]);
+  });
+
+  it('skips registration on bridges without channel tool support', () => {
+    expect(() => makeChannel({ moderationTools: true })).not.toThrow();
+  });
+
+  it('resolves the newest tracked message per sender', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    raw['recordRecentInbound']('group-1', 'bob', 'msg-2');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-3');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-3');
+    expect(raw['recentMemberMessage']('group-1', 'bob')).toBe('msg-2');
+    expect(raw['recentMemberMessage']('group-1', 'carol')).toBeUndefined();
+    expect(raw['recentMemberMessage']('group-2', 'alice')).toBeUndefined();
+  });
+
+  it('ignores messages without an id or sender', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', undefined, 'msg-1');
+    raw['recordRecentInbound']('group-1', 'alice', '');
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('drops messages past the configured recall window', () => {
+    vi.useFakeTimers();
+    try {
+      const ch = makeChannel({
+        moderationTools: true,
+        moderationRecallWindowMs: RECALL_WINDOW_MS,
+      });
+      const raw = ch as unknown as QQChannelRaw;
+      raw['recordRecentInbound']('group-1', 'alice', 'msg-old');
+      vi.advanceTimersByTime(RECALL_WINDOW_MS + 1);
+      expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+
+      raw['recordRecentInbound']('group-1', 'alice', 'msg-new');
+      expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-new');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an old message when no window is configured', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-old');
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-old');
+  });
+
+  it('records nothing when moderationTools is false', () => {
+    const ch = makeChannel();
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    expect(ring.size).toBe(0);
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('records nothing and rejects member targets when the window is 0', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true, moderationRecallWindowMs: 0 },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('G1', 'alice', 'msg-1');
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    expect(ring.size).toBe(0);
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const rejected = (await recall?.handler(
+      { member_openid: 'alice' },
+      { sessionId: 's-1' },
+    )) as { text: string; isError?: boolean };
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toContain('disabled');
+
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '{}',
+    });
+    const recalled = await recall?.handler(
+      { message_id: 'msg-1' },
+      { sessionId: 's-1' },
+    );
+    expect(recalled).toBe('Message recalled (msg-1).');
+  });
+
+  it('warns and falls back to no time limit for an invalid window', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let written = '';
+    try {
+      const ch = makeChannel({
+        moderationTools: true,
+        moderationRecallWindowMs: 1.5,
+      });
+      written = stderr.mock.calls.map((call) => String(call[0])).join('');
+      const raw = ch as unknown as QQChannelRaw;
+      raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-1');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written).toContain('invalid moderationRecallWindowMs=1.5');
+    expect(written.split('\n').filter(Boolean)).toHaveLength(1);
+  });
+
+  it('caps the per-chat ring at 50 entries', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (
+      ch as unknown as {
+        recentInbound: Map<string, Array<{ messageId: string }>>;
+      }
+    ).recentInbound;
+    for (let i = 0; i < 60; i++) {
+      raw['recordRecentInbound']('group-1', 'alice', `msg-${i}`);
+    }
+    const entries = ring.get('group-1') ?? [];
+    expect(entries).toHaveLength(50);
+    expect(entries[0]?.messageId).toBe('msg-10');
+    expect(entries[49]?.messageId).toBe('msg-59');
+  });
+
+  it('does not duplicate a replayed message id', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (
+      ch as unknown as {
+        recentInbound: Map<string, Array<{ messageId: string }>>;
+      }
+    ).recentInbound;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    expect(ring.get('group-1')).toHaveLength(1);
+  });
+
+  it('keeps the first arrival order when a replayed id arrives again', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-b');
+    // A replay of the older message must not become the newest entry.
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-b');
+  });
+
+  it('does not extend the recall window when a message is replayed', () => {
+    const ch = makeChannel({
+      moderationTools: true,
+      moderationRecallWindowMs: RECALL_WINDOW_MS,
+    });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    vi.advanceTimersByTime(RECALL_WINDOW_MS - 10_000);
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    vi.advanceTimersByTime(15_000);
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('drops a recalled message from the ring, leaving the older target reachable', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-2');
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-2');
+
+    raw['dropRecentMessage']('group-1', 'msg-2');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-1');
+  });
+
+  it('leaves the ring untouched when the recalled id is not tracked', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (
+      ch as unknown as {
+        recentInbound: Map<string, Array<{ messageId: string }>>;
+      }
+    ).recentInbound;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+
+    raw['dropRecentMessage']('group-1', 'msg-other');
+
+    expect(ring.get('group-1')?.map((entry) => entry.messageId)).toEqual([
+      'msg-1',
+    ]);
+  });
+
+  it('keeps direct-message traffic out of the group recall ring', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    const sender = 'ABCDEF0123456789ABCDEF0123456789';
+
+    // A real group inbound event populates the ring through its own call site.
+    raw['handleGroup'](
+      makeGroupEvent({ id: 'msg-g', group_openid: 'GROUP_LIVE' }),
+    );
+    expect(raw['recentMemberMessage']('GROUP_LIVE', sender)).toBe('msg-g');
+
+    // DMs are unreachable for the group-only recall tool, so they must not
+    // consume the shared 256-chat ring budget (and evict GROUP_LIVE).
+    for (let i = 0; i < 300; i++) {
+      raw['handleC2C'](
+        makeC2CEvent({
+          id: `msg-c2c-${i}`,
+          author: { user_openid: `user-${i}`, username: 'DM User' },
+        }),
+      );
+    }
+
+    expect(ring.size).toBe(1);
+    expect(raw['recentMemberMessage']('GROUP_LIVE', sender)).toBe('msg-g');
+  });
+
+  it('drops a recall target when the platform call never completed', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('G1', 'alice', 'msg-old');
+    raw['recordRecentInbound']('G1', 'alice', 'msg-new');
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi
+      .mockRejectedValueOnce(new Error('The operation was aborted'))
+      .mockResolvedValue({ ok: true, status: 204, text: async () => '' });
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const first = (await recall?.handler(
+      { member_openid: 'alice' },
+      { sessionId: 's-1' },
+    )) as { text: string; isError?: boolean };
+    expect(first.isError).toBe(true);
+    expect(first.text).toContain('message_id="msg-new"');
+
+    const second = await recall?.handler(
+      { member_openid: 'alice' },
+      { sessionId: 's-1' },
+    );
+    expect(second).toBe('Message recalled (msg-old).');
+    expect(mockRequestQQApi.mock.calls[1]?.[2]).toBe(
+      '/v2/groups/G1/messages/msg-old',
+    );
+  });
+
+  describe('requestModerationApi', () => {
+    function channelWithToken(): {
+      ch: InstanceType<typeof QQChannel>;
+      request: (input: Record<string, unknown>) => Promise<unknown>;
+    } {
+      const ch = makeChannel();
+      const internals = ch as unknown as {
+        accessToken: string;
+        tokenExpiresAt: number;
+        requestModerationApi: (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      internals.accessToken = 'tok';
+      internals.tokenExpiresAt = Date.now() + 3_600_000;
+      return {
+        ch,
+        request: (input) => internals.requestModerationApi(input),
+      };
+    }
+
+    it('parses a JSON success body', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ group_name: 'class' }),
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'GET', path: '/v2/groups/g/info' }),
+      ).resolves.toEqual({
+        ok: true,
+        status: 200,
+        data: { group_name: 'class' },
+      });
+      expect(mockRequestQQApi).toHaveBeenCalledWith(
+        'https://api.sgroup.qq.com',
+        'GET',
+        '/v2/groups/g/info',
+        'tok',
+        undefined,
+      );
+    });
+
+    it('refuses to call the platform after the channel is disposed', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => '',
+      });
+      const { ch, request } = channelWithToken();
+      (ch as unknown as { disposed: boolean }).disposed = true;
+
+      await expect(
+        request({ method: 'DELETE', path: '/v2/groups/g/messages/m' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 0,
+        message: 'channel disposed',
+      });
+      expect(mockRequestQQApi).not.toHaveBeenCalled();
+    });
+
+    it('surfaces success with no body as undefined data', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => '',
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'DELETE', path: '/v2/groups/g/messages/m' }),
+      ).resolves.toEqual({ ok: true, status: 200, data: undefined });
+    });
+
+    it('extracts the platform code and message on failure', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () =>
+          JSON.stringify({ code: 11253, message: '应用无接口访问权限' }),
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'POST', path: '/v2/groups/g/batch_remove_members' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 403,
+        code: 11253,
+        message: '应用无接口访问权限',
+      });
+    });
+
+    it('falls back to err_code and raw text', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ err_code: 40061001 }),
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'GET', path: '/v2/groups/g/info' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 400,
+        code: 40061001,
+        message: '{"err_code":40061001}',
+      });
+    });
+
+    it('reports a transport failure without a status', async () => {
+      mockRequestQQApi.mockRejectedValue(new Error('socket hang up'));
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'GET', path: '/v2/groups/g/info' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 0,
+        message: 'socket hang up',
+      });
+    });
+  });
+});
+
+// One bridge can serve several channels, and crash recovery replaces the
+// bridge, so the tool registry must survive both: tools are tagged with the
+// owning channel and re-registered whenever the bridge instance changes.
+describe('qqbot moderation tool ownership and recovery', () => {
+  it('tags every registered tool with the owning channel', () => {
+    const tools: Array<{ name: string; owner?: string }> = [];
+    makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string; owner?: string }) =>
+          tools.push(tool),
+      },
+    );
+    const names = tools.map((tool) => tool.name);
+    expect(names).toHaveLength(18);
+    expect(names[0]).toBe('qq_recall_message');
+    expect(tools.every((tool) => tool.owner === 'test-bot')).toBe(true);
+  });
+
+  it('re-registers the moderation tools on a replacement bridge', () => {
+    const first: string[] = [];
+    const second: string[] = [];
+    const ch = makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) => first.push(tool.name),
+      },
+    );
+    expect(first).toHaveLength(18);
+    expect(first[0]).toBe('qq_recall_message');
+
+    ch.setBridge({
+      registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+    } as never);
+
+    expect(second).toHaveLength(18);
+    expect(second[0]).toBe('qq_recall_message');
+    expect(second).toContain('qq_recall_message');
+  });
+
+  it('does not re-register on a replacement bridge when tools are disabled', () => {
+    const second: string[] = [];
+    const ch = makeChannel(
+      { moderationTools: false },
+      {
+        registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+      },
+    );
+    ch.setBridge({
+      registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+    } as never);
+    expect(second).toEqual([]);
+  });
+
+  it('refuses a session that belongs to another channel', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'other-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const result = (await recall?.handler({}, { sessionId: 's-1' })) as {
+      text: string;
+      isError?: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('No QQ chat is bound');
+  });
+
+  it('recalls in the chat of the current turn under sessionScope single', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true, sessionScope: 'single' },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          // Frozen at the chat that created the session: group A.
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'GROUP_A',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const raw = ch as unknown as QQChannelRaw;
+    const groupEvent = (id: string, groupOpenid: string) =>
+      makeGroupEvent({
+        id,
+        group_openid: groupOpenid,
+        author: { member_openid: 'MEMBER', username: 'Alice' },
+      });
+    raw['handleGroup'](groupEvent('msg-a', 'GROUP_A'));
+    raw['handleGroup'](groupEvent('msg-b', 'GROUP_B'));
+    // ChannelBase brackets each turn with onPromptStart(chatId, sessionId,
+    // messageId); this is group B's turn, whose session is the shared one.
+    raw['onPromptStart']('GROUP_B', 's-shared', 'msg-b');
+
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: true,
+      status: 204,
+      text: async () => '',
+    });
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const result = await recall?.handler(
+      { member_openid: 'MEMBER' },
+      { sessionId: 's-shared' },
+    );
+
+    expect(result).toBe('Message recalled (msg-b).');
+    expect(mockRequestQQApi.mock.calls[0]?.[2]).toBe(
+      '/v2/groups/GROUP_B/messages/msg-b',
+    );
+  });
+
+  it('caps and sanitizes the stderr line for an unsanitized failure body', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => '<html>' + 'x'.repeat(5_000) + '\u001b[31m',
+    });
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let written = '';
+    let result: { text: string; isError?: boolean } | undefined;
+    try {
+      const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+      result = (await recall?.handler(
+        { message_id: 'M1' },
+        { sessionId: 's-1' },
+      )) as { text: string; isError?: boolean };
+      written = stderr.mock.calls.map((call) => String(call[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    // The model-visible half is what the agent relays; the log half is not
+    // the whole contract.
+    expect(result?.isError).toBe(true);
+    expect(result?.text).toContain('qq_recall_message');
+    expect(result?.text).toContain('502');
+    expect(written).toContain('qq_recall_message failed');
+    expect(written.length).toBeLessThan(400);
+    expect(written).not.toContain('\u001b');
+  });
+});
+
+describe('qqbot recent-inbound ring bounds', () => {
+  it('evicts the least recently active chat, not the first inserted', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+
+    vi.setSystemTime(1_000);
+    raw['recordRecentInbound']('group-old', 'alice', 'msg-old');
+    vi.setSystemTime(2_000);
+    raw['recordRecentInbound']('group-recent', 'alice', 'msg-r1');
+    for (let i = 0; i < 250; i++) {
+      vi.setSystemTime(3_000 + i);
+      raw['recordRecentInbound'](`group-${i}`, 'alice', `msg-${i}`);
+    }
+    // Touch the first-inserted chat last, so insertion order and activity
+    // order disagree: FIFO would drop group-old, LRU must drop group-recent.
+    vi.setSystemTime(5_000);
+    raw['recordRecentInbound']('group-old', 'alice', 'msg-old-2');
+    for (let i = 250; i < 310; i++) {
+      vi.setSystemTime(6_000 + i);
+      raw['recordRecentInbound'](`group-${i}`, 'alice', `msg-${i}`);
+    }
+
+    expect(ring.size).toBeLessThanOrEqual(256);
+    expect(raw['recentMemberMessage']('group-recent', 'alice')).toBeUndefined();
+    expect(raw['recentMemberMessage']('group-old', 'alice')).toBe('msg-old-2');
+    expect(raw['recentMemberMessage']('group-309', 'alice')).toBe('msg-309');
+  });
+});
+
+describe('channel construction', () => {
+  it('forwards optionsOverrides to the base channel', () => {
+    const router = { getTarget: vi.fn() };
+    const ch = makeChannel({}, {}, { router });
+    expect((ch as unknown as { router: unknown }).router).toBe(router);
+  });
+});
+
+// The channel-base mock above keeps the shipped implementations rather than
+// mirrors, so the double cannot diverge from what production imports. Pin the
+// exports to the real module — a reintroduced hand mirror reddens here instead
+// of silently drifting — and keep the shipped truncation contract, which the
+// channel's own surrogate handling depends on, as explicit expectations rather
+// than a comparison of the double against itself.
+describe('channel-base test double', () => {
+  it('truncateUtf16Units keeps whole code points inside the unit bound', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    // `a𠮷b` at max 2 keeps the BMP char and drops the astral pair whole; a
+    // plain `text.slice(0, max)` returns a split surrogate here. The astral
+    // cases also catch an implementation that charges a surrogate pair one
+    // unit.
+    expect(actual.truncateUtf16Units('a𠮷b', 2)).toBe('a');
+    expect(actual.truncateUtf16Units('a𠮷b', 3)).toBe('a𠮷');
+    expect(actual.truncateUtf16Units('𠮷𠮷', 3)).toBe('𠮷');
+    expect(actual.truncateUtf16Units('abc', 5)).toBe('abc');
+    expect(actual.truncateUtf16Units('😀', 1)).toBe('');
+    expect(actual.truncateUtf16Units('a😀b😀c', 5)).toBe('a😀b');
+  });
+
+  it('sanitizer exports are the shipped implementations, not mirrors', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const mocked = await import('@qwen-code/channel-base');
+    expect(mocked.sanitizeLogText).toBe(actual.sanitizeLogText);
+    expect(mocked.sanitizeSenderName).toBe(actual.sanitizeSenderName);
+    expect(mocked.sanitizePromptText).toBe(actual.sanitizePromptText);
+    expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
+    expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
+  });
+});

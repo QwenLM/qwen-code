@@ -425,11 +425,19 @@ describe('Configuration Integration Tests', () => {
   });
 });
 
-describe('buildDisabledSkillNamesProvider', async () => {
-  const { buildDisabledSkillNamesProvider } = await import('./config.js');
+describe('skill settings providers', async () => {
+  const { buildDisabledSkillNamesProvider, buildEnabledSkillNamesProvider } =
+    await import('./config.js');
 
-  function fakeSettings(disabled: unknown) {
-    return { merged: { skills: { disabled } } } as never;
+  function fakeSettings(
+    disabled: unknown,
+    defaultDisabled?: unknown,
+    enabled?: unknown,
+  ) {
+    return {
+      merged: { skills: { disabled, defaultDisabled, enabled } },
+      forScope: () => ({ settings: { skills: {} } }),
+    } as never;
   }
 
   it('returns a normalized set from a normal array', () => {
@@ -469,5 +477,38 @@ describe('buildDisabledSkillNamesProvider', async () => {
       fakeSettings(['  ', '', 'keep']),
     );
     expect(provider()).toEqual(new Set(['keep']));
+  });
+
+  it('applies explicit enables between defaults and hard disables', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings(['hard'], ['soft', 'hard'], ['SOFT', 'HARD']),
+    );
+
+    expect(provider()).toEqual(new Set(['hard']));
+  });
+
+  it('reflects Browser Use disable and re-enable changes without restarting', () => {
+    const settings = {
+      merged: { skills: { enabled: [] as string[], disabled: [] as string[] } },
+      forScope: () => ({ settings: { skills: {} } }),
+    };
+    const provider = buildDisabledSkillNamesProvider(settings as never);
+    expect(provider().has('browser-use')).toBe(false);
+    settings.merged.skills.disabled = ['browser-use'];
+    expect(provider().has('browser-use')).toBe(true);
+    settings.merged.skills.disabled = [];
+    expect(provider().has('browser-use')).toBe(false);
+    expect(provider().has('computer-use')).toBe(false);
+  });
+
+  it('reads explicit enables from the current merged settings', () => {
+    const settings = {
+      merged: { skills: { enabled: [' REVIEW '] } },
+      forScope: () => ({ settings: { skills: {} } }),
+    };
+    const provider = buildEnabledSkillNamesProvider(settings as never);
+    expect(provider()).toEqual(new Set(['review']));
+    settings.merged = { skills: { enabled: ['plan'] } };
+    expect(provider()).toEqual(new Set(['plan']));
   });
 });

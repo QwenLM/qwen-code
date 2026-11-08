@@ -6,7 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { NativeLspClient } from './NativeLspClient.js';
-import type { NativeLspService } from './NativeLspService.js';
+import type { NativeLspService } from './native-lsp-service.js';
 import type { LspServerHandle } from './types.js';
 
 const createHandle = (overrides: Partial<LspServerHandle>): LspServerHandle =>

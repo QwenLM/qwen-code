@@ -7,15 +7,13 @@
 import type React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  type ArenaManager,
-  type ArenaAgentState,
-  type InProcessBackend,
-  type AgentStatsSummary,
-  isSettledStatus,
-  ArenaSessionStatus,
-  DISPLAY_MODE,
-} from '@qwen-code/qwen-code-core';
+import type { ArenaManager } from '@qwen-code/qwen-code-core/agents/arena/ArenaManager.js';
+import { ArenaSessionStatus } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import type { ArenaAgentState } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import type { InProcessBackend } from '@qwen-code/qwen-code-core/agents/backends/InProcessBackend.js';
+import { DISPLAY_MODE } from '@qwen-code/qwen-code-core/agents/backends/types.js';
+import type { AgentStatsSummary } from '@qwen-code/qwen-code-core/agents/runtime/agent-statistics.js';
+import { isSettledStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { formatDuration } from '../../utils/formatters.js';
@@ -220,7 +218,7 @@ export function ArenaStatusDialog({
         // Use live stats from AgentInteractive when in-process, otherwise
         // fall back to the cached ArenaAgentState.stats (file-polled).
         const live = liveStats?.get(agent.agentId);
-        const totalTokens = live?.totalTokens ?? agent.stats.totalTokens;
+        const outputTokens = live?.outputTokens ?? agent.stats.outputTokens;
         const rounds = live?.rounds ?? agent.stats.rounds;
         const toolCalls = live?.totalToolCalls ?? agent.stats.toolCalls;
         const successfulToolCalls =
@@ -246,7 +244,7 @@ export function ArenaStatusDialog({
               </Box>
               <Box width={colTokens} justifyContent="flex-end">
                 <Text color={theme.text.primary}>
-                  {pad(totalTokens.toLocaleString(), colTokens - 1, 'right')}
+                  {pad(outputTokens.toLocaleString(), colTokens - 1, 'right')}
                 </Text>
               </Box>
               <Box width={colRounds} justifyContent="flex-end">

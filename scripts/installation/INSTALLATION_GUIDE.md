@@ -143,11 +143,13 @@ install-qwen-standalone.bat --repair-path --path-scope machine
 
 ## Optional Native Modules
 
-The standalone archives bundle Qwen Code and a private Node.js runtime. They do
-not currently install npm optional native modules such as `node-pty` and
-`@teddyzhu/clipboard`. Qwen Code is designed to degrade when these optional
-modules are absent, but terminal pty behavior and clipboard image support may
-not be identical to an npm installation.
+The standalone archives bundle Qwen Code, a private Node.js runtime, and the
+matching `@teddyzhu/clipboard` native package for clipboard image paste. They
+also ship `@lydell/node-pty` plus the matching platform prebuild for
+`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64` and `win-x64`, which
+is what the web terminal and the PTY-backed interactive shell resolve at
+runtime. Every target the release builds pins its prebuild package, and the
+release archive build fails rather than publish one that is missing it.
 
 Use `--method npm` if you specifically need npm to resolve optional native
 modules for the current machine.

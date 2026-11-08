@@ -1,0 +1,1160 @@
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, type ReactNode } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { I18nProvider } from '../../i18n';
+import { SystemMessage } from './SystemMessage';
+import {
+  createContextUsageMessageData,
+  serializeContextUsageMessage,
+} from './ContextUsageMessage';
+import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
+
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
+const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+afterEach(() => {
+  for (const { root, container } of mounted.splice(0)) {
+    act(() => root.unmount());
+    container.remove();
+  }
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(<I18nProvider language={language}>{node}</I18nProvider>);
+  });
+  mounted.push({ root, container });
+  return container;
+}
+
+describe('SystemMessage — prompt_cancelled marker', () => {
+  it('uses shared quota copy in the Chinese Desktop and VS Code message component', () => {
+    const container = render(
+      <SystemMessage
+        content="You've used up your weekly credits. Your credits are expected to reset in 3 hours. Please try again after the reset."
+        variant="error"
+        source="turn_error"
+        data={{
+          subscriptionQuota: {
+            type: 'subscription_quota',
+            memberType: 'pro',
+            resetAt: Math.floor(Date.now() / 1000) + 3 * 3600,
+          },
+        }}
+      />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(
+      '周额度已用完，预计将于3小时后恢复，请在额度恢复后重试。',
+    );
+    expect(container.textContent).not.toContain('/upgrade');
+  });
+
+  it('preserves backend public text in the Chinese error component', () => {
+    const container = render(
+      <SystemMessage content="Backend public text" variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain('Backend public text');
+  });
+  it('does not infer quota errors from backend message wording', () => {
+    const message =
+      "You've used up your weekly credits. Please try again after the reset.";
+    const container = render(
+      <SystemMessage content={message} variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(message);
+  });
+  it.each([
+    ['zh-CN', 10999, '你在 11s 后取消了请求'],
+    ['zh-CN', 999, '你在 1s 后取消了请求'],
+    ['zh-CN', 0, '你在 0s 后取消了请求'],
+    ['zh-CN', 7069, '你在 8s 后取消了请求'],
+    ['zh-CN', 59999, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60000, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60001, '你在 1m 1s 后取消了请求'],
+    ['zh-CN', 397000, '你在 6m 37s 后取消了请求'],
+    ['en', 10999, 'You cancelled this request after 11s'],
+    ['en', 999, 'You cancelled this request after 1s'],
+    ['en', 397000, 'You cancelled this request after 6m 37s'],
+  ] as const)('renders elapsed duration in %s', (language, elapsedMs, text) => {
+    const container = render(
+      <SystemMessage
+        content=""
+        variant="info"
+        source="prompt_cancelled"
+        data={{ elapsedMs }}
+      />,
+      language,
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(text);
+  });
+
+  it.each(['1000', -1, NaN, Infinity])(
+    'falls back for invalid elapsed time %s',
+    (elapsedMs) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="prompt_cancelled"
+          data={{ elapsedMs }}
+        />,
+        'zh-CN',
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        '你已取消请求',
+      );
+    },
+  );
+
+  it('renders the user-cancelled marker as a status region', () => {
+    const container = render(
+      <SystemMessage content="" variant="info" source="prompt_cancelled" />,
+    );
+    const status = container.querySelector('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(status?.textContent).toBe('You cancelled this request');
+  });
+
+  it('ignores message content when rendering the cancelled marker', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text that must not leak"
+        variant="info"
+        source="prompt_cancelled"
+      />,
+    );
+    expect(container.textContent).toBe('You cancelled this request');
+    expect(container.textContent).not.toContain('raw daemon text');
+  });
+
+  it('renders a normal message without the status marker for other sources', () => {
+    const container = render(
+      <SystemMessage content="a plain note" variant="error" />,
+    );
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.textContent).toContain('a plain note');
+  });
+});
+
+describe('SystemMessage — goal status', () => {
+  it.each([
+    [
+      'usage_limited',
+      'en',
+      'Goal usage limited',
+      'token budget reached',
+      'Last check: token budget reached',
+    ],
+    [
+      'usage_limited',
+      'zh-CN',
+      '目标用量受限',
+      'token budget reached',
+      '上次检查: token budget reached',
+    ],
+    [
+      'blocked',
+      'en',
+      'Goal blocked',
+      'approval required',
+      'Last check: approval required',
+    ],
+    [
+      'blocked',
+      'zh-CN',
+      '目标已阻塞',
+      'approval required',
+      '上次检查: approval required',
+    ],
+  ] as const)(
+    'renders a %s goal distinctly in %s',
+    (kind, language, title, lastReason, reason) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="goal"
+          data={{
+            kind,
+            condition: 'finish the evaluation',
+            lastReason,
+          }}
+        />,
+        language,
+      );
+
+      expect(container.textContent).toContain(title);
+      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain('Goal aborted');
+      expect(container.textContent).not.toContain('目标已中止');
+    },
+  );
+});
+
+describe('SystemMessage — terminal turn error copy', () => {
+  it('copies the displayed error without triggering retry', async () => {
+    vi.useFakeTimers();
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      'clipboard',
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const onRetryClick = vi.fn();
+
+    try {
+      const container = render(
+        <SystemMessage
+          content="The model stream was interrupted."
+          variant="error"
+          source="turn_error"
+          showRetryHint
+          onRetryClick={onRetryClick}
+        />,
+      );
+      const copyButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy"]',
+      );
+      expect(copyButton).not.toBeNull();
+      expect(container.textContent).toContain('Press Ctrl+Y to retry');
+
+      await act(async () => {
+        copyButton?.click();
+      });
+
+      expect(writeText).toHaveBeenCalledOnce();
+      expect(writeText).toHaveBeenCalledWith(
+        'The model stream was interrupted.',
+      );
+      expect(onRetryClick).not.toHaveBeenCalled();
+      expect(copyButton?.querySelector('.lucide-check')).not.toBeNull();
+
+      act(() => vi.advanceTimersByTime(1999));
+      expect(copyButton?.querySelector('.lucide-check')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(1));
+      expect(copyButton?.querySelector('.lucide-copy')).not.toBeNull();
+    } finally {
+      if (clipboardDescriptor) {
+        Object.defineProperty(navigator, 'clipboard', clipboardDescriptor);
+      } else {
+        Reflect.deleteProperty(navigator, 'clipboard');
+      }
+    }
+  });
+
+  it('keeps the copy icon when writing to the clipboard fails', async () => {
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      'clipboard',
+    );
+    const execCommandDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      'execCommand',
+    );
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn().mockReturnValue(false),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const container = render(
+        <SystemMessage
+          content="The model stream was interrupted."
+          variant="error"
+          source="turn_error"
+        />,
+      );
+      const copyButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy"]',
+      );
+
+      await act(async () => {
+        copyButton?.click();
+        await Promise.resolve();
+      });
+
+      expect(copyButton?.querySelector('.lucide-copy')).not.toBeNull();
+      expect(copyButton?.querySelector('.lucide-check')).toBeNull();
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      if (clipboardDescriptor) {
+        Object.defineProperty(navigator, 'clipboard', clipboardDescriptor);
+      } else {
+        Reflect.deleteProperty(navigator, 'clipboard');
+      }
+      if (execCommandDescriptor) {
+        Object.defineProperty(document, 'execCommand', execCommandDescriptor);
+      } else {
+        Reflect.deleteProperty(document, 'execCommand');
+      }
+    }
+  });
+
+  it('shows Copy for non-retryable terminal turn errors', () => {
+    const container = render(
+      <SystemMessage
+        content="The model stopped because it was repeating itself."
+        variant="error"
+        source="turn_error"
+      />,
+    );
+
+    expect(container.querySelector('button[aria-label="Copy"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('retry');
+  });
+
+  it('does not add Copy to ordinary system errors', () => {
+    const container = render(
+      <SystemMessage content="A system error occurred." variant="error" />,
+    );
+
+    expect(container.querySelector('button[aria-label="Copy"]')).toBeNull();
+  });
+});
+
+describe('SystemMessage — vision bridge notice', () => {
+  it('localizes a cancelled notice with egress details', () => {
+    const container = render(
+      <SystemMessage
+        content="English fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelName: 'qwen3.6-plus',
+          modelEndpoint: 'idealab.alibaba-inc.com',
+          egressOccurred: true,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '视觉桥接已取消。你的图片及提示词/上下文已发送至 qwen3.6-plus (idealab.alibaba-inc.com)。',
+    );
+    expect(container.textContent).not.toContain('English fallback');
+  });
+
+  it('falls back to daemon text for malformed metadata', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{ status: 'unknown' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+  });
+
+  it('falls back to daemon text for malformed egress metadata', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          egressOccurred: 'true',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+  });
+
+  it('falls back to daemon text for malformed image counts', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'ok',
+          convertedCount: Number.NaN,
+          omittedCount: 0,
+          egressOccurred: true,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+    expect(container.textContent).not.toContain('NaN 张图片');
+  });
+
+  it.each([
+    [
+      {
+        status: 'failed',
+        convertedCount: 0,
+        omittedCount: 0,
+        egressOccurred: false,
+      },
+      '视觉桥接（视觉模型）失败：视觉桥接无法运行。图片未被解析。',
+    ],
+    [
+      {
+        status: 'ok',
+        convertedCount: 2,
+        omittedCount: 1,
+        modelName: 'qwen-vl',
+        egressOccurred: true,
+      },
+      '已通过 qwen-vl 将 2 张图片转换为文本（已忽略 1 张图片）。你的图片及提示词/上下文已发送至该模型。',
+    ],
+  ])('localizes %s notices', (data, expected) => {
+    const container = render(
+      <SystemMessage
+        content="English fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={data}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(expected);
+  });
+});
+
+describe('SystemMessage — context compression', () => {
+  const result = {
+    originalTokenCount: 263195,
+    newTokenCount: 99799,
+    originalTokenCountIsEstimated: false,
+    newTokenCountIsEstimated: true,
+  };
+  const done = { phase: 'done', ...result };
+
+  it('renders the in-progress row in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compressing context..."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'progress' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('正在压缩');
+    expect(container.textContent).not.toContain('Compressing context...');
+  });
+
+  it('renders a no-op result in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="No compression needed."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'noop' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('无需压缩。');
+  });
+
+  it('renders the truncation notice in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compression instructions were truncated to 2000 characters."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'notice', instructionsLimit: 2000 }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('压缩指令已截断为 2,000 个字符');
+  });
+
+  it('renders the counts in the UI language instead of the daemon sentence', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('上下文已压缩 263,195 → ~99,799');
+    expect(container.textContent).not.toContain('Context compressed');
+  });
+
+  it('renders the English line for an English UI', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+  });
+
+  it('carries a server-authored warning on a second line', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={{ ...done, warning: 'Recent history was left intact.' }}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+    expect(container.textContent).toContain('Recent history was left intact.');
+    // A hard break, not a soft one: the row renders through Markdown, which
+    // would fold a bare newline into the line above.
+    expect(container.querySelector('br')).not.toBeNull();
+  });
+
+  it.each([
+    [
+      'a malformed count',
+      { phase: 'done', ...result, originalTokenCount: 'many' },
+    ],
+    ['no phase at all', result],
+    ['an unreadable payload', 'not-a-payload'],
+  ])('falls back to the daemon sentence for %s', (_label, data) => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={data}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed (263195 -> ~99799).',
+    );
+  });
+});
+
+describe('SystemMessage — background notification label', () => {
+  it('labels background task notifications and preserves display text', () => {
+    const container = render(
+      <SystemMessage
+        content='Background agent "worker" completed.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background agent "worker" completed.',
+    );
+    const icon = container.querySelector('[role="img"][data-tone="success"]');
+    expect(icon?.getAttribute('aria-label')).toBe('Background task completed');
+    expect(icon?.nextElementSibling?.textContent).toContain(
+      'Background agent "worker" completed.',
+    );
+    expect(icon?.querySelector('svg')).not.toBeNull();
+  });
+
+  it('localizes the label', () => {
+    const container = render(
+      <SystemMessage
+        content="后台代理已完成。"
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(
+      container
+        .querySelector('[role="img"][data-tone="success"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('后台任务执行完成');
+  });
+
+  it.each([
+    ['failed', '后台任务执行失败', 'error'],
+    ['cancelled', '后台任务已取消', 'neutral'],
+    ['unknown', '后台任务通知', 'neutral'],
+  ])(
+    'uses the matching label and tone for %s status',
+    (status, label, tone) => {
+      const container = render(
+        <SystemMessage
+          content="任务结果"
+          variant="info"
+          source="background_notification"
+          data={{ status }}
+        />,
+        'zh-CN',
+      );
+
+      const icon = container.querySelector(`[role="img"][data-tone="${tone}"]`);
+      expect(icon?.getAttribute('aria-label')).toBe(label);
+      expect(icon?.querySelector('svg')).not.toBeNull();
+    },
+  );
+
+  it('does not label generic system information', () => {
+    const container = render(
+      <SystemMessage content="Connected." variant="info" />,
+    );
+
+    expect(container.textContent).toBe('Connected.');
+  });
+});
+
+describe('SystemMessage — background notification i18n body', () => {
+  it('renders an overflow summary record without task metadata verbatim', () => {
+    const content =
+      'Dropped 1 background notification (queue full): 1 shell result (shell-0).';
+    const container = render(
+      <SystemMessage
+        content={content}
+        variant="info"
+        source="background_notification"
+      />,
+    );
+
+    expect(container.textContent).toContain(content);
+  });
+
+  it('renders shell notifications with structured command via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'shell',
+          commandLabel: 'npm test',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台 Shell 已完成：npm test');
+    expect(container.textContent).not.toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+
+  it('renders agent notifications with structured description via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background agent "worker" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'agent',
+          description: 'worker',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台智能体已完成：worker');
+  });
+
+  it('renders monitor notifications with the event count in English', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Monitor "logs" completed. (5 events)',
+    );
+    expect(container.textContent).not.toContain('raw daemon text');
+  });
+
+  it('renders the dropped-lines clause when throttling dropped output', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+          droppedLines: 2,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Monitor "logs" completed. (5 events, 2 lines dropped due to throttling)',
+    );
+  });
+
+  it('renders the dropped-lines clause in zh-CN when throttling dropped output', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+          droppedLines: 2,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '监控器已完成（5 个事件，因限流丢弃 2 行）：logs',
+    );
+  });
+
+  it('renders failed monitor notifications with the event count in zh-CN', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'failed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 42,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '监控器执行失败（42 个事件）：logs',
+    );
+  });
+
+  it('renders cancelled shell notifications via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'cancelled',
+          kind: 'shell',
+          commandLabel: 'npm test',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台 Shell 已取消：npm test');
+  });
+
+  it('renders failed agent notifications via i18n in English', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{ status: 'failed', kind: 'agent', description: 'worker' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background agent "worker" failed.',
+    );
+  });
+
+  it('falls back to raw content for unknown terminal statuses', () => {
+    const container = render(
+      <SystemMessage
+        content='Monitor "logs" timed out.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'timeout', kind: 'monitor', description: 'logs' }}
+      />,
+    );
+
+    expect(container.textContent).toContain('Monitor "logs" timed out.');
+    expect(container.textContent).not.toContain('notification.monitor.timeout');
+  });
+
+  it('falls back to raw content when structured fields are absent', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed', kind: 'shell' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+
+  it('renders the fallback through Markdown so session links stay clickable', () => {
+    const seen: unknown[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener('qwen:open-session', handler);
+    const container = render(
+      <SystemMessage
+        content="Sub-session [🧵 abc12345](qwen-session://abc12345-full) completed."
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed', kind: 'agent' }}
+      />,
+    );
+
+    const link = container.querySelector('a[role="button"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe('🧵 abc12345');
+    expect(container.textContent).not.toContain('](');
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(seen).toEqual(['abc12345-full']);
+    window.removeEventListener('qwen:open-session', handler);
+  });
+});
+
+describe('SystemMessage — inline images', () => {
+  it('renders image thumbnails when images prop is provided', () => {
+    const container = render(
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+      />,
+    );
+
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,base64data');
+    expect(img?.className).toContain('chatImageThumb');
+  });
+
+  it('makes images clickable when onImagePreview is provided', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    const img = container.querySelector('img');
+    expect(img?.className).toContain('chatImageThumbInteractive');
+
+    act(() => {
+      img?.click();
+    });
+
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,base64data',
+      'User uploaded image 1',
+      undefined,
+    );
+  });
+
+  it('renders multiple images in a row', () => {
+    const container = render(
+      <SystemMessage
+        content="look at these"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[
+          { data: 'img1', mimeType: 'image/png' },
+          { data: 'img2', mimeType: 'image/jpeg' },
+        ]}
+      />,
+    );
+
+    const imgs = container.querySelectorAll('img');
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0]?.getAttribute('src')).toBe('data:image/png;base64,img1');
+    expect(imgs[1]?.getAttribute('src')).toBe('data:image/jpeg;base64,img2');
+  });
+
+  it('renders injected files with the ordinary user attachment row', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <SystemMessage
+        content="explain this"
+        variant="info"
+        source="mid_turn_message_injected"
+        files={[
+          {
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            attachmentId: 'notes.txt',
+          },
+        ]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+
+    const file = container.querySelector('[role="button"]') as HTMLElement;
+    expect(file.textContent).toContain('notes.txt');
+    act(() => file.click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'notes.txt',
+    });
+  });
+});
+
+describe('background continuation', () => {
+  it('shows task provenance with an accessible source action', () => {
+    const locate = vi.fn(() => true);
+    const details = vi.fn();
+    const turn = {
+      turnId: 'turn-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+      label: 'Explore',
+      toolUseId: 'tool-1',
+    };
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Explore"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{ ...turn, backgroundTask: { status: 'completed' } }}
+          onLocateBackgroundSource={locate}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain('Background agent·Explore');
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe('Background task completed');
+    expect(container.querySelector('[title="Explore"]')?.className).toContain(
+      'truncate',
+    );
+    expect(container.querySelector('button')?.textContent).toBe('Source');
+    expect(container.querySelector('button svg')).not.toBeNull();
+    expect(container.querySelector('button')?.className).toContain(
+      'text-muted-foreground',
+    );
+    expect(container.querySelector('button')?.className).toContain(
+      'font-normal',
+    );
+    act(() => container.querySelector('button')!.click());
+    expect(locate).toHaveBeenCalledWith('', 'tool-1');
+    act(() => container.querySelectorAll('button')[1]!.click());
+    expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
+  });
+  it('names a cross-session message and offers no details to open', () => {
+    const details = vi.fn();
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Ask the other session"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{
+            turnId: 'turn-1',
+            taskId: 'msg-1',
+            kind: 'peer',
+            startedAt: 100,
+            label: 'qwen on api',
+            backgroundTask: { status: 'completed' },
+          }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain(
+      'Cross-session message·qwen on api',
+    );
+    // Nothing in the task registry answers to a message id, so the details
+    // button would open a tab that can never load.
+    expect(
+      [...container.querySelectorAll('button')].map((button) =>
+        button.textContent?.trim(),
+      ),
+    ).not.toContain('View details');
+    expect(details).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['failed', 'Background task failed'],
+    ['cancelled', 'Background task cancelled'],
+    [undefined, 'Background result'],
+  ])('does not describe %s results as successful', (status, label) => {
+    const container = render(
+      <SystemMessage
+        content="Explore"
+        variant="info"
+        source="background_notification_turn_started"
+        data={{ backgroundTask: { status } }}
+      />,
+    );
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe(label);
+    expect(container.querySelector('[data-tone="success"]')).toBeNull();
+  });
+  it.each(['completed', 'failed', 'cancelled'])(
+    'shows pending processing without overriding the %s outcome',
+    (status) => {
+      const container = render(
+        <SystemMessage
+          content="Explore completed"
+          variant="info"
+          source="background_task_completed"
+          data={{
+            kind: 'agent',
+            status,
+            description: 'Explore',
+            awaitingProcessing: true,
+          }}
+        />,
+      );
+      expect(container.textContent).toContain('Awaiting processing');
+      expect(
+        container.querySelector('[role="img"]')?.getAttribute('title'),
+      ).toBe(`Background task ${status}`);
+    },
+  );
+});
+
+describe('SystemMessage — context usage instruction files', () => {
+  function contextUsageStatus(): DaemonSessionContextUsageStatus {
+    return {
+      v: 1,
+      sessionId: 's-1',
+      workspaceCwd: '/repo/.qwen/worktrees/task',
+      workspaceRoot: '/repo',
+      formattedText: '',
+      usage: {
+        modelName: 'm',
+        totalTokens: 50,
+        contextWindowSize: 100,
+        breakdown: {
+          systemPrompt: 10,
+          builtinTools: 10,
+          mcpTools: 0,
+          instructionFiles: 5,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 25,
+          freeSpace: 40,
+          autocompactBuffer: 10,
+        },
+        builtinTools: [],
+        mcpTools: [],
+        instructionFiles: [
+          {
+            path: 'AGENTS.md',
+            tokens: 5,
+            absolutePath: '/repo/.qwen/worktrees/task/AGENTS.md',
+          },
+        ],
+        memoryFiles: [],
+        skills: [],
+        showDetails: true,
+      },
+    };
+  }
+
+  it('opens an instruction file through the admission root, like the panel', () => {
+    const status = contextUsageStatus();
+    const onOpenMemoryFile = vi.fn();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+        onOpenMemoryFile={onOpenMemoryFile}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => button!.click());
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+      '/repo',
+    );
+  });
+
+  it('renders instruction rows as plain text when no opener is supplied', () => {
+    const status = contextUsageStatus();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+      />,
+    );
+    expect(container.querySelector('button[title="AGENTS.md"]')).toBeNull();
+    expect(container.querySelector('[title="AGENTS.md"]')?.tagName).toBe(
+      'SPAN',
+    );
+  });
+});

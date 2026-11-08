@@ -6,11 +6,16 @@
 
 import {
   AuthType,
+  hasVertexProjectConfigured,
+  resolveModelSelectionAuthType,
+  VERTEX_ADC_HINT,
   type Config,
   type ModelProvidersConfig,
   type ProviderModelConfig,
+  type ProviderProtocolConfig,
 } from '@qwen-code/qwen-code-core';
 import { loadEnvironment, loadSettings, type Settings } from './settings.js';
+import { collectProviderModelsForProtocol } from '../utils/modelConfigUtils.js';
 import { t } from '../i18n/index.js';
 
 /**
@@ -18,6 +23,7 @@ import { t } from '../i18n/index.js';
  */
 const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_OPENAI]: 'OPENAI_API_KEY',
+  [AuthType.USE_OPENAI_RESPONSES]: 'OPENAI_API_KEY',
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
@@ -33,6 +39,7 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
  */
 function findModelConfig(
   modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
   authType: string,
   modelId: string | undefined,
   baseUrl?: string,
@@ -41,8 +48,14 @@ function findModelConfig(
     return undefined;
   }
 
-  const models = modelProviders[authType];
-  if (!Array.isArray(models)) {
+  // Merge across all provider ids routing to this protocol (built-in key or
+  // custom id via providerProtocol) so a custom provider's envKey is found.
+  const models = collectProviderModelsForProtocol(
+    modelProviders,
+    providerProtocol,
+    authType,
+  );
+  if (models.length === 0) {
     return undefined;
   }
 
@@ -118,12 +131,25 @@ function hasApiKeyForAuth(
   // that accounts for CLI args, env vars, and settings. Fall back to the
   // persisted settings.model.{name,baseUrl}.
   const { modelId, baseUrl } = resolveSelectedModel(settings, config);
+  const modelAuthType =
+    !config &&
+    (authType === AuthType.USE_OPENAI ||
+      authType === AuthType.USE_OPENAI_RESPONSES)
+      ? resolveModelSelectionAuthType(
+          authType,
+          modelId,
+          modelProviders,
+          settings.providerProtocol,
+          baseUrl,
+        )
+      : authType;
 
   // Try to find model-specific envKey from modelProviders, disambiguating by
   // baseUrl so duplicate-id providers resolve to the selected one.
   const modelConfig = findModelConfig(
     modelProviders,
-    authType,
+    settings.providerProtocol,
+    modelAuthType,
     modelId,
     baseUrl,
   );
@@ -183,6 +209,37 @@ function hasApiKeyForAuth(
 }
 
 /**
+ * Whether the selected Vertex entry can take the Application Default
+ * Credentials path at all. An entry that declares its own key variable never
+ * does: falling back to ADC there would authenticate as a different principal,
+ * silently, whenever that variable failed to be injected.
+ */
+function isVertexAdcEligible(settings: Settings, config?: Config): boolean {
+  const { modelId, baseUrl } = resolveSelectedModel(settings, config);
+  const modelConfig = findModelConfig(
+    settings.modelProviders as ModelProvidersConfig | undefined,
+    settings.providerProtocol,
+    AuthType.USE_VERTEX_AI,
+    modelId,
+    baseUrl,
+  );
+  return !modelConfig?.envKey;
+}
+
+/** Reads the project through the shared predicate, settings.env included. */
+function hasVertexProject(settings: Settings): boolean {
+  const settingsEnv = settings.env as Record<string, unknown> | undefined;
+  return hasVertexProjectConfigured((key) => {
+    const fromProcess = process.env[key];
+    if (fromProcess !== undefined) {
+      return fromProcess;
+    }
+    const fromSettings = settingsEnv?.[key];
+    return typeof fromSettings === 'string' ? fromSettings : undefined;
+  });
+}
+
+/**
  * Generate API key error message based on auth check result.
  * Returns null if API key is present, otherwise returns the appropriate error message.
  */
@@ -223,7 +280,14 @@ export function validateAuthMethod(
   const settings = loadSettings(process.cwd(), false);
   loadEnvironment(settings.merged);
 
-  if (authMethod === AuthType.USE_OPENAI) {
+  if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
+    return null;
+  }
+
+  if (
+    authMethod === AuthType.USE_OPENAI ||
+    authMethod === AuthType.USE_OPENAI_RESPONSES
+  ) {
     const { hasKey, checkedEnvKey, isExplicitEnvKey } = hasApiKeyForAuth(
       authMethod,
       settings.merged,
@@ -272,6 +336,7 @@ export function validateAuthMethod(
     const { modelId, baseUrl } = resolveSelectedModel(settings.merged, config);
     const modelConfig = findModelConfig(
       modelProviders,
+      settings.merged.providerProtocol,
       authMethod,
       modelId,
       baseUrl,
@@ -298,9 +363,12 @@ export function validateAuthMethod(
   }
 
   if (authMethod === AuthType.USE_VERTEX_AI) {
-    const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
-    if (apiKeyError) {
-      return apiKeyError;
+    const adcEligible = isVertexAdcEligible(settings.merged, config);
+    if (!adcEligible || !hasVertexProject(settings.merged)) {
+      const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
+      if (apiKeyError) {
+        return adcEligible ? apiKeyError + VERTEX_ADC_HINT : apiKeyError;
+      }
     }
 
     process.env['GOOGLE_GENAI_USE_VERTEXAI'] = 'true';

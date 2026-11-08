@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentParameters } from '@google/genai';
+import type {
+  FinishReason,
+  GenerateContentParameters,
+  Part,
+} from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type {
   ContentGeneratorConfig,
@@ -14,6 +18,7 @@ import type { OpenAICompatibleProvider } from './provider/index.js';
 import type { OpenAIResponseParsingOptions } from './responseParsingOptions.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { TaggedThinkingParser } from './taggedThinkingParser.js';
+import type { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
 
 export interface StreamingTextDeltaState {
   /**
@@ -34,6 +39,8 @@ export interface StreamingTextDeltaState {
    * visible duplication).
    */
   emittedLength: number;
+  /** Integer token-estimate units accumulated from normalized emitted text. */
+  emittedTokenUnits?: number;
   cumulativeMode: boolean;
 }
 
@@ -41,6 +48,33 @@ export interface RequestContext {
   model: string;
   modalities: InputModalities;
   startTime: number;
+  /**
+   * Effective output-token ceiling sent on the wire (`max_tokens` or a
+   * provider-specific budget key), set by the pipeline once the request is
+   * built. The converter cross-checks it against reported usage before
+   * treating incomplete tool-call JSON as max_tokens truncation
+   * (QwenLM/qwen-code#12970).
+   */
+  maxOutputTokens?: number;
+  /**
+   * Set by the converter when it rewrites a provider-reported finish_reason to
+   * "length" on incomplete tool-call JSON while that chunk's own usage could
+   * not decide whether the response really hit the output limit. The pipeline
+   * requests `stream_options.include_usage`, and under that convention usage
+   * arrives on a *later* `choices: []` chunk, so the parked finish response is
+   * where the delayed evidence first exists: the pipeline settles the rewrite
+   * there, before yielding, and restores the provider's own reason when the
+   * merged totals disprove truncation (QwenLM/qwen-code#12970).
+   *
+   * One-shot: set on this stream's own finish chunk and consumed by
+   * `settleParkedTruncationOverride` before that response is yielded. Nothing
+   * clears it at stream start — a stale park is unreachable only because a
+   * RequestContext is fresh per `executeWithErrorHandling` call and the
+   * streaming executor returns a lazy generator, so no `executeAttempt` retry
+   * can run after the converter has parked one. If that ever changes, this
+   * field needs an explicit per-attempt reset.
+   */
+  pendingTruncationOverride?: { finishReason: FinishReason };
   toolCallParser?: StreamingToolCallParser;
   responseParsingOptions?: OpenAIResponseParsingOptions;
   taggedThinkingParser?: TaggedThinkingParser;
@@ -57,12 +91,44 @@ export interface RequestContext {
    * reused across requests — stale state will silently corrupt text output.
    */
   textDeltaState?: StreamingTextDeltaState;
+  trailingThinkingTagFilter?: TrailingThinkingTagFilter;
   /**
    * Same as textDeltaState but for the reasoning/thinking content channel.
    * The two channels are tracked independently so interleaved chunks on each
    * channel are deduplicated correctly.
    */
   reasoningDeltaState?: StreamingTextDeltaState;
+  /**
+   * Tracks whether tagged-thinking parsing has emitted a thought part in the
+   * current stream. Once true, separate reasoning_content deltas are considered
+   * duplicate reasoning and are suppressed.
+   */
+  hasTaggedThinkingThought?: boolean;
+  /**
+   * Buffered reasoning_content for tagged-thinking streams until we know
+   * whether visible content will emit tagged thought parts.
+   */
+  pendingReasoningText?: string;
+  /**
+   * Visible content buffered behind pending reasoning_content so it can be
+   * emitted after the reasoning thought if no tagged thought appears.
+   */
+  pendingContentParts?: Part[];
+  /** Tool IDs whose preparing metadata has already been emitted in this stream. */
+  preparedToolCallIds?: Set<string>;
+  pendingUntrustedResponseParts?: Part[];
+  hasStructuredReasoningContent?: boolean;
+  hasThinkingTagInReasoning?: boolean;
+  hasVisibleContent?: boolean;
+  atVisibleLineStart?: boolean;
+  pendingThinkingTagCandidate?: {
+    text: string;
+    closingTagName?: 'think' | 'thinking';
+  };
+  protocolTagSanitized?: {
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  };
 }
 
 export interface ErrorHandler {

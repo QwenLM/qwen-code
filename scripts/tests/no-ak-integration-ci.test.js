@@ -4,79 +4,707 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
+
+import integrationConfig from '../../integration-tests/vitest.config.js';
+import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const NO_AK_SCRIPT = 'test:integration:no-ak:sandbox:none';
-
-function getWorkflowJob(workflow, jobName) {
-  const marker = `  ${jobName}:`;
-  const start = workflow.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-
-  const afterMarker = workflow.slice(start + marker.length);
-  const nextJob = afterMarker.match(/\n {2}[a-zA-Z0-9_-]+:\n/);
-
-  return workflow.slice(
-    start,
-    nextJob ? start + marker.length + nextJob.index : undefined,
-  );
-}
+const INTEGRATION_TYPECHECK_SCRIPT = 'typecheck:integration';
+const GUARD_ACTION_PATH = '.github/actions/verify-checkout-head/action.yml';
+const CONFIGURE_ACTION_PATH =
+  '.github/actions/configure-windows-runner/action.yml';
+const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
+const GUARD_STEP = 'Verify checkout includes expected head commit';
 
 describe('no-AK integration CI wiring', () => {
+  it.runIf(process.platform === 'linux')(
+    'keeps Linux Unix socket paths short and identity-stable',
+    () => {
+      const workflow = readFileSync(
+        path.join(ROOT, '.github/workflows/ci.yml'),
+        'utf8',
+      );
+      const routingBlocks = ['test', 'test_macos_shards', 'test_windows'].map(
+        (jobName) => {
+          const testStep = getWorkflowStep(
+            getWorkflowJob(workflow, jobName),
+            'Run tests and generate reports',
+          );
+          const start = testStep.indexOf('export TMPDIR=');
+          expect(
+            start,
+            `${jobName}: TMPDIR routing block`,
+          ).toBeGreaterThanOrEqual(0);
+          const end = testStep.indexOf('\n          ( while true', start);
+          expect(end, `${jobName}: sampler sentinel`).toBeGreaterThan(start);
+          return testStep.slice(start, end);
+        },
+      );
+      expect(new Set(routingBlocks)).toHaveLength(1);
+      const [routeTemp] = routingBlocks;
+      const root = mkdtempSync(path.join(tmpdir(), 'ci-temp-routing-'));
+      const longRunnerTemp = path.join(root, 'x'.repeat(180));
+
+      try {
+        mkdirSync(longRunnerTemp);
+        const [routedTemp, resolvedTemp] = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${routeTemp}\nprintf '%s\\n%s\\n' "$TMPDIR" "$(cd "$TMPDIR" && pwd -P)"`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              RUNNER_OS: 'Linux',
+              RUNNER_TEMP: longRunnerTemp,
+            },
+          },
+        )
+          .trim()
+          .split('\n');
+
+        expect(resolvedTemp).toBe(routedTemp);
+        expect(routedTemp).toMatch(/^\/var\/tmp\/qwen-ci-/);
+        expect(existsSync(routedTemp)).toBe(false);
+        expect(
+          Buffer.byteLength(
+            path.join(routedTemp, 'qwen-agent-view-XXXXXX', 'supervisor.sock'),
+          ),
+        ).toBeLessThan(108);
+        expect(
+          workflow.match(/mktemp -d \/var\/tmp\/qwen-ci-XXXXXX/g),
+        ).toHaveLength(3);
+        expect(workflow).toContain('QWEN_CI_TMPDIR="$(mktemp -d');
+        expect(workflow).toContain('if [ -n "$QWEN_CI_TMPDIR" ]; then');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('preserves test failures in every wrapped OS job', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+
+    for (const jobName of ['test', 'test_macos_shards']) {
+      const testStep = getWorkflowStep(
+        getWorkflowJob(workflow, jobName),
+        'Run tests and generate reports',
+      );
+      expect(testStep).toContain(
+        'trap \'rm -rf "$TMPDIR" 2>/dev/null || true\' EXIT',
+      );
+      let previous = -1;
+      for (const command of [
+        'set +e',
+        // The Linux job runs the suites through the lane script.
+        jobName === 'test'
+          ? '.github/scripts/ci/run-unit-test-lanes.sh'
+          : 'node scripts/run-macos-ci-group.js',
+        'RC=$?',
+        'set -e',
+        'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
+        'kill "$SAMPLER_PID" 2>/dev/null || true',
+        'exit "$RC"',
+      ]) {
+        const index = testStep.indexOf(command);
+        expect(index, `${jobName}: ${command}`).toBeGreaterThan(previous);
+        previous = index;
+      }
+    }
+
+    const windowsStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'test_windows'),
+      'Run tests and generate reports',
+    );
+    let previous = -1;
+    for (const command of [
+      'set +e',
+      'npm run test:ci:workspaces',
+      'WORKSPACE_RC=$?',
+      'if [ "$WORKSPACE_RC" -ne 0 ]; then',
+      '::warning::The Windows workspace suite has known baseline failures',
+      'npm run test:scripts',
+      'SCRIPTS_RC=$?',
+      'if [ "$SCRIPTS_RC" -ne 0 ]; then',
+      '::warning::The complete Windows script suite has known baseline failures',
+      'npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false',
+      'INSTALLER_RC=$?',
+      'set -e',
+      'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
+      'kill "$SAMPLER_PID" 2>/dev/null || true',
+      'exit "$INSTALLER_RC"',
+    ]) {
+      const index = windowsStep.indexOf(command);
+      expect(index, `test_windows: ${command}`).toBeGreaterThan(previous);
+      previous = index;
+    }
+  });
+
+  it('uses a tunable max for every Vitest pool on ECS', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const testStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'test'),
+      'Run tests and generate reports',
+    );
+
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+      expect(testStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
+    }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(testStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+      );
+    }
+    // The latency-budget skip shares this fleet predicate; if the line is
+    // dropped, renamed, or its expression altered, every millisecond budget
+    // silently dies on every lane while the helper tests stay green.
+    expect(testStep).toContain(
+      `QWEN_SKIP_LATENCY_BUDGETS: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+    );
+  });
+
   it('defines a focused no-AK integration script', () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
     );
 
+    expect(packageJson.scripts[INTEGRATION_TYPECHECK_SCRIPT]).toBe(
+      'tsc -p integration-tests/tsconfig.json --pretty false',
+    );
+    expect(packageJson.scripts.typecheck).toContain(
+      `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`,
+    );
+    const expectedFiles = [
+      './fake-openai-server.test.ts',
+      './test-helper.test.ts',
+      './chat-transcript-contract.test.ts',
+      './skill-hooks-invocation-parity.test.ts',
+      './skill-hooks-resume.test.ts',
+      './qwen-live-m4-acp-call.test.ts',
+      './qwen-live-m4-acp-permission.test.ts',
+      './qwen-live-m4-acp-steering.test.ts',
+      './qwen-live-m4-acp-multibackend.test.ts',
+      './qwen-live-m1-call.test.ts',
+      './qwen-live-m2-inject.test.ts',
+      './qwen-live-m2-permission.test.ts',
+      './qwen-live-m2-steering.test.ts',
+      './cli/_prompt-latency-policy.test.ts',
+      './cli/agent-loop-parity.test.ts',
+      './cli/acp-agent-loop-parity.test.ts',
+      './cli/hosted-harness-process.test.ts',
+      './cli/daemon-invocation-context.test.ts',
+      './cli/headless-workflow-skill.test.ts',
+      './cli/workflow-ancestor-discovery.test.ts',
+      './cli/daemon-workflow-ancestor-trust.test.ts',
+      './cli/workflow-intent.test.ts',
+      './cli/workflow-mode.test.ts',
+      './cli/acp-workflow-mode.test.ts',
+      './cli/daemon-workflow-intent.test.ts',
+      './cli/daemon-workflow-mode.test.ts',
+      './cli/list_directory.test.ts',
+      './cli/tool-hook-context.test.ts',
+      './cli/tool-hook-updated-input.test.ts',
+      './cli/mods-prompt-submit.test.ts',
+      './cli/qwen-serve-conversations-root.test.ts',
+      './cli/qwen-serve-routes.test.ts',
+      './cli/qwen-serve-session-cd.test.ts',
+      './cli/qwen-serve-streaming.test.ts',
+      './cli/qwen-serve-standalone-concurrency.test.ts',
+      './helpers/hosted-sse-observer.test.ts',
+      './interactive/workflow-completion.test.ts',
+      './interactive/workflow-intent.test.ts',
+      './interactive/workflow-mode.test.ts',
+      './interactive/mods-tool-middleware.test.ts',
+      './interactive/mods-prompt-submit.test.ts',
+      './interactive/statusline-parity.test.ts',
+      './interactive/tui-editor-parity.test.ts',
+      './interactive/tui-input-ownership.test.ts',
+      './interactive/ink-agent-loop-parity.test.ts',
+      './sdk-typescript/abort-and-lifecycle.test.ts',
+      './sdk-typescript/permission-control.test.ts',
+      './sdk-typescript/sdk-mcp-server.test.ts',
+      './sdk-typescript/subagents.test.ts',
+      './sdk-typescript/system-control.test.ts',
+      './sdk-typescript/tool-control.test.ts',
+      './sdk-typescript/workflow-intent.test.ts',
+      './sdk-typescript/workflow-mode.test.ts',
+    ];
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
-        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests',
-        './fake-openai-server.test.ts',
-        './cli/qwen-serve-routes.test.ts',
-        './cli/qwen-serve-streaming.test.ts',
+        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
+        ...expectedFiles,
       ].join(' '),
     );
+    // Vitest positional args are filename filters, not paths: a renamed entry
+    // matches nothing while the other filters keep vitest exiting 0, so the
+    // gate would report pass with that file's coverage silently gone.
+    for (const entry of expectedFiles) {
+      expect(
+        existsSync(path.join(ROOT, 'integration-tests', entry)),
+        entry,
+      ).toBe(true);
+    }
   });
 
-  it('runs the no-AK integration script in the Ubuntu gate only', () => {
+  it('accounts for every runnable integration test and every no-AK filter', () => {
+    const integrationRoot = path.join(ROOT, 'integration-tests');
+    const collectedFiles = new Set(
+      globSync(integrationConfig.test.include, {
+        cwd: integrationRoot,
+        ignore: integrationConfig.test.exclude,
+        dot: true,
+        nodir: true,
+        posix: true,
+      }),
+    );
+    const candidates = execFileSync(
+      'git',
+      ['ls-files', '-z', '--', 'integration-tests'],
+      { cwd: ROOT, encoding: 'utf8' },
+    )
+      .split('\0')
+      .map((file) => file.slice('integration-tests/'.length))
+      .filter((file) => file.endsWith('.test.ts') && collectedFiles.has(file));
+    const packageJson = JSON.parse(
+      readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    );
+    const entries = packageJson.scripts[NO_AK_SCRIPT].split(/\s+/).filter(
+      (arg, index, args) =>
+        arg.startsWith('./') && args[index - 1] !== '--root',
+    );
+    const selected = new Set();
+    for (const entry of entries) {
+      const filter = entry.slice(2).toLocaleLowerCase();
+      const matches = candidates
+        .filter((file) => file.toLocaleLowerCase().includes(filter))
+        .sort();
+      if (entry === './test-helper.test.ts') {
+        // Existing substring collision; pin both files without expanding CI.
+        expect(matches, entry).toEqual([
+          'sdk-typescript/test-helper.test.ts',
+          'test-helper.test.ts',
+        ]);
+      } else {
+        expect(matches, `${entry}: ${matches.join(', ')}`).toHaveLength(1);
+      }
+      for (const file of matches) selected.add(file);
+    }
+
+    // The no-AK job has a 20-minute budget. Keep existing omissions explicit;
+    // credential-free suites need a runtime-budget decision before enrollment.
+    const exemptions = {
+      'channel-plugin.test.ts': 'Real model required',
+      'chat-transcript-document.test.ts': 'Browser gate; runtime budget',
+      'cli/_first-output-benchmark.test.ts': 'Runtime budget',
+      'cli/acp-cron.test.ts': 'Runtime budget',
+      'cli/acp-integration.test.ts': 'Runtime budget',
+      'cli/advisor-tool.test.ts': 'Runtime budget',
+      'cli/cron-tools.test.ts': 'Real model required',
+      'cli/edit.test.ts': 'Real model required',
+      'cli/extensions-install.test.ts': 'Runtime budget',
+      'cli/external-context-mem0-daemon-delete.test.ts': 'Runtime budget',
+      'cli/external-context-mem0-daemon-write.test.ts': 'Runtime budget',
+      'cli/file-system.test.ts': 'Real model required',
+      'cli/gen-ai-telemetry.test.ts': 'Runtime budget',
+      'cli/hosted-latency-baseline.test.ts': 'Runtime budget',
+      'cli/json-output.test.ts': 'Runtime budget',
+      'cli/json-schema.test.ts': 'Real model required',
+      'cli/mcp_server_cyclic_schema.test.ts': 'Real model required',
+      'cli/mock-acp-typecheck.test.ts': 'Runtime budget',
+      'cli/monitor.test.ts': 'Real model required',
+      'cli/notebook-edit.test.ts': 'Real model required',
+      'cli/qwen-config-dir.test.ts': 'Real model required',
+      'cli/qwen-daemon-startup-benchmark.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-daemon-vs-cli-benchmark.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-serve-baseline.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-serve-channel-workers.test.ts': 'Runtime budget',
+      'cli/qwen-serve-client-mcp.test.ts': 'Runtime budget',
+      'cli/qwen-serve-live-journal-recovery.test.ts': 'Runtime budget',
+      'cli/qwen-serve-web-shell-live-journal-recovery.test.ts':
+        'Runtime budget',
+      'cli/read_many_files.test.ts': 'Real model required',
+      'cli/run_shell_command.test.ts': 'Real model required',
+      'cli/save_memory.test.ts': 'Real model required',
+      'cli/settings-migration.test.ts': 'Runtime budget',
+      'cli/simple-mcp-server.test.ts': 'Real model required',
+      'cli/sleep-interception.test.ts': 'Real model required',
+      'cli/stdin-context.test.ts': 'Real model required',
+      'cli/subagent-hook-owner.test.ts': 'Runtime budget',
+      'cli/telemetry.test.ts': 'Real model required',
+      'cli/todo_write.test.ts': 'Real model required',
+      'cli/tool-search.test.ts': 'Real model required',
+      'cli/update-target-version.test.ts': 'Runtime budget',
+      'cli/utf-bom-encoding.test.ts': 'Runtime budget',
+      'cli/write_file.test.ts': 'Real model required',
+      'export-artifact-contract.test.ts': 'Runtime budget',
+      'globalSetup.test.ts': 'Runtime budget',
+      'helpers/hosted-relay-headers.test.ts': 'Runtime budget',
+      'helpers/wire-rows.test.ts': 'Runtime budget',
+      'interactive/command-output-visibility.test.ts': 'Runtime budget',
+      'interactive/context-compress-interactive.test.ts': 'Runtime budget',
+      'interactive/cron-interactive.test.ts': 'Real model required',
+      'interactive/ctrl-c-exit.test.ts': 'Runtime budget',
+      'interactive/external-context-auto-recall.test.ts': 'Runtime budget',
+      'interactive/external-context-mem0-write.test.ts': 'Runtime budget',
+      'interactive/file-system-interactive.test.ts': 'Runtime budget',
+      'interactive/hooks-command.test.ts': 'Runtime budget',
+      'interactive/interactive-session-viewport.test.ts': 'Runtime budget',
+      'interactive/interactive-session.test.ts': 'Runtime budget',
+      'interactive/mid-turn-submit-interactive.test.ts': 'Runtime budget',
+      'interactive/mixed-input-crash.test.ts': 'Runtime budget',
+      'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
+      'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
+      'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-extension-acquisition.test.ts':
+        'Dedicated TUI parity gate',
+      'interactive/tui-foreground-shell.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-migration.test.ts': 'Runtime budget',
+      'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
+      'renderer-matrix.test.ts': 'Runtime budget',
+      'scratch-dir.test.ts': 'Runtime budget',
+      'sdk-typescript/configuration-options.test.ts': 'Real model required',
+      'sdk-typescript/mcp-server.test.ts': 'Real model required',
+      'sdk-typescript/message-event-pairing.test.ts': 'Real model required',
+      'sdk-typescript/multi-turn.test.ts': 'Real model required',
+      'sdk-typescript/session-id.test.ts': 'Real model required',
+      'sdk-typescript/single-turn.test.ts': 'Real model required',
+    };
+    for (const [file, reason] of Object.entries(exemptions)) {
+      expect(reason, `${file}: exemption reason`).toMatch(/\S/);
+    }
+    expect(
+      candidates.filter((file) => !selected.has(file)).sort(),
+      'Every runnable test must be selected or explicitly exempted with a reason',
+    ).toEqual(Object.keys(exemptions).sort());
+  });
+
+  it('runs the no-AK integration script as its own check on PRs and the merge queue', () => {
+    // The gate ran as a step inside the Ubuntu `test` job from #8313 until
+    // it moved out: a step is invisible to anything that reads check names,
+    // and the PR review bot ruled from the (merge_group-only, hence skipped
+    // on every PR) `Integration Tests (CLI, No Sandbox)` check that a changed
+    // integration test "never ran" while this gate had executed it and
+    // passed inside `test` (#9895 round 15). A check of its own carries the
+    // fact in its name. The env isolation and the two-event condition are
+    // the gate's contract and must survive the move unchanged.
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const platformJob = getWorkflowJob(workflow, 'test_platforms');
+    const macosJob = getWorkflowJob(workflow, 'test_macos_shards');
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
+    const classifyJob = getWorkflowJob(workflow, 'classify_pr');
+    const permissionsIndex = workflow.indexOf('\npermissions:');
+    expect(permissionsIndex).toBeGreaterThan(0);
+    const workflowTriggers = workflow.slice(0, permissionsIndex);
+    expect(workflowTriggers).toContain('\n  pull_request:\n');
+    expect(workflowTriggers).toContain('\n  merge_group:\n');
 
-    expect(workflow).not.toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
+    for (const [name, job] of Object.entries({
+      test: ubuntuJob,
+      test_macos_shards: macosJob,
+      test_windows: windowsJob,
+    })) {
+      expect(job, `${name} must not run the no-AK script`).not.toContain(
+        NO_AK_SCRIPT,
+      );
+    }
 
-    expect(ubuntuJob).toContain("name: 'Run no-AK integration smoke tests'");
-    expect(ubuntuJob).toContain("github.event_name == 'pull_request'");
-    expect(ubuntuJob).toContain(`npm run ${NO_AK_SCRIPT}`);
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_MODEL');
+    // The gate runs as three shards over test_build's tree; the aggregate
+    // job carries the required check name and fails when the build or any
+    // shard fails.
+    expect(gateJob).toContain(
+      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'",
+    );
+    expect(gateJob).toContain(
+      "    needs:\n      - 'classify_pr'\n      - 'test_build'\n",
+    );
+    expect(gateJob).toContain('        shard: [1, 2, 3]');
+    expect(gateJob).toContain(
+      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/3`,
+    );
+    const resultJob = getWorkflowJob(workflow, 'integration_no_ak_result');
+    expect(resultJob).toContain(
+      "    name: 'Integration Tests (no-AK, No Sandbox)'",
+    );
+    expect(resultJob).toContain(
+      "      - 'test_build'\n      - 'integration_no_ak'\n",
+    );
+    expect(resultJob).toContain(
+      'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
+    );
+    expect(
+      resultJob.split('\n').find((line) => line.startsWith('    if:')),
+    ).toBe(gateJob.split('\n').find((line) => line.startsWith('    if:')));
+    // Same trust class as lint (PR code on the pool, zero secrets by
+    // construction — 2026-11-02 extension of the 2026-10-31 decision),
+    // never a hard-coded pool. Pin the runs-on line itself: the timeout line
+    // also mentions lint_runner, so a bare substring stays green under a
+    // runs-on-only revert.
+    expect(gateJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner",
+    );
+    const jobIf = gateJob
+      .split('\n')
+      .find((line) => line.startsWith('    if:'));
+    expect(jobIf).toContain("needs.classify_pr.outputs.skip_ci != 'true'");
+    expect(jobIf).toContain(
+      "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
+    );
+    // Event PR head SHA on pull_request, queue head on merge_group — the same
+    // shape the Ubuntu gate uses, so this check tests the pushed tree, not
+    // the lagging merge ref.
+    expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
+      "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
+    );
+    const trustedClassifierCheckout = getWorkflowStep(
+      classifyJob,
+      'Checkout trusted CI classifier',
+    );
+    expect(classifyJob).toContain(
+      "ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'",
+    );
+    // The classifier wrapper calls `repos/{}/pulls/{}/files` and
+    // `repos/{}/pulls/{}`, so the job token needs `pull-requests` scope:
+    // the workflow-level grant lists none, and without a job-level block a
+    // same-repo PR's file listing 403s and classification falls back to
+    // `full` — a regression against the base lane that classified under
+    // `pull-requests: 'write'` (#10548 verify F1).
+    expect(classifyJob).toContain(
+      "    permissions:\n      contents: 'read'\n      pull-requests: 'read'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      'if: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "repository: '${{ github.repository }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "ref: '${{ github.event.pull_request.base.sha }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "path: 'trusted-ci-classifier'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "sparse-checkout: '.github/scripts/ci'",
+    );
+    expect(trustedClassifierCheckout).toContain('persist-credentials: false');
+    expect(trustedClassifierCheckout).not.toContain('head.sha');
 
-    expect(platformJob).not.toContain(NO_AK_SCRIPT);
+    const trustedClassifier = getWorkflowStep(
+      classifyJob,
+      'Classify CI profile from trusted base',
+    );
+    expect(trustedClassifier).toContain(
+      'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+    );
+    expect(trustedClassifier).toContain(
+      'docs_only|github_ci_only|java_only|full) ;;',
+    );
+    expect(trustedClassifier).toContain('profile=full');
+    // The classify_pr job output resolves against the step ID: renaming it
+    // empties the output and every consumer silently falls back to `full` —
+    // fail-safe direction, but a silent perf regression nothing would notice.
+    expect(trustedClassifier).toContain("id: 'ci_profile'");
+    expect(trustedClassifier).toContain(
+      'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
+    expect(classifyJob).not.toContain('CI_BOT_PAT');
+    expect(workflow).toContain(
+      '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
+    );
+
+    // Every consumer uses the profile that was already computed from the
+    // base checkout. None may execute a classifier from the PR checkout —
+    // and none may repoint the env binding to a literal: `profile=
+    // "\${TRUSTED_CI_PROFILE:-full}"` falls back silently, so a dropped
+    // binding turns every docs_only/github_ci_only PR into a full 34-step
+    // pool run with no degraded-path warning.
+    for (const profileStep of [
+      getWorkflowStep(ubuntuJob, 'Use trusted CI profile'),
+      getWorkflowStep(
+        getWorkflowJob(workflow, 'lint_and_static'),
+        'Use trusted CI profile',
+      ),
+      getWorkflowStep(gateJob, 'Use trusted CI profile'),
+    ]) {
+      expect(profileStep).toContain("id: 'ci_profile'");
+      expect(profileStep).toContain(
+        "TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'",
+      );
+      expect(profileStep).toContain('profile="${TRUSTED_CI_PROFILE:-full}"');
+      // The allowlist case line and the output write are load-bearing in
+      // the consumers too: dropping the echo empties
+      // steps.ci_profile.outputs.ci_profile, so every downstream profile
+      // gate mis-compares; dropping the case line lets an unexpected
+      // profile value pass through unnormalized.
+      // java_only either passes through (the gate and test skip their
+      // steps on it) or, in lint_and_static, maps to its full payload.
+      expect(profileStep).toMatch(
+        /docs_only\|github_ci_only\|(?:java_only\|)?full\) ;;/,
+      );
+      expect(profileStep).toContain('java_only');
+      expect(profileStep).toContain(
+        'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+      );
+      // Degraded path (classify_pr failed or was skipped, so the output is
+      // empty) must not log a byte-identical line to a legitimate `full`
+      // classification: the breadcrumb is the only signal that distinguishes a
+      // producer failure from a PR that really is full-profile.
+      expect(profileStep).toContain('if [ -z "${TRUSTED_CI_PROFILE}" ]; then');
+      expect(profileStep).toContain(
+        'echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."',
+      );
+      expect(profileStep).not.toContain('classify-pr-profile.sh');
+      expect(profileStep).not.toContain('GH_TOKEN');
+    }
+    for (const stepName of [
+      'Setup Node.js (hosted)',
+      'Use pre-installed Node.js (self-hosted)',
+      'Disk floor gate (self-hosted)',
+      'Install Dependencies',
+      'Run required no-AK integration gate',
+    ]) {
+      expect(
+        getWorkflowStep(gateJob, stepName),
+        `${stepName} must honour the CI profile`,
+      ).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
+    }
+
+    const diskFloorGate = getWorkflowStep(
+      gateJob,
+      'Disk floor gate (self-hosted)',
+    );
+    expect(diskFloorGate).toContain(
+      "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(diskFloorGate).toContain(
+      'run: \'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"\'',
+    );
+    expect(diskFloorGate).not.toContain('continue-on-error');
+    expect(diskFloorGate).not.toContain('|| true');
+    expect(diskFloorGate).not.toContain('env:');
+    expect(gateJob.indexOf("id: 'ci_profile'")).toBeLessThan(
+      gateJob.indexOf("name: 'Disk floor gate (self-hosted)'"),
+    );
+    expect(
+      gateJob.indexOf("name: 'Disk floor gate (self-hosted)'"),
+    ).toBeLessThan(gateJob.indexOf("name: 'Install Dependencies'"));
+
+    const gateStep = getWorkflowStep(
+      gateJob,
+      'Run required no-AK integration gate',
+    );
+    const integrationTypecheckCommand = `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
+    expect(gateStep).toContain(integrationTypecheckCommand);
+    expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
+    expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
+      gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
+    );
+    // The job's first step publishes the run-unique HOME via GITHUB_ENV
+    // (2026-11-02 round-2: fork code starts at checkout/install, not at the
+    // gate — HOME/USERPROFILE are job-wide, not gate-scoped); the gate keeps
+    // QWEN_HOME + the key scrub.
+    expect(gateStep).toContain(
+      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
+    );
+    expect(gateStep).toContain('timeout-minutes: 20');
+    // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
+    // gate must not re-pin them step-locally.
+    expect(gateStep).not.toContain('\n          HOME: ');
+    expect(gateStep).not.toContain('\n          USERPROFILE: ');
+    for (const key of [
+      'API_KEY',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_MODEL',
+      'BAILIAN_CODING_PLAN_API_KEY',
+      'BAILIAN_TOKEN_PLAN_API_KEY',
+      'DASHSCOPE_API_KEY',
+      'DEEPSEEK_API_KEY',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'IDEALAB_API_KEY',
+      'MINIMAX_API_KEY',
+      'MODELSCOPE_API_KEY',
+      'MOONSHOT_API_KEY',
+      'OPENAI_API_KEY',
+      'OPENAI_BASE_URL',
+      'OPENAI_MODEL',
+      'OPENROUTER_API_KEY',
+      'QWEN_API_KEY',
+      'QWENCLOUD_API_KEY',
+      'QWENCLOUD_TOKEN_PLAN_API_KEY',
+      'QWEN_DEFAULT_AUTH_TYPE',
+      'QWEN_MODEL',
+      'REQUESTY_API_KEY',
+      'XAI_API_KEY',
+      'ZAI_API_KEY',
+    ]) {
+      expect(gateStep).toContain(`\n          ${key}: ''`);
+    }
+    for (const job of [ubuntuJob, gateJob]) {
+      expect(job).not.toContain('secrets.OPENAI_API_KEY');
+      expect(job).not.toContain('secrets.OPENAI_BASE_URL');
+      expect(job).not.toContain('secrets.OPENAI_MODEL');
+    }
   });
 
-  it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
+  it('pins PR checkouts to the event head even after the PR ref advances', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const platformJob = getWorkflowJob(workflow, 'test_platforms');
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
+    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const integrationJob = getWorkflowJob(workflow, 'integration_cli');
+    const noAkJob = getWorkflowJob(workflow, 'integration_no_ak');
 
-    // On PRs both gates check out refs/pull/N/head, which is published the
-    // instant the branch is pushed, instead of the merge ref that GitHub
-    // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, platformJob]) {
-      expect(job).toContain(
-        "format('refs/pull/{0}/head', github.event.pull_request.number)",
+    // A retry retains the event head SHA while refs/pull/N/head may advance.
+    // Only these four lanes currently run on pull_request.
+    for (const job of [ubuntuJob, lintJob, webShellJob, noAkJob]) {
+      const checkout = getWorkflowStep(job, 'Checkout');
+      expect(checkout).toContain(
+        "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
       );
+      expect(checkout).not.toContain('refs/pull/');
+      expect(checkout).toContain('fetch-depth: 1');
     }
 
     // The brittle merge-ref retry/refresh machinery is gone: in particular the
@@ -91,11 +719,605 @@ describe('no-AK integration CI wiring', () => {
       "name: 'Back off for stale merge ref to refresh'",
     );
 
-    // The cheap sanity guard stays: fail loud if HEAD lacks the PR head.
-    expect(ubuntuJob).toContain(
-      "name: 'Verify PR checkout includes head commit'",
+    // The cheap sanity guard stays: fail loud if HEAD lacks the expected head
+    // (PR head, or the merge-queue head once a job also runs on merge_group).
+    // Its body lives in one composite action so the four gates cannot drift;
+    // each caller keeps its own run condition and expected-SHA expression.
+    const guardAction = readFileSync(
+      path.join(ROOT, GUARD_ACTION_PATH),
+      'utf8',
     );
-    expect(ubuntuJob).toContain('git merge-base --is-ancestor');
-    expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
+    // Pin the reject path as one contiguous block so ordering is part of the
+    // contract: relocating `exit 1` into a never-taken branch would turn the
+    // guard into a pass-through for the stale checkouts it must reject while
+    // every substring pin stayed green.
+    expect(guardAction).toContain(
+      [
+        'if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then',
+        '          echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."',
+        '          git log --oneline --decorate -5',
+        '          exit 1',
+        '        fi',
+      ].join('\n'),
+    );
+    // Pin the input-to-env wiring too: re-binding EXPECTED_SHA to a context
+    // value (e.g. github.sha) would pass for every checkout, including the
+    // stale ones this guard must reject, while the pin above stays green.
+    expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
+
+    const guardCalls = {
+      test: getWorkflowStep(ubuntuJob, GUARD_STEP),
+      lint_and_static: getWorkflowStep(lintJob, GUARD_STEP),
+      web_shell_e2e_smoke: getWorkflowStep(webShellJob, GUARD_STEP),
+      test_windows: getWorkflowStep(windowsJob, GUARD_STEP),
+      integration_cli: getWorkflowStep(integrationJob, GUARD_STEP),
+      integration_no_ak: getWorkflowStep(noAkJob, GUARD_STEP),
+    };
+    for (const [jobName, call] of Object.entries(guardCalls)) {
+      expect(call, `${jobName} guard must use the shared action`).toContain(
+        "uses: './.github/actions/verify-checkout-head'",
+      );
+    }
+    expect(guardCalls.test).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    // Byte-identical to test's event-aware shape: the lint lane replicates
+    // the same checkout contract on the same event surface.
+    expect(guardCalls.lint_and_static).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    expect(guardCalls.web_shell_e2e_smoke).toContain(
+      "expected_sha: '${{ github.event.pull_request.head.sha }}'",
+    );
+    expect(guardCalls.test_windows).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    expect(guardCalls.integration_cli).toContain(
+      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+    expect(guardCalls.integration_no_ak).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+
+    // The run conditions are part of the guard's contract: scoping a guard to
+    // the wrong runner class or dropping an event would silently disable it.
+    // integration_cli has no step-level if; its job-level merge_group gate
+    // already covers it.
+    expect(guardCalls.test).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
+    );
+    expect(guardCalls.web_shell_e2e_smoke).toContain(
+      'if: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(guardCalls.test_windows).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
+    );
+    expect(guardCalls.integration_cli).not.toContain('if:');
+    // integration_no_ak likewise gates skip_ci and both events at job level.
+    expect(guardCalls.integration_no_ak).not.toContain('if:');
   });
+
+  it('pins the Windows gate kill-switch routing, tuning, and Node split', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
+
+    // The runs-on expression is the Windows gate's escape hatch and its fork
+    // trust policy: pull requests never reach the pool, because a
+    // pull_request run executes the PR's own YAML and could rewrite runs-on
+    // itself. Pin the whole line so a variable typo, a quoting regression in
+    // the nested ''true'' escapes, or an && / || regrouping fails here
+    // instead of surfacing only when the switch is flipped — or when a fork
+    // PR finds the persistent pool.
+    const windowsRunsOn = windowsJob
+      .split('\n')
+      .find((line) => line.startsWith('    runs-on:'));
+    expect(windowsRunsOn).toBe(
+      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+    );
+    expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
+
+    // The guard must stay wired to the expected head for this job: the
+    // event-aware shape, since the revived triggers have no merge-queue head.
+    const guard = getWorkflowStep(windowsJob, GUARD_STEP);
+    expect(guard).toContain("uses: './.github/actions/verify-checkout-head'");
+    expect(guard).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+
+    // The self-hosted-only tuning comes from the composite action shared with
+    // windows-runner-smoke.yml, and only runs on self-hosted machines.
+    const configure = getWorkflowStep(
+      windowsJob,
+      'Configure self-hosted Windows test environment',
+    );
+    expect(configure).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(configure).toContain(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    const redirectTemp = getWorkflowStep(
+      windowsJob,
+      'Point temp at a short-alias-free directory',
+    );
+    expect(redirectTemp).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
+    // Pin the run block as one contiguous chunk so ordering is part of the
+    // contract: under PowerShell 5.1 an undefined $temp expands to empty, so
+    // if the assignment moves below the Out-File lines the step still writes
+    // TEMP=/TMP= to GITHUB_ENV and exits green. The shell pin matters for the
+    // same reason: Out-File's default is UTF-16LE on PowerShell 5.1, so the
+    // -Encoding utf8 spelling only carries its meaning there.
+    expect(redirectTemp).toContain(
+      [
+        "$temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'",
+        'New-Item -ItemType Directory -Force -Path $temp | Out-Null',
+        '"TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+        '"TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+      ]
+        .map((line) => `          ${line}`)
+        .join('\n'),
+    );
+    expect(redirectTemp).toContain("shell: 'powershell'");
+    const verifyTemp = getWorkflowStep(
+      windowsJob,
+      'Verify temp paths carry no short alias',
+    );
+    expect(verifyTemp).toContain(
+      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+    );
+    expect(verifyTemp).toContain('fs.realpathSync(value)');
+    // The guard's decisions are asserted by executing it, below; pinning the
+    // JS text here only fixes its spelling in place.
+    const configureAction = readFileSync(
+      path.join(ROOT, CONFIGURE_ACTION_PATH),
+      'utf8',
+    );
+    expect(configureAction).toContain("shell: 'powershell'");
+    const autocrlfStep = getWorkflowStep(
+      windowsJob,
+      'Disable Git CRLF conversion (self-hosted)',
+    );
+    expect(autocrlfStep).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+
+    // Repository-local `./` actions resolve from the job workspace, so the
+    // checkout must precede them or a fresh runner fails before checking out;
+    // autocrlf is turned off before the checkout itself (belt-and-braces
+    // alongside .gitattributes' eol=lf) so even a freshly provisioned machine
+    // checks out LF-only files.
+    const windowsCheckoutIndex = windowsJob.indexOf("name: 'Checkout'");
+    const autocrlfIndex = windowsJob.indexOf(
+      'git config --global core.autocrlf false',
+    );
+    const configureUseIndex = windowsJob.indexOf(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    const redirectTempIndex = windowsJob.indexOf(
+      "name: 'Point temp at a short-alias-free directory'",
+    );
+    const hostedNodeIndex = windowsJob.indexOf('actions/setup-node@');
+    const selfHostedNodeIndex = windowsJob.indexOf(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const verifyTempIndex = windowsJob.indexOf(
+      "name: 'Verify temp paths carry no short alias'",
+    );
+    const installIndex = windowsJob.indexOf("name: 'Install dependencies'");
+    const guardUseIndex = windowsJob.indexOf(
+      "uses: './.github/actions/verify-checkout-head'",
+    );
+    expect(windowsCheckoutIndex).toBeGreaterThanOrEqual(0);
+    expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
+    expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
+    expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(redirectTempIndex).toBeGreaterThan(configureUseIndex);
+    expect(redirectTempIndex).toBeLessThan(hostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(selfHostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(
+      windowsJob.indexOf("name: 'Run tests and generate reports'"),
+    );
+    expect(verifyTempIndex).toBeGreaterThan(hostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeLessThan(installIndex);
+    expect(guardUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(configureUseIndex).toBeLessThan(guardUseIndex);
+    for (const line of [
+      '"TEMP=$env:RUNNER_TEMP"',
+      '"TMP=$env:RUNNER_TEMP"',
+      '"LC_ALL=C.UTF-8"',
+    ]) {
+      expect(configureAction).toContain(
+        `${line} | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
+      );
+    }
+    expect(configureAction).toContain(
+      "$gitBash = 'C:\\Program Files\\Git\\bin'",
+    );
+    expect(configureAction).toContain('Test-Path $gitBash');
+    expect(configureAction).toContain(
+      '$gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append',
+    );
+    // The runner-validation smoke must consume the same action, or it
+    // validates a different configuration than the gate actually uses.
+    const smokeWorkflow = readFileSync(
+      path.join(ROOT, '.github/workflows/windows-runner-smoke.yml'),
+      'utf8',
+    );
+    expect(smokeWorkflow).toContain(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    expect(smokeWorkflow).toContain('npm run test:ci');
+    expect(smokeWorkflow).not.toContain(
+      'npm run test:ci --workspaces --if-present',
+    );
+    // Same ordering as the gate: autocrlf off before the checkout, the `./`
+    // configure action after it.
+    const smokeCheckoutIndex = smokeWorkflow.indexOf("name: 'Checkout'");
+    const smokeAutocrlfIndex = smokeWorkflow.indexOf(
+      'git config --global core.autocrlf false',
+    );
+    expect(smokeCheckoutIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeAutocrlfIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeAutocrlfIndex).toBeLessThan(smokeCheckoutIndex);
+    expect(
+      smokeWorkflow.indexOf(
+        "uses: './.github/actions/configure-windows-runner'",
+      ),
+    ).toBeGreaterThan(smokeCheckoutIndex);
+    // The smoke runs behind the same caching egress proxy as the gate, so it
+    // takes the same stale-checkout guard, pinned to the dispatched head.
+    expect(
+      smokeWorkflow.indexOf("uses: './.github/actions/verify-checkout-head'"),
+    ).toBeGreaterThan(smokeCheckoutIndex);
+    expect(smokeWorkflow).toContain("expected_sha: '${{ github.sha }}'");
+    // The smoke is self-hosted-only, so it must take the same Node path as
+    // the gate's self-hosted side: the pre-installed Node, never a nodejs.org
+    // download the ECS egress proxy cannot reach.
+    expect(smokeWorkflow).toContain(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    expect(smokeWorkflow).not.toContain('actions/setup-node');
+    // The gate's run steps inherit ci.yml's workflow-level bash default, so
+    // the smoke must execute these commands under the same shell; a
+    // powershell pin there would validate a shell the gate never runs.
+    const smokeJob = getWorkflowJob(smokeWorkflow, 'validate');
+    for (const stepName of [
+      'Configure persistent npm cache (self-hosted)',
+      'Configure npm for rate limiting',
+      'Install dependencies',
+      'Run tests and generate reports',
+    ]) {
+      expect(getWorkflowStep(smokeJob, stepName)).toContain("shell: 'bash'");
+    }
+    // Both workflows declare the persistent npm cache step; the gate's
+    // self-hosted path exports NPM_CONFIG_CACHE for every later npm command.
+    expect(
+      getWorkflowStep(smokeJob, 'Configure persistent npm cache (self-hosted)'),
+    ).toContain('NPM_CONFIG_CACHE=');
+    const gateNpmCache = getWorkflowStep(
+      windowsJob,
+      'Configure persistent npm cache (self-hosted)',
+    );
+    expect(gateNpmCache).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(gateNpmCache).toContain('NPM_CONFIG_CACHE=');
+
+    // Node split: hosted runners download Node, self-hosted runners reuse
+    // their pre-installed one: fail loud when Node is missing, warn when the
+    // major is not 22.
+    const hostedSetup = getWorkflowStep(
+      windowsJob,
+      'Set up Node.js 22.x (hosted)',
+    );
+    expect(hostedSetup).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
+    const selfHostedNode = getWorkflowStep(
+      windowsJob,
+      'Use pre-installed Node.js (self-hosted)',
+    );
+    expect(selfHostedNode).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(selfHostedNode).toContain(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const nodeAction = readFileSync(path.join(ROOT, NODE_ACTION_PATH), 'utf8');
+    expect(nodeAction).toContain('if ! command -v node >/dev/null 2>&1; then');
+    expect(nodeAction).toContain('exit 1');
+    expect(nodeAction).toContain(
+      'if [[ "$(node -p \'process.versions.node.split(".")[0]\')" != "22" ]]; then',
+    );
+    expect(nodeAction).toContain('::warning::Expected Node 22.x but found');
+  });
+
+  it('keeps both installer files out of the win32 exclude list', () => {
+    // install-script.test.js is the only home of the nine Windows installer
+    // end-to-end cases; excluding it on win32 would silently drop coverage
+    // docs/design/windows-ecs-ci-validation.md declares required.
+    const scriptSuiteConfig = readFileSync(
+      path.join(ROOT, 'scripts/tests/vitest.config.ts'),
+      'utf8',
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/install-script.test.js'",
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/opentui-preview-install.test.js'",
+    );
+  });
+
+  it('pins the shared Node preflight wiring on the Linux gates', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+
+    // The Windows gate and the smoke workflow are pinned above; these three
+    // call sites must be pinned too, or a revert to the inline pre-PR script
+    // keeps the suite green and only surfaces when a self-hosted machine
+    // lacks Node on PATH and runs without the preflight's fail-fast error.
+    const nodeCalls = {
+      test: getWorkflowStep(
+        getWorkflowJob(workflow, 'test'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+      web_shell_e2e_smoke: getWorkflowStep(
+        getWorkflowJob(workflow, 'web_shell_e2e_smoke'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+      integration_cli: getWorkflowStep(
+        getWorkflowJob(workflow, 'integration_cli'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+      integration_no_ak: getWorkflowStep(
+        getWorkflowJob(workflow, 'integration_no_ak'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+    };
+    for (const [jobName, call] of Object.entries(nodeCalls)) {
+      expect(call, `${jobName} must use the shared Node preflight`).toContain(
+        "uses: './.github/actions/self-hosted-node'",
+      );
+    }
+    expect(nodeCalls.test).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
+    for (const jobName of ['web_shell_e2e_smoke', 'integration_cli']) {
+      expect(nodeCalls[jobName]).toContain(
+        'if: "${{ runner.environment == \'self-hosted\' }}"',
+      );
+    }
+    expect(nodeCalls.integration_no_ak).toContain(
+      "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
+  });
+
+  it('installs Playwright system dependencies on hosted runners, and on pool hosts only when missing', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
+
+    // The lane still takes its runner from the classifier, so an untrusted
+    // fork PR cannot reach a self-hosted host; the architecture override it
+    // applies on top is pinned in scripts/tests/ci-platform-lanes.test.js.
+    expect(webShellJob).toMatch(
+      /runs-on: .*needs\.classify_pr\.outputs\.ubuntu_runner/,
+    );
+    const hostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium and WebKit (hosted)',
+    );
+    const selfHostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium and WebKit (self-hosted)',
+    );
+
+    expect(hostedInstall).toContain(
+      'node node_modules/playwright/cli.js install --with-deps chromium webkit',
+    );
+    expect(selfHostedInstall).toContain(
+      'node node_modules/playwright/cli.js install chromium webkit',
+    );
+    expect(selfHostedInstall).not.toContain('install --with-deps chromium');
+    // Pool hosts lacked WebKit's libraries: install them once per host, gated
+    // on Playwright's own validation, without prompting or racing apt locks.
+    expect(selfHostedInstall).toContain(
+      'if grep -q \'Host system is missing dependencies\' "${install_log}"; then',
+    );
+    expect(selfHostedInstall).toContain('DPkg::Lock::Timeout');
+    expect(selfHostedInstall).toContain(
+      'sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit',
+    );
+    for (const step of [hostedInstall, selfHostedInstall]) {
+      expect(step).toContain(
+        "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
+      );
+      expect(step).toContain('node "${nested_cli}" install chromium webkit');
+    }
+  });
+
+  it('installs Chromium and WebKit for both Playwright revisions in the nightly browser gate', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/e2e.yml'),
+      'utf8',
+    );
+    const browserJob = getWorkflowJob(workflow, 'web-shell-browser-regression');
+    const install = getWorkflowStep(
+      browserJob,
+      'Install Playwright Chromium and WebKit',
+    );
+
+    expect(install).toContain(
+      'node node_modules/playwright/cli.js install --with-deps chromium webkit',
+    );
+    expect(install).toContain(
+      "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
+    );
+    expect(install).toContain('node "${nested_cli}" install chromium webkit');
+  });
+});
+
+// The 8.3 alias this guard exists for (`C:\Users\RUNNER~1` realpathing to
+// `C:\Users\runneradmin`) cannot be reproduced off Windows, but every
+// decision the guard makes is a comparison between an env value and its
+// realpath — and a symlink reproduces each of those on any platform. Run the
+// real script rather than pinning its text: the case-insensitive comparison
+// below is the whole point of the step, and a substring pin cannot tell a
+// working comparison from a reverted one.
+describe('Windows temp short-alias guard', () => {
+  const workflow = readFileSync(
+    path.join(ROOT, '.github/workflows/ci.yml'),
+    'utf8',
+  );
+  const step = getWorkflowStep(
+    getWorkflowJob(workflow, 'test_windows'),
+    'Verify temp paths carry no short alias',
+  );
+  // The script is single-quoted throughout precisely so this stays a
+  // delimiter-safe extraction.
+  const match = /node -e "([^"]+)"/.exec(step);
+  const script = match?.[1];
+
+  // Invoked exactly as the workflow does: `node -e <script>`, no extra argv.
+  const runGuard = (env) =>
+    execFileSync(
+      process.execPath,
+      ['-e', script],
+      // Only TEMP/TMP may reach the guard: inheriting the ambient
+      // environment would let the host's own temp decide the verdict.
+      // stdio 'pipe' captures stderr too, so a failure's message reaches
+      // the assertion instead of the test runner's console.
+      { env, encoding: 'utf8', stdio: 'pipe' },
+    );
+
+  it('extracts a runnable script from the workflow', () => {
+    expect(script).toBeTruthy();
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'accepts, warns, or fails on the three ways an env path can meet its realpath',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+
+        // 1. Alias-free: the env value already IS its realpath.
+        expect(() =>
+          runGuard({ TEMP: canonical, TMP: canonical }),
+        ).not.toThrow();
+
+        // 2. Casing-only difference — the regression this guard had to stop
+        // producing. On Windows realpath returns the on-disk casing, so this
+        // is one directory under one spelling: warn, do not fail the lane.
+        const casing = path.join(base, 'RUNNERADMIN');
+        symlinkSync(canonical, casing);
+        let stdout = '';
+        expect(() => {
+          stdout = runGuard({ TEMP: casing, TMP: casing });
+        }).not.toThrow();
+        expect(stdout).toContain('::warning::');
+        expect(stdout).toContain('only by casing');
+
+        // 3. A genuine second spelling, as the 8.3 alias produces: fail.
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+        expect(() => runGuard({ TEMP: alias, TMP: alias })).toThrow(
+          /carries a short alias/,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'checks each temp key on its own, so the loop cannot drop one',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        // Every case above hands both keys the same value, so a guard loop
+        // narrowed to one key still passes all of them. Only a split pairing
+        // pins that the second key is visited at all, and that the failure
+        // names it.
+        expect(() => runGuard({ TEMP: canonical, TMP: alias })).toThrow(
+          /TMP carries a short alias/,
+        );
+        expect(() => runGuard({ TEMP: alias, TMP: canonical })).toThrow(
+          /TEMP carries a short alias/,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('fails loudly when temp is unset instead of throwing on undefined', () => {
+    // configure-windows-runner and the hosted redirect both set TEMP and TMP,
+    // so an unset value means one of them stopped running — a clear message
+    // beats realpathSync(undefined)'s TypeError.
+    expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
+  });
+
+  it('annotates an unset temp so the failure reaches the check UI', () => {
+    // A bare console.error leaves the run reporting only "Process completed
+    // with exit code 1". The `::error::` prefix is what GitHub turns into an
+    // annotation attached to the check — the same channel the
+    // hosted-process-suite step in this workflow already uses.
+    let err;
+    try {
+      runGuard({ TEMP: '', TMP: '' });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.stderr).toContain('::error::');
+    expect(err.stderr).toContain('TEMP is not set');
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'annotates a short alias so the failure reaches the check UI',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        let err;
+        try {
+          runGuard({ TEMP: alias, TMP: alias });
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeDefined();
+        expect(err.stderr).toContain('::error::');
+        expect(err.stderr).toContain('TEMP carries a short alias');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
 });

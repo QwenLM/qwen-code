@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "autoRecall": {
+    "repositoryRoot": "/absolute/path/to/repository",
+    "timeoutMs": 1500
+  },
+  "provider": {
+    "type": "generic-http-search-v1",
+    "baseUrl": "https://context.example.com",
+    "tokenEnv": "CONTEXT_API_TOKEN"
+  }
+}

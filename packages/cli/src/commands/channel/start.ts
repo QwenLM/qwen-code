@@ -1,175 +1,377 @@
-import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { CommandModule } from 'yargs';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
+import {
+  addChannelMemoryEntries,
+  clearChannelMemory,
+  getChannelMemoryRevision,
+  listChannelMemoryEntries,
+  nextFireTime,
+  readChannelMemory,
+  recordChannelMemoryRecallMetrics,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
-import type {
-  ChannelBase,
-  ChannelPlugin,
-  ToolCallEvent,
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineSafe,
+} from '../../utils/stdioHelpers.js';
+import {
+  AcpBridge,
+  ChannelLoopScheduler,
+  ChannelLoopStore,
+  SessionRouter,
 } from '@qwen-code/channel-base';
-import { getPlugin, registerPlugin } from './channel-registry.js';
+import type {
+  AcpBridgeOptions,
+  ChannelBase,
+  ChannelBaseOptions,
+} from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
+import { resolveProxy } from './proxy.js';
 import {
   readServiceInfo,
   writeServiceInfo,
   removeServiceInfo,
 } from './pidfile.js';
-import { getExtensionManager } from '../extensions/utils.js';
+import {
+  createChannel,
+  channelLoopPath,
+  loadChannelsConfig,
+  loadChannelsFromExtensions,
+  parseConfiguredChannels,
+  registerBackgroundResponseRelay,
+  registerPermissionRelay,
+  registerSessionCleanup,
+  registerToolCallDispatch,
+  resolveChannelLocale,
+  selectFirstModel,
+  sessionsPath,
+} from './runtime.js';
+import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import {
+  createChannelLoopController,
+  isChannelCronEnabled,
+} from './loop-runtime.js';
+import { disconnectChannels } from './disconnect-channels.js';
+
+export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
+export { resolveProxy } from './proxy.js';
 
 const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
+export const CHANNEL_DISCONNECT_DRAIN_MS = 4_000;
+export const BRIDGE_SESSION_RESTORE_TIMEOUT_MS = 60 * 1000;
 
-/**
- * Resolve and apply proxy settings for the channel service process.
- *
- * The normal CLI path applies proxy via loadCliConfig → Config constructor →
- * setGlobalDispatcher, but `channel start` never calls loadCliConfig. This
- * replicates the same resolution logic (--proxy flag → settings.proxy →
- * HTTPS_PROXY → HTTP_PROXY) and applies the global dispatcher for native
- * fetch() calls. The resolved URL is also passed to channels via
- * ChannelBaseOptions so adapters can configure their own HTTP clients (e.g.
- * grammy uses node-fetch which needs a separate agent).
- */
-export function resolveProxy(
-  cliProxy?: string,
-  settingsProxy?: string,
-): string | undefined {
-  const proxyUrl = normalizeProxyUrl(
-    cliProxy ||
-      settingsProxy ||
-      process.env['HTTPS_PROXY'] ||
-      process.env['https_proxy'] ||
-      process.env['HTTP_PROXY'] ||
-      process.env['http_proxy'],
+function disconnectStartedChannels(
+  channels: Iterable<ChannelBase>,
+): Promise<void> {
+  return disconnectChannels(channels, {
+    timeoutMs: CHANNEL_DISCONNECT_DRAIN_MS,
+    onTimeout: () => {
+      writeStderrLine(
+        `[Channel] disconnect drain exceeded ${CHANNEL_DISCONNECT_DRAIN_MS}ms; continuing shutdown.`,
+      );
+    },
+  });
+}
+
+function isFileExistsError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as NodeJS.ErrnoException).code === 'EEXIST'
   );
-  if (proxyUrl) {
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  }
-  return proxyUrl;
 }
 
-function sessionsPath(): string {
-  return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
+function channelMemoryOptions(
+  getBridge: () => AcpBridge,
+  cwd: string,
+): Pick<
+  ChannelBaseOptions,
+  'channelMemory' | 'memoryIntentClassifier' | 'channelMemoryRecallObserver'
+> {
+  return {
+    channelMemory: {
+      readChannelMemory,
+      getChannelMemoryRevision,
+      listChannelMemoryEntries,
+      addChannelMemoryEntries,
+      updateChannelMemoryEntry,
+      removeChannelMemoryEntries,
+      clearChannelMemory,
+    },
+    memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
+      getBridge,
+      cwd,
+    ),
+    channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
+  };
 }
 
-function loadChannelsConfig(): Record<string, unknown> {
-  const settings = loadSettings(process.cwd());
-  const channels = (
-    settings.merged as unknown as { channels?: Record<string, unknown> }
-  ).channels;
-  return channels || {};
+function isUnverifiablePidfileError(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    (err as NodeJS.ErrnoException).code === 'channel_service_conflict'
+  );
 }
 
-export function resolveExtensionChannelEntrySpecifier(
-  extensionPath: string,
-  entry: string,
-): string {
-  return pathToFileURL(path.join(extensionPath, entry)).href;
-}
-
-/**
- * Load channel plugins from active extensions.
- * Extensions declare channels in their qwen-extension.json manifest.
- */
-async function loadChannelsFromExtensions(): Promise<number> {
-  let loaded = 0;
+async function writeServiceInfoOrExit(
+  channels: string[],
+  cleanup: () => Promise<void>,
+): Promise<void> {
   try {
-    const extensionManager = await getExtensionManager();
-    const extensions = extensionManager
-      .getLoadedExtensions()
-      .filter((e) => e.isActive && e.channels);
-
-    for (const ext of extensions) {
-      for (const [channelType, channelDef] of Object.entries(ext.channels!)) {
-        if (await getPlugin(channelType)) {
-          writeStderrLine(
-            `[Extensions] Skipping channel "${channelType}" from "${ext.name}": type already registered`,
-          );
-          continue;
-        }
-
-        const entrySpecifier = resolveExtensionChannelEntrySpecifier(
-          ext.path,
-          channelDef.entry,
-        );
-        try {
-          const module = (await import(entrySpecifier)) as {
-            plugin?: ChannelPlugin;
-          };
-          const plugin = module.plugin;
-
-          if (!plugin || typeof plugin.createChannel !== 'function') {
-            writeStderrLine(
-              `[Extensions] "${ext.name}": channel entry point does not export a valid plugin object`,
-            );
-            continue;
-          }
-
-          if (plugin.channelType !== channelType) {
-            writeStderrLine(
-              `[Extensions] "${ext.name}": channelType mismatch — manifest says "${channelType}", plugin says "${plugin.channelType}"`,
-            );
-            continue;
-          }
-
-          registerPlugin(plugin);
-          loaded++;
-          writeStdoutLine(
-            `[Extensions] Loaded channel "${channelType}" from "${ext.name}"`,
-          );
-        } catch (err) {
-          writeStderrLine(
-            `[Extensions] Failed to load channel "${channelType}" from "${ext.name}": ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }
+    writeServiceInfo(channels);
   } catch (err) {
-    writeStderrLine(
-      `[Extensions] Failed to load extensions: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    await cleanup();
+    if (isFileExistsError(err)) {
+      writeStderrLine(
+        'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
+      );
+      process.exit(1);
+    }
+    if (isUnverifiablePidfileError(err)) {
+      // Retrying cannot clear a record this side can never verify, so the
+      // pidfile's own recovery step replaces the concurrent-startup advice.
+      writeStderrLine(`Error: ${err.message}`);
+      process.exit(1);
+    }
+    // A held pidfile lock already states its own recovery window, and the two
+    // identity refusals below are code-less and thrown by module-private
+    // helpers, so each is recognised here and reported as one operator-facing
+    // line instead of falling through to a yargs usage dump and a raw stack.
+    if (
+      err instanceof Error &&
+      ((err as NodeJS.ErrnoException).code === 'ELOCKED' ||
+        err.message.startsWith('Unable to read the process start token') ||
+        err.message.startsWith('Unable to read the PID namespace id'))
+    ) {
+      writeStderrLine(`Error: ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
   }
-  return loaded;
 }
 
-async function createChannel(
-  name: string,
-  config: Awaited<ReturnType<typeof parseChannelConfig>>,
-  bridge: AcpBridge,
-  options?: { router?: SessionRouter; proxy?: string },
-): Promise<ChannelBase> {
-  const channelPlugin = await getPlugin(config.type);
-  if (!channelPlugin) {
-    throw new Error(`Unknown channel type: "${config.type}".`);
-  }
-  return channelPlugin.createChannel(name, config, bridge, options);
-}
-
-function registerToolCallDispatch(
+async function cleanupStartedChannels(
+  channels: Iterable<ChannelBase>,
   bridge: AcpBridge,
   router: SessionRouter,
-  channels: Map<string, ChannelBase>,
-): void {
-  bridge.on('toolCall', (event: ToolCallEvent) => {
-    const target = router.getTarget(event.sessionId);
-    if (target) {
-      const channel = channels.get(target.channelName);
-      if (channel) {
-        channel.onToolCall(target.chatId, event);
-      }
-    }
+): Promise<void> {
+  await disconnectStartedChannels(channels);
+  try {
+    bridge.stop();
+  } catch {
+    // best-effort
+  }
+  try {
+    router.clearAll();
+  } catch {
+    // best-effort
+  }
+}
+
+function createBridgeReadinessGate(): {
+  current: () => Promise<void> | undefined;
+  block: () => void;
+  release: () => void;
+} {
+  let pending: Promise<void> | undefined;
+  let releasePending: (() => void) | undefined;
+  return {
+    current: () => pending,
+    block: () => {
+      if (pending) return;
+      pending = new Promise<void>((resolve) => {
+        releasePending = resolve;
+      });
+    },
+    release: () => {
+      const release = releasePending;
+      pending = undefined;
+      releasePending = undefined;
+      release?.();
+    },
+  };
+}
+
+async function restoreBridgeSessions(
+  router: SessionRouter,
+): ReturnType<SessionRouter['restoreSessions']> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timeout = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `Session restore timed out after ${BRIDGE_SESSION_RESTORE_TIMEOUT_MS}ms`,
+          ),
+        ),
+      BRIDGE_SESSION_RESTORE_TIMEOUT_MS,
+    );
+    timeout.unref?.();
   });
+  try {
+    return await Promise.race([router.restoreSessions(), expired]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+interface BridgeRecoveryOptions {
+  bridgeOpts: AcpBridgeOptions;
+  router: SessionRouter;
+  channels: Map<string, ChannelBase>;
+  scheduler: ChannelLoopScheduler | undefined;
+  bridgeReadiness: ReturnType<typeof createBridgeReadinessGate>;
+  isShuttingDown: () => boolean;
+  beginShutdown: () => void;
+  getBridge: () => AcpBridge;
+  setBridge: (bridge: AcpBridge) => void;
+}
+
+/**
+ * Rebuild the ACP bridge after a disconnect while keeping channel adapters
+ * connected. Shared by the standalone and all-channel start paths; the only
+ * per-path state comes in through the accessors.
+ */
+function createBridgeRecovery(options: BridgeRecoveryOptions): {
+  attachDisconnectHandler: (bridge: AcpBridge) => void;
+} {
+  const {
+    bridgeOpts,
+    router,
+    channels,
+    scheduler,
+    bridgeReadiness,
+    isShuttingDown,
+    beginShutdown,
+    getBridge,
+    setBridge,
+  } = options;
+  const crashTimestamps: number[] = [];
+  let recoveryTask: Promise<void> | undefined;
+  let recoveryRequested = false;
+  let recoverySourceBridge: AcpBridge | undefined;
+
+  const attachDisconnectHandler = (failedBridge: AcpBridge): void => {
+    failedBridge.on('disconnected', () => {
+      // A dead bridge never settles its in-flight turns; let every channel
+      // clear turn-scoped transient state. Crash recovery restores the
+      // sessions, so routing state must stay.
+      for (const channel of channels.values()) {
+        channel.onBridgeDisconnected();
+      }
+      if (isShuttingDown() || failedBridge !== getBridge()) return;
+      if (recoveryTask) {
+        if (failedBridge !== recoverySourceBridge) recoveryRequested = true;
+        return;
+      }
+      recoverBridge();
+    });
+  };
+
+  const recoverBridge = (): void => {
+    bridgeReadiness.block();
+    scheduler?.markBridgeRecovery();
+    const task = (async () => {
+      do {
+        recoveryRequested = false;
+        recoverySourceBridge = getBridge();
+        const now = Date.now();
+        crashTimestamps.push(now);
+        while (now - crashTimestamps[0]! >= CRASH_WINDOW_MS) {
+          crashTimestamps.shift();
+        }
+        const recentCrashCount = crashTimestamps.length;
+
+        if (recentCrashCount > MAX_CRASH_RESTARTS) {
+          beginShutdown();
+          writeStderrLine(
+            `[Channel] Bridge crashed ${recentCrashCount} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
+          );
+          scheduler?.stop();
+          await cleanupStartedChannels(channels.values(), getBridge(), router);
+          removeServiceInfo();
+          process.exit(1);
+        }
+
+        writeStderrLine(
+          `[Channel] Bridge crashed (${recentCrashCount}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
+        if (isShuttingDown()) return;
+
+        const bridge = new AcpBridge(bridgeOpts);
+        try {
+          await bridge.start();
+        } catch (error) {
+          bridge.stop();
+          throw error;
+        }
+        if (isShuttingDown()) {
+          bridge.stop();
+          return;
+        }
+        setBridge(bridge);
+        attachDisconnectHandler(bridge);
+        router.setBridge(bridge);
+        for (const channel of channels.values()) {
+          channel.setBridge(bridge);
+        }
+        registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
+        registerSessionCleanup(bridge, router, channels);
+
+        const result = await restoreBridgeSessions(router);
+        if (isShuttingDown()) {
+          bridge.stop();
+          return;
+        }
+        writeStdoutLine(
+          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
+        );
+      } while (recoveryRequested && !isShuttingDown());
+    })()
+      .catch(async (err) => {
+        if (isShuttingDown()) return;
+        beginShutdown();
+        writeStderrLine(
+          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        scheduler?.stop();
+        await cleanupStartedChannels(channels.values(), getBridge(), router);
+        removeServiceInfo();
+        process.exit(1);
+      })
+      .finally(() => {
+        if (recoveryTask === task) {
+          recoveryTask = undefined;
+          recoverySourceBridge = undefined;
+          bridgeReadiness.release();
+        }
+      });
+    recoveryTask = task;
+  };
+
+  return { attachDisconnectHandler };
 }
 
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {
   const existing = readServiceInfo();
   if (existing) {
+    if (existing.owner === 'serve') {
+      writeStderrLine(
+        `Error: Channel service is managed by qwen serve (PID ${existing.pid}, started ${existing.startedAt}).`,
+      );
+      writeStderrLine('Stop the qwen serve process to stop managed channels.');
+      process.exit(1);
+    }
     writeStderrLine(
       `Error: Channel service is already running (PID ${existing.pid}, started ${existing.startedAt}).`,
     );
@@ -179,7 +381,13 @@ function checkDuplicateInstance(): void {
 }
 
 /** Start a single channel with its own bridge + crash recovery. */
-async function startSingle(name: string, proxy?: string): Promise<void> {
+async function startSingle(
+  name: string,
+  proxy: string | undefined,
+  cronEnabled: boolean,
+  locale: 'en' | 'zh',
+  displayLanguage?: string,
+): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
@@ -197,7 +405,14 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     config = await parseChannelConfig(
       name,
       channelsConfig[name] as Record<string, unknown>,
+      process.cwd(),
+      { resolveEnvVars: 'available' },
     );
+    if (config.multiSession) {
+      throw new Error(
+        'multiSession is available only for daemon-managed Channels started by qwen serve.',
+      );
+    }
   } catch (err) {
     writeStderrLine(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
@@ -207,7 +422,8 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
 
   const cliEntryPath = findCliEntryPath();
   let shuttingDown = false;
-  const crashTimestamps: number[] = [];
+
+  const bridgeReadiness = createBridgeReadinessGate();
 
   const bridgeOpts = { cliEntryPath, cwd: config.cwd, model: config.model };
   let bridge = new AcpBridge(bridgeOpts);
@@ -219,89 +435,119 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     config.sessionScope,
     sessionsPath(),
   );
+  router.setChannelApprovalMode(name, config.approvalMode);
+  const loopStore = cronEnabled
+    ? new ChannelLoopStore({ filePath: channelLoopPath() })
+    : undefined;
+  const loopController = loopStore
+    ? createChannelLoopController(loopStore)
+    : undefined;
   const channels: Map<string, ChannelBase> = new Map();
 
-  const channel = await createChannel(name, config, bridge, { router, proxy });
+  const channel = await createChannel(name, config, bridge, {
+    locale,
+    router,
+    proxy,
+    ...(displayLanguage ? { displayLanguage } : {}),
+    ...channelMemoryOptions(() => bridge, config.cwd),
+    ...(loopController ? { loopController } : {}),
+    bridgeRecovery: bridgeReadiness.current,
+  });
   channels.set(name, channel);
+  const scheduler = loopStore
+    ? new ChannelLoopScheduler({
+        store: loopStore,
+        channels,
+        nextFireTime,
+      })
+    : undefined;
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
+  registerSessionCleanup(bridge, router, channels);
+  let serviceInfoWritten = false;
+  let shutdownTask: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    const runningShutdown = shutdownTask;
+    if (runningShutdown) {
+      process.exit(1);
+      return runningShutdown!;
+    }
+    shuttingDown = true;
+    shutdownTask = (async () => {
+      ignoreBrokenPipe();
+      writeStdoutLineSafe('\n[Channel] Shutting down...');
+      scheduler?.stop();
+      await disconnectStartedChannels([channel]);
+      bridge.stop();
+      router.clearAll();
+      if (serviceInfoWritten) removeServiceInfo();
+      process.exit(0);
+    })();
+    return shutdownTask;
+  };
+  const detachShutdownHandlers = () => {
+    process.off('SIGINT', shutdown);
+    process.off('SIGTERM', shutdown);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   try {
     await channel.connect();
   } catch (err) {
+    if (shuttingDown) return shutdownTask;
+    detachShutdownHandlers();
     writeStderrLine(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
     );
-    bridge.stop();
+    await cleanupStartedChannels([channel], bridge, router);
     process.exit(1);
   }
-
-  writeServiceInfo([name]);
+  if (shuttingDown) return shutdownTask;
+  try {
+    await writeServiceInfoOrExit([name], () => {
+      detachShutdownHandlers();
+      return cleanupStartedChannels([channel], bridge, router);
+    });
+    serviceInfoWritten = true;
+  } catch (error) {
+    detachShutdownHandlers();
+    throw error;
+  }
+  // Keep scheduled loops active; their prompt paths wait on bridgeReadiness.
+  scheduler?.start();
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
-  const attachDisconnectHandler = (b: AcpBridge): void => {
-    b.on('disconnected', async () => {
-      if (shuttingDown) return;
-
-      const now = Date.now();
-      crashTimestamps.push(now);
-      // Only count crashes within the recent window
-      const recentCrashes = crashTimestamps.filter(
-        (ts) => now - ts < CRASH_WINDOW_MS,
-      );
-
-      if (recentCrashes.length > MAX_CRASH_RESTARTS) {
-        writeStderrLine(
-          `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
-        );
-        channel.disconnect();
-        router.clearAll();
-        removeServiceInfo();
-        process.exit(1);
-      }
-
-      writeStderrLine(
-        `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
-      );
-      await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
-
-      try {
-        bridge = new AcpBridge(bridgeOpts);
-        await bridge.start();
-        router.setBridge(bridge);
-        channel.setBridge(bridge);
-        registerToolCallDispatch(bridge, router, channels);
-        attachDisconnectHandler(bridge);
-
-        const result = await router.restoreSessions();
-        writeStdoutLine(
-          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
-        );
-      } catch (err) {
-        writeStderrLine(
-          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    });
-  };
+  const { attachDisconnectHandler } = createBridgeRecovery({
+    bridgeOpts,
+    router,
+    channels,
+    scheduler,
+    bridgeReadiness,
+    isShuttingDown: () => shuttingDown,
+    beginShutdown: () => {
+      shuttingDown = true;
+      detachShutdownHandlers();
+      shutdownTask ??= Promise.resolve();
+    },
+    getBridge: () => bridge,
+    setBridge: (next) => {
+      bridge = next;
+    },
+  });
   attachDisconnectHandler(bridge);
-
-  const shutdown = () => {
-    shuttingDown = true;
-    writeStdoutLine('\n[Channel] Shutting down...');
-    channel.disconnect();
-    bridge.stop();
-    router.clearAll();
-    removeServiceInfo();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
 
   await new Promise<void>(() => {});
 }
 
 /** Start all configured channels with a shared bridge + crash recovery. */
-async function startAll(proxy?: string): Promise<void> {
+async function startAll(
+  proxy: string | undefined,
+  cronEnabled: boolean,
+  locale: 'en' | 'zh',
+  displayLanguage?: string,
+): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
@@ -315,51 +561,47 @@ async function startAll(proxy?: string): Promise<void> {
   }
 
   // Parse all configs upfront — fail fast on bad config
-  const parsed: Array<{
-    name: string;
-    config: Awaited<ReturnType<typeof parseChannelConfig>>;
-  }> = [];
-  for (const [name, raw] of Object.entries(channelsConfig)) {
-    try {
-      parsed.push({
-        name,
-        config: await parseChannelConfig(name, raw as Record<string, unknown>),
-      });
-    } catch (err) {
-      writeStderrLine(
-        `Error in channel "${name}": ${err instanceof Error ? err.message : String(err)}`,
+  let parsed;
+  try {
+    parsed = await parseConfiguredChannels(
+      channelsConfig,
+      Object.keys(channelsConfig),
+    );
+    if (parsed.some(({ config }) => config.multiSession)) {
+      throw new Error(
+        'multiSession is available only for daemon-managed Channels started by qwen serve.',
       );
-      process.exit(1);
     }
+  } catch (err) {
+    writeStderrLine(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
 
   const cliEntryPath = findCliEntryPath();
   const defaultCwd = process.cwd();
   let shuttingDown = false;
-  const crashTimestamps: number[] = [];
 
-  // All channels share one bridge process. Use the first channel's model.
-  const models = [
-    ...new Set(parsed.map((p) => p.config.model).filter(Boolean)),
-  ];
-  if (models.length > 1) {
-    writeStderrLine(
-      `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
-        `Shared bridge will use "${models[0]}".`,
-    );
-  }
+  const bridgeReadiness = createBridgeReadinessGate();
+
   const bridgeOpts = {
     cliEntryPath,
     cwd: defaultCwd,
-    model: models[0],
+    model: selectFirstModel(parsed, 'Shared bridge'),
   };
   let bridge = new AcpBridge(bridgeOpts);
   await bridge.start();
 
   const router = new SessionRouter(bridge, defaultCwd, 'user', sessionsPath());
-  // Register per-channel scope overrides so each channel uses its own sessionScope
+  const loopStore = cronEnabled
+    ? new ChannelLoopStore({ filePath: channelLoopPath() })
+    : undefined;
+  const loopController = loopStore
+    ? createChannelLoopController(loopStore)
+    : undefined;
+  // Register per-channel routing overrides.
   for (const { name, config } of parsed) {
     router.setChannelScope(name, config.sessionScope);
+    router.setChannelApprovalMode(name, config.approvalMode);
   }
   const channels: Map<string, ChannelBase> = new Map();
 
@@ -370,19 +612,72 @@ async function startAll(proxy?: string): Promise<void> {
   for (const { name, config } of parsed) {
     channels.set(
       name,
-      await createChannel(name, config, bridge, { router, proxy }),
+      await createChannel(name, config, bridge, {
+        locale,
+        router,
+        proxy,
+        ...(displayLanguage ? { displayLanguage } : {}),
+        ...channelMemoryOptions(() => bridge, config.cwd),
+        ...(loopController ? { loopController } : {}),
+        bridgeRecovery: bridgeReadiness.current,
+      }),
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
+  registerSessionCleanup(bridge, router, channels);
+  const connectedChannels: Map<string, ChannelBase> = new Map();
+  const scheduler = loopStore
+    ? new ChannelLoopScheduler({
+        store: loopStore,
+        channels: connectedChannels,
+        nextFireTime,
+      })
+    : undefined;
+  let serviceInfoWritten = false;
+  let shutdownTask: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    const runningShutdown = shutdownTask;
+    if (runningShutdown) {
+      process.exit(1);
+      return runningShutdown!;
+    }
+    shuttingDown = true;
+    shutdownTask = (async () => {
+      ignoreBrokenPipe();
+      writeStdoutLineSafe('\n[Channel] Shutting down...');
+      scheduler?.stop();
+      await disconnectStartedChannels(channels.values());
+      for (const name of channels.keys()) {
+        writeStdoutLineSafe(`[Channel] "${name}" disconnected.`);
+      }
+      bridge.stop();
+      router.clearAll();
+      if (serviceInfoWritten) removeServiceInfo();
+      process.exit(0);
+    })();
+    return shutdownTask;
+  };
+  const detachShutdownHandlers = () => {
+    process.off('SIGINT', shutdown);
+    process.off('SIGTERM', shutdown);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   // Connect all channels
   let connectedCount = 0;
   for (const [name, channel] of channels) {
+    if (shuttingDown) return shutdownTask;
     try {
       await channel.connect();
+      if (shuttingDown) return shutdownTask;
+      connectedChannels.set(name, channel);
       connectedCount++;
       writeStdoutLine(`[Channel] "${name}" connected.`);
     } catch (err) {
+      if (shuttingDown) return shutdownTask;
       writeStderrLine(
         `[Channel] Failed to connect "${name}": ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -390,88 +685,48 @@ async function startAll(proxy?: string): Promise<void> {
   }
 
   if (connectedCount === 0) {
+    detachShutdownHandlers();
     writeStderrLine('[Channel] No channels connected. Exiting.');
-    bridge.stop();
+    await cleanupStartedChannels(channels.values(), bridge, router);
     process.exit(1);
   }
-
-  writeServiceInfo(parsed.map((p) => p.name));
+  try {
+    await writeServiceInfoOrExit(
+      parsed.map((p) => p.name),
+      () => {
+        detachShutdownHandlers();
+        return cleanupStartedChannels(channels.values(), bridge, router);
+      },
+    );
+    serviceInfoWritten = true;
+  } catch (error) {
+    detachShutdownHandlers();
+    throw error;
+  }
+  // Keep scheduled loops active; their prompt paths wait on bridgeReadiness.
+  scheduler?.start();
   writeStdoutLine(
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );
 
-  const attachDisconnectHandler = (b: AcpBridge): void => {
-    b.on('disconnected', async () => {
-      if (shuttingDown) return;
-
-      const now = Date.now();
-      crashTimestamps.push(now);
-      const recentCrashes = crashTimestamps.filter(
-        (ts) => now - ts < CRASH_WINDOW_MS,
-      );
-
-      if (recentCrashes.length > MAX_CRASH_RESTARTS) {
-        writeStderrLine(
-          `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
-        );
-        for (const channel of channels.values()) {
-          try {
-            channel.disconnect();
-          } catch {
-            // best-effort
-          }
-        }
-        router.clearAll();
-        removeServiceInfo();
-        process.exit(1);
-      }
-
-      writeStderrLine(
-        `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
-      );
-      await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
-
-      try {
-        bridge = new AcpBridge(bridgeOpts);
-        await bridge.start();
-        router.setBridge(bridge);
-        for (const channel of channels.values()) {
-          channel.setBridge(bridge);
-        }
-        registerToolCallDispatch(bridge, router, channels);
-        attachDisconnectHandler(bridge);
-
-        const result = await router.restoreSessions();
-        writeStdoutLine(
-          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
-        );
-      } catch (err) {
-        writeStderrLine(
-          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    });
-  };
+  const { attachDisconnectHandler } = createBridgeRecovery({
+    bridgeOpts,
+    router,
+    channels,
+    scheduler,
+    bridgeReadiness,
+    isShuttingDown: () => shuttingDown,
+    beginShutdown: () => {
+      shuttingDown = true;
+      detachShutdownHandlers();
+      shutdownTask ??= Promise.resolve();
+    },
+    getBridge: () => bridge,
+    setBridge: (next) => {
+      bridge = next;
+    },
+  });
   attachDisconnectHandler(bridge);
-
-  const shutdown = () => {
-    shuttingDown = true;
-    writeStdoutLine('\n[Channel] Shutting down...');
-    for (const [name, channel] of channels) {
-      try {
-        channel.disconnect();
-        writeStdoutLine(`[Channel] "${name}" disconnected.`);
-      } catch {
-        // best-effort
-      }
-    }
-    bridge.stop();
-    router.clearAll();
-    removeServiceInfo();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
 
   await new Promise<void>(() => {});
 }
@@ -486,14 +741,21 @@ export const startCommand: CommandModule<object, { name?: string }> = {
     }),
   handler: async (argv) => {
     const settings = loadSettings(process.cwd());
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
       settings.merged.proxy as string | undefined,
     );
+    const cronEnabled = isChannelCronEnabled(settings);
+    const locale = resolveChannelLocale(settings.merged.general?.language);
+    const displayLanguage = resolveLanguage(
+      resolveLanguageSetting(
+        settings.merged.general?.language as string | undefined,
+      ),
+    );
     if (argv.name) {
-      await startSingle(argv.name, proxy);
+      await startSingle(argv.name, proxy, cronEnabled, locale, displayLanguage);
     } else {
-      await startAll(proxy);
+      await startAll(proxy, cronEnabled, locale, displayLanguage);
     }
   },
 };

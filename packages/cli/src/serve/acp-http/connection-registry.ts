@@ -7,15 +7,18 @@
 import { randomUUID } from 'node:crypto';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { logSafe } from './json-rpc.js';
-import type { TransportStream } from './transport-stream.js';
-
-/**
- * Per-stream cap on frames buffered before the client attaches its SSE
- * stream. Mirrors the EventBus's `maxQueued` backpressure cap so a client
- * that drives requests without ever opening a stream can't grow daemon
- * memory without bound. Oldest frames are dropped past the cap.
- */
-const MAX_BUFFERED_FRAMES = 256;
+import {
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
+  AcpPreAttachBudget,
+  type AcpPreAttachLease,
+} from './pre-attach-budget.js';
+import type {
+  DeliveryResult,
+  TransportCloseReason,
+  TransportStream,
+} from './transport-stream.js';
 
 /** Default cap on concurrent live connections (mirrors a bounded resource). */
 const DEFAULT_MAX_CONNECTIONS = 64;
@@ -42,6 +45,35 @@ export type DetachSessionFn = (
   clientId: string | undefined,
 ) => void;
 
+export interface DeliveryReceipt {
+  delivered(): void;
+  discarded(): void;
+  outcomeUnknown?(): void;
+}
+
+interface PreparedFrame {
+  payload: Buffer;
+  sequence: number;
+  id?: number;
+  /**
+   * For DEFERRED out-of-band replies only (`sendSessionReply`, always id-less):
+   * the bus head id at the moment the reply was produced. The reply must not be
+   * released to the wire until the pump has delivered every content event up to
+   * this id — otherwise a prompt result produced during a slow ring replay could
+   * land ahead of tail content that is still queued behind `replay_complete`
+   * (§1.8 W1). `undefined` ⇒ release at the next boundary unconditionally.
+   */
+  anchorId?: number;
+  receipt?: DeliveryReceipt;
+  receiptSettled?: boolean;
+  lease?: AcpPreAttachLease;
+  binding?: SessionBinding;
+  requeueOnStreamReplacement?: boolean;
+  deliveryAttempt?: number;
+  deliveryStream?: TransportStream;
+  resolve: (result: DeliveryResult) => void;
+}
+
 /**
  * Tracks one logical ACP-over-HTTP connection (RFD #721). A connection is
  * minted at `initialize`, keyed by `Acp-Connection-Id`, and may host many
@@ -60,8 +92,16 @@ export interface SessionBinding {
   clientId?: string;
   /** Session-scoped SSE stream (the client's `GET /acp` with both headers). */
   stream?: TransportStream;
-  /** Frames emitted before the session stream attached, flushed on attach. */
-  buffer: unknown[];
+  /** Stable across a transport detach while `stream` is temporarily absent. */
+  usesConnectionStream?: boolean;
+  /**
+   * Frames emitted before the session stream attached, flushed on attach.
+   * Each keeps its bus event id (when it has one) so the SSE `id:` resume
+   * cursor survives the buffer → live-stream handoff.
+   */
+  buffer: PreparedFrame[];
+  ownedFrames: number;
+  ownedBytes: number;
   /**
    * Aborts the bridge event subscription tied to the CURRENT session
    * stream. Replaced with a fresh controller on every re-attach — a
@@ -77,6 +117,40 @@ export interface SessionBinding {
    * the agent burning model quota on a result nobody will read.
    */
   promptAbort?: AbortController;
+  /**
+   * Armed by `detachSessionStream` when the session stream closes at the
+   * transport level (proxy idle-close, network blip) WITHOUT an explicit
+   * `session/close`. The binding — ownership, prompt, bridge-client — is kept
+   * alive across the window so a reconnect (`attachSessionStream`) can resume
+   * (ring replay backfills the gap, §1.8). If no reconnect arrives the timer
+   * fires the full teardown, bounding the runaway-prompt cost. Cleared on
+   * reconnect and on teardown.
+   */
+  graceTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Set from the CURRENT attach mode on every `attachSessionStream`: armed on a
+   * resumptive attach (with a `Last-Event-ID`), cleared on a fresh one (no
+   * `Last-Event-ID`) — never a one-way latch, or an aborted resume that skipped
+   * its flush would strand the flag and buffer every later reply forever. Also
+   * cleared when the ring replay boundary passes (`replay_complete` →
+   * `flushBufferedSessionFrames`). While set, OUT-OF-BAND session JSON-RPC
+   * replies (`replySession` — e.g. a `session/prompt` result that finishes
+   * mid-replay) are deferred into `buffer` instead of written live, so they
+   * can't overtake replay frames that haven't been sent yet. The flush boundary
+   * is `replay_complete` ONLY: `state_resync_required` is deliberately NOT one —
+   * the EventBus emits it BEFORE the replay frames, so flushing there would put
+   * deferred replies ahead of replayed content (the §1.8 reordering bug). In-band
+   * pump frames (`translateEvent`, including the `replay_complete` frame itself)
+   * are unaffected — they're already produced in replay order.
+   */
+  replayPending?: boolean;
+  /**
+   * Set after ACP `session/load` when the bridge used response-mode history
+   * replay. The first session stream attach rereads the bridge replay snapshot
+   * and emits it; the binding keeps only this lightweight marker, not the
+   * potentially large replay arrays.
+   */
+  initialReplayPending?: boolean;
 }
 
 /** An agent→client request awaiting the client's JSON-RPC response. */
@@ -85,6 +159,22 @@ export interface PendingClientRequest {
   /** Maps the JSON-RPC id we issued back to the bridge's permission id. */
   bridgeRequestId: string;
   kind: 'permission';
+}
+
+export interface SessionOwnershipIdentity {
+  binding: SessionBinding | undefined;
+  generation: number;
+}
+
+interface SessionOwnershipState {
+  generation: number;
+  captures: number;
+}
+
+export interface PendingClientRequestRef {
+  conn: AcpConnection;
+  id: string;
+  req: PendingClientRequest;
 }
 
 export interface AcpConnectionDiagnostic {
@@ -102,6 +192,9 @@ export interface AcpConnectionDiagnostic {
   wsStreams: number;
   bufferedConnectionFrames: number;
   bufferedSessionFrames: number;
+  pendingDeliveryFrames: number;
+  preAttachOwnedFrames: number;
+  preAttachOwnedBytes: number;
 }
 
 export interface ConnectionRegistrySnapshot {
@@ -112,15 +205,34 @@ export interface ConnectionRegistrySnapshot {
   sseStreams: number;
   wsStreams: number;
   pendingClientRequests: number;
+  bufferedConnectionFrames: number;
+  bufferedSessionFrames: number;
+  pendingDeliveryFrames: number;
+  preAttachOwnedFrames: number;
+  preAttachOwnedBytes: number;
+  preAttachGuardFailures: number;
   connections: AcpConnectionDiagnostic[];
 }
 
 export class AcpConnection {
+  preserveRunningPromptsOnDisconnect = false;
   readonly connectionId: string;
   /** Connection-scoped SSE stream (the client's `GET /acp` with only the conn header). */
   connStream?: TransportStream;
+  private readonly abortController = new AbortController();
+  readonly abortSignal = this.abortController.signal;
   /** Frames emitted before the connection stream attached, flushed on attach. */
-  private readonly connBuffer: unknown[] = [];
+  private readonly connBuffer: PreparedFrame[] = [];
+  private readonly pendingDeliveries = new Set<PreparedFrame>();
+  private nextPreparedSequence = 0;
+  private ownedFrames = 0;
+  private ownedBytes = 0;
+  private connOwnedFrames = 0;
+  private readonly pendingReceipts = new Set<DeliveryReceipt>();
+  private readonly sessionOwnershipStates = new Map<
+    string,
+    SessionOwnershipState
+  >();
   readonly sessions = new Map<string, SessionBinding>();
   /**
    * Sessions this connection created (`session/new`) or explicitly
@@ -162,6 +274,22 @@ export class AcpConnection {
    * `maxConnections`) for the full 30-min idle TTL.
    */
   connGraceTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * True once the connection grace timer has fired. The timer is one-shot, so
+   * if it fired while a session was still mid-reconnect (`hasRecoverableSession`
+   * blocked the reap), nothing would re-check the connection after that session
+   * later tore down — it would linger until the 30-min idle sweep. This flag
+   * lets `onSessionGraceExpired` (fired when a session grace expires) recognize
+   * "the conn grace already elapsed" and run the reap that was deferred.
+   */
+  connGraceExpired = false;
+  /**
+   * Set by the transport layer (`index.ts`) when the connection grace timer is
+   * armed. Invoked after a session's reclaim grace expires so a connection that
+   * was blocked from reaping by a then-recoverable session gets re-evaluated
+   * instead of leaking until the idle sweep.
+   */
+  onSessionGraceExpired?: () => void;
   lastActiveMs: number = Date.now();
   private idCounter = 0;
 
@@ -170,6 +298,14 @@ export class AcpConnection {
     fromLoopback: boolean,
     private readonly onAbandonPending?: AbandonPendingFn,
     private readonly onDetachSession?: DetachSessionFn,
+    private readonly preAttachBudget = new AcpPreAttachBudget(),
+    private readonly onFatalConnection?: (
+      connection: AcpConnection,
+      reason: TransportCloseReason,
+    ) => void,
+    private readonly maxFramesPerConnection = ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+    private readonly maxPayloadBytesPerConnection = ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
+    private readonly onPreAttachGuardFailure?: () => void,
   ) {
     this.connectionId = connectionId ?? randomUUID();
     this.clientId = randomUUID();
@@ -178,13 +314,13 @@ export class AcpConnection {
 
   /**
    * Allocate a fresh JSON-RPC id for an agent→client request. STRING-typed
-   * (`_qwen_perm_N`) so it can never collide with a client-originated id —
+   * (`_qwen_perm_<conn>_N`) so it can never collide with a client-originated id —
    * JSON-RPC 2.0 permits clients to use any number (incl. negatives) or
    * string, so a numeric namespace wasn't actually safe.
    */
   nextId(): string {
     this.idCounter += 1;
-    return `_qwen_perm_${this.idCounter}`;
+    return `_qwen_perm_${this.connectionId}_${this.idCounter}`;
   }
 
   touch(): void {
@@ -199,13 +335,84 @@ export class AcpConnection {
     return this.ownedSessions.has(sessionId);
   }
 
+  /**
+   * True when a client request (a permission vote) is still outstanding for
+   * this session. Such a prompt cannot make progress without the client: once
+   * the entrance is revoked the vote can never arrive, so it must not be
+   * preserved across disconnect — it has to go through teardown, which
+   * abandons the pending request and releases the connection.
+   */
+  hasPendingClientRequest(sessionId: string): boolean {
+    for (const req of this.pending.values()) {
+      if (req.sessionId === sessionId) return true;
+    }
+    return false;
+  }
+
+  captureSessionOwnershipIdentity(sessionId: string): SessionOwnershipIdentity {
+    let state = this.sessionOwnershipStates.get(sessionId);
+    if (!state) {
+      state = { generation: 0, captures: 0 };
+      this.sessionOwnershipStates.set(sessionId, state);
+    }
+    state.captures += 1;
+    return {
+      binding: this.sessions.get(sessionId),
+      generation: state.generation,
+    };
+  }
+
+  canCommitSessionOwnership(
+    sessionId: string,
+    ownership: SessionOwnershipIdentity,
+  ): boolean {
+    return (
+      !this.destroyed &&
+      !this.closingSessions.has(sessionId) &&
+      this.sessionOwnershipStates.get(sessionId)?.generation ===
+        ownership.generation &&
+      this.sessions.get(sessionId) === ownership.binding
+    );
+  }
+
+  releaseSessionOwnershipIdentity(
+    sessionId: string,
+    ownership: SessionOwnershipIdentity,
+  ): void {
+    const state = this.sessionOwnershipStates.get(sessionId);
+    if (!state || state.generation < ownership.generation) return;
+    state.captures -= 1;
+    if (state.captures === 0) {
+      this.sessionOwnershipStates.delete(sessionId);
+    }
+  }
+
   getOrCreateSession(sessionId: string): SessionBinding {
     let binding = this.sessions.get(sessionId);
     if (!binding) {
-      binding = { sessionId, abort: new AbortController(), buffer: [] };
+      binding = {
+        sessionId,
+        abort: new AbortController(),
+        buffer: [],
+        ownedFrames: 0,
+        ownedBytes: 0,
+      };
       this.sessions.set(sessionId, binding);
     }
     return binding;
+  }
+
+  markInitialReplayPending(sessionId: string): void {
+    this.getOrCreateSession(sessionId).initialReplayPending = true;
+  }
+
+  hasInitialReplayPending(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.initialReplayPending === true;
+  }
+
+  markInitialReplayComplete(sessionId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (binding) binding.initialReplayPending = false;
   }
 
   getDiagnostic(): AcpConnectionDiagnostic {
@@ -215,8 +422,14 @@ export class AcpConnection {
     }
     let sessionStreams = 0;
     let bufferedSessionFrames = 0;
+    let pendingDeliveryFrames = 0;
     for (const binding of this.sessions.values()) {
       bufferedSessionFrames += binding.buffer.length;
+      pendingDeliveryFrames += binding.buffer.filter(
+        (prepared) =>
+          prepared.lease !== undefined &&
+          prepared.deliveryAttempt !== undefined,
+      ).length;
       if (binding.stream && !binding.stream.isClosed) {
         sessionStreams += 1;
         liveStreams.add(binding.stream);
@@ -244,16 +457,28 @@ export class AcpConnection {
       wsStreams,
       bufferedConnectionFrames: this.connBuffer.length,
       bufferedSessionFrames,
+      pendingDeliveryFrames:
+        pendingDeliveryFrames +
+        [...this.pendingDeliveries].filter(
+          (prepared) => prepared.lease !== undefined,
+        ).length,
+      preAttachOwnedFrames: this.ownedFrames,
+      preAttachOwnedBytes: this.ownedBytes,
     };
   }
 
   /** Send a frame on the connection-scoped stream (buffer until it attaches). */
-  sendConn(frame: unknown): void {
-    if (this.connStream && !this.connStream.isClosed) {
-      void this.connStream.send(frame);
-    } else {
-      pushCapped(this.connBuffer, frame, `conn ${this.connectionId}`);
-    }
+  sendConn(frame: unknown, receipt?: DeliveryReceipt): Promise<DeliveryResult> {
+    const trackedReceipt = this.trackReceipt(receipt);
+    return this.prepareAndBuffer(
+      this.connBuffer,
+      frame,
+      undefined,
+      undefined,
+      trackedReceipt,
+      undefined,
+      true,
+    );
   }
 
   /** True if any session currently has a live (open) SSE stream. */
@@ -264,23 +489,79 @@ export class AcpConnection {
     return false;
   }
 
+  hasRunningDetachedPrompt(): boolean {
+    return (
+      this.preserveRunningPromptsOnDisconnect &&
+      [...this.sessions.values()].some(
+        (binding) =>
+          binding.promptAbort !== undefined &&
+          !binding.promptAbort.signal.aborted,
+      )
+    );
+  }
+
+  promptSettled(sessionId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (
+      !this.preserveRunningPromptsOnDisconnect ||
+      !binding ||
+      binding.stream ||
+      binding.graceTimer ||
+      binding.promptAbort ||
+      !binding.abort.signal.aborted
+    )
+      return;
+    this.closeSessionStream(sessionId);
+    this.onSessionGraceExpired?.();
+  }
+
+  /**
+   * True if any session is mid-reconnect: its transport stream detached but
+   * its `SESSION_GRACE_MS` reclaim window is still armed (`graceTimer` set),
+   * so the binding — ownership + in-flight prompt — is being held open for an
+   * imminent resume. The connection reaper must count these as activity:
+   * otherwise, when the connection-scoped stream closes first and a session
+   * stream detaches just after, the connection grace timer could delete the
+   * whole connection (and `destroy()` abort the prompt) while the session is
+   * still inside its OWN grace window — the reconnect would then 404.
+   */
+  hasRecoverableSession(): boolean {
+    if (this.hasRunningDetachedPrompt()) return true;
+    for (const b of this.sessions.values()) {
+      if (b.graceTimer) return true;
+    }
+    return false;
+  }
+
   /** Cancel a pending grace-period reap (e.g. on conn-stream reconnect). */
   clearGraceTimer(): void {
     if (this.connGraceTimer) {
       clearTimeout(this.connGraceTimer);
       this.connGraceTimer = undefined;
     }
+    // A fresh grace window (or a reconnect that cancels one) starts clean — the
+    // prior window's "already expired" verdict must not carry over.
+    this.connGraceExpired = false;
   }
 
   /** Attach the connection-scoped stream and flush any buffered frames. */
   attachConnStream(stream: TransportStream): void {
     // A reconnect cancels any pending grace-period reap.
     this.clearGraceTimer();
-    // Close any prior connection stream so its heartbeat interval + socket
-    // don't leak when a client reconnects the connection-scoped GET.
-    if (this.connStream && this.connStream !== stream) this.connStream.close();
+    const previousStream = this.connStream;
     this.connStream = stream;
-    for (const frame of this.connBuffer.splice(0)) void stream.send(frame);
+    // Move unresolved replies off the old stream before closing it. A queued
+    // SSE write can otherwise resolve `closed` without ever reaching the wire.
+    if (previousStream && previousStream !== stream) {
+      if (!this.requeuePendingConnectionFrames(previousStream)) {
+        previousStream.close();
+        return;
+      }
+      previousStream.close();
+    }
+    for (const prepared of this.connBuffer.splice(0)) {
+      this.deliverPrepared(stream, prepared);
+    }
   }
 
   /**
@@ -291,13 +572,95 @@ export class AcpConnection {
    * creating here would resurrect a ghost binding (no stream, no owner) that
    * buffers up to 256 late pump/reply frames forever.
    */
-  sendSession(sessionId: string, frame: unknown): void {
+  sendSession(
+    sessionId: string,
+    frame: unknown,
+    id?: number,
+  ): Promise<DeliveryResult> {
     const binding = this.sessions.get(sessionId);
-    if (!binding) return;
+    if (!binding) return Promise.resolve('closed');
     if (binding.stream && !binding.stream.isClosed) {
-      void binding.stream.send(frame);
-    } else {
-      pushCapped(binding.buffer, frame, `session ${sessionId}`);
+      return this.sendLive(binding.stream, frame, id, undefined, binding);
+    }
+    return this.prepareAndBuffer(
+      binding.buffer,
+      frame,
+      id,
+      undefined,
+      undefined,
+      binding,
+    );
+  }
+
+  /**
+   * Send an OUT-OF-BAND session JSON-RPC reply (a `session/prompt` result and
+   * friends from `replySession`) — id-less on the wire (no ring cursor).
+   *
+   * Unlike `sendSession`, this defers the reply behind a watermark while a ring
+   * replay is catching up. `anchorId` is the bus head id at the moment the reply
+   * was produced (every content event that should precede the reply has id ≤
+   * `anchorId`). The reply is held until the pump has DELIVERED through that id
+   * (`releaseDeferredSessionReplies`), so a prompt that finishes during a slow
+   * replay can't land ahead of tail content still queued behind `replay_complete`
+   * (§1.8 W1 — the truncated-body reordering).
+   *
+   * It defers when EITHER a resume replay is in flight (`replayPending`) OR the
+   * stream is detached OR replies are already queued ahead of it (`buffer` not
+   * empty) — that last case keeps a just-produced reply from overtaking an
+   * earlier one still waiting on its watermark. Once the buffer drains and replay
+   * is done, replies go straight to the wire (steady state, unchanged from a
+   * non-resumed stream).
+   */
+  sendSessionReply(
+    sessionId: string,
+    frame: unknown,
+    anchorId?: number,
+  ): Promise<DeliveryResult> {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return Promise.resolve('closed');
+    return this.prepareAndBuffer(
+      binding.buffer,
+      frame,
+      undefined,
+      anchorId,
+      undefined,
+      binding,
+      true,
+    );
+  }
+
+  /**
+   * Release deferred out-of-band replies (`sendSessionReply`) whose watermark
+   * (`anchorId`) the pump has now passed: every leading id-less buffer entry
+   * with `anchorId ≤ deliveredId` is flushed to the live stream, in order. The
+   * pump calls this after delivering each content event (and at `replay_complete`
+   * with the last replayed id), so each reply lands immediately AFTER the last
+   * content event that preceded it — never ahead of tail content still queued.
+   *
+   * Stops at the first entry that is id-bearing (not a deferred reply) or whose
+   * anchor is still ahead of `deliveredId`, preserving stream order. No-op if the
+   * stream isn't live (the entries stay buffered for the next attach).
+   */
+  releaseDeferredSessionReplies(sessionId: string, deliveredId: number): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding || !binding.stream || binding.stream.isClosed) return;
+    while (binding.buffer.length > 0) {
+      const front = binding.buffer[0];
+      // Only id-less deferred replies are watermark-gated; anything else (a
+      // stray id-bearing frame) marks the end of the releasable prefix.
+      if (front.id !== undefined) break;
+      if (front.anchorId === undefined) {
+        // No watermark (rare: the bus head was unreadable when the reply was
+        // produced — a session-teardown race). It can't be sequenced against a
+        // content id, so hold it until the replay boundary passes
+        // (`endReplayDeferral` clears `replayPending`, then this releases it).
+        // Releasing mid-replay could land it ahead of not-yet-sent content.
+        if (binding.replayPending) break;
+      } else if (front.anchorId > deliveredId) {
+        break;
+      }
+      binding.buffer.shift();
+      this.deliverPrepared(binding.stream, front);
     }
   }
 
@@ -311,38 +674,308 @@ export class AcpConnection {
     sessionId: string,
     stream: TransportStream,
     abort: AbortController,
+    resumeFromEventId?: number,
   ): SessionBinding {
     const binding = this.getOrCreateSession(sessionId);
+    // Reclaim: a reconnect within the grace window cancels the pending
+    // teardown so ownership/prompt survive the transport-level blip. Log it so
+    // an operator can tell "reclaimed within grace" apart from a first attach
+    // (the detach + grace-expiry paths already log; this completes the trail).
+    if (binding.graceTimer) {
+      clearTimeout(binding.graceTimer);
+      binding.graceTimer = undefined;
+      writeStderrLine(
+        `qwen serve: /acp session reclaimed within grace (${logSafe(sessionId)})`,
+      );
+    }
     const prevStream = binding.stream;
     binding.abort.abort();
     binding.abort = abort;
-    // Install the NEW stream BEFORE closing the old one. The old stream's
-    // `onClose` is identity-guarded on `binding.stream` (see the session-GET
-    // handler in `index.ts` — `if (conn.sessions.get(sessionId)?.stream ===
-    // stream) ...promptAbort?.abort()`), so installing first means a
-    // reconnect's close can't abort the in-flight prompt (the client is
-    // reconnecting, not leaving — the prompt must survive). CONTRACT: that
-    // identity guard and this ordering must stay in lockstep.
+    // Install the NEW stream BEFORE closing the old one. Each stream's event
+    // pump has its OWN abort controller, and the post-pump teardown in the
+    // session-GET handler (`index.ts` `onPumpSettled`) is identity-guarded on
+    // `binding.stream`: a settling stream only acts if it is STILL the bound
+    // stream (`conn.sessions.get(sessionId)?.stream === stream`). Installing
+    // first means the old stream settles against a binding that already points
+    // at the new stream, so it falls into detach-with-grace instead of tearing
+    // down the in-flight prompt — the client is reconnecting, not leaving, and
+    // the prompt must survive. CONTRACT: that identity guard and this ordering
+    // must stay in lockstep.
     binding.stream = stream;
+    binding.usesConnectionStream = stream === this.connStream;
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
+      if (!this.requeuePendingSessionReplies(binding, prevStream)) {
+        prevStream.close();
+        return binding;
+      }
       prevStream.close();
     }
-    for (const frame of binding.buffer.splice(0)) void stream.send(frame);
+    // Flush buffered pre-attach frames produced during the detach gap.
+    //
+    // FRESH CONNECT (`resumeFromEventId === undefined`, no `Last-Event-ID`):
+    // there's no ring replay, so the buffer is the only delivery path — flush
+    // everything now, in order.
+    //
+    // REPLAYING ATTACH (Last-Event-ID resume or response-mode load's initial
+    // replay): the event pump redelivers sequenced BUS events (`id !==
+    // undefined`) from the replay source, so we do NOT flush id-bearing frames
+    // here (flushing would double-deliver, and advancing a cursor past them to
+    // dedupe would silently drop an in-flight-lost frame whose id sits below
+    // the buffer's ids).
+    //
+    // Id-LESS frames are JSON-RPC replies (`replySession`), NOT ring events, so
+    // the replay won't redeliver them. But flushing them HERE — before replay —
+    // would deliver e.g. a `session/prompt` result BEFORE the pump replays the
+    // content chunks that preceded it, so the client would see "prompt complete"
+    // ahead of the body (the exact truncated-body failure §1.8 fixes). So on
+    // resume we DEFER id-less frames: leave them in the buffer for the pump to
+    // flush after `replay_complete` (`flushBufferedSessionFrames`), preserving
+    // original stream order.
+    // Set the deferral flag from the CURRENT attach mode every time — never a
+    // one-way latch. Resume arms it (keep deferring out-of-band replies until
+    // the replay boundary passes — not just the ones already buffered from the
+    // detach gap, but any prompt that finishes DURING the replay window). A
+    // fresh connect CLEARS it: the prior resumptive attach may have been aborted
+    // before its pump reached `replay_complete` (the normal reclaim path skips
+    // the flush), which would otherwise leave the flag stuck true and buffer
+    // every later `sendSessionReply` — including `session/prompt` results —
+    // behind a replay boundary this live-only subscription will never emit.
+    const replayingOnAttach =
+      resumeFromEventId !== undefined || binding.initialReplayPending === true;
+    binding.replayPending = replayingOnAttach;
+    if (binding.replayPending) {
+      // Breadcrumb: while armed, `sendSessionReply` defers every out-of-band
+      // reply (e.g. `session/prompt` results) until the pump delivers
+      // `replay_complete`. If that sentinel never arrives — a dropped frame or
+      // a pump error — the replies stay buffered indefinitely with no other
+      // trace. Logging the arm gives operators a starting point when responses
+      // look stuck behind the replay window.
+      writeStderrLine(
+        `qwen serve: /acp replay deferral armed (${logSafe(sessionId)}, from id ${resumeFromEventId ?? 'initial'})`,
+      );
+    }
+    // Drain the gap buffer into a separate array first: on the resume path the
+    // loop pushes id-less entries BACK into `binding.buffer`, so iterating the
+    // live buffer would be re-entrant. `splice(0)` snapshots + clears in one
+    // step; the explicit local makes the copy-semantics invariant visible.
+    const gap = binding.buffer.splice(0);
+    for (const entry of gap) {
+      if (!replayingOnAttach) {
+        this.deliverPrepared(stream, entry); // fresh connect: flush all now
+      } else if (entry.id !== undefined) {
+        // Resume: ring replay owns bus events, so drop the buffered copy to
+        // avoid double-delivery (the same id arrives via replay). This branch is
+        // near-vacuous on the resume path: id-bearing frames are buffered ONLY
+        // by `sendSession` from the event pump, which is aborted the moment the
+        // stream detaches — so during the detach gap that precedes a resume the
+        // buffer accumulates only id-LESS out-of-band replies. Even the rare
+        // race (an in-flight `translateEvent` buffering one id-bearing frame
+        // just after detach) is covered: that id is still in the ring and the
+        // replay redelivers it. The only residual loss needs that frame to ALSO
+        // be ring-evicted before reconnect, which the replay signals to the
+        // client as `state_resync_required` (not a silent gap) — strictly better
+        // than the pre-resume live-only behaviour, which lost every gap frame.
+        this.settlePrepared(entry, 'closed');
+        continue;
+      } else {
+        binding.buffer.push(entry); // resume: defer id-less past replay
+      }
+    }
     return binding;
+  }
+
+  /**
+   * The ring replay drained (`replay_complete`): stop deferring NEW replies that
+   * are anchored within the replayed range, and release every buffered reply
+   * whose watermark the replay already passed (`anchorId ≤ lastReplayedId`).
+   *
+   * Replies anchored ABOVE the replayed range stay buffered — their content
+   * hasn't been delivered yet because the turn was still running at reconnect
+   * (the content flows as LIVE events after `replay_complete`). The per-event
+   * `releaseDeferredSessionReplies` calls drain those as the matching live
+   * content arrives, so a result produced during a slow replay still lands after
+   * its tail content (§1.8 W1), not at the boundary.
+   */
+  endReplayDeferral(
+    sessionId: string,
+    lastReplayedId: number,
+    evictionOccurred = false,
+  ): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return;
+    // Replay boundary passed → new replies are no longer gated by the replay
+    // window itself (they may still defer behind a non-empty buffer).
+    binding.replayPending = false;
+    if (evictionOccurred) {
+      // The replay emitted a `state_resync_required` (ring eviction / epoch
+      // reset): anchor events may have been dropped from the ring and will
+      // NEVER be delivered. A watermark-gated release would then leave any
+      // reply anchored above the surviving range deferred forever — and because
+      // `sendSessionReply` gates inline delivery on an EMPTY buffer, every later
+      // reply piles up behind it too (a cascading freeze: agent runs, heartbeats
+      // flow, but no result ever reaches the client). With the ordering
+      // guarantee already void after an eviction, release everything now — an
+      // ordering imperfection beats a permanently frozen session.
+      this.flushBufferedSessionFrames(sessionId);
+      return;
+    }
+    this.releaseDeferredSessionReplies(sessionId, lastReplayedId);
+  }
+
+  /**
+   * Final, UNCONDITIONAL flush of everything still buffered — used when the pump
+   * ends with no more events coming (clean iterator end / live-only subscription
+   * with no replay boundary). Releases any remaining deferred replies regardless
+   * of watermark: their anchored content will never arrive, so holding them
+   * would strand the result forever.
+   *
+   * No-op if the session has no live stream (frames stay buffered for the next
+   * attach) — but `replayPending` is cleared regardless, since no replay is in
+   * flight once the pump has settled.
+   *
+   * The frames are enqueued synchronously, in buffer order: `SseStream`
+   * serializes every `send` through one `writeChain`, so wire order is fixed by
+   * call order here. We deliberately do NOT `await` each `send` between `shift`s
+   * — doing so would open a window where a live event arriving mid-drain enqueues
+   * BETWEEN two deferred frames, reordering the very replies this deferral exists
+   * to keep in order (§1.8 W1).
+   */
+  flushBufferedSessionFrames(sessionId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return;
+    // Pump settled → no replay in flight; stop deferring out-of-band replies.
+    binding.replayPending = false;
+    if (
+      !binding.stream ||
+      binding.stream.isClosed ||
+      binding.buffer.length === 0
+    )
+      return;
+    for (const prepared of binding.buffer.splice(0)) {
+      this.deliverPrepared(binding.stream, prepared);
+    }
+  }
+
+  /**
+   * Transport-level session-stream close (proxy idle-close / network blip) —
+   * as opposed to an explicit `session/close`. Detaches ONLY the stream and
+   * its event subscription while KEEPING the binding, ownership, the in-flight
+   * prompt, and the bridge-client registration, so a reconnect within
+   * `graceMs` can resume (ring replay backfills the gap — §1.8). If no
+   * reconnect arrives, the grace timer runs the full `closeSessionStream`
+   * teardown, bounding the runaway-prompt cost. Identity-guarded: a stale
+   * stream's close can't detach a newer reconnect's stream.
+   */
+  detachSessionStream(
+    sessionId: string,
+    stream: TransportStream,
+    graceMs: number,
+  ): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding || binding.stream !== stream) return;
+    // Breadcrumb at the moment of detach so an operator can measure the actual
+    // disconnect→reconnect gap against the grace window (the reclaim/expiry
+    // logs alone can't tell "reclaimed with 0.5s to spare" from "9.5s").
+    writeStderrLine(
+      `qwen serve: /acp session stream detached (${logSafe(sessionId)}), ` +
+        `grace=${graceMs}ms`,
+    );
+    // Stop the closing stream's event pump; the prompt + ownership live on.
+    binding.abort.abort();
+    // Drop the stream ref so frames produced during the gap buffer until the
+    // reconnect re-attaches and flushes them.
+    binding.stream = undefined;
+    if (binding.graceTimer) clearTimeout(binding.graceTimer);
+    binding.graceTimer = setTimeout(() => {
+      binding.graceTimer = undefined;
+      // Revoking a remote entrance detaches its client, not the running job.
+      // The prompt's finally path releases this binding once it settles. A
+      // prompt blocked on a client permission vote is the exception: the vote
+      // can never arrive after the credential is revoked, so preserving it
+      // would hang the turn and pin the connection forever. Let it fall through
+      // to teardown, which abandons the pending request.
+      if (
+        this.preserveRunningPromptsOnDisconnect &&
+        binding.promptAbort &&
+        !binding.promptAbort.signal.aborted &&
+        !this.hasPendingClientRequest(sessionId)
+      )
+        return;
+      // Grace expired with no reconnect → full teardown (aborts the prompt,
+      // releases ownership, detaches the bridge client). Log it so an operator
+      // debugging a vanished session can tell grace-expiry teardown apart from
+      // an explicit `session/close` or connection drop.
+      writeStderrLine(
+        `qwen serve: /acp session grace expired (${logSafe(sessionId)}), ` +
+          `no reconnect within ${graceMs}ms — tearing down`,
+      );
+      // `closeSessionStream` → `teardownBinding` runs external callbacks
+      // (`abandonPendingForSession`, `onDetachSession`) that can throw. This
+      // runs from a bare `setTimeout`, so an uncaught throw would crash the
+      // whole daemon process (taking down every other session). `destroy()`
+      // guards `teardownBinding` for the same reason; mirror it here.
+      try {
+        this.closeSessionStream(sessionId);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: /acp teardown failed during grace expiry ` +
+            `(${logSafe(sessionId)}): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+      // Grace expiry may have removed the last recoverable session that was
+      // blocking a pending connection reap; let the owner re-check. Guard it in
+      // its OWN try/catch (separate from the teardown above, so it runs even if
+      // teardown threw): this callback is owner-supplied and still runs from the
+      // bare `setTimeout`, so an uncaught throw here would equally crash the
+      // daemon.
+      try {
+        this.onSessionGraceExpired?.();
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: /acp onSessionGraceExpired failed during grace expiry ` +
+            `(${logSafe(sessionId)}): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }, graceMs);
+    binding.graceTimer.unref?.();
   }
 
   closeSessionStream(sessionId: string): void {
     const binding = this.sessions.get(sessionId);
-    if (!binding) return;
-    this.teardownBinding(binding);
     this.sessions.delete(sessionId);
     this.ownedSessions.delete(sessionId);
+    const ownershipState = this.sessionOwnershipStates.get(sessionId);
+    if (ownershipState) {
+      ownershipState.generation += 1;
+      if (ownershipState.captures === 0) {
+        this.sessionOwnershipStates.delete(sessionId);
+      }
+    }
+    if (!binding) return;
+    this.teardownBinding(binding);
   }
 
-  destroy(): void {
+  destroy(reason?: TransportCloseReason): void {
+    if (this.destroyed) return;
     this.destroyed = true;
+    this.abortController.abort();
     this.clearGraceTimer();
-    for (const binding of this.sessions.values()) {
+    const bindings = [...this.sessions.values()];
+    this.sessions.clear();
+    this.ownedSessions.clear();
+    for (const prepared of this.connBuffer.splice(0)) {
+      this.discardPrepared(prepared);
+    }
+    this.connStream?.close(reason);
+    setImmediate(() => {
+      for (const prepared of this.pendingDeliveries) {
+        this.discardPreparedReceipt(prepared);
+      }
+      for (const receipt of [...this.pendingReceipts]) receipt.discarded();
+    });
+    for (const binding of bindings) {
       try {
         this.teardownBinding(binding);
       } catch (err) {
@@ -351,13 +984,23 @@ export class AcpConnection {
         );
       }
     }
-    this.sessions.clear();
-    this.ownedSessions.clear();
+    this.sessionOwnershipStates.clear();
     this.pending.clear();
-    this.connStream?.close();
   }
 
   private teardownBinding(binding: SessionBinding): void {
+    if (binding.graceTimer) {
+      clearTimeout(binding.graceTimer);
+      binding.graceTimer = undefined;
+    }
+    for (const prepared of binding.buffer.splice(0)) {
+      this.discardPrepared(prepared);
+    }
+    for (const prepared of this.pendingDeliveries) {
+      if (prepared.binding === binding) {
+        this.discardPreparedReceipt(prepared);
+      }
+    }
     binding.abort.abort();
     binding.promptAbort?.abort();
     // Don't close the stream if it's the shared connStream (WS reuses
@@ -367,6 +1010,496 @@ export class AcpConnection {
     }
     this.abandonPendingForSession(binding.sessionId, binding.clientId);
     this.onDetachSession?.(binding.sessionId, binding.clientId);
+  }
+
+  private sendLive(
+    stream: TransportStream,
+    frame: unknown,
+    id?: number,
+    receipt?: DeliveryReceipt,
+    binding?: SessionBinding,
+  ): Promise<DeliveryResult> {
+    let payload: Buffer;
+    try {
+      const serialized = JSON.stringify(frame);
+      if (serialized === undefined) throw new Error('not serializable');
+      payload = Buffer.from(serialized, 'utf8');
+    } catch {
+      receipt?.discarded();
+      if (!this.isCurrentStreamOwner(stream, binding)) {
+        return Promise.resolve('closed');
+      }
+      this.failSerializationOwner(binding);
+      return Promise.resolve('failed');
+    }
+    if (!this.isCurrentStreamOwner(stream, binding)) {
+      receipt?.discarded();
+      return Promise.resolve('closed');
+    }
+    const result = stream.sendSerialized(payload, id);
+    this.observeLiveReceipt(result, receipt);
+    return result;
+  }
+
+  private isCurrentStreamOwner(
+    stream: TransportStream,
+    binding: SessionBinding | undefined,
+  ): boolean {
+    if (this.destroyed || stream.isClosed) return false;
+    return binding
+      ? this.sessions.get(binding.sessionId) === binding &&
+          binding.stream === stream
+      : this.connStream === stream;
+  }
+
+  private prepareAndBuffer(
+    buffer: PreparedFrame[],
+    frame: unknown,
+    id: number | undefined,
+    anchorId: number | undefined,
+    receipt: DeliveryReceipt | undefined,
+    binding: SessionBinding | undefined,
+    requeueOnStreamReplacement = false,
+  ): Promise<DeliveryResult> {
+    if (this.destroyed) {
+      receipt?.discarded();
+      return Promise.resolve('closed');
+    }
+    const expectedStream = binding ? binding.stream : this.connStream;
+    if (
+      (binding ? binding.ownedFrames : this.connOwnedFrames) >=
+      ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
+    ) {
+      receipt?.discarded();
+      this.failOwner(binding, 'ACP pre-attach frame limit');
+      return Promise.resolve('failed');
+    }
+    let payload: Buffer;
+    try {
+      const serialized = JSON.stringify(frame);
+      if (serialized === undefined) throw new Error('not serializable');
+      payload = Buffer.from(serialized, 'utf8');
+    } catch {
+      receipt?.discarded();
+      if (
+        this.destroyed ||
+        (binding ? binding.stream : this.connStream) !== expectedStream ||
+        (binding !== undefined &&
+          this.sessions.get(binding.sessionId) !== binding)
+      ) {
+        return Promise.resolve('closed');
+      }
+      this.failSerializationOwner(binding);
+      return Promise.resolve('failed');
+    }
+    if (
+      this.destroyed ||
+      (binding ? binding.stream : this.connStream) !== expectedStream ||
+      (binding !== undefined &&
+        this.sessions.get(binding.sessionId) !== binding)
+    ) {
+      receipt?.discarded();
+      return Promise.resolve('closed');
+    }
+    if (
+      (binding ? binding.ownedFrames : this.connOwnedFrames) >=
+      ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
+    ) {
+      receipt?.discarded();
+      this.failOwner(binding, 'ACP pre-attach frame limit');
+      return Promise.resolve('failed');
+    }
+    const liveStream = expectedStream;
+    const deliveryDeferred = binding?.replayPending === true;
+    const deliverImmediately =
+      buffer.length === 0 &&
+      liveStream &&
+      !liveStream.isClosed &&
+      !deliveryDeferred;
+    if (deliverImmediately && !requeueOnStreamReplacement) {
+      return this.sendSerializedLive(liveStream, payload, id, receipt);
+    }
+    let lease: AcpPreAttachLease | undefined;
+    if (!deliverImmediately) {
+      if (
+        this.ownedFrames >= this.maxFramesPerConnection ||
+        payload.byteLength > this.maxPayloadBytesPerConnection - this.ownedBytes
+      ) {
+        receipt?.discarded();
+        this.failConnection('ACP pre-attach connection budget');
+        return Promise.resolve('failed');
+      }
+      lease = this.preAttachBudget.tryReserve(payload.byteLength);
+      if (!lease) {
+        receipt?.discarded();
+        this.failConnection('ACP pre-attach daemon budget', false);
+        return Promise.resolve('failed');
+      }
+    }
+    let resolve!: (result: DeliveryResult) => void;
+    const result = new Promise<DeliveryResult>((accept) => {
+      resolve = accept;
+    });
+    const prepared: PreparedFrame = {
+      payload,
+      sequence: this.nextPreparedSequence++,
+      id,
+      anchorId,
+      receipt,
+      lease,
+      binding,
+      requeueOnStreamReplacement,
+      resolve,
+    };
+    if (deliverImmediately) {
+      this.deliverPrepared(liveStream, prepared);
+      return result;
+    }
+    buffer.push(prepared);
+    this.ownedFrames += 1;
+    this.ownedBytes += payload.byteLength;
+    if (binding) {
+      binding.ownedFrames += 1;
+      binding.ownedBytes += payload.byteLength;
+    } else {
+      this.connOwnedFrames += 1;
+    }
+    return result;
+  }
+
+  private sendSerializedLive(
+    stream: TransportStream,
+    payload: Buffer,
+    id: number | undefined,
+    receipt: DeliveryReceipt | undefined,
+  ): Promise<DeliveryResult> {
+    const result = stream.sendSerialized(payload, id);
+    this.observeLiveReceipt(result, receipt);
+    return result;
+  }
+
+  private observeLiveReceipt(
+    result: Promise<DeliveryResult>,
+    receipt: DeliveryReceipt | undefined,
+  ): void {
+    void result.then(
+      (outcome) => {
+        if (outcome === 'delivered') receipt?.delivered();
+        else if (outcome === 'outcome_unknown') receipt?.outcomeUnknown?.();
+        else receipt?.discarded();
+      },
+      () => receipt?.discarded(),
+    );
+  }
+
+  private trackReceipt(
+    receipt: DeliveryReceipt | undefined,
+  ): DeliveryReceipt | undefined {
+    if (!receipt) return undefined;
+    let settled = false;
+    const tracked: DeliveryReceipt = {
+      delivered: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingReceipts.delete(tracked);
+        this.invokeReceipt(receipt, 'delivered');
+      },
+      discarded: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingReceipts.delete(tracked);
+        this.invokeReceipt(receipt, 'discarded');
+      },
+      outcomeUnknown: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingReceipts.delete(tracked);
+        this.invokeReceipt(receipt, 'outcomeUnknown');
+      },
+    };
+    this.pendingReceipts.add(tracked);
+    return tracked;
+  }
+
+  private deliverPrepared(
+    stream: TransportStream,
+    prepared: PreparedFrame,
+  ): void {
+    const attempt = (prepared.deliveryAttempt ?? 0) + 1;
+    prepared.deliveryAttempt = attempt;
+    prepared.deliveryStream = stream;
+    prepared.lease?.markPendingDelivery();
+    this.pendingDeliveries.add(prepared);
+    void stream.sendSerialized(prepared.payload, prepared.id).then(
+      (outcome) => this.settlePreparedAttempt(prepared, attempt, outcome),
+      () => this.settlePreparedAttempt(prepared, attempt, 'failed'),
+    );
+  }
+
+  private requeuePendingSessionReplies(
+    binding: SessionBinding,
+    previousStream: TransportStream,
+  ): boolean {
+    // These replies have no SSE event id and are absent from ring replay. Use
+    // at-least-once handoff: a duplicate JSON-RPC response is identifiable by
+    // its request id, while dropping the only response hangs the caller.
+    const requeued = [...this.pendingDeliveries].filter(
+      (prepared) =>
+        prepared.binding === binding &&
+        prepared.deliveryStream === previousStream &&
+        prepared.requeueOnStreamReplacement,
+    );
+    for (const prepared of requeued) {
+      if (!this.reservePreparedForBuffer(prepared, binding)) return false;
+    }
+    for (const prepared of requeued) {
+      if (
+        prepared.binding !== binding ||
+        prepared.deliveryStream !== previousStream ||
+        !prepared.requeueOnStreamReplacement
+      ) {
+        continue;
+      }
+      prepared.deliveryAttempt = (prepared.deliveryAttempt ?? 0) + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(binding.buffer, prepared);
+    }
+    return true;
+  }
+
+  private requeuePendingConnectionFrames(
+    previousStream: TransportStream,
+  ): boolean {
+    const requeued = [...this.pendingDeliveries].filter(
+      (prepared) =>
+        prepared.binding === undefined &&
+        prepared.deliveryStream === previousStream &&
+        prepared.requeueOnStreamReplacement,
+    );
+    for (const prepared of requeued) {
+      if (!this.reservePreparedForBuffer(prepared)) return false;
+    }
+    for (const prepared of requeued) {
+      if (
+        prepared.binding !== undefined ||
+        prepared.deliveryStream !== previousStream ||
+        !prepared.requeueOnStreamReplacement
+      ) {
+        continue;
+      }
+      prepared.deliveryAttempt = (prepared.deliveryAttempt ?? 0) + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(this.connBuffer, prepared);
+    }
+    return true;
+  }
+
+  private settlePreparedAttempt(
+    prepared: PreparedFrame,
+    attempt: number,
+    outcome: DeliveryResult,
+  ): void {
+    if (prepared.deliveryAttempt !== attempt) return;
+    const binding = prepared.binding;
+    const stream = prepared.deliveryStream;
+    if (
+      outcome === 'closed' &&
+      prepared.requeueOnStreamReplacement &&
+      !binding &&
+      stream &&
+      stream.isClosed &&
+      !this.destroyed &&
+      this.connStream === stream
+    ) {
+      if (!this.reservePreparedForBuffer(prepared)) return;
+      prepared.deliveryAttempt = attempt + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(this.connBuffer, prepared);
+      return;
+    }
+    if (
+      outcome !== 'delivered' &&
+      prepared.requeueOnStreamReplacement &&
+      binding &&
+      stream &&
+      stream !== this.connStream &&
+      stream.isClosed &&
+      !this.destroyed &&
+      this.sessions.get(binding.sessionId) === binding &&
+      (binding.stream === stream || binding.stream === undefined)
+    ) {
+      if (!this.reservePreparedForBuffer(prepared, binding)) return;
+      prepared.deliveryAttempt = attempt + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(binding.buffer, prepared);
+      return;
+    }
+    prepared.deliveryStream = undefined;
+    this.settlePrepared(prepared, outcome);
+  }
+
+  private reservePreparedForBuffer(
+    prepared: PreparedFrame,
+    binding?: SessionBinding,
+  ): boolean {
+    if (prepared.lease) return true;
+    if (
+      (binding ? binding.ownedFrames : this.connOwnedFrames) >=
+      ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
+    ) {
+      this.settlePrepared(prepared, 'failed');
+      this.failOwner(binding, 'ACP pre-attach frame limit');
+      return false;
+    }
+    if (
+      this.ownedFrames >= this.maxFramesPerConnection ||
+      prepared.payload.byteLength >
+        this.maxPayloadBytesPerConnection - this.ownedBytes
+    ) {
+      this.settlePrepared(prepared, 'failed');
+      this.failConnection('ACP pre-attach connection budget');
+      return false;
+    }
+    const lease = this.preAttachBudget.tryReserve(prepared.payload.byteLength);
+    if (!lease) {
+      this.settlePrepared(prepared, 'failed');
+      this.failConnection('ACP pre-attach daemon budget', false);
+      return false;
+    }
+    lease.markPendingDelivery();
+    prepared.lease = lease;
+    this.ownedFrames += 1;
+    this.ownedBytes += prepared.payload.byteLength;
+    if (binding) {
+      binding.ownedFrames += 1;
+      binding.ownedBytes += prepared.payload.byteLength;
+    } else {
+      this.connOwnedFrames += 1;
+    }
+    return true;
+  }
+
+  private insertPrepared(
+    buffer: PreparedFrame[],
+    prepared: PreparedFrame,
+  ): void {
+    const index = buffer.findIndex(
+      (buffered) => buffered.sequence > prepared.sequence,
+    );
+    if (index === -1) buffer.push(prepared);
+    else buffer.splice(index, 0, prepared);
+  }
+
+  private discardPrepared(prepared: PreparedFrame): void {
+    this.discardPreparedReceipt(prepared);
+    if (!this.pendingDeliveries.has(prepared)) {
+      this.settlePrepared(prepared, 'closed');
+    }
+  }
+
+  private settlePrepared(
+    prepared: PreparedFrame,
+    outcome: DeliveryResult,
+  ): void {
+    const lease = prepared.lease;
+    lease?.release();
+    prepared.lease = undefined;
+    this.pendingDeliveries.delete(prepared);
+    if (lease) {
+      this.ownedFrames -= 1;
+      this.ownedBytes -= prepared.payload.byteLength;
+      if (prepared.binding) {
+        prepared.binding.ownedFrames -= 1;
+        prepared.binding.ownedBytes -= prepared.payload.byteLength;
+      } else {
+        this.connOwnedFrames -= 1;
+      }
+    }
+    if (!prepared.receiptSettled) {
+      prepared.receiptSettled = true;
+      if (prepared.receipt) {
+        this.invokeReceipt(
+          prepared.receipt,
+          outcome === 'delivered'
+            ? 'delivered'
+            : outcome === 'outcome_unknown'
+              ? 'outcomeUnknown'
+              : 'discarded',
+        );
+      }
+    }
+    prepared.resolve(outcome);
+  }
+
+  private discardPreparedReceipt(prepared: PreparedFrame): void {
+    if (prepared.receiptSettled) return;
+    prepared.receiptSettled = true;
+    if (prepared.receipt) this.invokeReceipt(prepared.receipt, 'discarded');
+  }
+
+  private invokeReceipt(
+    receipt: DeliveryReceipt,
+    outcome: 'delivered' | 'discarded' | 'outcomeUnknown',
+  ): void {
+    try {
+      if (outcome === 'outcomeUnknown') {
+        (receipt.outcomeUnknown ?? receipt.delivered)();
+      } else {
+        receipt[outcome]();
+      }
+    } catch {
+      writeStderrLine(`qwen serve: /acp ${outcome} receipt callback failed`);
+    }
+  }
+
+  private failOwner(
+    binding: SessionBinding | undefined,
+    message: string,
+  ): void {
+    this.preAttachBudget.recordGuardFailure();
+    this.onPreAttachGuardFailure?.();
+    writeStderrLine(`qwen serve: /acp resource guard: ${message}`);
+    if (
+      !binding ||
+      binding.usesConnectionStream === true ||
+      (binding.usesConnectionStream === undefined &&
+        binding.stream === undefined &&
+        this.connStream?.kind === 'ws')
+    ) {
+      this.retireConnection(message);
+      return;
+    }
+    try {
+      this.closeSessionStream(binding.sessionId);
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: /acp resource guard session teardown failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private failSerializationOwner(binding: SessionBinding | undefined): void {
+    writeStderrLine('qwen serve: /acp response serialization failed');
+    if (binding) this.failOwner(binding, 'ACP response serialization failed');
+  }
+
+  private failConnection(message: string, recordFailure = true): void {
+    if (recordFailure) this.preAttachBudget.recordGuardFailure();
+    this.onPreAttachGuardFailure?.();
+    writeStderrLine(`qwen serve: /acp resource guard: ${message}`);
+    this.retireConnection(message);
+  }
+
+  private retireConnection(_message: string): void {
+    const reason = { code: 1013, reason: 'Resource limit' };
+    if (this.onFatalConnection) this.onFatalConnection(this, reason);
+    else this.destroy(reason);
   }
 
   /**
@@ -396,16 +1529,6 @@ export class AcpConnection {
   }
 }
 
-function pushCapped(buf: unknown[], frame: unknown, label = 'stream'): void {
-  if (buf.length >= MAX_BUFFERED_FRAMES) {
-    buf.shift();
-    writeStderrLine(
-      `qwen serve: /acp pre-attach buffer full (${label}), dropped oldest frame`,
-    );
-  }
-  buf.push(frame);
-}
-
 /**
  * Registry of live ACP connections with an idle-TTL sweep. The sweep is
  * defensive: a well-behaved client `DELETE /acp`s, but a crashed client
@@ -414,12 +1537,16 @@ function pushCapped(buf: unknown[], frame: unknown, label = 'stream'): void {
 export class ConnectionRegistry {
   private readonly byId = new Map<string, AcpConnection>();
   private readonly sweepTimer: ReturnType<typeof setInterval>;
+  private preAttachGuardFailures = 0;
 
   constructor(
     private readonly onAbandonPending?: AbandonPendingFn,
     private readonly onDetachSession?: DetachSessionFn,
     private readonly maxConnections = DEFAULT_MAX_CONNECTIONS,
     private readonly idleTtlMs = 30 * 60_000,
+    private readonly preAttachBudget = new AcpPreAttachBudget(),
+    private readonly maxFramesPerConnection = ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+    private readonly maxPayloadBytesPerConnection = ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
   ) {
     this.sweepTimer = setInterval(() => this.sweep(), 60_000);
     this.sweepTimer.unref();
@@ -439,6 +1566,13 @@ export class ConnectionRegistry {
       fromLoopback,
       this.onAbandonPending,
       this.onDetachSession,
+      this.preAttachBudget,
+      (failed, reason) => this.deleteExact(failed, reason),
+      this.maxFramesPerConnection,
+      this.maxPayloadBytesPerConnection,
+      () => {
+        this.preAttachGuardFailures += 1;
+      },
     );
     this.byId.set(conn.connectionId, conn);
     return conn;
@@ -451,11 +1585,78 @@ export class ConnectionRegistry {
     return conn;
   }
 
+  findPendingClientRequest(id: string): PendingClientRequestRef | undefined {
+    // Fast path: server-minted ids embed their originating connection
+    // (`_qwen_perm_<connectionId>_<counter>`, connectionId is a hyphenated
+    // `randomUUID()` with no underscores), so the owning connection is the
+    // substring before the last `_` — an O(1) lookup instead of scanning all
+    // connections on every client response.
+    if (id.startsWith('_qwen_perm_')) {
+      const body = id.slice('_qwen_perm_'.length);
+      const lastUnderscore = body.lastIndexOf('_');
+      if (lastUnderscore > 0) {
+        const conn = this.byId.get(body.slice(0, lastUnderscore));
+        const req = conn?.pending.get(id);
+        if (conn && req) return { conn, id, req };
+      }
+    }
+    // Fallback for client-chosen ids that don't match the server format.
+    for (const conn of this.byId.values()) {
+      const req = conn.pending.get(id);
+      if (req) return { conn, id, req };
+    }
+    return undefined;
+  }
+
+  /**
+   * Locate a pending permission entry matching `requestId` (a bridge
+   * `bridgeRequestId`, i.e. a per-request `randomUUID()`) and optionally
+   * `sessionId`, returning the first match.
+   *
+   * NOTE: `requestId` is unique per *request*, not per *pending entry*. The
+   * per-entry unique id is the `conn.pending` map key
+   * (`_qwen_perm_<connectionId>_N`), which is NOT what is matched here. A
+   * `permission_request` is delivered to every live subscriber of its session,
+   * so when connections co-own a session (multi-client attach) each mints its
+   * own entry sharing the same `bridgeRequestId`. More than one entry can
+   * therefore match, so this is a *read-only locator* for deriving a session /
+   * ownership from a wire `requestId`. To DELETE a resolved entry, act on the
+   * specific `conn`/map-key the caller already holds (see
+   * `AcpDispatcher.dropOwnPendingPermission`) — never delete by re-matching
+   * here, which could hit a sibling co-owner's entry.
+   */
+  findPendingPermission(
+    requestId: string,
+    sessionId?: string,
+  ): PendingClientRequestRef | undefined {
+    for (const conn of this.byId.values()) {
+      for (const [id, req] of conn.pending) {
+        if (
+          req.kind === 'permission' &&
+          req.bridgeRequestId === requestId &&
+          (sessionId === undefined || req.sessionId === sessionId)
+        ) {
+          return { conn, id, req };
+        }
+      }
+    }
+    return undefined;
+  }
+
   delete(connectionId: string): boolean {
     const conn = this.byId.get(connectionId);
     if (!conn) return false;
-    conn.destroy();
-    return this.byId.delete(connectionId);
+    return this.deleteExact(conn);
+  }
+
+  private deleteExact(
+    conn: AcpConnection,
+    reason?: TransportCloseReason,
+  ): boolean {
+    if (this.byId.get(conn.connectionId) !== conn) return false;
+    this.byId.delete(conn.connectionId);
+    conn.destroy(reason);
+    return true;
   }
 
   get size(): number {
@@ -486,19 +1687,45 @@ export class ConnectionRegistry {
         connections,
         (conn) => conn.pendingClientRequests,
       ),
+      bufferedConnectionFrames: sumBy(
+        connections,
+        (conn) => conn.bufferedConnectionFrames,
+      ),
+      bufferedSessionFrames: sumBy(
+        connections,
+        (conn) => conn.bufferedSessionFrames,
+      ),
+      pendingDeliveryFrames: sumBy(
+        connections,
+        (conn) => conn.pendingDeliveryFrames,
+      ),
+      preAttachOwnedFrames: sumBy(
+        connections,
+        (conn) => conn.preAttachOwnedFrames,
+      ),
+      preAttachOwnedBytes: sumBy(
+        connections,
+        (conn) => conn.preAttachOwnedBytes,
+      ),
+      preAttachGuardFailures: this.preAttachGuardFailures,
       connections,
     };
   }
 
+  clear(): void {
+    for (const id of [...this.byId.keys()]) this.delete(id);
+  }
+
   dispose(): void {
     clearInterval(this.sweepTimer);
-    for (const id of [...this.byId.keys()]) this.delete(id);
+    this.clear();
   }
 
   private sweep(): void {
     const cutoff = Date.now() - this.idleTtlMs;
     for (const [id, conn] of this.byId) {
-      if (conn.lastActiveMs >= cutoff) continue;
+      if (conn.lastActiveMs >= cutoff || conn.hasRunningDetachedPrompt())
+        continue;
       // Observability: a reaped connection silently dropping its SSE
       // streams is otherwise invisible to operators chasing "my client
       // froze". Note that `touch()` fires on inbound HTTP AND on event

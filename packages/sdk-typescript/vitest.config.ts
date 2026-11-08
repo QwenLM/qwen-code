@@ -38,10 +38,28 @@ export default defineConfig({
     },
     testTimeout: testTimeoutMs,
     hookTimeout: 10000,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
+        __dirname,
+        '../core/src/utils/transcript-records.ts',
+      ),
+      '@qwen-code/qwen-code-core/telemetryConstants': path.resolve(
+        __dirname,
+        '../core/src/telemetry/constants.ts',
+      ),
+      '@qwen-code/qwen-code-core/omni': path.resolve(
+        __dirname,
+        '../core/src/omni/index.ts',
+      ),
+      '@qwen-code/acp-bridge/transcriptReplay': path.resolve(
+        __dirname,
+        '../acp-bridge/src/transcript-replay.ts',
+      ),
     },
   },
 });

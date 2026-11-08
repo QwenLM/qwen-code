@@ -69,7 +69,7 @@ export function CommandFormatMigrationNudge({
     >
       <Box marginBottom={1} flexDirection="column">
         <Text>
-          <Text color={theme.status.warning}>{'⚠️  '}</Text>
+          <Text color={theme.status.warning}>{'⚠  '}</Text>
           <Text bold>{t('Command Format Migration')}</Text>
         </Text>
         <Text color={theme.text.secondary}>

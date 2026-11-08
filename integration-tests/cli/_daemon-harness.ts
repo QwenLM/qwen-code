@@ -41,6 +41,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DaemonClient, type SubscribeOptions } from '@qwen-code/sdk';
+import {
+  hashMcpServerConfig,
+  type MCPServerConfig,
+} from '@qwen-code/qwen-code-core';
+import { LISTENING_LINE_RE, stopDaemon } from '../helpers/daemon-process.js';
+
+export { LISTENING_LINE_RE };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -85,12 +92,10 @@ export interface SpawnedDaemon {
   stdoutBuf: { value: string };
   /** Drain stderr similarly — surface on dispose if exit code != 0. */
   stderrBuf: { value: string };
-  /** Idempotent. Sends SIGTERM, awaits exit (up to 5s). */
+  /** Idempotent. Resolves once the daemon has exited (see `stopDaemon`). */
   dispose: () => Promise<void>;
 }
 
-const LISTENING_RE = /listening on http:\/\/127\.0\.0\.1:(\d+)/;
-const DISPOSE_GRACE_MS = 5_000;
 const MATCHED_DESCENDANT_DEPTH = 4;
 
 export async function spawnDaemon(
@@ -113,6 +118,8 @@ export async function spawnDaemon(
     '127.0.0.1',
     '--workspace',
     workspaceCwd,
+    '--initialize-timeout-ms',
+    '60000',
     ...extraArgs,
   ];
 
@@ -160,13 +167,11 @@ export async function spawnDaemon(
       );
     }, bootTimeoutMs);
     const onData = (_chunk: Buffer) => {
-      const m = stdoutBuf.value.match(LISTENING_RE);
-      if (m) {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(Number(m[1]));
-      }
+      const port = stdoutBuf.value.match(LISTENING_LINE_RE)?.groups?.['port'];
+      if (!port || settled) return;
+      settled = true;
+      cleanup();
+      resolve(Number(port));
     };
     const onExit = (code: number | null) => {
       fail(
@@ -183,27 +188,7 @@ export async function spawnDaemon(
   const base = `http://127.0.0.1:${port}`;
   const client = new DaemonClient({ baseUrl: base, token });
 
-  const dispose = async () => {
-    if (daemon.exitCode !== null) return;
-    daemon.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const t = setTimeout(() => {
-        // Force kill if SIGTERM didn't take in time. We don't await
-        // exit again — the OS will clean up either way and a 5s
-        // hang here multiplies into 5s × N tests on flaky machines.
-        try {
-          daemon.kill('SIGKILL');
-        } catch {
-          /* already gone */
-        }
-        resolve();
-      }, DISPOSE_GRACE_MS);
-      daemon.once('exit', () => {
-        clearTimeout(t);
-        resolve();
-      });
-    });
-  };
+  const dispose = () => stopDaemon(daemon);
 
   return {
     client,
@@ -233,6 +218,41 @@ export function writeWorkspaceSettings(
   const settingsPath = path.join(settingsDir, 'settings.json');
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   return settingsPath;
+}
+
+/**
+ * Pre-approve gated (workspace / project scope, #4615) MCP servers for
+ * `workspaceCwd` so the daemon's `qwen --acp` child connects them instead of
+ * skipping them as pending-approval. Servers declared in `.qwen/settings.json`
+ * are workspace-scoped and therefore gated: absent a stored approval, discovery
+ * skips them BEFORE any spawn, which makes the MCP-amplification suite time out
+ * waiting for grandchildren that never appear.
+ *
+ * Writes a standalone approvals file (NOT the developer's global
+ * `~/.qwen/mcpApprovals.json`) under the workspace and returns the env that
+ * points the daemon — and, by inheritance, its acp child — at it. Pass the
+ * returned env to `spawnDaemon({ env })`. The approval hash binds to the same
+ * behavioral fields the child hashes (`scope` is provenance-only and excluded),
+ * so the plain settings config is sufficient. Mirrors the pre-approval pattern
+ * in `simple-mcp-server.test.ts`.
+ */
+export function approveWorkspaceMcpServers(
+  workspaceCwd: string,
+  servers: Record<string, MCPServerConfig>,
+): Record<string, string> {
+  const approvalsPath = path.join(workspaceCwd, '.qwen', 'mcpApprovals.json');
+  const project: Record<string, { hash: string; status: 'approved' }> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    project[name] = { hash: hashMcpServerConfig(config), status: 'approved' };
+  }
+  // Key by the canonical (realpath) workspace, NOT `path.resolve`: the daemon
+  // canonicalizes `--workspace` (e.g. macOS `/var` → `/private/var`) and the
+  // acp child looks approvals up under that resolved path. Keying by the
+  // un-resolved temp path would miss, leaving the servers pending.
+  const root = fs.realpathSync(workspaceCwd);
+  fs.mkdirSync(path.dirname(approvalsPath), { recursive: true });
+  fs.writeFileSync(approvalsPath, JSON.stringify({ [root]: project }, null, 2));
+  return { QWEN_CODE_MCP_APPROVALS_PATH: approvalsPath };
 }
 
 /**

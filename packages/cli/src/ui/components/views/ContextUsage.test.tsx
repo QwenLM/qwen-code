@@ -43,7 +43,199 @@ function makeBreakdown(
   };
 }
 
+it('renders instructions independently from auto memory', () => {
+  const { lastFrame } = render(
+    <ContextUsage
+      modelName="qwen3-coder"
+      totalTokens={50000}
+      contextWindowSize={128000}
+      breakdown={makeBreakdown('safe', { instructionFiles: 100 })}
+      builtinTools={[]}
+      mcpTools={[]}
+      skills={[]}
+      instructionFiles={[{ path: 'QWEN.md', tokens: 100 }]}
+      memoryFiles={[{ path: 'auto memory', tokens: 200 }]}
+      showDetails={true}
+    />,
+  );
+  expect(lastFrame()).toMatch(/Instruction files\s+100 tokens/);
+  expect(lastFrame()).toMatch(/Auto memory\s+200 tokens/);
+  expect(lastFrame()).toContain('QWEN.md');
+  expect(lastFrame()).not.toContain('Memory files');
+});
+
+it.each([false, true])(
+  'preserves the combined memory category in legacy Ink snapshots (details: %s)',
+  (showDetails) => {
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="legacy-model"
+        totalTokens={14200}
+        contextWindowSize={128000}
+        breakdown={makeBreakdown('safe', { freeSpace: 80_800 })}
+        builtinTools={[]}
+        mcpTools={[]}
+        skills={[]}
+        memoryFiles={[{ path: 'QWEN.md', tokens: 200 }]}
+        showDetails={showDetails}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toMatch(/Memory files\s+200 tokens/);
+    expect(frame).not.toContain('Instruction files');
+    expect(frame).not.toContain('Auto memory');
+    expect(frame.includes('QWEN.md')).toBe(showDetails);
+  },
+);
+
 describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', () => {
+  it('shows a million-token context window in millions', () => {
+    const frame = (contextWindowSize: number) =>
+      render(
+        <ContextUsage
+          modelName="coder-model"
+          totalTokens={50_000}
+          contextWindowSize={contextWindowSize}
+          breakdown={makeBreakdown('safe')}
+          builtinTools={[]}
+          mcpTools={[]}
+          memoryFiles={[]}
+          skills={[]}
+          showDetails={false}
+        />,
+      ).lastFrame() ?? '';
+
+    expect(frame(2_000_000)).toContain('2.0m tokens');
+    expect(frame(1_000_000)).toContain('1.0m tokens');
+    expect(frame(1_000_000)).not.toContain('1000.0k');
+    expect(frame(999_950)).toContain('1.0m tokens');
+    expect(frame(999_949)).toContain('999.9k tokens');
+  });
+
+  it('keeps a loaded skill name and listing cost on one line with one body-cost label', () => {
+    const name = 'agent-reproduce-feature';
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe', { skills: 10_000 })}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[{ name, tokens: 5000, loaded: true, bodyTokens: 5000 }]}
+        showDetails={true}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    const skills = frame.slice(frame.lastIndexOf('Skills'));
+    const nameLine = skills.split('\n').find((line) => line.includes(name));
+    expect(nameLine).toBeDefined();
+    expect(nameLine).toContain('5.0k tokens');
+    expect(nameLine).not.toContain('body loaded');
+    expect(nameLine).not.toContain('active');
+    expect(skills.match(/body loaded/g)).toHaveLength(1);
+    expect(skills).toContain('+5.0k tokens');
+  });
+
+  it('keeps a positive estimated count in the numeric usage view', () => {
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe')}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+        isEstimated={true}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Token usage is estimated');
+    expect(frame).toContain('Used');
+    expect(frame).toContain('Messages');
+    expect(frame).not.toContain('No API response yet');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    const frame = (messages: number) =>
+      render(
+        <ContextUsage
+          modelName="qwen3-coder"
+          totalTokens={0}
+          contextWindowSize={128_000}
+          breakdown={makeBreakdown('warn', { messages })}
+          builtinTools={[]}
+          mcpTools={[]}
+          memoryFiles={[]}
+          skills={[]}
+          isEstimated={true}
+        />,
+      ).lastFrame() ?? '';
+
+    expect(frame(90_000)).toContain('Messages');
+    expect(frame(0)).not.toContain('Messages');
+    // The captions follow the row: an estimated history is not
+    // pre-conversation overhead.
+    expect(frame(90_000)).toContain(
+      'Estimated usage, including the conversation',
+    );
+    expect(frame(90_000)).not.toContain('pre-conversation');
+    expect(frame(0)).toContain('Estimated pre-conversation overhead');
+  });
+
+  it('renders startup context and cached prefix while ignoring legacy residuals', () => {
+    const present = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe', {
+          startupContext: 1_200,
+          unattributed: 900,
+          cachedTokens: 30_000,
+        })}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+      />,
+    );
+    const frame = present.lastFrame() ?? '';
+    expect(frame).toContain('Startup context');
+    expect(frame).not.toContain('Unattributed');
+    expect(frame).toContain('Cached prefix');
+    present.unmount();
+
+    // Zero-suppression half. `makeBreakdown`'s defaults omit the optional fields,
+    // which is the shape of a `context_usage` item persisted by an older build
+    // and replayed after `/restore`; `startupContext` is also 0 by
+    // construction on a pre-first-send `/context`. Without the `> 0` guards
+    // these rows render as `undefined tokens (NaN%)`.
+    // Keep totalTokens positive so the cached-prefix guard is exercised.
+    const absent = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe')}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+      />,
+    );
+    const zeroFrame = absent.lastFrame() ?? '';
+    // The legend still renders, so the absences below are the guards and not
+    // an empty frame.
+    expect(zeroFrame).toContain('Usage by category');
+    expect(zeroFrame).not.toContain('Startup context');
+    expect(zeroFrame).not.toContain('Unattributed');
+    expect(zeroFrame).not.toContain('Cached prefix');
+  });
+
   it('renders the new three-tier section with all four threshold rows', () => {
     const { lastFrame } = render(
       <ContextUsage
@@ -131,5 +323,37 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(hardLine).toContain('▶');
     // Current tier reads `hard`
     expect(frame).toMatch(/Current tier[\s\S]*hard/);
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the wire type, so a payload from an
+    // older daemon omits it. Absent and `false` are the same state — not
+    // loaded — so the pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const { lastFrame, unmount } = render(
+        <ContextUsage
+          modelName="qwen3-coder"
+          totalTokens={50_000}
+          contextWindowSize={128_000}
+          breakdown={makeBreakdown('safe', { skills: 60 })}
+          builtinTools={[]}
+          mcpTools={[]}
+          memoryFiles={[]}
+          skills={skills}
+          showDetails={true}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('big-skill');
+      expect(frame.indexOf('big-skill')).toBeLessThan(
+        frame.indexOf('small-skill'),
+      );
+      unmount();
+    }
   });
 });

@@ -31,6 +31,8 @@ function createStdout(write: NodeJS.WriteStream['write']): NodeJS.WriteStream {
 describe('terminalSupportsSynchronizedOutput', () => {
   it.each([
     [{ TERM_PROGRAM: 'WezTerm' }, true],
+    [{ TERM_PROGRAM: 'WarpTerminal' }, true],
+    [{ TERM_PROGRAM: 'ghostty' }, true],
     [{ TERM_PROGRAM: 'iTerm.app' }, true],
     [{ TERM: 'xterm-kitty' }, true],
     [{ KITTY_WINDOW_ID: '1' }, true],
@@ -146,7 +148,9 @@ describe('installSynchronizedOutput', () => {
       return true;
     }) as NodeJS.WriteStream['write'];
     const stdout = createStdout(write);
-    const restoreRedrawOptimizer = installTerminalRedrawOptimizer(stdout);
+    // Pass an empty env so WSL detection does not skip the optimizer when
+    // the test itself runs on WSL (#7897).
+    const restoreRedrawOptimizer = installTerminalRedrawOptimizer(stdout, {});
     const restoreSynchronizedOutput = installSynchronizedOutput(stdout, {
       TERM_PROGRAM: 'WezTerm',
     });

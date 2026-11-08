@@ -3,42 +3,420 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from 'react';
+import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
+import { FileTypeIcon } from '../FileTypeIcon';
+import { FileAttachmentContent } from '../FileAttachmentContent';
+import { describeCron } from '../dialogs/scheduledTasksSchedule';
+import {
+  getComposerTagDisplay,
+  getComposerTagIconUrl,
+  getComposerTagLabel,
+  getComposerTagValue,
+  getComposerTagViewModel,
+  isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
+  parseUserMessageContentSafely,
+  splitComposerTagContentByAnnotations,
+} from '../../utils/composerTag';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
+import { LinkifiedText } from './LinkifiedText';
+import { useWebShellCustomization } from '../../customization';
+import type {
+  ComposerTagClickHandler,
+  ComposerTagRenderer,
+  WebShellComposerTag,
+  WebShellComposerTagIconMap,
+} from '../../customization';
+import type {
+  AttachmentPreviewRequest,
+  DaemonMessageAuthor,
+} from '../../adapters/messageTypes';
+import { AuthorAvatar } from './AuthorAvatar';
+import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import { cssUrlVar } from '../../utils/cssUrlVar';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
 interface UserMessageImage {
   data: string;
   mimeType: string;
+  attachmentId?: string;
+}
+
+interface UserMessageFile {
+  name: string;
+  mimeType: string;
+  data?: Blob;
+  text?: string;
+  attachmentId?: string;
 }
 
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  files?: UserMessageFile[];
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+  isLocateFlashing?: boolean;
+  sendFailed?: boolean;
+  onRetrySend?: () => void;
+  /** Render the message as an in-place editor instead of rendered content. */
+  editing?: boolean;
+  /** The edited text is being sent; the editor stays open and inert. */
+  submittingEdit?: boolean;
+  /** Submit trimmed text; attachment-only messages may have empty text. */
+  onEditSubmit?: (content: string) => void;
+  onEditCancel?: () => void;
+  /** Click an uploaded image to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  /** Set when a workspace agent, not the user, posted this message. */
+  author?: DaemonMessageAuthor;
+}
+
+interface ScheduledTaskRunContent {
+  name: string;
+  id: string;
+  cron: string;
+  triggeredAt: string;
+  trigger: 'scheduled' | 'manual';
+  prompt: string;
+}
+
+// Mirrors `SCHEDULED_TASK_RUN_INSTRUCTION` in cli/src/runtime/scheduled-task-run.ts
+// (the client cannot import that package): the header `buildScheduledTaskRunPrompt`
+// puts ahead of the task's own instructions. Change both together.
+const SCHEDULED_TASK_RUN_INSTRUCTION =
+  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.';
+
+function parseScheduledTaskRunContent(
+  content: string,
+): ScheduledTaskRunContent | null {
+  const separator = `\n\n${SCHEDULED_TASK_RUN_INSTRUCTION}\n\n`;
+  const separatorIndex = content.indexOf(separator);
+  if (separatorIndex < 0) return null;
+  const lines = content.slice(0, separatorIndex).split('\n');
+  if (lines.length !== 6 || lines[5] !== 'Session: new chat for this run') {
+    return null;
+  }
+  const values = [
+    ['Scheduled task: ', lines[0]],
+    ['Task ID: ', lines[1]],
+    ['Schedule: ', lines[2]],
+    ['Triggered at: ', lines[3]],
+    ['Trigger: ', lines[4]],
+  ] as const;
+  if (values.some(([prefix, line]) => !line?.startsWith(prefix))) return null;
+  const trigger = lines[4]!.slice('Trigger: '.length);
+  if (trigger !== 'scheduled' && trigger !== 'manual') return null;
+  return {
+    name: lines[0]!.slice('Scheduled task: '.length),
+    id: lines[1]!.slice('Task ID: '.length),
+    cron: lines[2]!.slice('Schedule: '.length),
+    triggeredAt: lines[3]!.slice('Triggered at: '.length),
+    trigger,
+    prompt: content.slice(separatorIndex + separator.length),
+  };
+}
+
+function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
+  const { language, t } = useI18n();
+  const triggeredAt = new Date(run.triggeredAt);
+  const triggeredAtLabel = Number.isNaN(triggeredAt.getTime())
+    ? run.triggeredAt
+    : triggeredAt.toLocaleString(language);
+  return (
+    <div
+      className={styles.scheduledTaskRun}
+      data-web-shell-scheduled-task-run-message
+    >
+      <div className={styles.scheduledTaskHeader}>
+        <span className={styles.scheduledTaskIcon} aria-hidden="true">
+          <CalendarClockIcon />
+        </span>
+        <span className={styles.scheduledTaskHeading}>
+          <span className={styles.scheduledTaskEyebrow}>
+            {t('scheduledTasks.runContext.title')}
+          </span>
+          <strong className={styles.scheduledTaskName}>{run.name}</strong>
+        </span>
+      </div>
+      <div className={styles.scheduledTaskMeta}>
+        <span className={styles.scheduledTaskMetaItem} title={run.cron}>
+          <span>{t('scheduledTasks.runContext.schedule')}</span>
+          <code>{describeCron(run.cron, t)}</code>
+        </span>
+        <span className={styles.scheduledTaskMetaItem}>
+          <span>{t('scheduledTasks.runContext.triggeredAt')}</span>
+          <time dateTime={run.triggeredAt}>{triggeredAtLabel}</time>
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t(
+            run.trigger === 'manual'
+              ? 'scheduledTasks.runContext.trigger.manual'
+              : 'scheduledTasks.runContext.trigger.scheduled',
+          )}
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t('scheduledTasks.sessionMode.perRun')}
+        </span>
+      </div>
+      <div className={styles.scheduledTaskId}>
+        {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
+      </div>
+      <div className={styles.scheduledTaskPrompt}>
+        {renderUserMessageText(run.prompt)}
+      </div>
+    </div>
+  );
+}
+
+function renderUserMessageText(text: string, isContinuation?: boolean) {
+  // Preserve captured line breaks separately from the slash tokens.
+  return text.split(/(^|\r\n?|\n)(\/[^ \r\n]*)/g).map((part, index) => {
+    const content = part.includes('://') ? (
+      <LinkifiedText key={index} text={part} />
+    ) : (
+      part
+    );
+    return index % 3 === 2 &&
+      (!isContinuation || index > 2 || text[0] !== '/') ? (
+      <span key={index} data-web-shell-user-slash-command>
+        {content}
+      </span>
+    ) : (
+      content
+    );
+  });
+}
+
+function DefaultUserMessageContent({
+  composerTagIcons,
+  content,
+  inputAnnotations,
+  onComposerTagClick,
+  onFileTagClick,
+  renderComposerTag,
+  renderComposerTagTooltip,
+}: {
+  composerTagIcons?: WebShellComposerTagIconMap;
+  content: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+  onComposerTagClick?: ComposerTagClickHandler;
+  onFileTagClick?: ComposerTagClickHandler;
+  renderComposerTag?: ComposerTagRenderer;
+  renderComposerTagTooltip?: ComposerTagRenderer;
+}) {
+  // Submit-time annotations are the source of truth for reference chips.
+  // Unannotated serialized text stays plain text.
+  const segments = useMemo(
+    () => splitComposerTagContentByAnnotations(content, inputAnnotations),
+    [content, inputAnnotations],
+  );
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === 'text' ? (
+          renderUserMessageText(segment.text, index > 0)
+        ) : (
+          <ReadonlyComposerTag
+            composerTagIcons={composerTagIcons}
+            key={`${segment.tag.id}:${index}`}
+            onComposerTagClick={
+              segment.tag.kind === 'file'
+                ? isPreviewableFileComposerTag(segment.tag)
+                  ? onFileTagClick
+                  : onComposerTagClick
+                : onComposerTagClick
+            }
+            renderComposerTag={renderComposerTag}
+            renderComposerTagTooltip={renderComposerTagTooltip}
+            tag={segment.tag}
+            title={segment.tag.serialized}
+            preserveCustomKindLabel
+          />
+        ),
+      )}
+    </>
+  );
 }
 
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  files,
+  inputAnnotations,
+  isLocateFlashing = false,
+  sendFailed = false,
+  onRetrySend,
+  editing = false,
+  submittingEdit = false,
+  onEditSubmit,
+  onEditCancel,
+  onImagePreview,
+  onAttachmentPreview,
+  author,
 }: UserMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
+  const {
+    parseUserMessageContent,
+    renderUserMessageContent,
+    composerTagIcons,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    onComposerTagClick,
+  } = useWebShellCustomization();
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
-  const [overflowing, setOverflowing] = useState(false);
+  const [heightOverflowing, setHeightOverflowing] = useState(false);
+  // The draft lives here so opening the editor always starts from the message
+  // as recorded, not from a stale keystroke the user cancelled earlier.
+  const [draft, setDraft] = useState(content);
+  useEffect(() => {
+    if (editing) setDraft(content);
+  }, [editing, content]);
+  const submitEdit = useCallback(() => {
+    const next = draft.trim();
+    if ((!next && !images?.length && !files?.length) || submittingEdit) return;
+    onEditSubmit?.(next);
+  }, [draft, files?.length, images?.length, onEditSubmit, submittingEdit]);
+  const handleEditKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      if (submittingEdit) return;
+      // An IME candidate window owns Enter and Escape while composing.
+      if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
+        return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onEditCancel?.();
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        submitEdit();
+      }
+    },
+    [onEditCancel, submitEdit, submittingEdit],
+  );
+  const handleComposerTagClick = useCallback<ComposerTagClickHandler>(
+    (info) => {
+      if (isPreviewableFileComposerTag(info.tag)) {
+        onAttachmentPreview?.({
+          name: info.tag.value.split(/[\\/]/).pop() ?? info.tag.value,
+          workspacePath: info.tag.value,
+        });
+      }
+      onComposerTagClick?.(info);
+    },
+    [onAttachmentPreview, onComposerTagClick],
+  );
+  const fileTagClick =
+    onAttachmentPreview || onComposerTagClick
+      ? handleComposerTagClick
+      : undefined;
+  const scheduledTaskRun = useMemo(
+    () => parseScheduledTaskRunContent(content),
+    [content],
+  );
+  const renderedContent = useMemo(() => {
+    if (scheduledTaskRun) {
+      return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
+    }
+    const explicit = renderUserMessageContent?.({
+      content,
+      images,
+      files,
+      inputAnnotations,
+    });
+    if (explicit !== undefined && explicit !== null) return explicit;
+    if (inputAnnotations && inputAnnotations.length > 0) {
+      return (
+        <DefaultUserMessageContent
+          composerTagIcons={composerTagIcons}
+          content={content}
+          inputAnnotations={inputAnnotations}
+          onComposerTagClick={onComposerTagClick}
+          onFileTagClick={fileTagClick}
+          renderComposerTag={renderComposerTag}
+          renderComposerTagTooltip={renderComposerTagTooltip}
+        />
+      );
+    }
+    const parts = parseUserMessageContentSafely(
+      content,
+      parseUserMessageContent,
+      '[WebShell] failed to parse user message content',
+    );
+    if (!parts) return renderUserMessageText(content);
+    const mergedParts: Array<(typeof parts)[number]> = [];
+    for (const part of parts) {
+      const previous = mergedParts.at(-1);
+      if (part.type === 'text' && previous?.type === 'text') {
+        mergedParts[mergedParts.length - 1] = {
+          type: 'text',
+          text: previous.text + part.text,
+        };
+      } else {
+        mergedParts.push(part);
+      }
+    }
+    return mergedParts.map((part, index) => {
+      if (part.type === 'text') {
+        return renderUserMessageText(part.text, index > 0);
+      }
+      return (
+        <ReadonlyComposerTag
+          key={`${part.tag.id}-${index}`}
+          tag={part.tag}
+          composerTagIcons={composerTagIcons}
+          renderComposerTag={renderComposerTag}
+          renderComposerTagTooltip={renderComposerTagTooltip}
+          onComposerTagClick={
+            part.tag.kind === 'file'
+              ? isPreviewableFileComposerTag(part.tag)
+                ? fileTagClick
+                : onComposerTagClick
+              : onComposerTagClick
+          }
+        />
+      );
+    });
+  }, [
+    content,
+    images,
+    files,
+    inputAnnotations,
+    fileTagClick,
+    onComposerTagClick,
+    parseUserMessageContent,
+    composerTagIcons,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    renderUserMessageContent,
+    scheduledTaskRun,
+  ]);
 
   const measureOverflow = useCallback(() => {
     const el = contentRef.current;
     if (!el) return;
-    setOverflowing(el.scrollHeight > 400);
+    setHeightOverflowing(el.scrollHeight > 400);
   }, []);
 
   useLayoutEffect(() => {
     setExpanded(false);
     measureOverflow();
-  }, [content, images?.length, measureOverflow]);
+    // `editing` is a dep so leaving the editor re-measures the re-shown
+    // content: it is `hidden` while editing, which reads as zero height.
+  }, [content, images?.length, editing, measureOverflow]);
 
   useEffect(() => {
     const el = contentRef.current;
@@ -49,62 +427,307 @@ export const UserMessage = memo(function UserMessage({
   }, [measureOverflow]);
 
   return (
-    <div className={styles.chatMessageRow}>
-      <div className={styles.chatBubble}>
-        <div
-          ref={contentRef}
-          className={`${styles.chatContent} ${
-            overflowing && !expanded ? styles.chatContentCollapsed : ''
-          }`}
-        >
-          {images && images.length > 0 && (
-            <div className={styles.chatImages}>
-              {images.map((img, index) => {
-                const src = img.data.startsWith('data:')
-                  ? img.data
-                  : `data:${img.mimeType};base64,${img.data}`;
-                if (!isSafeImageSrc(src)) return null;
-                return (
-                  <img
-                    key={index}
-                    src={src}
-                    alt={`User uploaded image ${index + 1}`}
-                    className={styles.chatImageThumb}
-                    onLoad={measureOverflow}
+    <div className={styles.chatMessageRow} data-web-shell-user-row>
+      <div
+        className={`${styles.chatMessageColumn}${
+          isLocateFlashing && content.trim().length === 0
+            ? ` ${flashStyles.flash}`
+            : ''
+        }`}
+      >
+        {author && (
+          <div className={styles.author}>
+            <AuthorAvatar name={author.name} color={author.color} />
+            <span className={styles.authorName}>{author.name}</span>
+          </div>
+        )}
+        {images && images.length > 0 && (
+          <div className={styles.chatImages} data-web-shell-user-images>
+            {images.map((img, index) => {
+              const src = img.data.startsWith('data:')
+                ? img.data
+                : `data:${img.mimeType};base64,${img.data}`;
+              if (!isSafeImageSrc(src)) return null;
+              return (
+                <img
+                  key={index}
+                  src={src}
+                  alt={t('user.uploadedImage', { index: index + 1 })}
+                  className={`${styles.chatImageThumb}${
+                    onImagePreview ? ` ${styles.chatImageThumbInteractive}` : ''
+                  }`}
+                  onClick={
+                    onImagePreview
+                      ? () =>
+                          onImagePreview(
+                            src,
+                            t('user.uploadedImage', { index: index + 1 }),
+                            img.attachmentId
+                              ? {
+                                  kind: 'attachment',
+                                  attachmentId: img.attachmentId,
+                                }
+                              : undefined,
+                          )
+                      : undefined
+                  }
+                />
+              );
+            })}
+          </div>
+        )}
+        {files && files.length > 0 && (
+          <div className={styles.chatFiles} data-web-shell-user-files>
+            {files.map((file, index) => {
+              const previewable = Boolean(
+                onAttachmentPreview &&
+                  (file.data !== undefined ||
+                    file.text !== undefined ||
+                    file.attachmentId),
+              );
+              return (
+                <span
+                  key={`${file.name}-${index}`}
+                  className={`${styles.chatFileChip}${
+                    previewable ? ` ${styles.chatFileChipPreviewable}` : ''
+                  }`}
+                  role={previewable ? 'button' : undefined}
+                  tabIndex={previewable ? 0 : undefined}
+                  onClick={
+                    previewable ? () => onAttachmentPreview?.(file) : undefined
+                  }
+                  onKeyDown={(event) => {
+                    if (
+                      previewable &&
+                      (event.key === 'Enter' || event.key === ' ')
+                    ) {
+                      event.preventDefault();
+                      onAttachmentPreview?.(file);
+                    }
+                  }}
+                >
+                  <FileAttachmentContent
+                    name={file.name}
+                    mimeType={file.mimeType}
                   />
-                );
-              })}
-            </div>
-          )}
-          {content}
-        </div>
-        {overflowing && (
-          <button
-            type="button"
-            className={styles.toggleButton}
-            onClick={() => setExpanded((value) => !value)}
+                </span>
+              );
+            })}
+          </div>
+        )}
+        {(content.trim().length > 0 || editing) && (
+          <div
+            className={`${styles.chatBubble}${
+              scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
+            }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
+            data-web-shell-user-bubble
           >
-            <span>
-              {expanded ? t('userMessage.showLess') : t('userMessage.showMore')}
-            </span>
-            <svg
-              className={`${styles.toggleIcon} ${
-                expanded ? styles.toggleIconExpanded : ''
+            <div
+              ref={contentRef}
+              className={`${styles.chatContent} ${
+                heightOverflowing && !documentMode && !expanded
+                  ? styles.chatContentCollapsed
+                  : ''
               }`}
-              viewBox="0 0 16 16"
-              aria-hidden="true"
+              hidden={editing}
             >
-              <path
-                d="m4 6 4 4 4-4"
-                fill="none"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+              {renderedContent}
+            </div>
+            {editing && (
+              <div className={styles.editArea}>
+                <textarea
+                  className={styles.editInput}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={handleEditKeyDown}
+                  aria-label={t('userMessage.edit')}
+                  readOnly={submittingEdit}
+                  autoFocus
+                />
+                <div className={styles.editActions}>
+                  <button
+                    type="button"
+                    className={styles.editCancel}
+                    onClick={onEditCancel}
+                    disabled={submittingEdit}
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.editSubmit}
+                    onClick={submitEdit}
+                    disabled={
+                      submittingEdit ||
+                      (!draft.trim() && !images?.length && !files?.length)
+                    }
+                  >
+                    {submittingEdit
+                      ? t('userMessage.editSending')
+                      : t('userMessage.editSubmit')}
+                  </button>
+                </div>
+              </div>
+            )}
+            {heightOverflowing && !documentMode && !editing && (
+              <button
+                type="button"
+                className={styles.toggleButton}
+                onClick={() => setExpanded((value) => !value)}
+              >
+                <span>
+                  {expanded
+                    ? t('userMessage.showLess')
+                    : t('userMessage.showMore')}
+                </span>
+                <svg
+                  className={`${styles.toggleIcon} ${
+                    expanded ? styles.toggleIconExpanded : ''
+                  }`}
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="m4 6 4 4 4-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
+        {sendFailed && onRetrySend && (
+          <div className={styles.sendFailure}>
+            <span>{t('userMessage.sendFailed')}</span>
+            <button
+              type="button"
+              className={styles.retryButton}
+              onClick={onRetrySend}
+              aria-label={t('userMessage.retrySend')}
+              title={t('userMessage.retrySend')}
+            >
+              <RefreshCwIcon aria-hidden="true" />
+              <span>{t('common.retry')}</span>
+            </button>
+          </div>
         )}
       </div>
     </div>
   );
 });
+
+function getTagText(tag: WebShellComposerTag): string {
+  return getComposerTagDisplay(tag);
+}
+
+export function ReadonlyComposerTag({
+  tag,
+  composerTagIcons,
+  renderComposerTag,
+  renderComposerTagTooltip,
+  onComposerTagClick,
+  title,
+  preserveCustomKindLabel = false,
+}: {
+  tag: WebShellComposerTag;
+  composerTagIcons: WebShellComposerTagIconMap | undefined;
+  renderComposerTag: ComposerTagRenderer | undefined;
+  renderComposerTagTooltip: ComposerTagRenderer | undefined;
+  onComposerTagClick: ComposerTagClickHandler | undefined;
+  title?: string;
+  preserveCustomKindLabel?: boolean;
+}) {
+  const info = { tag, placement: 'user-message' as const, readonly: true };
+  let custom: ReactNode | null | undefined;
+  let tooltip: ReactNode | null | undefined;
+  try {
+    custom = renderComposerTag?.(info);
+  } catch (error) {
+    console.warn('[WebShell] user message tag render failed', error);
+  }
+  try {
+    tooltip = renderComposerTagTooltip?.(info);
+  } catch (error) {
+    console.warn('[WebShell] user message tag tooltip render failed', error);
+  }
+  const clickable = Boolean(onComposerTagClick);
+  const viewModel = preserveCustomKindLabel
+    ? getComposerTagViewModel(tag, composerTagIcons)
+    : null;
+  const rawTagLabel = getComposerTagLabel(tag);
+  const tagValue = viewModel?.tagValue ?? getComposerTagValue(tag);
+  const tagLabel = viewModel?.tagLabel ?? (tag.kind ? '' : rawTagLabel);
+  const fallback = viewModel?.fallback ?? tag.id;
+  const iconUrl =
+    tag.icon ??
+    viewModel?.iconUrl ??
+    getComposerTagIconUrl(tag.kind, composerTagIcons);
+  const safeIconUrl =
+    iconUrl && (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+      ? iconUrl
+      : undefined;
+  return (
+    <span
+      className={`${styles.messageTag}${
+        clickable ? ` ${styles.messageTagClickable}` : ''
+      }`}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      title={title ?? getTagText(tag)}
+      onClick={(event) => {
+        if (!clickable) return;
+        event.stopPropagation();
+        onComposerTagClick?.({
+          ...info,
+          anchorRect: event.currentTarget.getBoundingClientRect(),
+        });
+      }}
+      onKeyDown={(event) => {
+        if (!clickable) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onComposerTagClick?.({
+          ...info,
+          anchorRect: event.currentTarget.getBoundingClientRect(),
+        });
+      }}
+    >
+      {custom ?? (
+        <>
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
+            <span
+              className={styles.messageTagIcon}
+              style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
+              aria-hidden="true"
+            />
+          ) : null}
+          {tagLabel && (
+            <span className={styles.messageTagLabel}>{tagLabel}</span>
+          )}
+          {tagValue ? (
+            <span className={styles.messageTagValue}>{tagValue}</span>
+          ) : !tagLabel ? (
+            <span className={styles.messageTagLabel}>{fallback}</span>
+          ) : null}
+        </>
+      )}
+      {tooltip !== undefined && tooltip !== null && (
+        <span className={styles.messageTagTooltip} role="tooltip">
+          {tooltip}
+        </span>
+      )}
+    </span>
+  );
+}

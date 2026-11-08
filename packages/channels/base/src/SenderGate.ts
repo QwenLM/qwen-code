@@ -1,18 +1,22 @@
-import type { SenderPolicy } from './types.js';
-import type { PairingStore } from './PairingStore.js';
+import type { PrivatePolicy } from './types.js';
+import type {
+  CreatePairingRequestResult,
+  PairingStore,
+} from './PairingStore.js';
 
 export interface SenderCheckResult {
   allowed: boolean;
-  pairingCode?: string | null; // set when pairing policy returns a code (null = cap reached)
+  /** Set when the pairing policy denies the sender. */
+  pairing?: CreatePairingRequestResult;
 }
 
 export class SenderGate {
-  private policy: SenderPolicy;
+  private policy: PrivatePolicy;
   private allowedUsers: Set<string>;
   private pairingStore: PairingStore | null;
 
   constructor(
-    policy: SenderPolicy,
+    policy: PrivatePolicy,
     allowedUsers: string[] = [],
     pairingStore?: PairingStore,
   ) {
@@ -21,8 +25,32 @@ export class SenderGate {
     this.pairingStore = pairingStore || null;
   }
 
+  replaceAllowedUsers(users: string[]): void {
+    this.allowedUsers = new Set(users);
+  }
+
+  isAllowed(senderId: string): boolean {
+    switch (this.policy) {
+      case 'disabled':
+        return false;
+      case 'open':
+        return true;
+      case 'allowlist':
+        return this.allowedUsers.has(senderId);
+      case 'pairing':
+        return (
+          this.allowedUsers.has(senderId) ||
+          this.pairingStore?.isApproved(senderId) === true
+        );
+      default:
+        throw new Error(`Unknown sender policy: ${this.policy}`);
+    }
+  }
+
   check(senderId: string, senderName?: string): SenderCheckResult {
     switch (this.policy) {
+      case 'disabled':
+        return { allowed: false };
       case 'open':
         return { allowed: true };
       case 'allowlist':
@@ -37,11 +65,14 @@ export class SenderGate {
           return { allowed: true };
         }
         // Generate pairing code
-        const code = this.pairingStore?.createRequest(
+        const result = this.pairingStore?.createRequest(
           senderId,
           senderName || senderId,
         );
-        return { allowed: false, pairingCode: code ?? null };
+        return {
+          allowed: false,
+          pairing: result ?? { rejected: 'cap_reached' },
+        };
       }
       default:
         throw new Error(`Unknown sender policy: ${this.policy}`);

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
@@ -15,11 +16,17 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
  */
 export class EditorMessageHandler extends BaseMessageHandler {
   canHandle(messageType: string): boolean {
-    return ['getActiveEditor', 'focusActiveEditor'].includes(messageType);
+    return ['getActiveEditor', 'focusActiveEditor', 'openExternalUrl'].includes(
+      messageType,
+    );
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
     switch (message.type) {
+      case 'openExternalUrl':
+        await this.handleOpenExternalUrl(message.data);
+        break;
+
       case 'getActiveEditor':
         await this.handleGetActiveEditor();
         break;
@@ -29,11 +36,39 @@ export class EditorMessageHandler extends BaseMessageHandler {
         break;
 
       default:
-        console.warn(
+        logger.warn(
           '[EditorMessageHandler] Unknown message type:',
           message.type,
         );
         break;
+    }
+  }
+
+  private async handleOpenExternalUrl(data: unknown): Promise<void> {
+    const value =
+      data && typeof data === 'object'
+        ? (data as { url?: unknown }).url
+        : undefined;
+    try {
+      if (typeof value !== 'string') throw new Error('Invalid external URL.');
+      const url = new URL(value);
+      if (
+        !['https:', 'http:'].includes(url.protocol) ||
+        url.username ||
+        url.password
+      ) {
+        throw new Error('Only HTTP and HTTPS URLs can be opened.');
+      }
+      if (!(await vscode.env.openExternal(vscode.Uri.parse(url.toString())))) {
+        throw new Error(
+          'Could not open the browser. Please use the displayed link.',
+        );
+      }
+    } catch (error) {
+      this.sendToWebView({
+        type: 'error',
+        data: { message: getErrorMessage(error) },
+      });
     }
   }
 
@@ -68,7 +103,7 @@ export class EditorMessageHandler extends BaseMessageHandler {
         });
       }
     } catch (error) {
-      console.error(
+      logger.error(
         '[EditorMessageHandler] Failed to get active editor:',
         error,
       );
@@ -102,7 +137,7 @@ export class EditorMessageHandler extends BaseMessageHandler {
         }
       }
     } catch (error) {
-      console.error(
+      logger.error(
         '[EditorMessageHandler] Failed to focus active editor:',
         error,
       );

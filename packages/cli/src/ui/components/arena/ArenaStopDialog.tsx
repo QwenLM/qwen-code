@@ -7,11 +7,9 @@
 import type React from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  ArenaSessionStatus,
-  createDebugLogger,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+import { ArenaSessionStatus } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { MessageType, type HistoryItemWithoutId } from '../../types.js';

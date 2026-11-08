@@ -1,0 +1,2752 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import type { Dirent } from 'node:fs';
+import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
+import { Mutex } from 'async-mutex';
+import { Storage } from '../config/storage.js';
+import { atomicWriteJSON, renameWithRetry } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { isNodeError } from '../utils/errors.js';
+import { realPathWithin } from './gemini-converter.js';
+import { Override, type AllExtensionsEnablementConfig } from './override.js';
+
+const debugLogger = createDebugLogger('EXTENSION_STORE');
+
+export type ExtensionActivation = 'enabled' | 'disabled';
+export type WorkspaceActivation = ExtensionActivation | 'inherit';
+
+export interface ExtensionPolicy {
+  name: string;
+  artifactDirectory?: string;
+  artifactGeneration?: number;
+  declarationOnly?: true;
+  preserveActivationOnNextInstall?: true;
+  defaultActivation: ExtensionActivation;
+  workspaceOverrides: Record<string, WorkspaceActivation>;
+  skillWorkspaceOverrides?: Record<string, Record<string, boolean>>;
+  legacyPathRules?: string[];
+}
+
+export interface ExtensionStoreSnapshot {
+  version: 2;
+  generation: number;
+  legacyProjectionHash: string;
+  legacyProjectionRemainder?: AllExtensionsEnablementConfig;
+  extensions: Record<string, ExtensionPolicy>;
+}
+
+export interface ExtensionStoreBatchMutationOutcome {
+  snapshot: ExtensionStoreSnapshot;
+  updated: boolean;
+}
+
+export interface ExtensionIdentity {
+  id: string;
+  name: string;
+}
+
+export interface ExtensionActivationResult {
+  default: ExtensionActivation;
+  workspace: WorkspaceActivation;
+  effective: ExtensionActivation;
+  source:
+    | 'cli_override'
+    | 'workspace_override'
+    | 'legacy_path_rule'
+    | 'default';
+}
+
+export interface ExtensionStoreOptions {
+  extensionsDir?: string;
+  storeDir?: string;
+  enablementPath?: string;
+}
+
+export type ExtensionStoreEmptiness =
+  | { status: 'empty' }
+  | { status: 'installed' | 'unknown'; reason: string };
+
+const STORE_TRANSACTION_DIRS = ['staging', 'rollback', 'transactions'];
+const STORE_FILES = new Set(['state.json', 'state.previous.json', 'lock']);
+// What a write of a state file leaves when it stops before its rename; the
+// store never reads it.
+const STATE_WRITE_LEFTOVER = /^state(?:\.previous)?\.json\.[0-9a-f]{12}\.tmp$/;
+
+// The store names nothing with a leading dot; such entries belong to the file
+// system or its browsers, such as `.DS_Store`.
+function isStoreName(name: string): boolean {
+  return !name.startsWith('.');
+}
+
+export type InitialExtensionActivation =
+  | { scope: 'user' }
+  | { scope: 'workspace'; workspacePath: string };
+
+export interface CommitExtensionArtifactInput {
+  operation: 'install' | 'update' | 'uninstall';
+  identity: ExtensionIdentity;
+  destinationDirectory: string;
+  stagingDirectory?: string;
+  initialActivation?: InitialExtensionActivation;
+  expectedArtifactGeneration?: number;
+}
+
+interface ExtensionTransactionJournal {
+  version: 1;
+  transactionId: string;
+  operation: CommitExtensionArtifactInput['operation'];
+  phase: 'prepared' | 'artifact_swapped' | 'state_committed';
+  destinationDirectory: string;
+  stagingDirectory?: string;
+  backupDirectory: string;
+  /** Absent means 'rename'. 'copy' is the Windows fallback for a locked one. */
+  swapStrategy?: 'rename' | 'copy';
+  /** Absent means false. Set when a rollback could not complete. */
+  rollbackBlocked?: boolean;
+  /** Absent means false. Set when only the transaction's teardown is owed. */
+  cleanupPending?: boolean;
+  /** Absent means now. Epoch ms before recovery retries the owed step. */
+  rollbackRetryAt?: number;
+  /** Set for a rollback mark: true when a holder may let go, false when a fault
+   *  blocked the step, so a refusal never blames a held directory for a fault.
+   *  Absent on journals written before this field, and on cleanup marks. */
+  rollbackHeld?: boolean;
+  /** Ordering key among journals of one generation: epoch ms, stamped once at
+   *  creation and never recomputed, because marking a journal rewrites the
+   *  file's mtime. Absent on journals written before this field, filled in from
+   *  the mtime observed on first read. */
+  orderMs?: number;
+  previousGeneration: number;
+  targetGeneration: number;
+  targetSnapshot: ExtensionStoreSnapshot;
+}
+
+export class ExtensionStoreCorruptError extends Error {
+  readonly code = 'extension_store_corrupt';
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ExtensionStoreCorruptError';
+  }
+}
+
+export class ExtensionStoreBusyError extends Error {
+  readonly code = 'extension_store_busy';
+
+  constructor(storeDir: string, options?: ErrorOptions) {
+    super(`Extension store is busy at ${storeDir}.`, options);
+    this.name = 'ExtensionStoreBusyError';
+  }
+}
+
+class UnsafeRecoveredJournalError extends ExtensionStoreCorruptError {}
+
+export class ExtensionConflictError extends Error {
+  readonly code = 'extension_conflict';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExtensionConflictError';
+  }
+}
+
+export class ExtensionDirectoryLockedError extends Error {
+  readonly code = 'extension_directory_locked';
+
+  constructor(directory: string, options?: ErrorOptions) {
+    super(
+      `Extension directory ${directory} is in use by a process holding it open. Exit any Qwen Code session that has this extension loaded - including this one - or close any other program holding this directory open, then try again.`,
+      options,
+    );
+    this.name = 'ExtensionDirectoryLockedError';
+  }
+}
+
+// On Windows a permission denial arrives as EPERM too, so the code alone cannot
+// separate it from a held handle; a `symlink` failure can be - and is not a lock.
+function isDirectoryLockError(error: unknown): boolean {
+  return (
+    isNodeError(error) &&
+    (error.code === 'EPERM' || error.code === 'EBUSY') &&
+    error.syscall !== 'symlink'
+  );
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return isNodeError(error) && error.code === 'ENOENT';
+}
+
+// Synthetic lock error for marking an older journal whose newer was deferred
+// this pass: no real lock happened, but the owed step needs its window.
+function lockErrorFor(path: string): NodeJS.ErrnoException {
+  const error = new Error('EPERM') as NodeJS.ErrnoException;
+  error.code = 'EPERM';
+  error.path = path;
+  return error;
+}
+
+// Move a journal whose restore is unrecoverable aside so the next pass
+// does not re-enter the doomed branch.
+async function quarantineJournal(
+  journalPath: string,
+  cause: unknown,
+): Promise<boolean> {
+  const quarantinePath = `${journalPath}.corrupt-${crypto.randomUUID()}`;
+  try {
+    await fsp.rename(journalPath, quarantinePath);
+    debugLogger.warn(
+      `Quarantined unrecoverable transaction journal at ${quarantinePath}:`,
+      cause,
+    );
+    return true;
+  } catch (renameError) {
+    debugLogger.warn(
+      `Extension transaction journal could not be quarantined at ${journalPath}:`,
+      renameError,
+    );
+    return false;
+  }
+}
+
+/**
+ * Whether a transaction no longer needs its rollback: its state is committed,
+ * or a rollback already restored the destination and only left its backup
+ * behind.
+ */
+function isTransactionResolved(
+  journal: ExtensionTransactionJournal,
+  snapshot: ExtensionStoreSnapshot | null | undefined,
+): boolean {
+  return (
+    journal.phase === 'state_committed' ||
+    journal.cleanupPending === true ||
+    (!journal.rollbackBlocked &&
+      (snapshot?.generation ?? -1) >= journal.targetGeneration)
+  );
+}
+
+/** Total sleep one store operation may spend on lock retries. */
+const LOCK_RETRY_BUDGET_MS = 1000;
+
+/**
+ * The owed step of a transaction blocked by a lock waits this long before a
+ * retry: far longer than a transient hold, so reads stop re-copying a held
+ * tree while the directory heals on its own once the holder lets go. A
+ * deadline further out than this reads as a moved clock, not a live window.
+ */
+const ROLLBACK_RETRY_DELAY_MS = 5000;
+
+/** Keeps one operation's retries from scaling with the entries it walks. */
+interface LockRetryBudget {
+  remainingMs: number;
+}
+
+function partialBackupPath(backupDirectory: string): string {
+  return `${backupDirectory}.partial`;
+}
+
+async function lstatOrNull(
+  target: string,
+): Promise<Awaited<ReturnType<typeof fsp.lstat>> | undefined> {
+  try {
+    return await fsp.lstat(target);
+  } catch (error) {
+    if (!isNotFoundError(error)) throw error;
+    return undefined;
+  }
+}
+
+function entryKind(stats: {
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+}): 'link' | 'dir' | 'file' {
+  if (stats.isSymbolicLink()) return 'link';
+  return stats.isDirectory() ? 'dir' : 'file';
+}
+
+const storeMutexes = new Map<string, Mutex>();
+
+function getStoreMutex(storeDir: string): Mutex {
+  let mutex = storeMutexes.get(storeDir);
+  if (!mutex) {
+    mutex = new Mutex();
+    storeMutexes.set(storeDir, mutex);
+  }
+  return mutex;
+}
+
+function normalizeRulePath(workspacePath: string): string {
+  let normalized = workspacePath.replace(/\\/g, '/');
+  if (!normalized.startsWith('/')) normalized = `/${normalized}`;
+  if (!normalized.endsWith('/')) normalized = `${normalized}/`;
+  return normalized;
+}
+
+function canonicalizeWorkspacePath(workspacePath: string): string {
+  const resolved = path.resolve(workspacePath);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return resolved;
+    throw error;
+  }
+}
+
+async function readDirectoryIfPresent(
+  directory: string,
+): Promise<string[] | null> {
+  try {
+    return await fsp.readdir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function projectionHash(projection: AllExtensionsEnablementConfig): string {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(projection))
+    .digest('hex');
+}
+
+function validLegacyProjection(
+  projection: unknown,
+): projection is AllExtensionsEnablementConfig {
+  if (
+    !projection ||
+    Array.isArray(projection) ||
+    typeof projection !== 'object'
+  ) {
+    return false;
+  }
+  const names = new Set<string>();
+  return Object.entries(projection).every(([name, config]) => {
+    const normalizedName = name.toLowerCase();
+    if (names.has(normalizedName)) return false;
+    names.add(normalizedName);
+    return (
+      !!config &&
+      !Array.isArray(config) &&
+      typeof config === 'object' &&
+      Array.isArray((config as { overrides?: unknown }).overrides) &&
+      (config as { overrides: unknown[] }).overrides.every(
+        (rule) => typeof rule === 'string',
+      )
+    );
+  });
+}
+
+function findLegacyRules(
+  projection: AllExtensionsEnablementConfig,
+  name: string,
+): readonly string[] {
+  const normalizedName = name.toLowerCase();
+  return (
+    Object.entries(projection).find(
+      ([candidate]) => candidate.toLowerCase() === normalizedName,
+    )?.[1].overrides ?? []
+  );
+}
+
+function assertIdentity(identity: ExtensionIdentity): void {
+  if (!/^[a-f0-9]{64}$/.test(identity.id)) {
+    throw new Error(`Invalid extension id "${identity.id}".`);
+  }
+  if (!/^[a-zA-Z0-9-_.]+$/.test(identity.name)) {
+    throw new Error('Invalid extension name.');
+  }
+}
+
+function setLegacyPathActivation(
+  policy: ExtensionPolicy,
+  scopePath: string,
+  activation: ExtensionActivation,
+): void {
+  const canonicalScope = canonicalizeWorkspacePath(scopePath);
+  const scope = Override.fromInput(canonicalScope, true);
+  for (const workspacePath of Object.keys(policy.workspaceOverrides)) {
+    if (scope.matchesPath(normalizeRulePath(workspacePath))) {
+      delete policy.workspaceOverrides[workspacePath];
+    }
+  }
+  const nextRule = Override.fromInput(
+    activation === 'disabled' ? `!${canonicalScope}` : canonicalScope,
+    true,
+  );
+  const rules = (policy.legacyPathRules ?? []).filter((rule) => {
+    const existing = Override.fromFileRule(rule);
+    return (
+      !existing.conflictsWith(nextRule) &&
+      !existing.isEqualTo(nextRule) &&
+      !existing.isChildOf(nextRule)
+    );
+  });
+  rules.push(nextRule.output());
+  policy.legacyPathRules = rules;
+}
+
+function clearWorkspaceActivation(
+  policy: ExtensionPolicy,
+  workspacePath: string,
+  canonicalWorkspace = canonicalizeWorkspacePath(workspacePath),
+): void {
+  const legacyCandidates = [
+    normalizeRulePath(workspacePath),
+    normalizeRulePath(canonicalWorkspace),
+  ];
+  const legacyMatches = (policy.legacyPathRules ?? []).some((rule) => {
+    const override = Override.fromFileRule(rule);
+    return legacyCandidates.some((candidate) =>
+      override.matchesPath(candidate),
+    );
+  });
+  if (legacyMatches) {
+    policy.workspaceOverrides[canonicalWorkspace] = 'inherit';
+  } else {
+    delete policy.workspaceOverrides[canonicalWorkspace];
+  }
+}
+
+function parseState(
+  content: string,
+  statePath: string,
+): ExtensionStoreSnapshot {
+  let value: unknown;
+  try {
+    value = JSON.parse(content);
+  } catch (error) {
+    throw new ExtensionStoreCorruptError(
+      `Extension store state is corrupt at ${statePath}.`,
+      { cause: error },
+    );
+  }
+  const candidate = value as Partial<ExtensionStoreSnapshot> | null;
+  const validPolicy = (extensionId: string, policy: unknown): boolean => {
+    if (
+      !/^[a-f0-9]{64}$/.test(extensionId) ||
+      !policy ||
+      typeof policy !== 'object'
+    ) {
+      return false;
+    }
+    const parsed = policy as Partial<ExtensionPolicy>;
+    return (
+      typeof parsed.name === 'string' &&
+      /^[a-zA-Z0-9-_.]+$/.test(parsed.name) &&
+      (parsed.artifactDirectory === undefined ||
+        (typeof parsed.artifactDirectory === 'string' &&
+          /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory) &&
+          parsed.artifactDirectory !== '.' &&
+          parsed.artifactDirectory !== '..')) &&
+      (parsed.artifactGeneration === undefined ||
+        (Number.isSafeInteger(parsed.artifactGeneration) &&
+          parsed.artifactGeneration >= 0)) &&
+      (parsed.declarationOnly === undefined ||
+        parsed.declarationOnly === true) &&
+      (parsed.preserveActivationOnNextInstall === undefined ||
+        parsed.preserveActivationOnNextInstall === true) &&
+      (parsed.defaultActivation === 'enabled' ||
+        parsed.defaultActivation === 'disabled') &&
+      !!parsed.workspaceOverrides &&
+      !Array.isArray(parsed.workspaceOverrides) &&
+      typeof parsed.workspaceOverrides === 'object' &&
+      Object.values(parsed.workspaceOverrides).every(
+        (activation) =>
+          activation === 'enabled' ||
+          activation === 'disabled' ||
+          activation === 'inherit',
+      ) &&
+      (parsed.skillWorkspaceOverrides === undefined ||
+        (parsed.skillWorkspaceOverrides !== null &&
+          typeof parsed.skillWorkspaceOverrides === 'object' &&
+          !Array.isArray(parsed.skillWorkspaceOverrides) &&
+          Object.values(parsed.skillWorkspaceOverrides).every(
+            (states) =>
+              states !== null &&
+              typeof states === 'object' &&
+              !Array.isArray(states) &&
+              Object.values(states).every(
+                (enabled) => typeof enabled === 'boolean',
+              ),
+          ))) &&
+      (parsed.legacyPathRules === undefined ||
+        (Array.isArray(parsed.legacyPathRules) &&
+          parsed.legacyPathRules.every((rule) => typeof rule === 'string')))
+    );
+  };
+  if (
+    !candidate ||
+    typeof candidate !== 'object' ||
+    candidate.version !== 2 ||
+    !Number.isSafeInteger(candidate.generation) ||
+    candidate.generation! < 0 ||
+    typeof candidate.legacyProjectionHash !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(candidate.legacyProjectionHash) ||
+    (candidate.legacyProjectionRemainder !== undefined &&
+      !validLegacyProjection(candidate.legacyProjectionRemainder)) ||
+    !candidate.extensions ||
+    Array.isArray(candidate.extensions) ||
+    typeof candidate.extensions !== 'object' ||
+    !Object.entries(candidate.extensions).every(([id, policy]) =>
+      validPolicy(id, policy),
+    )
+  ) {
+    throw new ExtensionStoreCorruptError(
+      `Extension store state has an invalid schema at ${statePath}.`,
+    );
+  }
+  return value as ExtensionStoreSnapshot;
+}
+
+export class ExtensionStore {
+  readonly extensionsDir: string;
+  readonly storeDir: string;
+  readonly enablementPath: string;
+  private readonly statePath: string;
+  private readonly previousStatePath: string;
+  private readonly lockPath: string;
+
+  constructor(options: ExtensionStoreOptions = {}) {
+    this.extensionsDir =
+      options.extensionsDir ?? Storage.getUserExtensionsDir();
+    this.storeDir =
+      options.storeDir ??
+      path.join(Storage.getGlobalQwenDir(), 'extension-store');
+    this.enablementPath =
+      options.enablementPath ??
+      path.join(this.extensionsDir, 'extension-enablement.json');
+    this.statePath = path.join(this.storeDir, 'state.json');
+    this.previousStatePath = path.join(this.storeDir, 'state.previous.json');
+    this.lockPath = path.join(this.storeDir, 'lock');
+  }
+
+  agentPluginDataRoot(extensionId: string): string {
+    if (!/^[a-f0-9]{64}$/.test(extensionId)) {
+      throw new Error(`Invalid extension id "${extensionId}".`);
+    }
+    return path.join(
+      this.storeDir,
+      'plugin-data',
+      'agent-plugins',
+      extensionId,
+    );
+  }
+
+  /**
+   * Whether the installed extension set is provably empty, read without the
+   * store's lock, recovery or initialization and without writing anything.
+   * Evidence that is inconsistent, in flight or changes while it is read is
+   * `unknown`, never `empty`.
+   */
+  async inspectEmptiness(): Promise<ExtensionStoreEmptiness> {
+    try {
+      const before = await this.emptinessFingerprint();
+      const result = await this.inspectEmptinessOnce();
+      if ((await this.emptinessFingerprint()) !== before) {
+        return {
+          status: 'unknown',
+          reason: 'the extension store changed while it was read',
+        };
+      }
+      return result;
+    } catch (error) {
+      return {
+        status: 'unknown',
+        reason:
+          error instanceof ExtensionStoreCorruptError
+            ? 'the extension store state is corrupt'
+            : `the extension store could not be read (${
+                (error as NodeJS.ErrnoException).code ?? 'error'
+              })`,
+      };
+    }
+  }
+
+  private async inspectEmptinessOnce(): Promise<ExtensionStoreEmptiness> {
+    // The manager loads directories only; files there are control files.
+    for (const entry of (await readDirectoryIfPresent(this.extensionsDir)) ??
+      []) {
+      const entryPath = path.join(this.extensionsDir, entry);
+      const stats = await fsp.lstat(entryPath);
+      if (
+        stats.isDirectory() ||
+        (stats.isSymbolicLink() && (await fsp.stat(entryPath)).isDirectory())
+      ) {
+        return {
+          status: 'installed',
+          reason: 'an extension directory is present',
+        };
+      }
+    }
+    const storeEntries = await readDirectoryIfPresent(this.storeDir);
+    for (const entry of (storeEntries ?? []).filter(isStoreName)) {
+      const stats = await fsp.lstat(path.join(this.storeDir, entry));
+      if (STORE_TRANSACTION_DIRS.includes(entry) && stats.isDirectory()) {
+        const contents = await fsp.readdir(path.join(this.storeDir, entry));
+        if (entry === 'transactions') {
+          // Recovery acts only on `.json` journals. It leaves the journals it
+          // quarantined, and temporary files, where they are for good.
+          if (contents.some((name) => name.endsWith('.json'))) {
+            return {
+              status: 'unknown',
+              reason:
+                'an extension store transaction is in progress or awaits recovery',
+            };
+          }
+        } else if (contents.some(isStoreName)) {
+          // An install prepares its staging directory without the lock or a
+          // journal, so nothing removes one it leaves before it commits;
+          // recovery clears only what a journal names.
+          return {
+            status: 'unknown',
+            reason:
+              'an extension install or removal is in progress or was interrupted',
+          };
+        }
+      } else if (
+        !(entry === 'plugin-data' && stats.isDirectory()) &&
+        !(
+          (STORE_FILES.has(entry) || STATE_WRITE_LEFTOVER.test(entry)) &&
+          stats.isFile()
+        )
+      ) {
+        return {
+          status: 'unknown',
+          reason:
+            entry === 'lock.lock'
+              ? 'the extension store is locked'
+              : 'the extension store holds an unexpected entry',
+        };
+      }
+    }
+    const state = await this.readSnapshotUnlocked();
+    let enablement: fs.Stats | undefined;
+    try {
+      enablement = await fsp.stat(this.enablementPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (enablement && !enablement.isFile()) {
+      return {
+        status: 'unknown',
+        reason: 'the extension enablement file is not a regular file',
+      };
+    }
+    let projection: AllExtensionsEnablementConfig;
+    try {
+      projection = await this.readLegacyProjection();
+    } catch (error) {
+      if (!(error instanceof ExtensionStoreCorruptError)) throw error;
+      return {
+        status: 'unknown',
+        reason: 'the extension enablement file is corrupt',
+      };
+    }
+    if (!state) {
+      if (storeEntries?.includes('state.previous.json')) {
+        return {
+          status: 'unknown',
+          reason: 'the extension store state was replaced incompletely',
+        };
+      }
+      return Object.keys(projection).length === 0
+        ? { status: 'empty' }
+        : {
+            status: 'unknown',
+            reason: 'extension enablement exists without a store state',
+          };
+    }
+    if (Object.keys(state.extensions).length > 0) {
+      return {
+        status: 'installed',
+        reason: 'the extension store records extensions',
+      };
+    }
+    // Legacy rules the state keeps for extensions that are not installed wait
+    // for an install of that name; they enable nothing.
+    if (projectionHash(projection) !== state.legacyProjectionHash) {
+      return {
+        status: 'unknown',
+        reason: 'the extension enablement projection needs reconciliation',
+      };
+    }
+    return { status: 'empty' };
+  }
+
+  private async emptinessFingerprint(): Promise<string> {
+    const parts: string[] = [];
+    for (const directory of [
+      this.extensionsDir,
+      this.storeDir,
+      ...STORE_TRANSACTION_DIRS.map((name) => path.join(this.storeDir, name)),
+    ]) {
+      const entries = await readDirectoryIfPresent(directory);
+      parts.push(entries === null ? '-' : [...entries].sort().join('/'));
+    }
+    for (const file of [
+      this.statePath,
+      this.previousStatePath,
+      this.enablementPath,
+    ]) {
+      let stats: fs.BigIntStats | undefined;
+      try {
+        stats = await fsp.stat(file, { bigint: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      parts.push(
+        stats
+          ? `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`
+          : '-',
+      );
+    }
+    return parts.join('\n');
+  }
+
+  async ensureInitialized(
+    extensions: readonly ExtensionIdentity[],
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.withLock(
+      async () => await this.ensureInitializedUnlocked(extensions),
+    );
+  }
+
+  async readConsistent<T>(
+    readArtifacts: () => Promise<{
+      value: T;
+      extensions: readonly ExtensionIdentity[];
+    }>,
+  ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
+    return await this.withLock(async () => {
+      const { value, extensions } = await readArtifacts();
+      const snapshot = await this.ensureInitializedUnlocked(extensions);
+      return { value, snapshot };
+    });
+  }
+
+  private async ensureInitializedUnlocked(
+    extensions: readonly ExtensionIdentity[],
+  ): Promise<ExtensionStoreSnapshot> {
+    const loadedNames = new Map<string, ExtensionIdentity>();
+    for (const identity of extensions) {
+      assertIdentity(identity);
+      const normalizedName = identity.name.toLowerCase();
+      const existingIdentity = loadedNames.get(normalizedName);
+      if (
+        existingIdentity &&
+        (existingIdentity.id !== identity.id ||
+          existingIdentity.name !== identity.name)
+      ) {
+        throw new ExtensionConflictError(
+          `Extension name "${identity.name}" conflicts with loaded extension "${existingIdentity.name}".`,
+        );
+      }
+      loadedNames.set(normalizedName, identity);
+    }
+    const existing = await this.readSnapshotUnlocked();
+    const legacy = await this.readLegacyProjection();
+    if (existing) {
+      let changed = false;
+      const renamedPolicyNames = new Set<string>();
+      const importUnmappedLegacy =
+        existing.legacyProjectionHash === projectionHash(legacy);
+      let legacyProjectionIsNewer = false;
+      // An id-formula change (e.g. #7568 added the plugin name to the hash)
+      // leaves installed extensions pointing at ids the store has never
+      // seen. Without this re-key, the blocks below would mint a fresh
+      // default policy under the new id — resetting activation state — and
+      // strand the old policy as an orphan that later trips the
+      // name-conflict guard on update/uninstall. Names are unique in the
+      // store (enforced case-insensitively on every commit), so a loaded
+      // identity whose id is unknown safely claims the policy stored under
+      // its name, provided no loaded extension still owns that entry.
+      const loadedIds = new Set(extensions.map((identity) => identity.id));
+      for (const identity of extensions) {
+        assertIdentity(identity);
+        const directPolicy = existing.extensions[identity.id];
+        if (directPolicy) {
+          if (directPolicy.name !== identity.name) {
+            const nameOwner = Object.entries(existing.extensions).find(
+              ([id, policy]) =>
+                id !== identity.id &&
+                policy.name.toLowerCase() === identity.name.toLowerCase(),
+            );
+            if (nameOwner && !nameOwner[1].declarationOnly) {
+              throw new ExtensionConflictError(
+                `Extension name "${identity.name}" conflicts with an installed extension.`,
+              );
+            }
+            if (!directPolicy.declarationOnly) {
+              directPolicy.artifactDirectory ??= directPolicy.name;
+            }
+            if (
+              directPolicy.name.toLowerCase() !== identity.name.toLowerCase()
+            ) {
+              renamedPolicyNames.add(directPolicy.name.toLowerCase());
+            }
+            if (nameOwner) {
+              const [declarationId, declaration] = nameOwner;
+              directPolicy.defaultActivation = declaration.defaultActivation;
+              directPolicy.workspaceOverrides = {
+                ...declaration.workspaceOverrides,
+              };
+              if (declaration.legacyPathRules) {
+                directPolicy.legacyPathRules = [...declaration.legacyPathRules];
+              } else {
+                delete directPolicy.legacyPathRules;
+              }
+              delete existing.extensions[declarationId];
+              changed = true;
+            }
+            directPolicy.name = identity.name;
+            changed = true;
+          }
+          if (directPolicy.declarationOnly) {
+            delete directPolicy.declarationOnly;
+            directPolicy.artifactGeneration = existing.generation + 1;
+            directPolicy.preserveActivationOnNextInstall = true;
+            changed = true;
+          }
+          continue;
+        }
+        const staleEntry = Object.entries(existing.extensions).find(
+          ([id, policy]) =>
+            !loadedIds.has(id) &&
+            policy.name.toLowerCase() === identity.name.toLowerCase(),
+        );
+        if (staleEntry) {
+          const [staleId, policy] = staleEntry;
+          if (!policy.declarationOnly && policy.name !== identity.name) {
+            policy.artifactDirectory ??= policy.name;
+          }
+          if (policy.declarationOnly) {
+            delete policy.declarationOnly;
+            policy.artifactGeneration = existing.generation + 1;
+            policy.preserveActivationOnNextInstall = true;
+          }
+          delete existing.extensions[staleId];
+          policy.name = identity.name;
+          existing.extensions[identity.id] = policy;
+          changed = true;
+        }
+      }
+      if (existing.legacyProjectionHash !== projectionHash(legacy)) {
+        legacyProjectionIsNewer = await this.legacyProjectionIsNewerThanState();
+        if (!legacyProjectionIsNewer) {
+          try {
+            await this.writeLegacyProjectionUnlocked(existing);
+          } catch {
+            // state.json remains authoritative; a later access retries repair.
+          }
+          for (const identity of extensions) {
+            assertIdentity(identity);
+            if (existing.extensions[identity.id]) continue;
+            const rules = findLegacyRules(
+              existing.legacyProjectionRemainder ?? {},
+              identity.name,
+            );
+            existing.extensions[identity.id] = {
+              name: identity.name,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+              ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+            };
+            changed = true;
+          }
+        } else {
+          const identities = new Map(
+            Object.entries(existing.extensions).map(([id, policy]) => [
+              id,
+              { id, name: policy.name },
+            ]),
+          );
+          for (const identity of extensions)
+            identities.set(identity.id, identity);
+          for (const identity of identities.values()) {
+            assertIdentity(identity);
+            const existingPolicy = existing.extensions[identity.id];
+            const { rules, activationChanged } = this.importLegacyProjection(
+              findLegacyRules(legacy, identity.name),
+              existingPolicy,
+            );
+            if (existingPolicy) {
+              const previousRules = existingPolicy.legacyPathRules ?? [];
+              const policyChanged =
+                activationChanged ||
+                existingPolicy.name !== identity.name ||
+                previousRules.length !== rules.length ||
+                previousRules.some((rule, index) => rule !== rules[index]);
+              if (!policyChanged) continue;
+              existingPolicy.name = identity.name;
+              if (rules.length > 0) {
+                existingPolicy.legacyPathRules = [...rules];
+              } else {
+                delete existingPolicy.legacyPathRules;
+              }
+              changed = true;
+            } else {
+              existing.extensions[identity.id] = {
+                name: identity.name,
+                defaultActivation: 'enabled',
+                workspaceOverrides: {},
+                ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+              };
+              changed = true;
+            }
+          }
+          if (!changed) {
+            try {
+              await this.writeLegacyProjectionUnlocked(existing);
+            } catch {
+              // state.json remains authoritative; a later access retries repair.
+            }
+          }
+        }
+      } else {
+        for (const identity of extensions) {
+          assertIdentity(identity);
+          if (existing.extensions[identity.id]) continue;
+          const rules = findLegacyRules(legacy, identity.name);
+          existing.extensions[identity.id] = {
+            name: identity.name,
+            defaultActivation: 'enabled',
+            workspaceOverrides: {},
+            ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+          };
+          changed = true;
+        }
+      }
+      let remainderSource = legacyProjectionIsNewer
+        ? legacy
+        : importUnmappedLegacy
+          ? legacy
+          : (existing.legacyProjectionRemainder ?? {});
+      if (renamedPolicyNames.size > 0) {
+        remainderSource = Object.fromEntries(
+          Object.entries(remainderSource).filter(
+            ([name]) => !renamedPolicyNames.has(name.toLowerCase()),
+          ),
+        );
+      }
+      changed =
+        this.updateLegacyProjectionRemainder(existing, remainderSource) ||
+        changed;
+      if (changed) {
+        existing.generation += 1;
+        await this.writeSnapshotUnlocked(existing);
+      }
+      return existing;
+    }
+    const policies: Record<string, ExtensionPolicy> = {};
+    for (const identity of extensions) {
+      assertIdentity(identity);
+      const rules = findLegacyRules(legacy, identity.name);
+      policies[identity.id] = {
+        name: identity.name,
+        defaultActivation: 'enabled',
+        workspaceOverrides: {},
+        ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+      };
+    }
+    const snapshot: ExtensionStoreSnapshot = {
+      version: 2,
+      generation: 0,
+      legacyProjectionHash: projectionHash(legacy),
+      extensions: policies,
+    };
+    this.updateLegacyProjectionRemainder(snapshot, legacy);
+    await this.writeSnapshotUnlocked(snapshot);
+    return snapshot;
+  }
+
+  async createStagingDirectory(): Promise<string> {
+    await this.prepareDirectories();
+    const stagingRoot = path.join(this.storeDir, 'staging');
+    await fsp.mkdir(stagingRoot, { recursive: true, mode: 0o700 });
+    return await fsp.mkdtemp(path.join(stagingRoot, 'transaction-'));
+  }
+
+  async commitArtifact(
+    input: CommitExtensionArtifactInput,
+  ): Promise<ExtensionStoreSnapshot> {
+    assertIdentity(input.identity);
+    this.assertArtifactPaths(input);
+    return await this.withLock(async () => {
+      const snapshot =
+        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const transactionId = crypto.randomUUID();
+      const transactionsDir = path.join(this.storeDir, 'transactions');
+      const backupDirectory = path.join(
+        this.storeDir,
+        'rollback',
+        transactionId,
+      );
+      const journalPath = path.join(transactionsDir, `${transactionId}.json`);
+      const currentPolicy = snapshot.extensions[input.identity.id];
+      const destinationDirectory =
+        input.operation !== 'install' && currentPolicy?.artifactDirectory
+          ? path.join(this.extensionsDir, currentPolicy.artifactDirectory)
+          : input.destinationDirectory;
+      this.assertArtifactDestination(destinationDirectory);
+      const destinationExists = await this.pathExists(destinationDirectory);
+      if (input.operation === 'install' && destinationExists) {
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" is installed.`,
+        );
+      }
+      if (input.operation === 'update' && !destinationExists) {
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" is not installed.`,
+        );
+      }
+      if (input.operation === 'install' && !input.initialActivation) {
+        throw new Error('Install requires an initial activation.');
+      }
+      const nameConflict = Object.entries(snapshot.extensions).find(
+        ([extensionId, policy]) =>
+          extensionId !== input.identity.id &&
+          policy.name.toLowerCase() === input.identity.name.toLowerCase(),
+      );
+      const currentPolicyIsAdoptable =
+        input.operation === 'install' &&
+        !!currentPolicy &&
+        (currentPolicy.declarationOnly ||
+          (currentPolicy.preserveActivationOnNextInstall &&
+            !(await this.extensionArtifactExists(currentPolicy))));
+      const nameConflictIsAdoptable =
+        input.operation === 'install' &&
+        !currentPolicy &&
+        !!nameConflict &&
+        (nameConflict[1].declarationOnly ||
+          (nameConflict[1].preserveActivationOnNextInstall &&
+            !(await this.extensionArtifactExists(nameConflict[1]))));
+      if (
+        input.operation !== 'uninstall' &&
+        nameConflict &&
+        !nameConflictIsAdoptable
+      ) {
+        throw new ExtensionConflictError(
+          `Extension name "${input.identity.name}" conflicts with an installed extension.`,
+        );
+      }
+
+      if (
+        currentPolicy &&
+        currentPolicy.name.toLowerCase() !== input.identity.name.toLowerCase()
+      ) {
+        throw new ExtensionConflictError(
+          `Extension id belongs to "${currentPolicy.name}", not "${input.identity.name}".`,
+        );
+      }
+      if (input.operation === 'uninstall' && !currentPolicy) {
+        if (!destinationExists) return snapshot;
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" has no matching policy.`,
+        );
+      }
+      if (input.operation === 'uninstall' && currentPolicy.declarationOnly) {
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" is not installed.`,
+        );
+      }
+      if (input.operation === 'update' && !currentPolicy) {
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" is not installed.`,
+        );
+      }
+      if (
+        input.operation === 'update' &&
+        input.expectedArtifactGeneration !== undefined &&
+        (currentPolicy?.artifactGeneration ?? 0) !==
+          input.expectedArtifactGeneration
+      ) {
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" changed while its update was being prepared.`,
+        );
+      }
+
+      const targetSnapshot = structuredClone(snapshot);
+      if (input.operation === 'install') {
+        const declarationEntry = currentPolicyIsAdoptable
+          ? ([input.identity.id, currentPolicy] as const)
+          : nameConflictIsAdoptable
+            ? nameConflict!
+            : undefined;
+        if (declarationEntry) {
+          const [declarationId] = declarationEntry;
+          const policy = targetSnapshot.extensions[declarationId]!;
+          delete targetSnapshot.extensions[declarationId];
+          delete policy.declarationOnly;
+          delete policy.preserveActivationOnNextInstall;
+          delete policy.artifactDirectory;
+          policy.name = input.identity.name;
+          policy.artifactGeneration = targetSnapshot.generation + 1;
+          targetSnapshot.extensions[input.identity.id] = policy;
+        } else {
+          const initial = input.initialActivation!;
+          const rules = findLegacyRules(
+            snapshot.legacyProjectionRemainder ?? {},
+            input.identity.name,
+          );
+          targetSnapshot.extensions[input.identity.id] = {
+            name: input.identity.name,
+            artifactGeneration: targetSnapshot.generation + 1,
+            defaultActivation:
+              initial.scope === 'user' ? 'enabled' : 'disabled',
+            workspaceOverrides:
+              initial.scope === 'workspace'
+                ? {
+                    [canonicalizeWorkspacePath(initial.workspacePath)]:
+                      'enabled',
+                  }
+                : {},
+            ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+          };
+        }
+        this.updateLegacyProjectionRemainder(
+          targetSnapshot,
+          targetSnapshot.legacyProjectionRemainder ?? {},
+        );
+      } else if (input.operation === 'uninstall') {
+        delete targetSnapshot.extensions[input.identity.id];
+      } else {
+        const policy = targetSnapshot.extensions[input.identity.id];
+        if (policy && policy.name !== input.identity.name) {
+          throw new ExtensionConflictError(
+            `Extension update changed name from "${policy.name}" to "${input.identity.name}".`,
+          );
+        }
+        targetSnapshot.extensions[input.identity.id] = policy!;
+        delete targetSnapshot.extensions[input.identity.id]!
+          .preserveActivationOnNextInstall;
+        targetSnapshot.extensions[input.identity.id]!.artifactGeneration =
+          targetSnapshot.generation + 1;
+      }
+      targetSnapshot.generation = snapshot.generation + 1;
+      targetSnapshot.legacyProjectionHash = projectionHash(
+        this.buildLegacyProjection(targetSnapshot),
+      );
+
+      await this.assertNoPendingTransaction(destinationDirectory);
+
+      const journal: ExtensionTransactionJournal = {
+        version: 1,
+        transactionId,
+        operation: input.operation,
+        phase: 'prepared',
+        destinationDirectory,
+        ...(input.stagingDirectory
+          ? { stagingDirectory: input.stagingDirectory }
+          : {}),
+        backupDirectory,
+        orderMs: Date.now(),
+        previousGeneration: snapshot.generation,
+        targetGeneration: targetSnapshot.generation,
+        targetSnapshot,
+      };
+      await atomicWriteJSON(journalPath, journal, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
+
+      // One allowance per transaction: a transient hold spends it once, so the
+      // store lock is not held longer for a tree with many held entries.
+      const swapBudget: LockRetryBudget = {
+        remainingMs: LOCK_RETRY_BUDGET_MS,
+      };
+      let stateCommitted = false;
+      try {
+        if (destinationExists) {
+          try {
+            await renameWithRetry(destinationDirectory, backupDirectory, 3, 50);
+          } catch (error) {
+            if (process.platform !== 'win32' || !isDirectoryLockError(error)) {
+              throw error;
+            }
+            journal.swapStrategy = 'copy';
+            await atomicWriteJSON(journalPath, journal, {
+              mode: 0o600,
+              forceMode: true,
+              noFollow: true,
+            });
+            if (!realPathWithin(destinationDirectory, this.extensionsDir)) {
+              throw new Error(
+                `Extension destination ${destinationDirectory} resolves outside the extensions directory.`,
+              );
+            }
+            // The walks below refuse a linked root, so the swap must not start one.
+            const destinationStats = await lstatOrNull(destinationDirectory);
+            if (destinationStats && !destinationStats.isDirectory()) {
+              throw new Error(
+                `Extension destination ${destinationDirectory} is not a directory this store can replace.`,
+              );
+            }
+            // A half-copied backup would be restored over an intact destination.
+            // The failure names the extension directory; rollback paths are internal.
+            const partialBackup = partialBackupPath(backupDirectory);
+            await this.withLockHint(destinationDirectory, async () => {
+              await this.removeWithRetry(partialBackup, swapBudget);
+              await this.copyTree(
+                destinationDirectory,
+                partialBackup,
+                swapBudget,
+              );
+              await renameWithRetry(partialBackup, backupDirectory, 3, 50);
+            });
+          }
+        }
+        if (journal.swapStrategy === 'copy') {
+          if (input.operation === 'uninstall') {
+            await this.removeDirectoryInPlace(destinationDirectory, swapBudget);
+          } else {
+            const stagingDirectory = input.stagingDirectory!;
+            await this.withLockHint(destinationDirectory, async () => {
+              await this.removeKindConflicts(
+                stagingDirectory,
+                destinationDirectory,
+                swapBudget,
+              );
+              // Copy first, then prune: deleting ahead of the copy would widen the
+              // window in which a crash leaves the extension missing content.
+              await this.copyTree(
+                stagingDirectory,
+                destinationDirectory,
+                swapBudget,
+              );
+              await this.pruneStalePaths(
+                stagingDirectory,
+                destinationDirectory,
+                swapBudget,
+              );
+            });
+          }
+        } else if (input.operation !== 'uninstall') {
+          await this.withLockHint(destinationDirectory, () =>
+            renameWithRetry(
+              input.stagingDirectory!,
+              destinationDirectory,
+              3,
+              50,
+            ),
+          );
+        }
+        journal.phase = 'artifact_swapped';
+        await atomicWriteJSON(journalPath, journal, {
+          mode: 0o600,
+          forceMode: true,
+          noFollow: true,
+        });
+
+        await this.writeSnapshotUnlocked(targetSnapshot);
+        stateCommitted = true;
+        journal.phase = 'state_committed';
+        try {
+          await atomicWriteJSON(journalPath, journal, {
+            mode: 0o600,
+            forceMode: true,
+            noFollow: true,
+          });
+        } catch {
+          // The snapshot generation is enough for recovery to recognize the
+          // commit even if this advisory phase update could not be persisted.
+        }
+      } catch (error) {
+        if (!stateCommitted) {
+          try {
+            await this.rollbackJournal(journal, swapBudget);
+            await this.finishRollback(journal, journalPath, swapBudget);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'Extension transaction failed and rollback recovery did not complete.',
+              { cause: error },
+            );
+          }
+        }
+        throw error;
+      }
+
+      try {
+        await this.removeTransactionTeardown(journal, journalPath, swapBudget);
+      } catch {
+        // The committed state is authoritative. Recovery retries cleanup on
+        // the next store operation without reporting a false mutation failure.
+      }
+      return targetSnapshot;
+    });
+  }
+
+  async readSnapshot(): Promise<ExtensionStoreSnapshot> {
+    return await this.withLock(async () => {
+      const snapshot = await this.readSnapshotUnlocked();
+      if (!snapshot) return this.emptySnapshot();
+      return snapshot;
+    });
+  }
+
+  getActivation(
+    snapshot: ExtensionStoreSnapshot,
+    extensionId: string,
+    extensionName: string,
+    workspacePath: string,
+  ): ExtensionActivationResult {
+    const policy = snapshot.extensions[extensionId];
+    if (!policy || policy.name !== extensionName) {
+      return {
+        default: 'enabled',
+        workspace: 'inherit',
+        effective: 'enabled',
+        source: 'default',
+      };
+    }
+    const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
+    const exact = policy.workspaceOverrides[canonicalWorkspace];
+    if (exact === 'enabled' || exact === 'disabled') {
+      return {
+        default: policy.defaultActivation,
+        workspace: exact,
+        effective: exact,
+        source: 'workspace_override',
+      };
+    }
+    if (exact === 'inherit') {
+      return {
+        default: policy.defaultActivation,
+        workspace: 'inherit',
+        effective: policy.defaultActivation,
+        source: 'default',
+      };
+    }
+    let effective = policy.defaultActivation;
+    let matched = false;
+    const legacyCandidates = [
+      normalizeRulePath(workspacePath),
+      normalizeRulePath(canonicalWorkspace),
+    ];
+    for (const rule of policy.legacyPathRules ?? []) {
+      const override = Override.fromFileRule(rule);
+      if (
+        !legacyCandidates.some((candidate) => override.matchesPath(candidate))
+      ) {
+        continue;
+      }
+      effective = override.isDisable ? 'disabled' : 'enabled';
+      matched = true;
+    }
+    return {
+      default: policy.defaultActivation,
+      workspace: 'inherit',
+      effective,
+      source: matched ? 'legacy_path_rule' : 'default',
+    };
+  }
+
+  async setDefaultActivation(
+    identity: ExtensionIdentity,
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutate(identity, (policy) => {
+      policy.defaultActivation = activation;
+    });
+  }
+
+  async setDefaultActivations(
+    identities: readonly ExtensionIdentity[],
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    const outcome = await this.mutateMany(identities, (policy) => {
+      policy.defaultActivation = activation;
+    });
+    return outcome.snapshot;
+  }
+
+  async setActivationScope(
+    identity: ExtensionIdentity,
+    activation: InitialExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutate(identity, (policy) => {
+      policy.defaultActivation =
+        activation.scope === 'user' ? 'enabled' : 'disabled';
+      policy.workspaceOverrides =
+        activation.scope === 'workspace'
+          ? {
+              [canonicalizeWorkspacePath(activation.workspacePath)]: 'enabled',
+            }
+          : {};
+      delete policy.legacyPathRules;
+    });
+  }
+
+  async setWorkspaceActivation(
+    identity: ExtensionIdentity,
+    workspacePath: string,
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutate(identity, (policy) => {
+      policy.workspaceOverrides[canonicalizeWorkspacePath(workspacePath)] =
+        activation;
+    });
+  }
+
+  getSkillWorkspaceOverride(
+    snapshot: ExtensionStoreSnapshot,
+    extensionId: string,
+    workspacePath: string,
+    skillName: string,
+  ): boolean | null {
+    const states =
+      snapshot.extensions[extensionId]?.skillWorkspaceOverrides?.[
+        canonicalizeWorkspacePath(workspacePath)
+      ];
+    const name = skillName.trim().toLowerCase();
+    return states && Object.hasOwn(states, name) ? states[name]! : null;
+  }
+
+  async setSkillWorkspaceOverrides(
+    identity: ExtensionIdentity,
+    workspacePath: string,
+    states: Readonly<Record<string, boolean>>,
+    expectedArtifactGeneration: number,
+    beforeCommit?: () => void,
+  ): Promise<ExtensionStoreSnapshot> {
+    const workspace = canonicalizeWorkspacePath(workspacePath);
+    return await this.mutate(identity, (policy) => {
+      if ((policy.artifactGeneration ?? 0) !== expectedArtifactGeneration) {
+        throw new ExtensionConflictError(
+          `Extension "${identity.name}" changed while its skill states were being prepared.`,
+        );
+      }
+      beforeCommit?.();
+      policy.skillWorkspaceOverrides = {
+        ...policy.skillWorkspaceOverrides,
+        [workspace]: {
+          ...policy.skillWorkspaceOverrides?.[workspace],
+          ...states,
+        },
+      };
+    });
+  }
+
+  async setWorkspaceActivations(
+    identities: readonly ExtensionIdentity[],
+    workspacePath: string,
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
+    const outcome = await this.mutateMany(identities, (policy) => {
+      policy.workspaceOverrides[canonicalWorkspace] = activation;
+    });
+    return outcome.snapshot;
+  }
+
+  async clearWorkspaceActivation(
+    identity: ExtensionIdentity,
+    workspacePath: string,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutate(identity, (policy) => {
+      clearWorkspaceActivation(policy, workspacePath);
+    });
+  }
+
+  async clearWorkspaceActivations(
+    identities: readonly ExtensionIdentity[],
+    workspacePath: string,
+  ): Promise<ExtensionStoreBatchMutationOutcome> {
+    const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
+    return await this.mutateMany(
+      identities,
+      (policy) => {
+        clearWorkspaceActivation(policy, workspacePath, canonicalWorkspace);
+      },
+      false,
+    );
+  }
+
+  async setLegacyPathActivation(
+    identity: ExtensionIdentity,
+    scopePath: string,
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutate(identity, (policy) => {
+      setLegacyPathActivation(policy, scopePath, activation);
+    });
+  }
+
+  private async mutate(
+    identity: ExtensionIdentity,
+    update: (policy: ExtensionPolicy) => void,
+  ): Promise<ExtensionStoreSnapshot> {
+    assertIdentity(identity);
+    return await this.withLock(async () => {
+      const snapshot =
+        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const policy = snapshot.extensions[identity.id];
+      if (!policy) {
+        throw new ExtensionConflictError(
+          `Extension "${identity.name}" is not installed.`,
+        );
+      }
+      if (policy.declarationOnly) {
+        throw new ExtensionConflictError(
+          `Extension "${identity.name}" is not installed.`,
+        );
+      }
+      if (policy.name !== identity.name) {
+        throw new Error(
+          `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
+        );
+      }
+      update(policy);
+      snapshot.extensions[identity.id] = policy;
+      snapshot.generation += 1;
+      await this.writeSnapshotUnlocked(snapshot);
+      return snapshot;
+    });
+  }
+
+  private async mutateMany(
+    identities: readonly ExtensionIdentity[],
+    update: (policy: ExtensionPolicy) => void,
+    declareUnknown = true,
+  ): Promise<ExtensionStoreBatchMutationOutcome> {
+    identities.forEach(assertIdentity);
+    if (identities.length === 0) {
+      throw new Error('At least one extension identity is required.');
+    }
+    return await this.withLock(async () => {
+      const existing = await this.readSnapshotUnlocked();
+      const snapshot = existing ?? this.emptySnapshot();
+      const legacy = await this.readLegacyProjection();
+      let legacyForImport = legacy;
+      let legacyForRemainder = legacy;
+      if (
+        existing &&
+        existing.legacyProjectionHash !== projectionHash(legacy)
+      ) {
+        if (await this.legacyProjectionIsNewerThanState()) {
+          for (const policy of Object.values(snapshot.extensions)) {
+            const { rules } = this.importLegacyProjection(
+              findLegacyRules(legacy, policy.name),
+              policy,
+            );
+            if (rules.length > 0) {
+              policy.legacyPathRules = [...rules];
+            } else {
+              delete policy.legacyPathRules;
+            }
+          }
+          legacyForRemainder = legacy;
+        } else {
+          legacyForImport = snapshot.legacyProjectionRemainder ?? {};
+          legacyForRemainder = snapshot.legacyProjectionRemainder ?? {};
+        }
+      }
+      const policies: ExtensionPolicy[] = [];
+      for (const identity of identities) {
+        let policy = snapshot.extensions[identity.id];
+        if (!policy) {
+          const existingByName = Object.values(snapshot.extensions).find(
+            (existing) =>
+              existing.name.toLowerCase() === identity.name.toLowerCase(),
+          );
+          if (existingByName) {
+            policy = existingByName;
+          } else if (!declareUnknown) {
+            continue;
+          } else {
+            const rules = findLegacyRules(legacyForImport, identity.name);
+            policy = {
+              name: identity.name,
+              declarationOnly: true,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+              ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+            };
+            snapshot.extensions[identity.id] = policy;
+          }
+        }
+        if (
+          !policy.declarationOnly &&
+          policy.artifactGeneration !== undefined &&
+          !(await this.extensionArtifactExists(policy))
+        ) {
+          delete policy.artifactGeneration;
+          delete policy.preserveActivationOnNextInstall;
+          policy.declarationOnly = true;
+        }
+        if (policy.name.toLowerCase() !== identity.name.toLowerCase()) {
+          throw new ExtensionConflictError(
+            `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
+          );
+        }
+        policies.push(policy);
+      }
+      if (policies.length === 0) {
+        return { snapshot, updated: false };
+      }
+      for (const policy of policies) update(policy);
+      this.updateLegacyProjectionRemainder(snapshot, legacyForRemainder);
+      snapshot.generation += 1;
+      await this.writeSnapshotUnlocked(snapshot);
+      return { snapshot, updated: true };
+    });
+  }
+
+  private async extensionArtifactExists(
+    policy: ExtensionPolicy,
+  ): Promise<boolean> {
+    const directory = policy.artifactDirectory ?? policy.name;
+    if (await this.pathExists(path.join(this.extensionsDir, directory))) {
+      return true;
+    }
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(this.extensionsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+    const normalizedName = directory.toLowerCase();
+    return entries.some((entry) => entry.toLowerCase() === normalizedName);
+  }
+
+  private emptySnapshot(): ExtensionStoreSnapshot {
+    return {
+      version: 2,
+      generation: 0,
+      legacyProjectionHash: projectionHash({}),
+      extensions: {},
+    };
+  }
+
+  private async readSnapshotUnlocked(): Promise<ExtensionStoreSnapshot | null> {
+    let content: string;
+    try {
+      content = await fsp.readFile(this.statePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+    return parseState(content, this.statePath);
+  }
+
+  private async readLegacyProjection(): Promise<AllExtensionsEnablementConfig> {
+    try {
+      const projection: unknown = JSON.parse(
+        await fsp.readFile(this.enablementPath, 'utf8'),
+      );
+      if (!validLegacyProjection(projection)) {
+        throw new ExtensionStoreCorruptError(
+          `Extension enablement projection has an invalid schema at ${this.enablementPath}.`,
+        );
+      }
+      return projection;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      if (error instanceof SyntaxError) {
+        throw new ExtensionStoreCorruptError(
+          `Extension enablement projection is corrupt at ${this.enablementPath}.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private buildLegacyProjection(
+    snapshot: ExtensionStoreSnapshot,
+  ): AllExtensionsEnablementConfig {
+    const projection = Object.create(null) as AllExtensionsEnablementConfig;
+    const representedNames = new Set(
+      Object.values(snapshot.extensions).map((policy) =>
+        policy.name.toLowerCase(),
+      ),
+    );
+    for (const [name, config] of Object.entries(
+      snapshot.legacyProjectionRemainder ?? {},
+    )) {
+      if (representedNames.has(name.toLowerCase())) continue;
+      projection[name] = { overrides: [...config.overrides] };
+    }
+    for (const policy of Object.values(snapshot.extensions)) {
+      const overrides: string[] = [];
+      if (policy.defaultActivation === 'disabled') overrides.push('!/*');
+      overrides.push(...(policy.legacyPathRules ?? []));
+      for (const [workspacePath, activation] of Object.entries(
+        policy.workspaceOverrides,
+      )) {
+        const effective =
+          activation === 'inherit' ? policy.defaultActivation : activation;
+        overrides.push(
+          Override.fromInput(
+            effective === 'disabled' ? `!${workspacePath}` : workspacePath,
+            false,
+          ).output(),
+        );
+      }
+      if (overrides.length > 0) projection[policy.name] = { overrides };
+    }
+    return projection;
+  }
+
+  private updateLegacyProjectionRemainder(
+    snapshot: ExtensionStoreSnapshot,
+    legacy: AllExtensionsEnablementConfig,
+  ): boolean {
+    const representedNames = new Set(
+      Object.values(snapshot.extensions).map((policy) =>
+        policy.name.toLowerCase(),
+      ),
+    );
+    const remainder = Object.create(null) as AllExtensionsEnablementConfig;
+    for (const [name, config] of Object.entries(legacy)) {
+      if (representedNames.has(name.toLowerCase())) continue;
+      remainder[name] = { overrides: [...config.overrides] };
+    }
+    const previous = snapshot.legacyProjectionRemainder ?? {};
+    if (Object.keys(remainder).length > 0) {
+      snapshot.legacyProjectionRemainder = remainder;
+    } else {
+      delete snapshot.legacyProjectionRemainder;
+    }
+    return projectionHash(previous) !== projectionHash(remainder);
+  }
+
+  private importLegacyProjection(
+    incomingRules: readonly string[],
+    policy: ExtensionPolicy | undefined,
+  ): { rules: string[]; activationChanged: boolean } {
+    if (!policy) return { rules: [...incomingRules], activationChanged: false };
+    const generatedRules: Array<{
+      rule: Override;
+      workspacePath?: string;
+    }> = [];
+    if (policy.defaultActivation === 'disabled') {
+      generatedRules.push({
+        rule: Override.fromFileRule('!/*'),
+      });
+    }
+    for (const [workspacePath, activation] of Object.entries(
+      policy.workspaceOverrides,
+    )) {
+      const effective =
+        activation === 'inherit' ? policy.defaultActivation : activation;
+      generatedRules.push({
+        rule: Override.fromInput(
+          effective === 'disabled' ? `!${workspacePath}` : workspacePath,
+          false,
+        ),
+        workspacePath,
+      });
+    }
+    let activationChanged = false;
+    const consumed = new Set<number>();
+    const rules = incomingRules.filter((rule) => {
+      const incoming = Override.fromFileRule(rule);
+      const exactIndex = generatedRules.findIndex(
+        (generated, index) =>
+          !consumed.has(index) && generated.rule.isEqualTo(incoming),
+      );
+      if (exactIndex >= 0) {
+        consumed.add(exactIndex);
+        return false;
+      }
+      const oppositeIndex = generatedRules.findIndex(
+        (generated, index) =>
+          !consumed.has(index) &&
+          generated.rule.baseRule === incoming.baseRule &&
+          generated.rule.includeSubdirs === incoming.includeSubdirs &&
+          generated.rule.isDisable !== incoming.isDisable,
+      );
+      if (oppositeIndex < 0) return true;
+      consumed.add(oppositeIndex);
+      const opposite = generatedRules[oppositeIndex];
+      if (opposite.workspacePath) {
+        policy.workspaceOverrides[opposite.workspacePath] = incoming.isDisable
+          ? 'disabled'
+          : 'enabled';
+      } else {
+        policy.defaultActivation = 'enabled';
+      }
+      activationChanged = true;
+      return false;
+    });
+    return { rules, activationChanged };
+  }
+
+  private async writeSnapshotUnlocked(
+    snapshot: ExtensionStoreSnapshot,
+  ): Promise<void> {
+    await this.prepareDirectories();
+    const projection = this.buildLegacyProjection(snapshot);
+    snapshot.legacyProjectionHash = projectionHash(projection);
+    try {
+      const previous = parseState(
+        await fsp.readFile(this.statePath, 'utf8'),
+        this.statePath,
+      );
+      await atomicWriteJSON(this.previousStatePath, previous, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await atomicWriteJSON(this.statePath, snapshot, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+    try {
+      await this.writeLegacyProjectionUnlocked(snapshot, projection);
+    } catch {
+      // state.json is the commit point. A later V2-aware store access repairs
+      // a stale projection instead of reporting a mutation failure after the
+      // authoritative state has already changed.
+    }
+  }
+
+  private async writeLegacyProjectionUnlocked(
+    snapshot: ExtensionStoreSnapshot,
+    projection = this.buildLegacyProjection(snapshot),
+  ): Promise<void> {
+    await atomicWriteJSON(this.enablementPath, projection, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+  }
+
+  private async legacyProjectionIsNewerThanState(): Promise<boolean> {
+    try {
+      const [state, projection] = await Promise.all([
+        fsp.stat(this.statePath, { bigint: true }),
+        fsp.stat(this.enablementPath, { bigint: true }),
+      ]);
+      if (projection.mtimeNs === state.mtimeNs) {
+        throw new ExtensionStoreCorruptError(
+          `Extension store state and projection disagree at the same timestamp in ${this.storeDir}.`,
+        );
+      }
+      return projection.mtimeNs > state.mtimeNs;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+
+  private async prepareDirectories(): Promise<void> {
+    await fsp.mkdir(this.extensionsDir, { recursive: true, mode: 0o700 });
+    await fsp.mkdir(this.storeDir, { recursive: true, mode: 0o700 });
+    const privateDirectories = [
+      this.storeDir,
+      ...STORE_TRANSACTION_DIRS.map((directory) =>
+        path.join(this.storeDir, directory),
+      ),
+    ];
+    await Promise.all(
+      privateDirectories.slice(1).map((directory) =>
+        fsp.mkdir(directory, {
+          recursive: true,
+          mode: 0o700,
+        }),
+      ),
+    );
+    await Promise.all(
+      privateDirectories.map((directory) => fsp.chmod(directory, 0o700)),
+    );
+    const handle = await fsp.open(this.lockPath, 'a', 0o600);
+    try {
+      await handle.chmod(0o600);
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async withLock<T>(run: () => Promise<T>): Promise<T> {
+    return await getStoreMutex(this.storeDir).runExclusive(async () => {
+      await this.prepareDirectories();
+      let release: () => Promise<void>;
+      try {
+        release = await lockfile.lock(this.lockPath, {
+          stale: 60_000,
+          update: 5_000,
+          retries: {
+            retries: 60,
+            factor: 1.2,
+            minTimeout: 50,
+            maxTimeout: 500,
+            randomize: true,
+          },
+          onCompromised: (err) => {
+            debugLogger.warn('extension store lock compromised:', err);
+          },
+        });
+      } catch (error) {
+        throw new ExtensionStoreBusyError(this.storeDir, { cause: error });
+      }
+      try {
+        await this.recoverCorruptStateUnlocked();
+        await this.recoverTransactionsUnlocked();
+        return await run();
+      } finally {
+        try {
+          await release();
+        } catch (error) {
+          debugLogger.warn('Failed to release extension store lock:', error);
+        }
+      }
+    });
+  }
+
+  private assertArtifactPaths(input: CommitExtensionArtifactInput): void {
+    this.assertArtifactDestination(input.destinationDirectory);
+    if (input.operation === 'uninstall') {
+      if (input.stagingDirectory !== undefined) {
+        throw new Error('Uninstall does not accept a staging directory.');
+      }
+      return;
+    }
+    if (!input.stagingDirectory) {
+      throw new Error(`${input.operation} requires a staging directory.`);
+    }
+    const stagingRoot = path.resolve(this.storeDir, 'staging');
+    const staging = path.resolve(input.stagingDirectory);
+    if (path.dirname(staging) !== stagingRoot) {
+      throw new Error('Extension staging directory is outside the store.');
+    }
+  }
+
+  private assertArtifactDestination(destinationDirectory: string): void {
+    const extensionsRoot = path.resolve(this.extensionsDir);
+    const destination = path.resolve(destinationDirectory);
+    if (
+      path.dirname(destination) !== extensionsRoot ||
+      destination === extensionsRoot
+    ) {
+      throw new Error('Extension destination must be a direct child.');
+    }
+  }
+
+  private async pathExists(filePath: string): Promise<boolean> {
+    try {
+      await fsp.access(filePath);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+
+  /** Pending transactions in replay order, shared by recovery and the commit
+   *  guard: newest transaction first. The ordering key must be one a pass
+   *  cannot move itself - marking a journal rewrites its mtime - so the
+   *  store-wide targetGeneration decides, and journals of one generation fall
+   *  back to the order key stamped when the journal was first seen. A
+   *  comparator switching keys on a pairwise property is not a valid ordering
+   *  at all. The live guard cannot stack two rollback-owed journals for one
+   *  destination; this orders the stacks a copied or older-build store can
+   *  still carry on disk. */
+  private async orderedPendingTransactions(
+    transactionsDir: string,
+  ): Promise<
+    Array<{ journalPath: string; journal: ExtensionTransactionJournal }>
+  > {
+    const names = await fsp.readdir(transactionsDir);
+    const pending: Array<{
+      journalPath: string;
+      journal: ExtensionTransactionJournal;
+      targetGeneration: number;
+      orderMs: number;
+    }> = [];
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const journalPath = path.join(transactionsDir, name);
+      const journal = await this.readRecoverableJournalUnlocked(journalPath);
+      if (!journal) continue;
+      const stats = await lstatOrNull(journalPath);
+      if (!stats) continue;
+      let orderMs = journal.orderMs;
+      if (orderMs === undefined) {
+        // Stamp once, from the only evidence this store has about which of two
+        // same-generation journals was written later; after that no pass reads
+        // the mtime, so marking cannot reorder. Whole ms, as the schema holds.
+        orderMs = Math.floor(Number(stats.mtimeMs));
+        journal.orderMs = orderMs;
+        try {
+          await atomicWriteJSON(journalPath, journal, {
+            mode: 0o600,
+            forceMode: true,
+            noFollow: true,
+          });
+        } catch (error: unknown) {
+          debugLogger.warn(
+            'extension transaction order key not persisted:',
+            error,
+          );
+        }
+      }
+      pending.push({
+        journalPath,
+        journal,
+        targetGeneration: journal.targetGeneration,
+        orderMs,
+      });
+    }
+    pending.sort(
+      (left, right) =>
+        right.targetGeneration - left.targetGeneration ||
+        right.orderMs - left.orderMs,
+    );
+    return pending;
+  }
+
+  private async recoverTransactionsUnlocked(): Promise<void> {
+    const transactionsDir = path.join(this.storeDir, 'transactions');
+    // One allowance per recovery pass, so stacked journals cannot multiply it.
+    const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
+    const snapshot = await this.readSnapshotUnlocked();
+    const groups = new Map<
+      string,
+      Array<{ journalPath: string; journal: ExtensionTransactionJournal }>
+    >();
+    for (const entry of await this.orderedPendingTransactions(
+      transactionsDir,
+    )) {
+      const destination = path.resolve(entry.journal.destinationDirectory);
+      if (!groups.has(destination)) groups.set(destination, []);
+      groups.get(destination)!.push(entry);
+    }
+    let firstUnrecoverable: unknown = null;
+    for (const journals of groups.values()) {
+      let decided: 'held' | 'fault' | null = null;
+      for (const { journalPath, journal } of journals) {
+        if (isTransactionResolved(journal, snapshot)) {
+          if (this.retryDue(journal)) {
+            try {
+              await this.removeTransactionTeardown(
+                journal,
+                journalPath,
+                budget,
+              );
+            } catch (error: unknown) {
+              if (isDirectoryLockError(error)) {
+                await this.recordPendingStep(
+                  journal,
+                  journalPath,
+                  'cleanup',
+                  'held',
+                );
+              }
+            }
+          }
+          continue;
+        }
+        if (decided !== null) {
+          // A newer journal of this destination still owes its restore, so this
+          // older one waits, marked under the same reason: applying an older
+          // rollback first would leave the destination below the generation
+          // the newer transaction was moving to.
+          if (
+            !(await this.recordPendingStep(
+              journal,
+              journalPath,
+              'rollback',
+              decided,
+            ))
+          ) {
+            throw lockErrorFor(journal.backupDirectory);
+          }
+          continue;
+        }
+        if (journal.rollbackBlocked && !this.retryDue(journal)) {
+          // A fault is no evidence the restore got anywhere, so only a held
+          // step may be absorbed on the strength of its top-level entries.
+          if (
+            journal.rollbackHeld === false ||
+            !(await this.canRetryRollback(journal))
+          ) {
+            throw this.windowRefusal(journal);
+          }
+          decided = journal.rollbackHeld ? 'held' : 'fault';
+          continue;
+        }
+        try {
+          if (!(await this.attemptRollback(journal, journalPath, budget))) {
+            decided = 'held';
+          }
+        } catch (error: unknown) {
+          decided = await this.classifyJournal(journal, journalPath, error);
+          if (firstUnrecoverable === null) firstUnrecoverable = error;
+        }
+      }
+    }
+    if (firstUnrecoverable !== null) throw firstUnrecoverable;
+  }
+
+  /** Note why the owed step is blocked after `attemptRollback` throws: 'held'
+   *  when a holder may let go, 'fault' otherwise. No answer removes the journal
+   *  from the scan - only an unparseable file is quarantined, and that is
+   *  decided where the file is read. */
+  private async classifyJournal(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+    error: unknown,
+  ): Promise<'held' | 'fault'> {
+    if (error instanceof ExtensionDirectoryLockedError) return 'held';
+    if (isDirectoryLockError(error)) throw error;
+    // Rollback completed but teardown failed: cleanupPending is on disk and
+    // rethrowing keeps the journal as the owner of its residue.
+    if (await this.journalCleanupPendingOnDisk(journalPath)) throw error;
+    // A failed attempt is evidence about the operation, not about the journal
+    // file: keep it in the scan, where it remains the only owner of the
+    // rollback and staging trees, and record the owed step so a later pass
+    // retries it under the window and a refusal can name it.
+    if (
+      !(await this.recordPendingStep(journal, journalPath, 'rollback', 'fault'))
+    ) {
+      throw error;
+    }
+    return 'fault';
+  }
+
+  private async journalCleanupPendingOnDisk(
+    journalPath: string,
+  ): Promise<boolean> {
+    try {
+      const text = await fsp.readFile(journalPath, 'utf8');
+      return Boolean(JSON.parse(text).cleanupPending);
+    } catch {
+      return false;
+    }
+  }
+
+  /** The refusal for a blocked rollback whose retry could not leave a loadable
+   *  artifact: never a held-handle diagnosis for a journal that records a fault;
+   *  one written before that record existed keeps the platform rule. */
+  private windowRefusal(journal: ExtensionTransactionJournal): Error {
+    return journal.rollbackHeld !== false && process.platform === 'win32'
+      ? new ExtensionDirectoryLockedError(journal.destinationDirectory)
+      : new ExtensionConflictError(
+          `Extension transaction ${journal.transactionId} for ${journal.destinationDirectory} is still unresolved.`,
+        );
+  }
+
+  /** Rolls a journal back and tears it down, reporting whether the transaction
+   *  is now gone. A lock-defeated restore that got its mark and can still
+   *  recover returns false - deferred, not resolved. A non-lock failure,
+   *  an un-landable marker, and a restore that cannot leave a loadable
+   *  artifact all throw - the recovery loop decides whether to quarantine. */
+  private async attemptRollback(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+    budget: LockRetryBudget,
+  ): Promise<boolean> {
+    try {
+      await this.rollbackJournal(journal, budget);
+      await this.finishRollback(journal, journalPath, budget);
+      return true;
+    } catch (error: unknown) {
+      if (!isDirectoryLockError(error)) throw error;
+      debugLogger.warn('extension transaction rollback blocked:', error);
+      // Marked before anything decides, so even a rollback that ends in
+      // refusal has its window and later passes reject from the window check.
+      if (
+        !(await this.recordPendingStep(
+          journal,
+          journalPath,
+          'rollback',
+          'held',
+        ))
+      ) {
+        throw error;
+      }
+      if (!(await this.canRetryRollback(journal))) {
+        // The raw errno stays honest off Windows, where it may not be a hold.
+        throw process.platform === 'win32'
+          ? new ExtensionDirectoryLockedError(journal.destinationDirectory, {
+              cause: error,
+            })
+          : error;
+      }
+      return false;
+    }
+  }
+
+  /** Whether retrying this rollback can still leave a loadable artifact: the
+   *  destination already carries the backup's top-level entries, so the owed
+   *  restore is effectively complete and any extra path is the disclosed
+   *  residue a later prune clears. An unreadable side or an empty artifact
+   *  answers "no" - existence is not integrity. */
+  private async canRetryRollback(
+    journal: ExtensionTransactionJournal,
+  ): Promise<boolean> {
+    const [backup, destination] = await Promise.all([
+      this.topLevelEntries(journal.backupDirectory),
+      this.topLevelEntries(journal.destinationDirectory),
+    ]);
+    if (!backup || !destination) return false;
+    if (backup.size === 0) return false;
+    for (const [name, kind] of backup) {
+      if (destination.get(name) !== kind) return false;
+    }
+    return true;
+  }
+
+  /** The directory's top-level name to kind map, or undefined if unreadable. */
+  private async topLevelEntries(
+    directory: string,
+  ): Promise<Map<string, 'link' | 'dir' | 'file'> | undefined> {
+    try {
+      const entries = await fsp.readdir(directory, { withFileTypes: true });
+      return new Map(entries.map((entry) => [entry.name, entryKind(entry)]));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Whether the persisted retry deadline on the owed step has come due. */
+  private retryDue(journal: ExtensionTransactionJournal): boolean {
+    const remainingMs = (journal.rollbackRetryAt ?? 0) - Date.now();
+    return remainingMs <= 0 || remainingMs > ROLLBACK_RETRY_DELAY_MS;
+  }
+
+  /** Persists the step a later operation must retry. Returns whether the marker
+   *  landed. `reason` decides who a later refusal blames; a failed restore waits
+   *  one window either way, since an unclassified errno is no evidence that
+   *  repeating a tree-sized copy is free. */
+  private async recordPendingStep(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+    pendingStep: 'rollback' | 'cleanup',
+    reason: 'held' | 'fault',
+  ): Promise<boolean> {
+    const rollbackBlocked = pendingStep === 'rollback' ? true : undefined;
+    const cleanupPending = pendingStep === 'cleanup' ? true : undefined;
+    const rollbackRetryAt =
+      pendingStep === 'rollback' || reason === 'held'
+        ? Date.now() + ROLLBACK_RETRY_DELAY_MS
+        : undefined;
+    const rollbackHeld =
+      pendingStep === 'rollback' ? reason === 'held' : undefined;
+    try {
+      await atomicWriteJSON(
+        journalPath,
+        {
+          ...journal,
+          rollbackBlocked,
+          cleanupPending,
+          rollbackRetryAt,
+          rollbackHeld,
+        },
+        { mode: 0o600, forceMode: true, noFollow: true },
+      );
+    } catch (writeError) {
+      debugLogger.warn(
+        'extension transaction marker not persisted:',
+        writeError,
+      );
+      return false;
+    }
+    // Keep the caller's copy in step with disk: the same pass reads these back
+    // when it decides whether an older journal of this destination may proceed.
+    journal.rollbackBlocked = rollbackBlocked;
+    journal.cleanupPending = cleanupPending;
+    journal.rollbackRetryAt = rollbackRetryAt;
+    journal.rollbackHeld = rollbackHeld;
+    return true;
+  }
+
+  /** A destination with an unresolved transaction must not stack another. */
+  private async assertNoPendingTransaction(
+    destinationDirectory: string,
+  ): Promise<void> {
+    const transactionsDir = path.join(this.storeDir, 'transactions');
+    const snapshot = await this.readSnapshotUnlocked();
+    const resolvedDestination = path.resolve(destinationDirectory);
+    const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
+    let decided: 'held' | 'fault' | null = null;
+    let deferredJournal: ExtensionTransactionJournal | null = null;
+    for (const {
+      journalPath,
+      journal,
+    } of await this.orderedPendingTransactions(transactionsDir)) {
+      if (
+        path.resolve(journal.destinationDirectory) !== resolvedDestination ||
+        isTransactionResolved(journal, snapshot)
+      ) {
+        continue;
+      }
+      if (decided !== null) {
+        if (
+          !(await this.recordPendingStep(
+            journal,
+            journalPath,
+            'rollback',
+            decided,
+          ))
+        ) {
+          throw lockErrorFor(journal.backupDirectory);
+        }
+        continue;
+      }
+      try {
+        if (!(await this.attemptRollback(journal, journalPath, budget))) {
+          decided = 'held';
+          deferredJournal = journal;
+        }
+      } catch (error: unknown) {
+        await this.classifyJournal(journal, journalPath, error);
+        throw error;
+      }
+    }
+    if (decided !== null) {
+      // Still blocked after a fresh attempt, so the diagnosis is current.
+      throw this.windowRefusal(deferredJournal!);
+    }
+  }
+
+  private async recoverCorruptStateUnlocked(): Promise<void> {
+    let stateMissing = false;
+    try {
+      const snapshot = await this.readSnapshotUnlocked();
+      if (snapshot) return;
+      stateMissing = true;
+    } catch (error) {
+      if (!(error instanceof ExtensionStoreCorruptError)) throw error;
+    }
+
+    const candidates: Array<{
+      snapshot: ExtensionStoreSnapshot;
+      recoveryGeneration: number;
+    }> = [];
+    const transactionsDir = path.join(this.storeDir, 'transactions');
+    for (const name of await fsp.readdir(transactionsDir)) {
+      if (!name.endsWith('.json')) continue;
+      const journal = await this.readRecoverableJournalUnlocked(
+        path.join(transactionsDir, name),
+      );
+      if (journal?.phase === 'state_committed') {
+        candidates.push({
+          snapshot: journal.targetSnapshot,
+          recoveryGeneration: journal.targetGeneration,
+        });
+      }
+    }
+
+    let backupError: unknown;
+    try {
+      const previous = parseState(
+        await fsp.readFile(this.previousStatePath, 'utf8'),
+        this.previousStatePath,
+      );
+      candidates.push({
+        snapshot: previous,
+        recoveryGeneration: previous.generation,
+      });
+    } catch (error) {
+      backupError = error;
+    }
+
+    const latest = candidates.sort(
+      (left, right) => right.recoveryGeneration - left.recoveryGeneration,
+    )[0];
+    if (latest) {
+      const recovered = {
+        ...latest.snapshot,
+        generation: latest.recoveryGeneration,
+      };
+      await atomicWriteJSON(this.statePath, recovered, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
+      await this.writeLegacyProjectionUnlocked(recovered);
+      return;
+    }
+    if (
+      stateMissing &&
+      (backupError as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+    ) {
+      return;
+    }
+    throw new ExtensionStoreCorruptError(
+      `Extension store state and recovery data are corrupt at ${this.storeDir}.`,
+      { cause: backupError },
+    );
+  }
+
+  private async readJournalUnlocked(
+    journalPath: string,
+  ): Promise<ExtensionTransactionJournal> {
+    try {
+      const journal = JSON.parse(
+        await fsp.readFile(journalPath, 'utf8'),
+      ) as ExtensionTransactionJournal;
+      if (
+        journal.version !== 1 ||
+        !/^[a-zA-Z0-9-]{1,128}$/.test(journal.transactionId) ||
+        !['install', 'update', 'uninstall'].includes(journal.operation) ||
+        !['prepared', 'artifact_swapped', 'state_committed'].includes(
+          journal.phase,
+        ) ||
+        (journal.swapStrategy !== undefined &&
+          !['rename', 'copy'].includes(journal.swapStrategy)) ||
+        (journal.rollbackBlocked !== undefined &&
+          typeof journal.rollbackBlocked !== 'boolean') ||
+        (journal.cleanupPending !== undefined &&
+          typeof journal.cleanupPending !== 'boolean') ||
+        (journal.rollbackRetryAt !== undefined &&
+          (!Number.isSafeInteger(journal.rollbackRetryAt) ||
+            (journal.rollbackRetryAt as number) < 0)) ||
+        (journal.rollbackHeld !== undefined &&
+          typeof journal.rollbackHeld !== 'boolean') ||
+        (journal.orderMs !== undefined &&
+          (!Number.isSafeInteger(journal.orderMs) ||
+            (journal.orderMs as number) < 0)) ||
+        !Number.isSafeInteger(journal.previousGeneration) ||
+        journal.targetGeneration !== journal.previousGeneration + 1
+      ) {
+        throw new Error('invalid transaction journal schema');
+      }
+      journal.targetSnapshot = parseState(
+        JSON.stringify(journal.targetSnapshot),
+        journalPath,
+      );
+      if (journal.targetSnapshot.generation !== journal.targetGeneration) {
+        throw new Error('transaction target generation does not match');
+      }
+      this.assertRecoveredJournalPaths(journal, journalPath);
+      return journal;
+    } catch (error) {
+      if (error instanceof ExtensionStoreCorruptError) throw error;
+      throw new ExtensionStoreCorruptError(
+        `Extension transaction journal is corrupt at ${journalPath}.`,
+        { cause: error },
+      );
+    }
+  }
+
+  private async readRecoverableJournalUnlocked(
+    journalPath: string,
+  ): Promise<ExtensionTransactionJournal | undefined> {
+    try {
+      return await this.readJournalUnlocked(journalPath);
+    } catch (error) {
+      if (!(error instanceof ExtensionStoreCorruptError)) throw error;
+      const quarantined = await quarantineJournal(journalPath, error);
+      if (!quarantined) {
+        throw new ExtensionStoreCorruptError(
+          `Extension transaction journal is corrupt and could not be quarantined at ${journalPath}.`,
+          { cause: error },
+        );
+      }
+      return undefined;
+    }
+  }
+
+  private assertRecoveredJournalPaths(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+  ): void {
+    const extensionsRoot = path.resolve(this.extensionsDir);
+    const rollbackRoot = path.resolve(this.storeDir, 'rollback');
+    const stagingRoot = path.resolve(this.storeDir, 'staging');
+    const transactionsRoot = path.resolve(this.storeDir, 'transactions');
+    if (
+      path.dirname(path.resolve(journalPath)) !== transactionsRoot ||
+      path.basename(journalPath) !== `${journal.transactionId}.json` ||
+      path.dirname(path.resolve(journal.destinationDirectory)) !==
+        extensionsRoot ||
+      path.dirname(path.resolve(journal.backupDirectory)) !== rollbackRoot ||
+      (journal.stagingDirectory !== undefined &&
+        path.dirname(path.resolve(journal.stagingDirectory)) !== stagingRoot) ||
+      (journal.operation === 'uninstall' &&
+        journal.stagingDirectory !== undefined) ||
+      (journal.operation !== 'uninstall' && !journal.stagingDirectory)
+    ) {
+      throw new UnsafeRecoveredJournalError(
+        `Extension transaction ${journal.transactionId} contains unsafe paths.`,
+      );
+    }
+  }
+
+  /** Enumerates only a real directory: `readdir` follows a link at the root. */
+  private async readRealDirectory(
+    directory: string,
+  ): Promise<Dirent[] | undefined> {
+    const stats = await lstatOrNull(directory);
+    if (!stats?.isDirectory()) return undefined;
+    return await fsp.readdir(directory, { withFileTypes: true });
+  }
+
+  private async pruneStalePaths(
+    stagingDirectory: string,
+    destinationDirectory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    const entries = await this.readRealDirectory(destinationDirectory);
+    if (!entries) return;
+    for (const entry of entries) {
+      const destination = path.join(destinationDirectory, entry.name);
+      const staged = path.join(stagingDirectory, entry.name);
+      const stagedStats = await lstatOrNull(staged);
+      if (!stagedStats) {
+        await this.removeWithRetry(destination, budget);
+        continue;
+      }
+      if (stagedStats.isDirectory() && entry.isDirectory()) {
+        await this.pruneStalePaths(staged, destination, budget);
+      }
+    }
+  }
+
+  /** Removes what `fsp.cp` cannot replace, so the copy ahead of the prune runs. */
+  private async removeKindConflicts(
+    referenceDirectory: string,
+    destinationDirectory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    const entries = await this.readRealDirectory(destinationDirectory);
+    if (!entries) return;
+    for (const entry of entries) {
+      const destination = path.join(destinationDirectory, entry.name);
+      const reference = path.join(referenceDirectory, entry.name);
+      const referenceStats = await lstatOrNull(reference);
+      if (!referenceStats) continue;
+      if (entryKind(referenceStats) !== entryKind(entry)) {
+        await this.removeWithRetry(destination, budget);
+        continue;
+      }
+      if (referenceStats.isDirectory()) {
+        await this.removeKindConflicts(reference, destination, budget);
+      }
+    }
+  }
+
+  private async emptyDirectory(
+    directory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    const entries = await this.readRealDirectory(directory);
+    if (!entries) {
+      // A linked root: unlink it instead of emptying what it points at.
+      await this.removeWithRetry(directory, budget);
+      return;
+    }
+    for (const entry of entries) {
+      await this.removeWithRetry(path.join(directory, entry.name), budget);
+    }
+  }
+
+  /** A linked or non-directory root fails every copy over it, so replace it. */
+  private async removeNonDirectoryRoot(
+    directory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    const stats = await lstatOrNull(directory);
+    if (stats && !stats.isDirectory()) {
+      await this.removeWithRetry(directory, budget);
+    }
+  }
+
+  /**
+   * Runs a filesystem step, retrying the lock errors the rename path absorbs.
+   * The sleeps come out of a shared budget, so a tree whose entries are each
+   * held retries each of them once instead of four times.
+   */
+  private async retryLock<T>(
+    step: () => Promise<T>,
+    budget: LockRetryBudget,
+  ): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await step();
+      } catch (error: unknown) {
+        const delayMs = 50 * 2 ** attempt;
+        if (
+          !isDirectoryLockError(error) ||
+          attempt >= 3 ||
+          budget.remainingMs < delayMs
+        ) {
+          throw error;
+        }
+        budget.remainingMs -= delayMs;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  /** Copies a tree, keeping symlink targets verbatim. */
+  private async copyTree(
+    sourceDirectory: string,
+    destinationDirectory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    await this.retryLock(
+      () =>
+        fsp.cp(sourceDirectory, destinationDirectory, {
+          recursive: true,
+          force: true,
+          preserveTimestamps: true,
+          verbatimSymlinks: true,
+        }),
+      budget,
+    );
+  }
+
+  private async removeWithRetry(
+    target: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    await this.retryLock(
+      () => fsp.rm(target, { recursive: true, force: true }),
+      budget,
+    );
+  }
+
+  private async removeDirectoryInPlace(
+    directory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    await this.withLockHint(directory, async () => {
+      await this.emptyDirectory(directory, budget);
+      // `rm`, not `rmdir`: emptying a linked root already unlinked it.
+      await this.removeWithRetry(directory, budget);
+    });
+  }
+
+  private async withLockHint<T>(
+    directory: string,
+    step: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await step();
+    } catch (error) {
+      // The hint is actionable only where EPERM/EBUSY mean a held handle;
+      // elsewhere the raw errno is the honest report, as at the sibling
+      // rename sites.
+      if (process.platform === 'win32' && isDirectoryLockError(error)) {
+        throw new ExtensionDirectoryLockedError(directory, { cause: error });
+      }
+      throw error;
+    }
+  }
+
+  private async removeTransactionBackup(
+    journal: ExtensionTransactionJournal,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    // Demoting the backup to the `.partial` name first means a removal that
+    // dies half-way can never be restored from: the next pass sees no backup.
+    const partial = partialBackupPath(journal.backupDirectory);
+    await this.removeWithRetry(partial, budget);
+    if (await this.pathExists(journal.backupDirectory)) {
+      await renameWithRetry(journal.backupDirectory, partial, 3, 50);
+      await this.removeWithRetry(partial, budget);
+    }
+  }
+
+  /**
+   * Removes the journal once its rollback is done. A backup a lock error keeps
+   * is retried by a later operation, so the journal stays and says which step
+   * is left - re-running the restore would copy an already-restored backup.
+   */
+  private async finishRollback(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    try {
+      await this.removeTransactionTeardown(journal, journalPath, budget);
+    } catch (error: unknown) {
+      debugLogger.warn('extension transaction cleanup blocked:', error);
+      // The rollback is done, so the step owed is the cleanup even when the
+      // error is not a lock: marking first stops a later pass restoring again
+      // from a backup this call already half-deleted. A marker that cannot
+      // land reports instead of leaving the journal unrecorded.
+      if (
+        !(await this.recordPendingStep(
+          journal,
+          journalPath,
+          'cleanup',
+          isDirectoryLockError(error) ? 'held' : 'fault',
+        ))
+      ) {
+        throw error;
+      }
+      if (!isDirectoryLockError(error)) throw error;
+    }
+  }
+
+  private async rollbackJournal(
+    journal: ExtensionTransactionJournal,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    const hasBackup = await this.pathExists(journal.backupDirectory);
+    const copySwap = journal.swapStrategy === 'copy';
+    // Restore over the live tree: emptying first would leave a manifest-less
+    // destination that still reads as installed and blocks a reinstall.
+    if (
+      !copySwap &&
+      (hasBackup ||
+        (journal.operation === 'install' &&
+          !(journal.stagingDirectory
+            ? await this.pathExists(journal.stagingDirectory)
+            : false)))
+    ) {
+      await this.removeWithRetry(journal.destinationDirectory, budget);
+    }
+    if (hasBackup) {
+      if (copySwap) {
+        await this.removeNonDirectoryRoot(journal.destinationDirectory, budget);
+        await this.removeKindConflicts(
+          journal.backupDirectory,
+          journal.destinationDirectory,
+          budget,
+        );
+        await this.copyTree(
+          journal.backupDirectory,
+          journal.destinationDirectory,
+          budget,
+        );
+        await this.pruneStalePaths(
+          journal.backupDirectory,
+          journal.destinationDirectory,
+          budget,
+        );
+      } else {
+        await renameWithRetry(
+          journal.backupDirectory,
+          journal.destinationDirectory,
+          3,
+          50,
+        );
+      }
+    }
+  }
+
+  /** The removals every transaction ends on, in one order, all retried. */
+  private async removeTransactionTeardown(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    await this.removeTransactionBackup(journal, budget);
+    if (journal.stagingDirectory) {
+      await this.removeWithRetry(journal.stagingDirectory, budget);
+    }
+    await this.removeWithRetry(journalPath, budget);
+  }
+}

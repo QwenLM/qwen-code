@@ -24,6 +24,7 @@ const LABEL_WIDTH = 15;
 type ServerAction =
   | 'view-tools'
   | 'view-resources'
+  | 'approve'
   | 'reconnect'
   | 'toggle-disable'
   | 'authenticate'
@@ -33,6 +34,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   server,
   onViewTools,
   onViewResources,
+  onApprove,
   onReconnect,
   onDisable,
   onAuthenticate,
@@ -40,15 +42,20 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   onBack,
   isActive = true,
 }) => {
+  // 受门控（#4615）但未审批的 server 被 discovery 跳过，不会进入连接/认证流程，
+  // 审批原因优先展示。
+  const awaitingApproval =
+    !!server && !server.isDisabled && !!server.approvalState;
   // 未连接且需要认证时，状态以"需要认证"展示，避免误导用户去排查连接问题。
   // requiresAuth 是加载时的快照，状态被实时推到 connected 后不再适用。
   const needsAuth =
     !!server &&
     !server.isDisabled &&
+    !awaitingApproval &&
     !!server.requiresAuth &&
     server.status !== MCPServerStatus.CONNECTED;
   const statusColor = server
-    ? server.isDisabled || needsAuth
+    ? server.isDisabled || awaitingApproval || needsAuth
       ? 'yellow'
       : getStatusColor(server.status)
     : 'gray';
@@ -90,12 +97,27 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       });
     }
 
-    // 只在服务器未禁用且已断开连接时显示"重新连接"选项
-    if (!server.isDisabled && server.status === 'disconnected') {
+    // 只在服务器未禁用且已断开连接时显示"重新连接"选项。受门控但未审批的 server
+    // 被 discovery 跳过，重连无法推进（仍是 pending/rejected），故隐藏以与状态文案一致。
+    if (
+      !server.isDisabled &&
+      !awaitingApproval &&
+      server.status === 'disconnected'
+    ) {
       result.push({
         key: 'reconnect',
         label: t('Reconnect'),
         value: 'reconnect',
+      });
+    }
+
+    // 受门控但未审批的 server 显示"审批"按钮，让用户可以在 /mcp 中直接审批
+    // 而不必等待启动时的弹窗。
+    if (awaitingApproval && onApprove) {
+      result.push({
+        key: 'approve',
+        label: t('Approve'),
+        value: 'approve',
       });
     }
 
@@ -106,8 +128,8 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       value: 'toggle-disable',
     });
 
-    // 已认证的服务器显示"重新认证"，未认证的显示"认证"
-    if (!server.isDisabled) {
+    // 已认证的服务器显示"重新认证"，未认证的显示"认证"。审批未通过时认证同样无法推进，隐藏。
+    if (!server.isDisabled && !awaitingApproval) {
       result.push({
         key: 'authenticate',
         label: server.hasOAuthTokens ? t('Re-authenticate') : t('Authenticate'),
@@ -125,7 +147,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
     }
 
     return result;
-  }, [server, onViewResources]);
+  }, [server, onViewResources, onApprove, awaitingApproval]);
 
   useKeypress(
     (key) => {
@@ -165,9 +187,13 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
               {getStatusIcon(server.status)}{' '}
               {server.isDisabled
                 ? t('disabled')
-                : needsAuth
-                  ? t('needs authentication')
-                  : t(server.status)}
+                : awaitingApproval
+                  ? server.approvalState === 'rejected'
+                    ? t('rejected — edit config to re-approve')
+                    : t('needs approval')
+                  : needsAuth
+                    ? t('needs authentication')
+                    : t(server.status)}
             </Text>
           </Box>
         </Box>
@@ -284,6 +310,9 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
                 break;
               case 'view-resources':
                 onViewResources?.();
+                break;
+              case 'approve':
+                onApprove?.();
                 break;
               case 'reconnect':
                 onReconnect?.();

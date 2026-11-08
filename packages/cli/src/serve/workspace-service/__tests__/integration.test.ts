@@ -112,7 +112,7 @@ function minimalBridge(
       .fn()
       .mockImplementation((_method: string, idle: () => unknown) => idle()),
     invokeWorkspaceCommand: vi.fn().mockResolvedValue({}),
-    killSession: vi.fn().mockResolvedValue(undefined),
+    killSession: vi.fn().mockResolvedValue(true),
     detachClient: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
     killAllSync: vi.fn(),
@@ -239,6 +239,38 @@ describe('workspace service REST integration', () => {
       expect(ctx.workspaceCwd).toBe(WS_BOUND);
       // No client-id header on GET — should be undefined
       expect(ctx.originatorClientId).toBeUndefined();
+    });
+
+    it('only includes userInvocable when manual invocation is disabled', async () => {
+      const { app } = createTestApp({
+        workspaceOverrides: {
+          getWorkspaceSkillsStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [
+              { name: 'normal-skill', source: 'project' },
+              {
+                name: 'hidden-skill',
+                source: 'project',
+                userInvocable: false,
+              },
+            ],
+          }),
+        },
+      });
+
+      const res = await request(app).get('/workspace/skills').set(hostHeader());
+
+      expect(res.status).toBe(200);
+      expect(res.body.skills).toEqual([
+        { name: 'normal-skill', source: 'project' },
+        {
+          name: 'hidden-skill',
+          source: 'project',
+          userInvocable: false,
+        },
+      ]);
     });
   });
 

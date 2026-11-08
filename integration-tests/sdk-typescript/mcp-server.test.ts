@@ -39,6 +39,28 @@ const SHARED_TEST_OPTIONS = {
 const MCP_ADD_TOOL = 'mcp__test-math-server__add';
 const MCP_MULTIPLY_TOOL = 'mcp__test-math-server__multiply';
 
+function getInvokedToolName(block: ToolUseBlock): string {
+  if (
+    block.name !== 'tool_call' ||
+    typeof block.input !== 'object' ||
+    block.input === null
+  ) {
+    return block.name;
+  }
+
+  const targetName = (block.input as { name?: unknown }).name;
+  return typeof targetName === 'string' ? targetName : block.name;
+}
+
+function findMcpToolUseBlocks(
+  message: Parameters<typeof findToolUseBlocks>[0],
+  toolName: string,
+): ToolUseBlock[] {
+  return findToolUseBlocks(message).filter(
+    (block) => getInvokedToolName(block) === toolName,
+  );
+}
+
 describe('MCP Server Integration (E2E)', () => {
   let helper: SDKTestHelper;
   let serverScriptPath: string;
@@ -86,7 +108,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
+            const toolUseBlocks = findMcpToolUseBlocks(message, MCP_ADD_TOOL);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -137,7 +159,10 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, MCP_MULTIPLY_TOOL);
+            const toolUseBlocks = findMcpToolUseBlocks(
+              message,
+              MCP_MULTIPLY_TOOL,
+            );
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -235,7 +260,7 @@ describe('MCP Server Integration (E2E)', () => {
           if (isSDKAssistantMessage(message)) {
             const toolUseBlocks = findToolUseBlocks(message);
             toolUseBlocks.forEach((block) => {
-              toolCalls.push(block.name);
+              toolCalls.push(getInvokedToolName(block));
             });
             assistantText += extractText(message.message.content);
           }
@@ -282,7 +307,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
+            const toolUseBlocks = findMcpToolUseBlocks(message, MCP_ADD_TOOL);
             addToolCalls.push(...toolUseBlocks);
             assistantText += extractText(message.message.content);
           }
@@ -364,7 +389,7 @@ describe('MCP Server Integration (E2E)', () => {
           if (isSDKAssistantMessage(message)) {
             const toolUseBlocks = findToolUseBlocks(message);
             toolUseBlocks.forEach((block) => {
-              toolCalls.push(block.name);
+              toolCalls.push(getInvokedToolName(block));
             });
             assistantText += extractText(message.message.content);
           }
@@ -452,7 +477,7 @@ describe('MCP Server Integration (E2E)', () => {
           if (isSDKAssistantMessage(message)) {
             const toolUseBlocks = findToolUseBlocks(message);
             toolUseBlocks.forEach((block) => {
-              toolCalls.push(block.name);
+              toolCalls.push(getInvokedToolName(block));
             });
             assistantText += extractText(message.message.content);
           }
@@ -502,7 +527,7 @@ describe('MCP Server Integration (E2E)', () => {
           messageTypes.push(message.type);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
+            const toolUseBlocks = findMcpToolUseBlocks(message, MCP_ADD_TOOL);
             const addToolUseBlock = toolUseBlocks[0];
             if (addToolUseBlock) {
               addToolUseId = addToolUseId ?? addToolUseBlock.id;

@@ -27,6 +27,7 @@ import {
   isSDKSystemMessage,
   isSDKResultMessage,
 } from '@qwen-code/sdk';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 
 // ============================================================================
 // Core Test Helper Class
@@ -77,6 +78,13 @@ export class SDKTestHelper {
     const sanitizedName = this.sanitizeTestName(testName);
     this.testDir = join(this.baseDir, sanitizedName);
 
+    // Suites call setup() from beforeEach with a fixed name, so every case in a
+    // file lands in this same directory — and cleanup() below keeps it whenever
+    // KEEP_OUTPUT is set, which CI always sets. Without this reset one case's
+    // files stay visible to the next: a `.env` written by an earlier case made a
+    // later write fail the prior-read check instead of the permission check it
+    // was asserting, so the suite passed locally and failed only in CI.
+    await rm(this.testDir, { recursive: true, force: true });
     await mkdir(this.testDir, { recursive: true });
 
     // Optionally create .qwen/settings.json for CLI configuration
@@ -91,8 +99,17 @@ export class SDKTestHelper {
           ? (optionsSettings['general'] as Record<string, unknown>)
           : {};
 
+      const memorySettings =
+        typeof optionsSettings['memory'] === 'object' &&
+        optionsSettings['memory'] !== null
+          ? (optionsSettings['memory'] as Record<string, unknown>)
+          : {};
+
       const settings = {
         ...optionsSettings,
+        // Per-key merge: a suite opting back into one flag keeps the other
+        // off.
+        memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
         telemetry: {
           enabled: false, // SDK tests don't need telemetry
         },

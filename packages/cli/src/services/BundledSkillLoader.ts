@@ -9,7 +9,7 @@ import {
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
-  applySkillAllowedTools,
+  applySkillSideEffects,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -19,6 +19,13 @@ import type {
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
+import {
+  writeSkillArgs,
+  clearSkillArgs,
+  staleArgsWarning,
+  skillArgsNote,
+  skillArgsPath,
+} from './skill-args-file.js';
 
 const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
 
@@ -91,15 +98,35 @@ export class BundledSkillLoader implements ICommandLoader {
           level: skill.level,
         },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
-          // Auto-approve the skill's declared allowedTools before its body is submitted.
-          applySkillAllowedTools(
-            this.config?.getPermissionManager(),
-            skill.allowedTools,
-          );
+          if (this.config?.getShellExecutionSandbox?.()) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content:
+                'Skill commands are not yet supported with tools.executionSandbox.',
+            };
+          }
+          // Re-check enabledness here, not just in the load-time filter above:
+          // `skills.disabled` can change after the command registry was built,
+          // and a stale command must not install a disabled skill's side
+          // effects. `SkillCommandLoader` refuses the same way.
+          if (this.config && !this.config.isSkillEnabled(skill)) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: `Skill "${skill.name}" is disabled.`,
+            };
+          }
+          // Apply the skill's declared side effects — allowedTools and
+          // frontmatter hooks — before its body is submitted, matching the
+          // Skill tool's model-invocation path (#11067).
+          await applySkillSideEffects(this.config, skill);
 
           // Resolve template variables in skill body
           let body = skill.body;
           const modelId = this.config?.getModel()?.trim() || '';
+          const cliVersion = this.config?.getCliVersion()?.trim() || 'unknown';
+          body = body.replaceAll('{{cliVersion}}', cliVersion);
           if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
             body = body.replaceAll('{{model}}', modelId);
             body = body.replaceAll('YOUR_MODEL_ID', modelId);
@@ -114,12 +141,36 @@ export class BundledSkillLoader implements ICommandLoader {
             dirname(skill.filePath),
             body,
           );
-          const content = context.invocation?.args
-            ? appendToLastTextPart(
-                [{ text: skillPrompt }],
-                context.invocation.raw,
-              )
-            : [{ text: skillPrompt }];
+
+          // Write the arguments down before the model gets a say in them. A
+          // skill that needs them as data used to ask the model to copy them
+          // into a file, and `/review 6771` was duly copied as `--effort high`
+          // — an example lifted out of the skill's own docs. The parser then did
+          // its job perfectly on the wrong input, reviewed the local working
+          // tree instead of the pull request, found it clean, and reported
+          // "no changes to review".
+          const rawArgs = context.invocation?.args ?? '';
+          let content;
+          if (rawArgs) {
+            content = appendToLastTextPart(
+              [{ text: skillPrompt }],
+              context.invocation!.raw +
+                (writeSkillArgs(skill.name, rawArgs)
+                  ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                  : ''),
+            );
+          } else {
+            // A bare invocation records no arguments — and must erase any record
+            // an earlier argument-bearing run left, or that run's posting
+            // authority is inherited by this one. If the erase FAILS, the stale
+            // record is still on disk and `submit` will still trust it, so the
+            // skill is told: silence here would let a `/review 6771 --comment`
+            // from earlier in the session authorise this bare run's post.
+            content = [{ text: skillPrompt }];
+            if (!clearSkillArgs(skill.name)) {
+              content = appendToLastTextPart(content, staleArgsWarning());
+            }
+          }
 
           return {
             type: 'submit_prompt',

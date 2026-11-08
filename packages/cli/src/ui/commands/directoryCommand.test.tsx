@@ -5,17 +5,27 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { directoryCommand, getDirPathCompletions } from './directoryCommand.js';
 import {
-  directoryCommand,
   expandHomeDir,
-  getDirPathCompletions,
-} from './directoryCommand.js';
-import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
+  loadServerHierarchicalMemory,
+  type Config,
+  type WorkspaceContext,
+} from '@qwen-code/qwen-code-core';
 import type { CommandContext, SlashCommandActionReturn } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    loadServerHierarchicalMemory: vi.fn(),
+  };
+});
 
 describe('directoryCommand', () => {
   let mockContext: CommandContext;
@@ -66,17 +76,18 @@ describe('directoryCommand', () => {
     mockConfig = {
       getWorkspaceContext: () => mockWorkspaceContext,
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         addDirectoryContext: vi.fn(),
       }),
       getWorkingDir: () => '/test/dir',
       shouldLoadMemoryFromIncludeDirectories: () => false,
+      isSafeMode: () => false,
       getDebugMode: () => false,
       getFileService: () => ({}),
       getExtensionContextFilePaths: () => [],
       getFileFilteringOptions: () => ({ ignore: [], include: [] }),
       setUserMemory: vi.fn(),
-      setGeminiMdFileCount: vi.fn(),
+      setMemoryFileCount: vi.fn(),
     } as unknown as Config;
 
     mockContext = {
@@ -188,6 +199,17 @@ describe('directoryCommand', () => {
       });
     });
 
+    it('should expand Windows-style home-relative paths before adding directories', async () => {
+      const homeProject = path.join(os.homedir(), 'new-project');
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, '~\\new-project');
+
+      expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(
+        homeProject,
+      );
+    });
+
     it('should persist added directories to workspace settings', async () => {
       const existingPath = path.normalize('/home/user/existing-project');
       const newPath = path.normalize('/home/user/new-project');
@@ -225,6 +247,51 @@ describe('directoryCommand', () => {
         'context.includeDirectories',
         [existingPath],
       );
+    });
+
+    it('refreshes context file paths when reloading memory from include directories', async () => {
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: 'reloaded memory',
+        fileCount: 2,
+        contextFilePaths: ['a/QWEN.md', '~/.qwen/QWEN.md'],
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/test/dir',
+      });
+      mockConfig.shouldLoadMemoryFromIncludeDirectories = () => true;
+      const extensionRuleSources = [
+        { name: 'charts', dir: '/ext/charts/rules' },
+      ];
+      mockConfig.getExtensionRuleSources = () => extensionRuleSources;
+      mockConfig.getFolderTrust = vi.fn().mockReturnValue(true);
+      mockConfig.getContextRuleExcludes = vi.fn().mockReturnValue([]);
+      mockConfig.setContextFilePaths = vi.fn();
+      mockConfig.setConditionalRulesRegistry = vi.fn();
+      mockContext.ui.setMemoryFileCount = vi.fn();
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(
+        mockContext,
+        path.normalize('/home/user/new-project'),
+      );
+
+      // Pin the CWD anchor (getWorkingDir, not process.cwd) and the new
+      // directory so an anchor regression can't slip through green.
+      expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+        '/test/dir',
+        expect.arrayContaining([path.normalize('/home/user/new-project')]),
+        expect.anything(),
+        expect.anything(),
+        true,
+        'tree',
+        expect.anything(),
+        expect.objectContaining({ extensionRuleSources }),
+      );
+      expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
+      expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([
+        'a/QWEN.md',
+        '~/.qwen/QWEN.md',
+      ]);
     });
 
     it('should not persist directories skipped by the workspace context', async () => {
@@ -388,11 +455,11 @@ describe('directoryCommand', () => {
     });
 
     it('should warn when gemini.addDirectoryContext throws', async () => {
-      vi.mocked(mockConfig.getGeminiClient).mockReturnValue({
+      vi.mocked(mockConfig.getLlmClient).mockReturnValue({
         addDirectoryContext: vi
           .fn()
           .mockRejectedValue(new Error('gemini unavailable')),
-      } as unknown as ReturnType<typeof mockConfig.getGeminiClient>);
+      } as unknown as ReturnType<typeof mockConfig.getLlmClient>);
       const newPath = path.normalize('/home/user/new-project');
       if (!addCommand?.action) throw new Error('No action');
       const result = await addCommand.action(mockContext, newPath);
@@ -468,12 +535,19 @@ describe('getDirPathCompletions', () => {
 
         // Directory values should end with path separator for continued navigation
         expect(suggestion.value.endsWith(path.sep)).toBe(true);
-
-        // Should match one of our created directories
-        const dirNameWithoutSlash = suggestion.value.slice(0, -1);
-        const basename = path.basename(dirNameWithoutSlash);
-        expect(['sub1', 'sub2'].includes(basename)).toBe(true);
       });
+
+      // The first result should be the typed directory itself (#7318)
+      const normalizedTempDir = tempTestDir.endsWith(path.sep)
+        ? tempTestDir
+        : tempTestDir + path.sep;
+      expect(results[0].value).toBe(normalizedTempDir);
+
+      // Remaining results should be child directories
+      const childBasenames = results
+        .slice(1)
+        .map((s) => path.basename(s.value.slice(0, -1)));
+      expect(childBasenames).toEqual(expect.arrayContaining(['sub1', 'sub2']));
     });
 
     it('should filter by prefix while preserving isDirectory flag', () => {
@@ -492,6 +566,33 @@ describe('getDirPathCompletions', () => {
         const dirname = path.dirname(suggestion.value);
         expect(dirname).toContain(tempTestDir);
       });
+    });
+
+    it('should complete Windows-style home-relative paths', () => {
+      const homeSubdir = fs.mkdtempSync(
+        path.join(os.homedir(), `qwen-dir-complete-${process.pid}-`),
+      );
+      const partialName = path.basename(homeSubdir).slice(0, -2);
+
+      try {
+        const results = getDirPathCompletions(`~\\${partialName}`);
+
+        expect(results.length).toBeGreaterThan(0);
+        expect(
+          results.some(
+            (suggestion) => suggestion.value === homeSubdir + path.sep,
+          ),
+        ).toBe(true);
+        results.forEach((suggestion) => {
+          expect(suggestion.isDirectory).toBe(true);
+          expect(path.basename(suggestion.value.slice(0, -1))).toContain(
+            partialName,
+          );
+          expect(suggestion.value.endsWith(path.sep)).toBe(true);
+        });
+      } finally {
+        fs.rmSync(homeSubdir, { recursive: true, force: true });
+      }
     });
 
     it('should support comma-separated paths with isDirectory flag on last segment', () => {
@@ -514,12 +615,15 @@ describe('getDirPathCompletions', () => {
 
       expect(deepResults.length).toBeGreaterThan(0);
 
-      // Only directories inside sub1 should be returned
-      deepResults.forEach((suggestion) => {
+      // First result should be the typed directory itself (#7318)
+      const sub1Path = path.join(tempTestDir, 'sub1') + path.sep;
+      expect(deepResults[0].value).toBe(sub1Path);
+
+      // Remaining results should be directories inside sub1
+      deepResults.slice(1).forEach((suggestion) => {
         expect(suggestion.isDirectory).toBe(true);
         expect(suggestion.value).toContain('sub1');
         expect(suggestion.value.endsWith(path.sep)).toBe(true);
-        // The nested 'deep' directory should be in the results
         const basename = path.basename(suggestion.value.slice(0, -1));
         expect(basename).toBe('deep');
       });

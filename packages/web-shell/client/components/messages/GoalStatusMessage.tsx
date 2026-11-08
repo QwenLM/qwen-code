@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
@@ -11,6 +10,9 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'blocked'
+  | 'usage_limited'
+  | 'paused'
   | 'checking';
 
 export interface SerializedGoalStatusMessage {
@@ -21,8 +23,6 @@ export interface SerializedGoalStatusMessage {
   setAt?: number;
   lastReason?: string;
 }
-
-export const GOAL_STATUS_ACTIVE_EVENT = 'web-shell-goal-status-active';
 
 const {
   serialize: serializeGoalStatusMessage,
@@ -37,6 +37,12 @@ const VALID_GOAL_KINDS = new Set<string>([
   'cleared',
   'failed',
   'aborted',
+  'blocked',
+  'usage_limited',
+  // A paused goal is not running. Dropping it here left the footer and
+  // the active-goal derivation falling through to the previous `set`
+  // card, so the UI kept claiming autonomous work was under way.
+  'paused',
   'checking',
 ]);
 
@@ -88,14 +94,12 @@ function getTitle(
   status: SerializedGoalStatusMessage,
   t: ReturnType<typeof useI18n>['t'],
 ): {
-  prefix: string;
   title: string;
   colorClass: string;
 } {
   switch (status.kind) {
     case 'checking':
       return {
-        prefix: '○',
         title: `${t('goal.check')}${
           status.iterations && status.iterations > 0
             ? ` · ${t('goal.turnLabel', { count: status.iterations })}`
@@ -105,32 +109,42 @@ function getTitle(
       };
     case 'set':
       return {
-        prefix: '◎',
         title: t('goal.set'),
         colorClass: styles.accent,
       };
     case 'achieved':
       return {
-        prefix: '✓',
         title: t('goal.achieved'),
         colorClass: styles.success,
       };
     case 'cleared':
       return {
-        prefix: '○',
         title: t('goal.cleared'),
         colorClass: styles.muted,
       };
     case 'failed':
       return {
-        prefix: '✖',
         title: t('goal.failed'),
         colorClass: styles.error,
       };
     case 'aborted':
       return {
-        prefix: '!',
         title: t('goal.aborted'),
+        colorClass: styles.warning,
+      };
+    case 'blocked':
+      return {
+        title: t('goal.blocked'),
+        colorClass: styles.warning,
+      };
+    case 'usage_limited':
+      return {
+        title: t('goal.usageLimited'),
+        colorClass: styles.warning,
+      };
+    case 'paused':
+      return {
+        title: t('goal.paused'),
         colorClass: styles.warning,
       };
   }
@@ -138,26 +152,10 @@ function getTitle(
 
 export function GoalStatusMessage({
   status,
-  activateFooter = false,
 }: {
   status: SerializedGoalStatusMessage;
-  activateFooter?: boolean;
 }) {
   const { t } = useI18n();
-
-  useEffect(() => {
-    if (!activateFooter) return;
-    const active = status.kind === 'set' || status.kind === 'checking';
-    window.dispatchEvent(
-      new CustomEvent(GOAL_STATUS_ACTIVE_EVENT, {
-        detail: {
-          active,
-          condition: status.condition,
-          setAt: status.setAt,
-        },
-      }),
-    );
-  }, [activateFooter, status.condition, status.kind, status.setAt]);
 
   const title = getTitle(status, t);
   const stats: string[] = [];
@@ -174,16 +172,16 @@ export function GoalStatusMessage({
     (status.kind === 'checking' ||
       status.kind === 'achieved' ||
       status.kind === 'failed' ||
-      status.kind === 'aborted') &&
+      status.kind === 'aborted' ||
+      status.kind === 'blocked' ||
+      status.kind === 'usage_limited' ||
+      status.kind === 'paused') &&
     status.lastReason?.trim();
   const reasonLabel =
     status.kind === 'checking' ? t('goal.judge') : t('goal.lastCheck');
 
   return (
     <div className={styles.message}>
-      <span className={`${styles.prefix} ${title.colorClass}`}>
-        {title.prefix}
-      </span>
       <div className={styles.body}>
         <div className={`${styles.title} ${title.colorClass}`}>
           {title.title}

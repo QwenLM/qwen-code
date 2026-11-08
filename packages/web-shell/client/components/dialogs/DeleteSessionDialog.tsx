@@ -1,21 +1,45 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
+import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
+import {
+  useConnection,
+  type DaemonSessionSummary,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
+import { useFilterInput } from '../../hooks/useFilterInput';
+import { SessionRow } from './SessionRow';
+import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 
 interface DeleteSessionDialogProps {
-  onDeleted: (sessionIds: string[]) => void;
+  /**
+   * `attachedSessionId` is the session this client was attached to when the
+   * delete was confirmed. The daemon publishes the terminal `session_closed`
+   * frame before it answers the delete request, so by the time this fires the
+   * caller can no longer read the attachment off the connection (#12619).
+   */
+  onDeleted: (
+    sessionIds: string[],
+    meta?: { attachedSessionId?: string },
+  ) => void;
   onError: (error: unknown) => void;
   onClose: () => void;
+  workspaceCwd?: string;
 }
+
+const LIST_ID = 'delete-session-list';
+const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
 
 export function DeleteSessionDialog({
   onDeleted,
   onError,
   onClose,
+  workspaceCwd,
 }: DeleteSessionDialogProps) {
   const { t } = useI18n();
+  const availability = useDaemonAvailability();
   const connection = useConnection();
   const {
     sessions,
@@ -23,12 +47,30 @@ export function DeleteSessionDialog({
     error: sessionsError,
     deleteSession,
     deleteSessions,
-  } = useSessions({ autoLoad: true });
+  } = useScopedSessions(workspaceCwd, {
+    autoLoad: true,
+    maxAgeMs: 1_000,
+  });
   const currentSessionId = connection.sessionId;
+  const outageMessage =
+    availability !== 'available'
+      ? t(
+          availability === 'auth-required'
+            ? 'daemon.connection.authRequired'
+            : 'daemon.connection.unavailable',
+        )
+      : undefined;
+  const sessionErrorMessage = outageMessage ?? sessionsError?.message;
   const [deleting, setDeleting] = useState(false);
-  const [selectedIdx, setSelectedIdx] = useState(0);
+  // `selectedIdx` is the keyboard/hover cursor (roving highlight, -1 = none —
+  // see ResumeDialog for the rationale); `selectedIds` is the multi-select set
+  // marked for deletion (shown by the [x] checkbox).
+  const [selectedIdx, setSelectedIdx] = useState(-1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [searchQuery, setSearchQuery] = useState('');
+  const { filterValue: filterQuery, inputProps } = useFilterInput(() => {
+    setSelectedIdx(-1);
+    setSelectedIds(new Set());
+  });
   const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -39,27 +81,55 @@ export function DeleteSessionDialog({
 
   const filtered = useMemo(
     () =>
-      searchQuery
-        ? sessions.filter((s) => {
-            const q = searchQuery.toLowerCase();
-            return (
-              (s.displayName || '').toLowerCase().includes(q) ||
-              s.sessionId.toLowerCase().includes(q)
-            );
-          })
-        : sessions,
-    [sessions, searchQuery],
+      sessions.filter((session) => {
+        if (session.sourceType === 'qwen-live') return false;
+        const q = filterQuery.toLowerCase();
+        return (
+          !q ||
+          (session.displayName || '').toLowerCase().includes(q) ||
+          session.sessionId.toLowerCase().includes(q) ||
+          sessionMatchesGitQuery(session, q)
+        );
+      }),
+    [sessions, filterQuery],
+  );
+
+  // The current session is deletable (issue #12619), but deleting the session
+  // the client is attached to tears its runtime down — match the Session
+  // Overview's idle-only policy for that case.
+  const blocksCurrentDelete = useCallback(
+    (session: DaemonSessionSummary) =>
+      session.sessionId === currentSessionId &&
+      (Boolean(session.hasActivePrompt) ||
+        session.activeWorkState === 'active'),
+    [currentSessionId],
+  );
+
+  const toggleSelection = useCallback(
+    (session: DaemonSessionSummary) => {
+      if (blocksCurrentDelete(session)) return;
+      const sessionId = session.sessionId;
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(sessionId)) {
+          next.delete(sessionId);
+        } else {
+          next.add(sessionId);
+        }
+        return next;
+      });
+    },
+    [blocksCurrentDelete],
   );
 
   useEffect(() => {
-    if (searchQuery && selectedIds.size > 0) {
-      const filteredSet = new Set(filtered.map((s) => s.sessionId));
-      setSelectedIds((prev) => {
-        const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
-        return pruned.size === prev.size ? prev : pruned;
-      });
-    }
-  }, [searchQuery, filtered, selectedIds.size]);
+    if (selectedIds.size === 0) return;
+    const filteredSet = new Set(filtered.map((s) => s.sessionId));
+    setSelectedIds((prev) => {
+      const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
+      return pruned.size === prev.size ? prev : pruned;
+    });
+  }, [filtered, selectedIds.size]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -78,24 +148,24 @@ export function DeleteSessionDialog({
     inputRef.current?.focus();
   }, []);
 
-  const toggleSelection = useCallback(
-    (sessionId: string) => {
-      if (sessionId === currentSessionId) return;
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        if (next.has(sessionId)) {
-          next.delete(sessionId);
-        } else {
-          next.add(sessionId);
-        }
-        return next;
-      });
+  // Enter toggles the cursor row's checkbox; the actual (destructive) delete
+  // still requires pressing the danger button — mirroring the click behaviour.
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: filtered.length,
+    activeIndex: selectedIdx,
+    onActiveIndexChange: setSelectedIdx,
+    onConfirm: (index) => {
+      const session = filtered[index];
+      if (session) toggleSelection(session);
     },
-    [currentSessionId],
-  );
+  });
 
   const handleDelete = useCallback(() => {
     if (deleting) return;
+    // Captured before the request: the daemon's terminal `session_closed`
+    // frame clears `connection.sessionId` before the delete resolves, so this
+    // is the last point where the attachment is still readable (#12619).
+    const attachedSessionId = currentSessionId;
 
     if (selectedIds.size > 0) {
       const filteredSet = new Set(filtered.map((s) => s.sessionId));
@@ -142,11 +212,15 @@ export function DeleteSessionDialog({
             return;
           }
 
-          onDeleted([...res.removed, ...res.notFound]);
+          onDeleted([...res.removed, ...res.notFound], { attachedSessionId });
           onClose();
         })
         .catch((error: unknown) => {
-          onError(error);
+          onError(
+            isDaemonUnavailableError(error)
+              ? new Error(outageMessage ?? t('daemon.connection.unavailable'))
+              : error,
+          );
           setDeleting(false);
         });
       return;
@@ -154,7 +228,7 @@ export function DeleteSessionDialog({
 
     const session = filtered[selectedIdx];
     if (!session) return;
-    if (session.sessionId === currentSessionId) {
+    if (blocksCurrentDelete(session)) {
       setMessage(t('delete.cannotCurrent'));
       return;
     }
@@ -166,14 +240,19 @@ export function DeleteSessionDialog({
           setDeleting(false);
           return;
         }
-        onDeleted([session.sessionId]);
+        onDeleted([session.sessionId], { attachedSessionId });
         onClose();
       })
       .catch((error: unknown) => {
-        onError(error);
+        onError(
+          isDaemonUnavailableError(error)
+            ? new Error(outageMessage ?? t('daemon.connection.unavailable'))
+            : error,
+        );
         setDeleting(false);
       });
   }, [
+    blocksCurrentDelete,
     currentSessionId,
     deleteSession,
     deleteSessions,
@@ -182,6 +261,7 @@ export function DeleteSessionDialog({
     onClose,
     onDeleted,
     onError,
+    outageMessage,
     selectedIdx,
     selectedIds,
     t,
@@ -191,51 +271,64 @@ export function DeleteSessionDialog({
   const canDelete = !deleting && !loading && hasSelection;
 
   return (
-    <div className={dp('resume-picker', 'resume-picker-in-shell')}>
-      <div className={dp('resume-picker-search')}>
-        <span className={dp('resume-picker-search-label')}>
+    <div className={dp('picker', 'picker-in-shell')}>
+      <div className={dp('picker-search')}>
+        <span className={dp('picker-search-label')}>
           {t('resume.search')}:{' '}
         </span>
         <input
           ref={inputRef}
-          className={dp('resume-picker-search-input')}
-          value={searchQuery}
-          onChange={(e) => {
-            setSearchQuery(e.target.value);
-            setSelectedIdx(0);
-            setSelectedIds(new Set());
-          }}
+          className={dp('picker-search-input')}
+          aria-label={t('resume.search')}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded="true"
+          aria-controls={LIST_ID}
+          aria-activedescendant={
+            selectedIdx >= 0 && selectedIdx < filtered.length
+              ? optionId(selectedIdx)
+              : undefined
+          }
+          {...inputProps}
           placeholder=""
         />
-        <span className={dp('resume-picker-search-hint')}>
-          {message ||
+        <span className={dp('picker-search-hint')}>
+          {outageMessage ||
+            message ||
             (deleting
               ? t('delete.deleting')
               : loading
                 ? t('common.loading')
                 : hasSelection
                   ? t('delete.selected', { count: selectedIds.size })
-                  : searchQuery
+                  : filterQuery
                     ? t('delete.matches', { count: filtered.length })
                     : '')}
         </span>
       </div>
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
 
-      <div className={dp('resume-picker-list')} ref={listRef}>
-        {loading && (
-          <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
+      <div
+        id={LIST_ID}
+        role="listbox"
+        aria-multiselectable="true"
+        className={dp(
+          'picker-list',
+          keyboardMode ? 'picker-keyboard-only' : undefined,
         )}
-        {!loading && sessionsError && (
-          <div className={dp('resume-picker-empty')}>
-            {sessionsError.message}
-          </div>
+        ref={listRef}
+      >
+        {loading && !outageMessage && (
+          <div className={dp('picker-empty')}>{t('common.loading')}</div>
         )}
-        {!loading && !sessionsError && filtered.length === 0 && (
-          <div className={dp('resume-picker-empty')}>
-            {searchQuery
-              ? t('delete.noMatch', { query: searchQuery })
+        {(outageMessage || (!loading && sessionErrorMessage)) && (
+          <div className={dp('picker-empty')}>{sessionErrorMessage}</div>
+        )}
+        {!loading && !sessionErrorMessage && filtered.length === 0 && (
+          <div className={dp('picker-empty')}>
+            {filterQuery
+              ? t('delete.noMatch', { query: filterQuery })
               : t('delete.none')}
           </div>
         )}
@@ -243,55 +336,44 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
-            const checkbox = isChecked ? '[x] ' : '[ ] ';
+            const deleteBlocked = blocksCurrentDelete(s);
             return (
-              <div
+              <SessionRow
                 key={s.sessionId}
-                className={dp(
-                  'resume-picker-item',
-                  'resume-picker-session-item',
-                  isChecked ? 'selected' : undefined,
-                  isCurrent ? 'resume-picker-item-current' : undefined,
-                  isCurrent ? 'disabled' : undefined,
-                )}
-                onClick={() => {
-                  setSelectedIdx(i);
-                  if (!isCurrent) toggleSelection(s.sessionId);
-                }}
-              >
-                <div className={dp('resume-picker-item-row')}>
-                  <span className={dp('resume-picker-item-checkbox')}>
-                    {checkbox}
+                session={s}
+                optionId={optionId(i)}
+                active={i === selectedIdx}
+                ariaSelected={isChecked}
+                current={false}
+                disabled={deleteBlocked}
+                leading={
+                  <span
+                    className={dp(
+                      'picker-item-checkbox',
+                      isChecked ? 'picker-item-checkbox-checked' : undefined,
+                    )}
+                  >
+                    {isChecked ? '[x] ' : '[ ] '}
                   </span>
-                  <span className={dp('resume-picker-item-title')}>
-                    {s.displayName || s.sessionId.slice(0, 8)}
-                  </span>
-                  {isCurrent && (
-                    <span className={dp('resume-picker-item-badge')}>
+                }
+                trailing={
+                  isCurrent ? (
+                    <span className={dp('picker-item-badge')}>
                       {t('resume.current')}
                     </span>
-                  )}
-                </div>
-                <div className={dp('resume-picker-item-meta')}>
-                  <span>
-                    {(s.updatedAt || s.createdAt) &&
-                      formatRelativeTime(s.updatedAt || s.createdAt || '', t)}
-                  </span>
-                  <span className={dp('resume-picker-item-detail')}>
-                    {t('common.clients', { count: s.clientCount ?? 0 })}
-                  </span>
-                  {s.hasActivePrompt && (
-                    <span className={dp('resume-picker-item-detail')}>
-                      {t('resume.activePrompt')}
-                    </span>
-                  )}
-                </div>
-              </div>
+                  ) : undefined
+                }
+                onClick={() => {
+                  setSelectedIdx(i);
+                  toggleSelection(s);
+                }}
+                onActivate={() => setSelectedIdx(i)}
+              />
             );
           })}
       </div>
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
       <div className={dp('dialog-footer-actions')}>
         <button
           type="button"

@@ -39,6 +39,124 @@ describe('contextLengthError', () => {
     expect(isContextLengthExceededError(new Error(message))).toBe(false);
   });
 
+  it('parses the DashScope input-range upper bound as the limit', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        '<400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 196608]',
+      ),
+    );
+    expect(info.isExceeded).toBe(true);
+    expect(info.limitTokens).toBe(196608);
+    expect(info.actualTokens).toBeUndefined();
+    // The range bounds the prompt, not the window: `prompt + max_tokens` may
+    // exceed it, so a consumer sizing an output budget against a window must
+    // not use it (#13876).
+    expect(info.limitKind).toBe('input');
+  });
+
+  // #13415: a local llama.cpp server names its REAL context ceiling in wording
+  // none of the patterns above covered, so the reactive compaction path in
+  // llm-chat never fired and the session looped on the same 400 forever.
+  describe('Hugging Face TGI context overflow wording', () => {
+    it('parses the total-token wording with the inputs count as the prompt size', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          '422 Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32768. Given: 40000 `inputs` tokens and 1000 `max_new_tokens`',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32768);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('parses the input-length wording as an input bound', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          'Input validation error: `inputs` must have less than 32000 tokens. Given: 40000',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32000);
+      expect(info.limitKind).toBe('input');
+    });
+
+    it('detects the wording in an error body object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 422,
+        error: {
+          error:
+            'Input validation error: `inputs` tokens + `max_new_tokens` must be <= 4096. Given: 4000 `inputs` tokens and 200 `max_new_tokens`',
+          error_type: 'validation',
+        },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(4000);
+      expect(info.limitTokens).toBe(4096);
+    });
+
+    it('does not match other TGI validation errors', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          'Input validation error: `temperature` must be strictly positive',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(false);
+    });
+  });
+
+  describe('llama.cpp context overflow wording (#13415)', () => {
+    const LLAMA_CPP_OVERFLOW =
+      'request (279935 tokens) exceeds the available context size (262144 tokens), try increasing it';
+
+    it.each([
+      // The raw server message.
+      LLAMA_CPP_OVERFLOW,
+      // The form the reporter actually saw: the CLI renders a caught request
+      // failure as `[API Error: <status> <message>]`.
+      `[API Error: 400 ${LLAMA_CPP_OVERFLOW}]`,
+      // Same wording without the surrounding brackets.
+      `API Error: 400 ${LLAMA_CPP_OVERFLOW}`,
+    ])('detects overflow and parses both token counts: %s', (message) => {
+      const info = getContextLengthExceededInfo(new Error(message));
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+      // "available context size" is the window itself, so the number may size
+      // an output budget against it (#13432).
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('detects the wording nested in an SDK-style error object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 400,
+        error: { message: LLAMA_CPP_OVERFLOW },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+    });
+
+    it('detects the wording through a wrapping cause chain', () => {
+      const error = new Error('request failed', {
+        cause: new Error(LLAMA_CPP_OVERFLOW),
+      });
+
+      const info = getContextLengthExceededInfo(error);
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+    });
+  });
+
   it('parses prompt-too-long actual and limit token counts', () => {
     const info = getContextLengthExceededInfo(
       new Error('prompt is too long: 137500 tokens > 135000 maximum'),
@@ -47,6 +165,10 @@ describe('contextLengthError', () => {
     expect(info.isExceeded).toBe(true);
     expect(info.actualTokens).toBe(137500);
     expect(info.limitTokens).toBe(135000);
+    // A bare `X tokens > M` does not say which quantity M bounds, so the kind
+    // stays unset: consumers keep their previous behavior rather than treating
+    // an unattested number as a window.
+    expect(info.limitKind).toBeUndefined();
   });
 
   it('parses OpenAI-style maximum context length token counts', () => {
@@ -59,6 +181,20 @@ describe('contextLengthError', () => {
     expect(info.isExceeded).toBe(true);
     expect(info.actualTokens).toBe(135000);
     expect(info.limitTokens).toBe(128000);
+    expect(info.limitKind).toBe('total');
+  });
+
+  it('marks an input token-count maximum as an input bound', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        'The input token length (127234) exceeds the maximum number of tokens allowed (100000).',
+      ),
+    );
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.actualTokens).toBe(127234);
+    expect(info.limitTokens).toBe(100000);
+    expect(info.limitKind).toBe('input');
   });
 
   it('parses maximum context length limits without actual token counts', () => {
@@ -156,5 +292,51 @@ describe('contextLengthError', () => {
 
     expect(info.isExceeded).toBe(true);
     expect(info.message).toContain('context_length_exceeded');
+  });
+
+  // A timeout phrase vetoes the fragment it appears in, not the whole error.
+  // Provider SDKs routinely attach retry/attempt metadata to an error, so a
+  // sibling field mentioning an earlier timeout must not hide a real overflow.
+  describe('timeout veto scope', () => {
+    const OVERFLOW =
+      "This model's maximum context length is 128000 tokens, however you requested 200000 tokens";
+
+    it('still detects overflow when a sibling field mentions a timeout', () => {
+      const error = Object.assign(new Error(OVERFLOW), {
+        detail: 'previous attempt: request timed out after 60s',
+      });
+
+      const info = getContextLengthExceededInfo(error);
+
+      expect(info.isExceeded).toBe(true);
+      // The token counts must survive too: they are parsed only when the
+      // error is classified as an overflow, so a veto silently lost them.
+      expect(info.actualTokens).toBe(200000);
+      expect(info.limitTokens).toBe(128000);
+    });
+
+    it('still detects overflow when retry metadata is nested deeper', () => {
+      const error = Object.assign(new Error(OVERFLOW), {
+        meta: {
+          attempts: [
+            { note: 'connection timed out while waiting for response' },
+          ],
+        },
+      });
+
+      expect(isContextLengthExceededError(error)).toBe(true);
+    });
+
+    it('does not treat a fragment that is itself a timeout as overflow', () => {
+      // The guard against over-correcting: dropping the veto entirely would
+      // also satisfy the two tests above. Here the timeout phrase and the
+      // context-length phrase are in the SAME fragment, so the veto applies
+      // and the error stays classified as a timeout.
+      expect(
+        isContextLengthExceededError(
+          new Error('request timed out while checking maximum context length'),
+        ),
+      ).toBe(false);
+    });
   });
 });

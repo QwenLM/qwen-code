@@ -15,6 +15,7 @@ import {
   createAbortController,
   createChildAbortController,
 } from '../../utils/abortController.js';
+import { childLaunchDepth, runWithAgentContext } from './agent-context.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -25,7 +26,7 @@ import type {
 import type { AgentStatsSummary } from './agent-statistics.js';
 import type { AgentCore } from './agent-core.js';
 import type { ContextState } from './agent-headless.js';
-import type { GeminiChat } from '../../core/geminiChat.js';
+import type { LlmChat } from '../../core/llm-chat.js';
 import type { FunctionDeclaration } from '@google/genai';
 import {
   ToolConfirmationOutcome,
@@ -40,6 +41,8 @@ import {
   type AgentInteractiveConfig,
   type AgentMessage,
 } from './agent-types.js';
+import type { LoopType } from '../../telemetry/types.js';
+import { describeAgentTerminateReason } from './terminate-reason.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
 
@@ -57,13 +60,25 @@ export class AgentInteractive {
   private readonly core: AgentCore;
   private readonly queue = new AsyncMessageQueue<string>();
 
+  /**
+   * This agent's nesting depth, captured from the spawner's ambient frame at
+   * construction (0 when spawned from the top-level session). start() and
+   * runLoop() re-enter the agent identity frame pinned at this depth, so
+   * prepareTools()' depth gating and the AgentTool's runtime guards see an
+   * in-process interactive agent (Arena, in-process teammate) as an agent —
+   * not as the top-level session. Pinning (rather than auto-increment)
+   * matters because runLoop() restarts itself from its own finally block and
+   * enqueueMessage() may be called from arbitrary chains.
+   */
+  private readonly agentDepth: number;
+
   private status: AgentStatus = AgentStatus.INITIALIZING;
   private error: string | undefined;
   private lastRoundError: string | undefined;
   private executionPromise: Promise<void> | undefined;
   private masterAbortController = createAbortController();
   private roundAbortController: AbortController | undefined;
-  private chat: GeminiChat | undefined;
+  private chat: LlmChat | undefined;
   private toolsList: FunctionDeclaration[] = [];
   private processing = false;
   private roundCancelledByUser = false;
@@ -78,6 +93,15 @@ export class AgentInteractive {
   constructor(config: AgentInteractiveConfig, core: AgentCore) {
     this.config = config;
     this.core = core;
+    // Ambient capture: reads the SPAWNER's AsyncLocalStorage frame, so this
+    // is correct only while construction stays on the spawner's await chain
+    // (today: InProcessBackend.spawnAgent, whose entry paths are top-level
+    // gated). A future factory/queue/deferred construction would silently
+    // record depth 0 — the same deferral-loses-frame failure the resume
+    // path solves explicitly by persisting AgentMeta.depth. If construction
+    // ever moves off the spawn chain, thread the depth through
+    // AgentInteractiveConfig instead.
+    this.agentDepth = childLaunchDepth();
     this.setupEventListeners();
   }
 
@@ -85,9 +109,19 @@ export class AgentInteractive {
 
   /**
    * Start the agent. Initializes the chat session, then kicks off
-   * processing if an initialTask is configured.
+   * processing if an initialTask is configured. Runs inside this agent's
+   * identity frame so prepareTools() depth-gates the AgentTool correctly
+   * (see agentDepth).
    */
-  async start(context: ContextState): Promise<void> {
+  start(context: ContextState): Promise<void> {
+    return runWithAgentContext(
+      this.config.agentId,
+      () => this.core.runInHookFrame(() => this.startInner(context)),
+      this.agentDepth,
+    );
+  }
+
+  private async startInner(context: ContextState): Promise<void> {
     this.setStatus(AgentStatus.INITIALIZING);
 
     this.chat = await this.core.createChat(context, {
@@ -112,15 +146,26 @@ export class AgentInteractive {
 
     if (this.config.initialTask) {
       this.queue.enqueue(this.config.initialTask);
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
   /**
    * Run loop: process all pending messages, then settle status.
-   * Exits when the queue is empty or the agent is aborted.
+   * Exits when the queue is empty or the agent is aborted. Runs inside this
+   * agent's identity frame (pinned at agentDepth) so tool bodies — including
+   * a nested `agent` spawn and its depth guard — attribute to this agent
+   * rather than the top-level session.
    */
-  private async runLoop(): Promise<void> {
+  private runLoop(): Promise<void> {
+    return runWithAgentContext(
+      this.config.agentId,
+      () => this.core.runInHookFrame(() => this.runLoopInner()),
+      this.agentDepth,
+    );
+  }
+
+  private async runLoopInner(): Promise<void> {
     this.processing = true;
     try {
       let message = this.queue.dequeue();
@@ -155,7 +200,7 @@ export class AgentInteractive {
         !this.masterAbortController.signal.aborted &&
         !isTerminalStatus(this.status)
       ) {
-        this.executionPromise = this.runLoop();
+        this.executionPromise = this.startRunLoop();
       }
     }
   }
@@ -196,11 +241,13 @@ export class AgentInteractive {
         result.terminateMode &&
         result.terminateMode !== AgentTerminateMode.GOAL
       ) {
-        const msg = terminateModeMessage(result.terminateMode);
+        const msg = terminateModeMessage(result.terminateMode, result.loopType);
         if (msg) {
           this.addMessage('info', msg.text, { metadata: { level: msg.level } });
         }
-        this.lastRoundError = `Terminated: ${result.terminateMode}`;
+        this.lastRoundError = result.loopType
+          ? `Terminated: ${result.terminateMode} (${result.loopType})`
+          : `Terminated: ${result.terminateMode}`;
       }
     } catch (err) {
       // User-initiated cancellation already logged by cancelCurrentRound().
@@ -275,7 +322,7 @@ export class AgentInteractive {
   enqueueMessage(message: string): void {
     this.queue.enqueue(message);
     if (!this.processing) {
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
@@ -363,6 +410,13 @@ export class AgentInteractive {
   }
 
   // ─── Private Helpers ───────────────────────────────────────
+
+  private startRunLoop(): Promise<void> {
+    if (this.config.runInContext) {
+      return this.config.runInContext(() => this.runLoop());
+    }
+    return this.runLoop();
+  }
 
   /**
    * Settle status after the run loop empties.
@@ -461,30 +515,40 @@ export class AgentInteractive {
   }
 }
 
+// Total on purpose: a new AgentTerminateMode has to pick a severity here,
+// or `tsc` fails. `null` means "worded nowhere, or reported elsewhere" —
+// GOAL never reaches this function, and a level on CANCELLED would
+// double-report what cancelCurrentRound() already warned about.
+const TERMINATE_MODE_LEVEL: Record<
+  AgentTerminateMode,
+  'warning' | 'error' | null
+> = {
+  [AgentTerminateMode.MAX_TURNS]: 'warning',
+  [AgentTerminateMode.TIMEOUT]: 'warning',
+  [AgentTerminateMode.ERROR]: 'error',
+  [AgentTerminateMode.LOOP_DETECTED]: 'error',
+  [AgentTerminateMode.GOAL]: null,
+  [AgentTerminateMode.CANCELLED]: null,
+  [AgentTerminateMode.SHUTDOWN]: null,
+};
+
 /**
  * Map a non-GOAL terminate mode to a visible status message for the UI,
- * or return null to suppress the message entirely.
+ * or return null to suppress the message entirely. The wording is shared
+ * with the non-interactive callers; only the severity is decided here.
  *
- * CANCELLED is suppressed here because cancelCurrentRound() already emits
- * its own warning. SHUTDOWN is suppressed as a normal lifecycle end.
+ * CANCELLED and SHUTDOWN have no wording, so they stay suppressed:
+ * cancelCurrentRound() already emits its own warning, and SHUTDOWN is a
+ * normal lifecycle end.
  */
 function terminateModeMessage(
   mode: AgentTerminateMode,
+  loopType?: LoopType | null,
 ): { text: string; level: 'info' | 'warning' | 'error' } | null {
-  switch (mode) {
-    case AgentTerminateMode.MAX_TURNS:
-      return {
-        text: 'Agent stopped: maximum turns reached.',
-        level: 'warning',
-      };
-    case AgentTerminateMode.TIMEOUT:
-      return { text: 'Agent stopped: time limit reached.', level: 'warning' };
-    case AgentTerminateMode.ERROR:
-      return { text: 'Agent stopped due to an error.', level: 'error' };
-    case AgentTerminateMode.CANCELLED:
-    case AgentTerminateMode.SHUTDOWN:
-      return null;
-    default:
-      return null;
-  }
+  const text = describeAgentTerminateReason(mode, loopType);
+  const level = TERMINATE_MODE_LEVEL[mode];
+  // Wording and severity live in different files; a mode missing either
+  // stays silent rather than being guessed at.
+  if (!text || !level) return null;
+  return { text, level };
 }

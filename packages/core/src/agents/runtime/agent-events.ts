@@ -13,14 +13,24 @@
  * - Lifecycle hooks (pre/post tool use, stop) for synchronous callbacks
  */
 
+import type { ToolLifecycleEvent } from '../../telemetry/tool-lifecycle.js';
 import { EventEmitter } from 'events';
 import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
+  ToolResultBoundaryArtifact,
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { AgentStatus } from './agent-types.js';
+import type { RetryWaitEvent } from '../../utils/retry-wait.js';
+
+type WithoutConfirmationCallback<T> = T extends unknown
+  ? Omit<T, 'onConfirm'>
+  : never;
+
+export type AgentConfirmationDetails =
+  WithoutConfirmationCallback<ToolCallConfirmationDetails>;
 
 // ─── Event Types ────────────────────────────────────────────
 
@@ -32,9 +42,11 @@ export type AgentEvent =
   | 'stream_text'
   | 'tool_call'
   | 'tool_result'
+  | 'tool_responses_finalized'
   | 'tool_output_update'
   | 'tool_waiting_approval'
   | 'usage_metadata'
+  | 'retry_wait'
   | 'external_message'
   | 'finish'
   | 'error'
@@ -49,9 +61,12 @@ export enum AgentEventType {
   STREAM_TEXT = 'stream_text',
   TOOL_CALL = 'tool_call',
   TOOL_RESULT = 'tool_result',
+  TOOL_RESPONSES_FINALIZED = 'tool_responses_finalized',
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
+  /** Start/end of a retry-owned backoff sleep inside the round's request. */
+  RETRY_WAIT = 'retry_wait',
   /** External user message injected mid-run (e.g. via send_message). */
   EXTERNAL_MESSAGE = 'external_message',
   FINISH = 'finish',
@@ -78,14 +93,17 @@ export interface AgentRoundEvent {
 
 export interface AgentRoundTextEvent {
   subagentId: string;
+  runId?: string;
   round: number;
   text: string;
   thoughtText: string;
+  usageMetadata?: GenerateContentResponseUsageMetadata;
   timestamp: number;
 }
 
 export interface AgentStreamTextEvent {
   subagentId: string;
+  runId?: string;
   round: number;
   text: string;
   /** Whether this text is reasoning/thinking content (as opposed to regular output) */
@@ -107,6 +125,8 @@ export interface AgentToolCallEvent {
   callId: string;
   name: string;
   args: Record<string, unknown>;
+  modelFacingName?: string;
+  modelFacingArgs?: Record<string, unknown>;
   description: string;
   /** Whether the tool's output should be rendered as markdown. */
   isOutputMarkdown?: boolean;
@@ -114,6 +134,7 @@ export interface AgentToolCallEvent {
 }
 
 export interface AgentToolResultEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;
@@ -124,11 +145,24 @@ export interface AgentToolResultEvent {
   resultDisplay?: ToolResultDisplay;
   /** Path to the temp file where oversized output was saved. */
   outputFile?: string;
+  boundaryArtifact?: ToolResultBoundaryArtifact;
   durationMs?: number;
   timestamp: number;
 }
 
+export interface AgentToolResponsesFinalizedEvent {
+  subagentId: string;
+  round: number;
+  responses: Array<{
+    callId: string;
+    responseParts: Part[];
+    durationMs?: number;
+  }>;
+  timestamp: number;
+}
+
 export interface AgentToolOutputUpdateEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;
@@ -159,9 +193,7 @@ export interface AgentApprovalRequestEvent {
    * `command`) which differs from the raw tool arguments.
    */
   args: Record<string, unknown>;
-  confirmationDetails: Omit<ToolCallConfirmationDetails, 'onConfirm'> & {
-    type: ToolCallConfirmationDetails['type'];
-  };
+  confirmationDetails: AgentConfirmationDetails;
   respond: (
     outcome: ToolConfirmationOutcome,
     payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
@@ -181,6 +213,12 @@ export interface AgentExternalMessageEvent {
 export interface AgentFinishEvent {
   subagentId: string;
   terminateReason: string;
+  /**
+   * Which loop detector fired when terminateReason is LOOP_DETECTED
+   * (issue #9450), so stops are attributable in journals/telemetry instead
+   * of collapsing into one generic label.
+   */
+  loopType?: string;
   timestamp: number;
   rounds?: number;
   totalDurationMs?: number;
@@ -197,6 +235,13 @@ export interface AgentErrorEvent {
   error: string;
   timestamp: number;
 }
+
+export type AgentRetryWaitEvent = RetryWaitEvent & {
+  subagentId: string;
+  round: number;
+  promptId: string;
+  timestamp: number;
+};
 
 export interface AgentStatusChangeEvent {
   agentId: string;
@@ -220,14 +265,20 @@ export interface AgentEventMap {
   [AgentEventType.STREAM_TEXT]: AgentStreamTextEvent;
   [AgentEventType.TOOL_CALL]: AgentToolCallEvent;
   [AgentEventType.TOOL_RESULT]: AgentToolResultEvent;
+  [AgentEventType.TOOL_RESPONSES_FINALIZED]: AgentToolResponsesFinalizedEvent;
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
+  [AgentEventType.RETRY_WAIT]: AgentRetryWaitEvent;
   [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;
 }
+
+export type AgentEventListener<E extends keyof AgentEventMap> = (
+  payload: AgentEventMap[E],
+) => void;
 
 // ─── Event Emitter ──────────────────────────────────────────
 
@@ -236,16 +287,22 @@ export class AgentEventEmitter {
 
   on<E extends keyof AgentEventMap>(
     event: E,
-    listener: (payload: AgentEventMap[E]) => void,
+    listener: AgentEventListener<E>,
   ): void {
     this.ee.on(event, listener as (...args: unknown[]) => void);
   }
 
   off<E extends keyof AgentEventMap>(
     event: E,
-    listener: (payload: AgentEventMap[E]) => void,
+    listener: AgentEventListener<E>,
   ): void {
     this.ee.off(event, listener as (...args: unknown[]) => void);
+  }
+
+  rawListeners<E extends keyof AgentEventMap>(
+    event: E,
+  ): Array<AgentEventListener<E>> {
+    return this.ee.rawListeners(event) as Array<AgentEventListener<E>>;
   }
 
   emit<E extends keyof AgentEventMap>(

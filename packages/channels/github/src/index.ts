@@ -1,0 +1,215 @@
+import {
+  MAX_POLL_INTERVAL_MS,
+  PR_BINDING_ROLES,
+} from '@qwen-code/channel-base';
+import type { ChannelPlugin } from '@qwen-code/channel-base';
+import {
+  GithubChannel,
+  validateBoundSessionConfig,
+  DEFAULT_PR_WATCH_LIMIT,
+  MAX_PR_WATCH_LIMIT,
+  validateRepoFilterConfig,
+  PR_NOTIFICATION_REASONS,
+  PR_WATCH_EVENTS,
+  REPO_FILTER_MODES,
+} from './GithubAdapter.js';
+
+/**
+ * One-line meaning of each unqualified boundSessionActions key, shown by
+ * management UIs next to the key and in the add picker. Role-qualified
+ * keys reuse their base event's description; the role's job is named by
+ * the picker group header instead.
+ */
+const BOUND_ACTION_DESCRIPTIONS: Record<string, string> = {
+  default: 'Fallback template for any event without a more specific key',
+  'watch:ci_failure': 'CI checks turn red on a head commit',
+  'watch:merge_conflict': 'The PR develops a merge conflict',
+  'watch:head_change': 'The PR’s head commit changes',
+  'watch:state_change': 'The PR is merged or closed',
+  mention: 'You are @mentioned in a comment',
+  review_requested: 'A review is requested from you',
+  assign: 'You are assigned to the PR',
+  author: 'Activity on a PR you authored',
+  comment: 'A new comment on a subscribed PR',
+  ci_activity: 'CI activity on a subscribed PR',
+  manual: 'You subscribed to the PR manually',
+  state_change: 'The PR is closed or merged',
+  subscribed: 'Activity on a PR you subscribed to',
+  team_mention: 'A team you belong to is @mentioned',
+  security_alert: 'A security alert on the repository',
+  approval_requested: 'Approval is requested from you',
+  invitation: 'You are invited to collaborate',
+  member_feature_requested: 'A member feature request notification',
+  security_advisory_credit: 'You are credited in a security advisory',
+};
+
+/**
+ * The boundSessionActions key options offered by management UIs: the
+ * fallback, every event class, and each role-qualified spelling — built
+ * from the same constants the validator enforces so the three cannot
+ * drift (the PR_WATCH_EVENTS pattern, R2-18). `group` buckets the picker
+ * by binding role; `description` explains each key.
+ */
+const BOUND_ACTION_BASE_OPTIONS = [
+  'default',
+  ...PR_WATCH_EVENTS.map((event) => `watch:${event}`),
+  ...PR_NOTIFICATION_REASONS,
+].map((value) => ({
+  value,
+  label: value,
+  description: BOUND_ACTION_DESCRIPTIONS[value],
+}));
+
+const BOUND_ACTION_KEY_OPTIONS = [
+  ...BOUND_ACTION_BASE_OPTIONS.map((option) => ({ ...option, group: 'any' })),
+  ...PR_BINDING_ROLES.flatMap((role) =>
+    BOUND_ACTION_BASE_OPTIONS.map((option) => ({
+      value: `${role}:${option.value}`,
+      label: `${role}:${option.value}`,
+      description: option.description,
+      group: role,
+    })),
+  ),
+];
+
+export { GithubChannel };
+
+export const plugin: ChannelPlugin = {
+  channelType: 'github',
+  displayName: 'GitHub',
+  envResolvableConfigFields: ['baseUrl'],
+  defaultSessionScope: 'chat_thread',
+  management: {
+    fields: [
+      {
+        key: 'token',
+        label: 'Personal Access Token',
+        kind: 'secret',
+        envResolvable: true,
+        description:
+          'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+      },
+      {
+        key: 'useLocalGh',
+        label: 'Use Local GitHub CLI Authentication',
+        kind: 'boolean',
+        description:
+          'Reuse the daemon host GitHub CLI login when no token is configured',
+      },
+      {
+        key: 'baseUrl',
+        label: 'Base URL',
+        kind: 'string',
+        envResolvable: true,
+        description:
+          'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+      },
+      {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_POLL_INTERVAL_MS,
+        default: '60000',
+        description:
+          'How often to poll the notifications API, in ms. Kept between 1 and 86400000 (one day): a smaller positive value is raised to 1. Leave empty for 60000',
+      },
+      {
+        key: 'groupPolicy',
+        label: 'Group Policy',
+        kind: 'enum',
+        required: true,
+        description:
+          'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
+        default: 'open',
+        options: [
+          { value: 'open', label: 'Open' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'pairing', label: 'Pairing' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+      {
+        key: 'reasonFilter',
+        label: 'Reason Filter',
+        kind: 'string-list',
+        description:
+          'Optional. Only notifications with a selected reason are processed. ' +
+          'Leave every reason unselected to process all of them.',
+        // Built from the adapter's exported vocabulary so the UI options
+        // can never drift from the boundSessionActions key validator.
+        options: PR_NOTIFICATION_REASONS.map((value) => ({
+          value,
+          label: value,
+        })),
+      },
+      {
+        key: 'repoFilterMode',
+        label: 'Repository Filter',
+        kind: 'enum',
+        default: 'off',
+        description:
+          'Filter incoming notifications by repository: allowlist processes only the listed repositories, blocklist processes all except the listed ones. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+        // Built from the adapter's exported vocabulary so the UI options
+        // cannot drift from the validator (the PR_WATCH_EVENTS pattern).
+        options: REPO_FILTER_MODES.map((value) => ({ value, label: value })),
+      },
+      {
+        key: 'repoFilter',
+        label: 'Filtered Repositories',
+        kind: 'string-list',
+        description:
+          'Comma-separated owner/repo repository names used by the repository filter. Requires Repository Filter to be set to allowlist or blocklist.',
+      },
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+        description:
+          'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+        default: 'false',
+      },
+      {
+        key: 'prWatchEvents',
+        label: 'PR Watch Events',
+        kind: 'string-list',
+        description:
+          'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+        // Built from the adapter's exported vocabulary so the UI options can
+        // never drift from the validator/emit path (R2-18).
+        options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
+      },
+      {
+        key: 'prWatchLimit',
+        label: 'PR Watch Limit',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_PR_WATCH_LIMIT,
+        default: String(DEFAULT_PR_WATCH_LIMIT),
+        description:
+          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
+      },
+      {
+        key: 'boundSessionActions',
+        label: 'Bound Session Actions',
+        kind: 'record',
+        description:
+          'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
+        options: BOUND_ACTION_KEY_OPTIONS,
+      },
+    ],
+    validateConfig: (config) => {
+      const token =
+        typeof config['token'] === 'string' ? config['token'].trim() : '';
+      if (!token && config['useLocalGh'] !== true) {
+        return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
+      }
+      return (
+        validateBoundSessionConfig(config, 'github') ??
+        validateRepoFilterConfig(config, 'github')
+      );
+    },
+  },
+  createChannel: (name, config, bridge, options) =>
+    new GithubChannel(name, config, bridge, options),
+};

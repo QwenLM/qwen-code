@@ -353,6 +353,21 @@ describe('FileCommandLoader', () => {
     expect(commands[0].name).toBe('good');
   });
 
+  it('loads a TOML command saved with a UTF-8 BOM', async () => {
+    const userCommandsDir = Storage.getUserCommandsDir();
+    mock({
+      [userCommandsDir]: {
+        'bom.toml': '\uFEFFprompt = "Prompt after a BOM"',
+      },
+    });
+
+    const loader = new FileCommandLoader(null);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('bom');
+  });
+
   it('ignores files that are semantically invalid (missing prompt)', async () => {
     const userCommandsDir = Storage.getUserCommandsDir();
     mock({
@@ -602,6 +617,40 @@ describe('FileCommandLoader', () => {
       const extCommand = commands.find((cmd) => cmd.name === 'ext');
       expect(extCommand?.extensionName).toBe('test-ext');
       expect(extCommand?.description).toMatch(/^\[test-ext\]/);
+    });
+
+    it('ignores commands bundled in manually discovered Agent Plugins', async () => {
+      const extensionDir = path.join(
+        process.cwd(),
+        '.qwen/extensions/agent-plugin',
+      );
+      mock({
+        [extensionDir]: {
+          commands: {
+            'deploy.toml': 'prompt = "Unconsented command"',
+          },
+        },
+      });
+      const mockConfig = {
+        getProjectRoot: vi.fn(() => process.cwd()),
+        getExtensions: vi.fn(() => [
+          {
+            name: 'agent-plugin',
+            version: '1.0.0',
+            isActive: true,
+            path: extensionDir,
+            format: 'agent-plugins-v1',
+          },
+        ]),
+        getFolderTrustFeature: vi.fn(() => false),
+        getFolderTrust: vi.fn(() => false),
+      } as unknown as Config;
+
+      const commands = await new FileCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+
+      expect(commands).toEqual([]);
     });
 
     it('extension commands have extensionName metadata for conflict resolution', async () => {

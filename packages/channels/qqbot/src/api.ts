@@ -5,6 +5,7 @@
  *  - Access token issuance
  *  - WebSocket Gateway URL resolution
  *  - Message sending (text / markdown)
+ *  - Message recall
  */
 
 const TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
@@ -35,10 +36,9 @@ export async function fetchAccessToken(
   });
 
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(
-      `QQ Bot token request failed (HTTP ${resp.status}): ${body}`,
-    );
+    await resp.body?.cancel().catch(() => {});
+    process.stderr.write(`[QQ] Token request failed (HTTP ${resp.status})\n`);
+    throw new Error(`QQ Bot token request failed (HTTP ${resp.status})`);
   }
 
   const data = (await resp.json()) as {
@@ -52,6 +52,43 @@ export async function fetchAccessToken(
     accessToken: data.access_token,
     expiresIn: data.expires_in ?? 7200,
   };
+}
+
+/**
+ * Validate the WebSocket Gateway URL to enforce TLS and known hostname.
+ * - Enforces wss:// protocol (hard boundary — throws on non-wss).
+ * - Rejects hostnames outside `*.qq.com` (hard boundary).
+ *
+ * The QQ Bot Open Platform documents all endpoints under qq.com domains
+ * (api.sgroup.qq.com, sandbox.api.sgroup.qq.com, bots.qq.com). Broader
+ * suffixes like *.tencentcs.com would accept attacker-controlled Tencent
+ * Cloud API Gateway default domains, creating a token-exfiltration vector
+ * if /gateway is tampered with or misdirected.
+ */
+export function validateGatewayUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'wss:') {
+      throw new Error(
+        `QQ Bot gateway URL must use wss:// protocol, got: ${parsed.protocol}`,
+      );
+    }
+    // Hard reject: only allow documented QQ gateway hostnames
+    if (!parsed.hostname.toLowerCase().endsWith('.qq.com')) {
+      throw new Error(
+        `QQ Bot gateway URL has unexpected hostname: ${parsed.hostname} (expected *.qq.com)`,
+      );
+    }
+    const clean = new URL(url);
+    clean.username = '';
+    clean.password = '';
+    return clean.href;
+  } catch (e) {
+    if (e instanceof TypeError) {
+      throw new Error('QQ Bot gateway URL is not a valid URL');
+    }
+    throw e;
+  }
 }
 
 /**
@@ -70,6 +107,7 @@ export async function fetchGatewayUrl(
   });
 
   if (!resp.ok) {
+    await resp.body?.cancel().catch(() => {});
     throw new Error(`QQ Bot gateway request failed (HTTP ${resp.status})`);
   }
 
@@ -77,7 +115,7 @@ export async function fetchGatewayUrl(
   if (!data['url']) {
     throw new Error('QQ Bot gateway response missing WebSocket URL');
   }
-  return data['url'];
+  return validateGatewayUrl(data['url']);
 }
 
 /** Determine the API base URL from the sandbox flag. */
@@ -95,13 +133,31 @@ export async function sendQQMessage(
   accessToken: string,
   body: Record<string, unknown>,
 ): Promise<Response> {
+  return requestQQApi(base, 'POST', path, accessToken, body);
+}
+
+/** HTTP methods the QQ Bot REST API uses for group management. */
+export type QQApiMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+/**
+ * Call a QQ Bot REST endpoint. Used for the group-management surface, where
+ * one thin wrapper per endpoint would only restate the path: callers own the
+ * path and interpret the status code and error body themselves.
+ */
+export async function requestQQApi(
+  base: string,
+  method: QQApiMethod,
+  path: string,
+  accessToken: string,
+  body?: Record<string, unknown>,
+): Promise<Response> {
   return fetch(`${base}${path}`, {
-    method: 'POST',
+    method,
     headers: {
-      'Content-Type': 'application/json',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       Authorization: `QQBot ${accessToken}`,
     },
-    body: JSON.stringify(body),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
 }

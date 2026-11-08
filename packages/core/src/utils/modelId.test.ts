@@ -6,7 +6,19 @@
 
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '../core/contentGenerator.js';
-import { resolveModelId, stripRuntimeSnapshotPrefix } from './modelId.js';
+import {
+  buildRuntimeSnapshotId,
+  resolveModelId,
+  stripRuntimeSnapshotPrefix,
+} from './modelId.js';
+
+describe('buildRuntimeSnapshotId', () => {
+  it('builds the canonical $runtime|{auth}|{model} id', () => {
+    expect(buildRuntimeSnapshotId('openai', 'qwen3.6-27b-autoround')).toBe(
+      '$runtime|openai|qwen3.6-27b-autoround',
+    );
+  });
+});
 
 describe('stripRuntimeSnapshotPrefix', () => {
   it('returns bare model IDs unchanged', () => {
@@ -96,6 +108,19 @@ describe('resolveModelId', () => {
   it('parses authType-prefixed model IDs', () => {
     expect(resolveModelId('openai:glm-5')).toEqual({
       authType: AuthType.USE_OPENAI,
+      modelId: 'glm-5',
+    });
+  });
+
+  it('drops the "\0<baseUrl>" endpoint disambiguator from persisted selectors', () => {
+    // The model picker persists aux selectors as `authType:modelId\0baseUrl`
+    // so same-id endpoints stay distinct (#12760). The baseUrl is routing
+    // metadata for the registry, not part of the model id.
+    expect(resolveModelId('openai:glm-5\0https://api.example.com/v1')).toEqual({
+      authType: AuthType.USE_OPENAI,
+      modelId: 'glm-5',
+    });
+    expect(resolveModelId('glm-5\0https://api.example.com/v1')).toEqual({
       modelId: 'glm-5',
     });
   });

@@ -9,7 +9,10 @@ import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import stringWidth from 'string-width';
 import { theme } from '../../semantic-colors.js';
+import type { HistoryItemInfo } from '../../types.js';
+import { ICON } from '../../constants.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
+import { t } from '../../../i18n/index.js';
 
 interface StatusMessageProps {
   text: string;
@@ -21,6 +24,7 @@ interface StatusMessageProps {
 }
 
 interface StatusTextProps {
+  presentation?: HistoryItemInfo['presentation'];
   text: string;
   linkUrl?: string;
   linkText?: string;
@@ -66,23 +70,42 @@ export const InfoMessage: React.FC<StatusTextProps> = ({
   text,
   linkUrl,
   linkText,
-}) => (
-  <StatusMessage
-    text={text}
-    prefix="●"
-    prefixColor={theme.text.primary}
-    textColor={theme.text.primary}
-    footer={
-      linkUrl && (
-        <Link url={linkUrl}>
-          <Text color={theme.text.link} underline>
-            {linkText ?? linkUrl}
-          </Text>
-        </Link>
-      )
-    }
-  />
-);
+  presentation,
+}) =>
+  presentation === 'subscription-success' ? (
+    <Box flexDirection="column">
+      {text.split('\n').map((line, index) =>
+        index < 2 ? (
+          <Box key={index} flexDirection="row">
+            <Box width={2} flexShrink={0}>
+              <Text color={theme.status.success}>✓</Text>
+            </Box>
+            <Text color={theme.text.primary}>{line.slice(2)}</Text>
+          </Box>
+        ) : (
+          <Box key={index} paddingLeft={2}>
+            <Text color={theme.text.secondary}>{line.trimStart()}</Text>
+          </Box>
+        ),
+      )}
+    </Box>
+  ) : (
+    <StatusMessage
+      text={text}
+      prefix={ICON.CIRCLE_FILLED}
+      prefixColor={theme.text.primary}
+      textColor={theme.text.primary}
+      footer={
+        linkUrl && (
+          <Link url={linkUrl}>
+            <Text color={theme.text.link} underline>
+              {linkText ?? linkUrl}
+            </Text>
+          </Link>
+        )
+      }
+    />
+  );
 
 export const SuccessMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
@@ -96,7 +119,7 @@ export const SuccessMessage: React.FC<StatusTextProps> = ({ text }) => (
 export const WarningMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
-    prefix="△"
+    prefix={ICON.TRIANGLE}
     prefixColor={theme.status.warning}
     textColor={theme.status.warning}
   />
@@ -107,7 +130,12 @@ export const ErrorMessage: React.FC<StatusTextProps & { hint?: string }> = ({
   hint,
 }) => (
   <StatusMessage
-    text={text}
+    text={
+      text ===
+      'Your login credentials are no longer valid. Run /auth to sign in again.'
+        ? t(text)
+        : text
+    }
     prefix="✕"
     prefixColor={theme.status.error}
     textColor={theme.status.error}
@@ -125,6 +153,19 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
   />
 );
 
+// Dim, tip-style notice for the vision bridge. The ◎ sits in the gutter as the
+// sole prefix (the message text no longer carries its own glyph), and the body
+// is rendered in secondary color so the disclosure reads as a hint rather than
+// a primary INFO line.
+export const VisionNoticeMessage: React.FC<StatusTextProps> = ({ text }) => (
+  <StatusMessage
+    text={text}
+    prefix={ICON.BULLSEYE}
+    prefixColor={theme.text.secondary}
+    textColor={theme.text.secondary}
+  />
+);
+
 // Mirrors Claude Code's away-summary rendering: a `※` prefix in a fixed
 // 2-column gutter, then bold "recap: " label and italic content, all
 // dim-colored. Rendered as a regular history item so it scrolls with
@@ -132,7 +173,7 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
 export const AwayRecapMessage: React.FC<StatusTextProps> = ({ text }) => (
   <Box flexDirection="row">
     <Box width={2} flexShrink={0}>
-      <Text color={theme.text.secondary}>※</Text>
+      <Text color={theme.text.secondary}>{ICON.REFERENCE}</Text>
     </Box>
     <Text wrap="wrap">
       <Text color={theme.text.secondary} bold>

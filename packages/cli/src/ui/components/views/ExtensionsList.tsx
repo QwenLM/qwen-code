@@ -7,10 +7,8 @@
 import { Box, Text } from 'ink';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { ExtensionUpdateState } from '../../state/extensions.js';
-import {
-  createDebugLogger,
-  getExtensionDisplayName,
-} from '@qwen-code/qwen-code-core';
+import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getCurrentLanguage } from '../../../i18n/index.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS_LIST');
@@ -43,6 +41,7 @@ export const ExtensionsList = () => {
               break;
             case ExtensionUpdateState.UPDATE_AVAILABLE:
             case ExtensionUpdateState.UPDATED_NEEDS_RESTART:
+            case ExtensionUpdateState.UPDATED_WITH_WARNINGS:
               stateColor = 'yellow';
               break;
             case ExtensionUpdateState.ERROR:

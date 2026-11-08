@@ -1,0 +1,158 @@
+import { useCallback, useContext, useMemo } from 'react';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import type { DaemonSessionArchiveState } from '@qwen-code/sdk/daemon';
+import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
+import {
+  useSessionCatalogController,
+  useSessionCatalogQuery,
+  useWebShellSessions,
+} from '../session-catalog/session-catalog-hooks';
+import type { SessionCatalogQuery } from '../session-catalog/session-catalog-store';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
+
+interface ScopedSessionsOptions {
+  autoLoad?: boolean;
+  enabled?: boolean;
+  maxAgeMs?: number;
+  pageSize?: number;
+  archiveState?: DaemonSessionArchiveState;
+  view?: 'organized';
+  group?: string;
+  pollIntervalMs?: number;
+  /** `null` queries every source type; omitted keeps the sidebar default. */
+  sourceType?: string | null;
+  /** List live bridge sessions only, so closed history cannot hide them. */
+  liveOnly?: boolean;
+}
+
+export function useScopedSessions(
+  workspaceCwd: string | undefined,
+  options: ScopedSessionsOptions = {},
+) {
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
+  const {
+    autoLoad = false,
+    enabled = true,
+    maxAgeMs,
+    pageSize,
+    archiveState,
+    view,
+    group,
+    pollIntervalMs,
+    liveOnly,
+    sourceType: sourceTypeOption,
+  } = options;
+  const sourceType =
+    sourceTypeOption === null
+      ? undefined
+      : (sourceTypeOption ?? WEB_SHELL_SESSION_SOURCE_TYPE);
+  const primary = useWebShellSessions({
+    autoLoad,
+    enabled: enabled && !workspaceCwd,
+    maxAgeMs,
+    pageSize,
+    archiveState,
+    view,
+    group,
+    ...(sourceType !== undefined ? { sourceType } : {}),
+    ...(liveOnly === true ? { liveOnly: true } : {}),
+    ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+  });
+  const primaryDeleteSession = primary.deleteSession;
+  const primaryDeleteSessions = primary.deleteSessions;
+  const primaryReleaseSessionAction = primary.releaseSessionAction;
+  const workspace = useWorkspace();
+  const controller = useSessionCatalogController(workspace.client);
+  const query = useMemo<SessionCatalogQuery | undefined>(
+    () =>
+      workspaceCwd
+        ? {
+            routeKind: 'qualified',
+            workspaceCwd,
+            options: {
+              ...(pageSize !== undefined ? { pageSize } : {}),
+              ...(archiveState !== undefined ? { archiveState } : {}),
+              ...(view !== undefined ? { view } : {}),
+              ...(group !== undefined ? { group } : {}),
+              ...(sourceType !== undefined ? { sourceType } : {}),
+              ...(liveOnly === true ? { liveOnly: true } : {}),
+            },
+          }
+        : undefined,
+    [archiveState, group, liveOnly, pageSize, sourceType, view, workspaceCwd],
+  );
+  const scoped = useSessionCatalogQuery(workspace.client, query, {
+    autoLoad,
+    enabled: enabled && Boolean(workspaceCwd),
+    ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
+    ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+  });
+  const reloadScopedPage = scoped.reload;
+  const reloadScoped = useCallback(async () => {
+    const page = await reloadScopedPage();
+    return page?.sessions ?? [];
+  }, [reloadScopedPage]);
+  const deleteSessions = useCallback(
+    async (sessionIds: string[]) => {
+      if (!workspaceCwd) return primaryDeleteSessions(sessionIds);
+      try {
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
+        const result = await workspace.client
+          .workspaceByCwd(workspaceCwd)
+          .deleteSessionsData(sessionIds);
+        invalidateDeleted?.([...result.removed, ...result.notFound]);
+        return result;
+      } finally {
+        controller.invalidateWorkspace(workspaceCwd);
+      }
+    },
+    [
+      controller,
+      generatedUiOwner,
+      primaryDeleteSessions,
+      workspace.client,
+      workspaceCwd,
+    ],
+  );
+  const deleteSession = useCallback(
+    async (sessionId: string) => {
+      if (!workspaceCwd) return primaryDeleteSession(sessionId);
+      const result = await deleteSessions([sessionId]);
+      if (result.errors.length > 0) throw new Error(result.errors[0]!.error);
+      return result.removed.length > 0 || result.notFound.length > 0;
+    },
+    [deleteSessions, primaryDeleteSession, workspaceCwd],
+  );
+  const releaseSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        return await primaryReleaseSessionAction?.(sessionId);
+      } finally {
+        if (workspaceCwd) controller.invalidateWorkspace(workspaceCwd);
+      }
+    },
+    [controller, primaryReleaseSessionAction, workspaceCwd],
+  );
+
+  if (!workspaceCwd) return primary;
+  return {
+    data: scoped.page ? scoped.sessions : undefined,
+    sessions: scoped.sessions,
+    loading: scoped.loading,
+    error: scoped.error,
+    reload: reloadScoped,
+    // Page-completeness markers, mirrored from the primary branch so a
+    // workspace-locked split call site can read them off the union without a
+    // TS2339: the prune guard needs them to tell "not in this page" from
+    // "gone".
+    nextCursor: scoped.nextCursor,
+    liveMergeFailed: scoped.liveMergeFailed,
+    truncated: scoped.truncated,
+    // Same reason: a stale-retained scoped page is not proof of absence.
+    stale: scoped.stale,
+    deleteSession,
+    deleteSessions,
+    releaseSession: primaryReleaseSessionAction ? releaseSession : undefined,
+  };
+}

@@ -1,0 +1,212 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it } from 'vitest';
+import type {
+  DaemonCapabilities,
+  DaemonSessionSummary,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
+import {
+  disambiguateWorkspaceLabels,
+  hasMultipleWorkspaces,
+  isAgentCollaborationEnabledForWorkspace,
+  isNonPrimaryWorkspaceSession,
+  mergeSessionsById,
+  workspaceBasename,
+  workspaceLabel,
+  workspaceLabelForCwd,
+} from './workspace';
+
+function caps(workspaces?: DaemonWorkspaceCapability[]): DaemonCapabilities {
+  return {
+    v: 1,
+    mode: 'native',
+    features: [],
+    modelServices: [],
+    ...(workspaces ? { workspaces } : {}),
+  } as unknown as DaemonCapabilities;
+}
+
+function ws(cwd: string): DaemonWorkspaceCapability {
+  return { id: cwd, cwd, primary: false, trusted: true };
+}
+
+function session(id: string, cwd: string): DaemonSessionSummary {
+  return { sessionId: id, workspaceCwd: cwd };
+}
+
+describe('workspaceBasename', () => {
+  it('returns the last path segment', () => {
+    expect(workspaceBasename('/home/me/projects/api')).toBe('api');
+    expect(workspaceBasename('/home/me/projects/api/')).toBe('api');
+    expect(workspaceBasename('C:\\Users\\me\\web')).toBe('web');
+  });
+
+  it('falls back to the whole string when there are no segments', () => {
+    expect(workspaceBasename('/')).toBe('/');
+    expect(workspaceBasename('')).toBe('');
+  });
+});
+
+describe('isAgentCollaborationEnabledForWorkspace', () => {
+  it('stays off without the collaboration capability', () => {
+    const capabilities = caps([
+      { ...ws('/workspace'), agentCollaborationEnabled: true },
+    ]);
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/workspace'),
+    ).toBe(false);
+  });
+
+  it('stays off when the daemon omits the feature list', () => {
+    const capabilities = {
+      v: 1,
+      mode: 'native',
+      modelServices: [],
+      workspaces: [ws('/workspace')],
+    } as unknown as DaemonCapabilities;
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/workspace'),
+    ).toBe(false);
+  });
+
+  it('uses the per-workspace opt-in when the daemon advertises it', () => {
+    const capabilities = caps([
+      { ...ws('/enabled'), agentCollaborationEnabled: true },
+      { ...ws('/disabled'), agentCollaborationEnabled: false },
+    ]);
+    capabilities.features = ['agent_collaboration_v1'];
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/enabled'),
+    ).toBe(true);
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/disabled'),
+    ).toBe(false);
+  });
+
+  it('keeps compatibility with daemons that only advertise the global tag', () => {
+    const capabilities = caps([ws('/workspace')]);
+    capabilities.features = ['agent_collaboration_v1'];
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/workspace'),
+    ).toBe(true);
+  });
+});
+
+describe('workspaceLabel', () => {
+  it('distinguishes SSH connections with different ports', () => {
+    const ssh = { host: 'alice@build-box', directory: '/srv/project' };
+    expect(workspaceLabel({ cwd: '/anchor', ssh })).toBe(
+      'alice@build-box:/srv/project',
+    );
+    expect(
+      workspaceLabel({ cwd: '/anchor', ssh: { ...ssh, port: 2222 } }),
+    ).toBe('alice@build-box:2222:/srv/project');
+    expect(
+      workspaceLabel({ cwd: '/anchor', ssh, displayName: 'Production' }),
+    ).toBe('Production');
+  });
+
+  it('prefers a display name and falls back to the cwd basename', () => {
+    expect(
+      workspaceLabel({ cwd: '/work/payments', displayName: 'Payments API' }),
+    ).toBe('Payments API');
+    expect(workspaceLabel({ cwd: '/work/payments' })).toBe('payments');
+  });
+
+  it('looks up a display name by cwd and falls back when unregistered', () => {
+    const workspaces = [{ cwd: '/work/payments', displayName: 'Payments API' }];
+    expect(workspaceLabelForCwd('/work/payments', workspaces)).toBe(
+      'Payments API',
+    );
+    expect(workspaceLabelForCwd('/work/web', workspaces)).toBe('web');
+  });
+});
+
+describe('hasMultipleWorkspaces', () => {
+  it('is false without a workspaces list or with a single entry', () => {
+    expect(hasMultipleWorkspaces(undefined)).toBe(false);
+    expect(hasMultipleWorkspaces(caps())).toBe(false);
+    expect(hasMultipleWorkspaces(caps([ws('/w')]))).toBe(false);
+  });
+
+  it('is true with more than one workspace', () => {
+    expect(hasMultipleWorkspaces(caps([ws('/w'), ws('/b')]))).toBe(true);
+  });
+});
+
+describe('isNonPrimaryWorkspaceSession', () => {
+  it('is true only when both cwds are known and differ', () => {
+    expect(isNonPrimaryWorkspaceSession('/b', '/w')).toBe(true);
+    expect(isNonPrimaryWorkspaceSession('/w', '/w')).toBe(false);
+    expect(isNonPrimaryWorkspaceSession(undefined, '/w')).toBe(false);
+    expect(isNonPrimaryWorkspaceSession('/b', undefined)).toBe(false);
+  });
+});
+
+describe('mergeSessionsById', () => {
+  it('returns the primary list unchanged (same ref) when there are no others', () => {
+    const primary = [session('a', '/w')];
+    expect(mergeSessionsById(primary, [])).toBe(primary);
+  });
+
+  it('appends other-workspace sessions', () => {
+    const merged = mergeSessionsById(
+      [session('a', '/w')],
+      [session('b', '/b')],
+    );
+    expect(merged.map((s) => s.sessionId)).toEqual(['a', 'b']);
+  });
+
+  it('returns only other-workspace sessions when the primary list is empty', () => {
+    // The primary workspace may have no live sessions while a non-primary one
+    // does — the early same-ref return is skipped and every other is inserted.
+    const merged = mergeSessionsById([], [session('b', '/b')]);
+    expect(merged.map((s) => s.sessionId)).toEqual(['b']);
+  });
+
+  it('keeps the primary entry on an id collision', () => {
+    const merged = mergeSessionsById(
+      [session('a', '/w')],
+      [session('a', '/b')],
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0].workspaceCwd).toBe('/w');
+  });
+});
+
+describe('disambiguateWorkspaceLabels', () => {
+  it('suffixes the parent directory only on colliding labels', () => {
+    const entries = [
+      { label: 'qwen-code', cwd: '/home/admin/jinjing.zzj/qwen-code' },
+      { label: 'qwen-code', cwd: '/home/admin/jinjing/QwenLM/qwen-code' },
+      { label: 'yiliang.skill', cwd: '/x/y/yiliang.skill' },
+    ];
+    expect(
+      disambiguateWorkspaceLabels(entries).map((entry) => entry.label),
+    ).toEqual([
+      'qwen-code (jinjing.zzj)',
+      'qwen-code (QwenLM)',
+      'yiliang.skill',
+    ]);
+  });
+
+  it('keeps bare labels when every label is unique or has no parent segment', () => {
+    const entries = [
+      { label: 'a', cwd: '/x/a' },
+      { label: 'bare', cwd: 'bare' },
+      { label: 'bare', cwd: 'bare' },
+    ];
+    expect(
+      disambiguateWorkspaceLabels(entries).map((entry) => entry.label),
+    ).toEqual(['a', 'bare', 'bare']);
+  });
+});

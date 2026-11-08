@@ -7,12 +7,10 @@
 import type React from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  type ArenaManager,
-  isSuccessStatus,
-  type Config,
-  type ArenaAgentResult,
-} from '@qwen-code/qwen-code-core';
+import type { ArenaManager } from '@qwen-code/qwen-code-core/agents/arena/ArenaManager.js';
+import type { ArenaAgentResult } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import { isSuccessStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { MessageType, type HistoryItemWithoutId } from '../../types.js';
@@ -153,7 +151,7 @@ export function ArenaSelectDialog({
         const label = agent.model.modelId;
         const statusInfo = getArenaStatusLabel(agent.status);
         const duration = formatDuration(agent.stats.durationMs);
-        const tokens = agent.stats.totalTokens.toLocaleString();
+        const tokens = agent.stats.outputTokens.toLocaleString();
 
         // Build diff summary from cached result if available
         let diffAdditions = 0;
@@ -327,7 +325,7 @@ function ArenaAgentPreview({
       <Box marginLeft={2}>
         <Text color={theme.text.secondary}>Metrics: </Text>
         <Text color={theme.text.primary}>
-          {result.stats.totalTokens.toLocaleString()} tokens ·{' '}
+          {result.stats.outputTokens.toLocaleString()} tokens ·{' '}
           {formatDuration(result.stats.durationMs)} · {result.stats.toolCalls}{' '}
           tools
         </Text>

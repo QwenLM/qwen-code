@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
+import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
@@ -26,12 +27,14 @@ import {
   mcpServerRequiresOAuth,
   MCPOAuthTokenStorage,
   createDebugLogger,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import {
   loadSettings,
   SettingScope as CliSettingScope,
 } from '../../../../config/settings.js';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import type { ExtensionUpdateState } from '../../../state/extensions.js';
 import type {
   InstalledItem,
   InstalledGroup,
@@ -75,6 +78,8 @@ interface InstalledTabProps {
   onStatus: (status: StatusMessage | null) => void;
   extensionsUpdateState: Map<string, string>;
   reloadSignal: number;
+  /** Adopt the state an update settled on into the app's update-state map. */
+  onUpdateStateChange?: (name: string, state: ExtensionUpdateState) => void;
 }
 
 function groupFor(
@@ -95,6 +100,7 @@ export const InstalledTab = ({
   onStatus,
   extensionsUpdateState,
   reloadSignal,
+  onUpdateStateChange,
 }: InstalledTabProps) => {
   const [items, setItems] = useState<InstalledItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -460,17 +466,25 @@ export const InstalledTab = ({
           : t('Enabling "{{name}}"...', { name: item.name }),
       });
       try {
+        let result;
         if (item.isActive) {
-          await extensionManager.disableExtension(item.name, scope);
+          result = await extensionManager.disableExtension(item.name, scope);
         } else {
-          await extensionManager.enableExtension(item.name, scope);
+          result = await extensionManager.enableExtension(item.name, scope);
         }
+        const warnings = result.warnings ?? [];
         onStatus({
-          type: 'success',
-          text: t('"{{name}}" {{state}}.', {
-            name: item.name,
-            state: item.isActive ? t('disabled') : t('enabled'),
-          }),
+          type: warnings.length > 0 ? 'warning' : 'success',
+          text:
+            warnings.length > 0
+              ? t('"{{name}}" changed with warnings: {{detail}}', {
+                  name: item.name,
+                  detail: warnings.map((warning) => warning.error).join('; '),
+                })
+              : t('"{{name}}" {{state}}.', {
+                  name: item.name,
+                  state: item.isActive ? t('disabled') : t('enabled'),
+                }),
         });
         await load();
       } catch (error) {
@@ -566,7 +580,7 @@ export const InstalledTab = ({
           // Disable: add to excluded + disconnect.
           const excluded =
             settings.forScope(targetScope).settings.mcp?.excluded ?? [];
-          if (!excluded.includes(item.name)) {
+          if (!matchesAnyServerPattern(item.name, excluded)) {
             settings.setValue(targetScope, 'mcp.excluded', [
               ...excluded,
               item.name,
@@ -682,6 +696,7 @@ export const InstalledTab = ({
         onStatus={onStatus}
         onReload={load}
         onExit={goToList}
+        onUpdateStateChange={onUpdateStateChange}
       />
     );
   }
@@ -741,7 +756,7 @@ export const InstalledTab = ({
         const item = row.item;
         const globalIndex = indexByKey.get(item.key) ?? -1;
         const isSelected = globalIndex === selectedIndex;
-        const marker = isSelected ? '●' : ' ';
+        const marker = isSelected ? ICON.CIRCLE_FILLED : ' ';
         const isChild = item.kind === 'mcp' && !!item.parentExtension;
         const kindBadge =
           item.kind === 'mcp'
@@ -794,7 +809,7 @@ export const InstalledTab = ({
                 {item.name}
               </Text>
               {item.isFavorite ? (
-                <Text color={theme.status.warning}> ★</Text>
+                <Text color={theme.status.warning}> {ICON.STAR}</Text>
               ) : null}
             </Box>
             <Text color={isSelected ? theme.text.accent : theme.text.secondary}>

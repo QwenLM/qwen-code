@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -25,7 +26,9 @@ import {
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
+  qualifySkillName,
   validateSkillName,
+  AUTO_MEMORY_SKILL_NAME,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { parsePriorityField, validateConfig } from './skill-load.js';
@@ -35,7 +38,9 @@ import {
   splitConditionalSkills,
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isNodeError } from '../utils/errors.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { expandHomeDir } from '../utils/paths.js';
 import {
   QWEN_DIR,
   SKILL_PROVIDER_CONFIG_DIRS,
@@ -51,6 +56,19 @@ import {
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';
+/**
+ * Bundled skills that `Config.isSkillEnabled` hides when the feature they
+ * serve is off: `generated-ui` without the generated-UI runtime, and
+ * `auto-memory` without legacy managed auto-memory. Both the listing and a
+ * by-name load consult it, so the two cannot disagree. `generated-ui` is
+ * spelled out because its module sits above this one in the import graph.
+ * A Config stand-in that builds a SkillManager must answer `isSkillEnabled`
+ * for these (see the daemon's skills catalog).
+ */
+const CONDITIONAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set([
+  'generated-ui',
+  AUTO_MEMORY_SKILL_NAME,
+]);
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 // Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
@@ -78,7 +96,9 @@ export class SkillManager {
   // so future async listeners get checked instead of relying on the
   // `Promise.resolve().then(listener)` runtime adapter to swallow the
   // mismatch silently.
-  private readonly changeListeners: Set<() => void | Promise<void>> = new Set();
+  private readonly changeListeners: Set<
+    (options?: { throwOnError?: boolean }) => void | Promise<void>
+  > = new Set();
   // One-shot signal: when true, the *next* `notifyChangeListeners()` run
   // will tell `slashCommandProcessor`'s reload-listener (and any other
   // opt-in consumer) that an external reload is about to be redundant —
@@ -88,6 +108,8 @@ export class SkillManager {
   // `slashCommandProcessor.ts:416`.
   private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
+  private discoveryHasErrors = false;
+  private discoveryHasReadErrors = false;
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
@@ -114,7 +136,9 @@ export class SkillManager {
    * updated state before continuing.
    * @returns A function to remove the listener.
    */
-  addChangeListener(listener: () => void | Promise<void>): () => void {
+  addChangeListener(
+    listener: (options?: { throwOnError?: boolean }) => void | Promise<void>,
+  ): () => void {
     this.changeListeners.add(listener);
     return () => {
       this.changeListeners.delete(listener);
@@ -186,7 +210,9 @@ export class SkillManager {
    * `allSettled` (not `Promise.all`) so a single listener throwing
    * still lets the others finish.
    */
-  private async notifyChangeListeners(): Promise<void> {
+  private async notifyChangeListeners(options?: {
+    throwOnError?: boolean;
+  }): Promise<void> {
     // Cap each listener at 30s. Without this, a hung listener (e.g.
     // `SkillTool.refreshSkills` blocked on a slow skill reload) would
     // permanently stall
@@ -223,16 +249,25 @@ export class SkillManager {
     };
     const results = await Promise.allSettled(
       Array.from(this.changeListeners).map((listener) =>
-        withTimeout(Promise.resolve().then(listener)),
+        withTimeout(
+          Promise.resolve().then(() =>
+            options ? listener(options) : listener(),
+          ),
+        ),
       ),
     );
+    const errors: unknown[] = [];
     for (const result of results) {
       if (result.status === 'rejected') {
+        errors.push(result.reason);
         debugLogger.warn(
           'Skill change listener threw an error:',
           result.reason,
         );
       }
+    }
+    if (options?.throwOnError && errors.length > 0) {
+      throw new AggregateError(errors, 'Skill change listeners failed.');
     }
   }
 
@@ -254,13 +289,6 @@ export class SkillManager {
     debugLogger.debug(
       `Listing skills${options.level ? ` at level: ${options.level}` : ''}${options.force ? ' (forced refresh)' : ''}`,
     );
-    const skills: SkillConfig[] = [];
-    const seenNames = new Set<string>();
-
-    const levelsToCheck: SkillLevel[] = options.level
-      ? [options.level]
-      : ['project', 'user', 'extension', 'bundled'];
-
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.skillsCache !== null;
 
@@ -272,6 +300,40 @@ export class SkillManager {
       debugLogger.debug('Using cached skills');
     }
 
+    const skills = this.collectCachedSkills(options.level);
+    debugLogger.info(`Listed ${skills.length} unique skills`);
+    return skills;
+  }
+
+  /**
+   * Returns the currently committed cache without triggering discovery.
+   *
+   * Status and diagnostics callers must use this method instead of
+   * `listSkills()` so a read-only request cannot turn a cold cache into a
+   * filesystem scan. `null` means no refresh has committed yet.
+   */
+  getCachedSkills(level?: SkillLevel): SkillConfig[] | null {
+    if (this.skillsCache === null) return null;
+    return this.collectCachedSkills(level);
+  }
+
+  /** Whether missing entries in the current cache might be discovery failures. */
+  hasDiscoveryErrors(): boolean {
+    return this.discoveryHasErrors;
+  }
+
+  /** Whether discovery could not read every enabled source. */
+  hasDiscoveryReadErrors(): boolean {
+    return this.discoveryHasReadErrors;
+  }
+
+  private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
+    const skills: SkillConfig[] = [];
+    const seenNames = new Set<string>();
+    const levelsToCheck: SkillLevel[] = level
+      ? [level]
+      : ['project', 'user', 'extension', 'bundled'];
+
     // Collect skills from each level (precedence: project > user > extension > bundled)
     for (const level of levelsToCheck) {
       const levelSkills = this.skillsCache?.get(level) || [];
@@ -280,6 +342,12 @@ export class SkillManager {
       );
 
       for (const skill of levelSkills) {
+        if (
+          level === 'bundled' &&
+          CONDITIONAL_BUNDLED_SKILLS.has(skill.name) &&
+          !this.config.isSkillEnabled(skill)
+        )
+          continue;
         // Skip if we've already seen this name (precedence: project > user > extension > bundled)
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
@@ -299,8 +367,6 @@ export class SkillManager {
     // programmatic consumers — notably SkillTool's model-facing
     // `<available_skills>` description — are not reordered by priority.
     skills.sort((a, b) => a.name.localeCompare(b.name));
-
-    debugLogger.info(`Listed ${skills.length} unique skills`);
     return skills;
   }
 
@@ -404,12 +470,28 @@ export class SkillManager {
   /**
    * Refreshes the skills cache by loading all skills from disk.
    */
-  async refreshCache(): Promise<void> {
+  async refreshCache(options?: { throwOnError?: boolean }): Promise<void> {
     debugLogger.info('Refreshing skills cache...');
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
+    let discoveryHasErrors = false;
+    let discoveryHasReadErrors = false;
+    const onDiscoveryError = (error?: unknown) => {
+      discoveryHasErrors = true;
+      if (
+        !(
+          error instanceof SkillError &&
+          error.code === SkillErrorCode.PARSE_ERROR
+        )
+      ) {
+        discoveryHasReadErrors = true;
+      }
+    };
 
-    const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
+    // Safe mode: only load bundled (system) skills
+    const levels: SkillLevel[] = this.config.isSafeMode()
+      ? ['bundled']
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Use allSettled so an unrecoverable error at one level (e.g. a hung
     // FS, a permission denial, an OS-level enoent on a removed config dir)
@@ -418,13 +500,17 @@ export class SkillManager {
     // bubble up to the level boundary.
     const settled = await Promise.allSettled(
       levels.map(async (level) => {
-        const levelSkills = await this.listSkillsAtLevel(level);
+        const levelSkills = await this.listSkillsAtLevel(
+          level,
+          onDiscoveryError,
+        );
         debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
         return [level, levelSkills] as const;
       }),
     );
 
     let totalSkills = 0;
+    const errors: unknown[] = [];
     for (let i = 0; i < settled.length; i++) {
       const result = settled[i];
       if (result.status === 'fulfilled') {
@@ -432,6 +518,8 @@ export class SkillManager {
         skillsCache.set(level, levelSkills);
         totalSkills += levelSkills.length;
       } else {
+        errors.push(result.reason);
+        onDiscoveryError();
         debugLogger.warn(
           `Failed to load ${levels[i]} level skills:`,
           result.reason,
@@ -439,6 +527,9 @@ export class SkillManager {
       }
     }
 
+    // Publish completeness with the cache produced by this scan.
+    this.discoveryHasErrors = discoveryHasErrors;
+    this.discoveryHasReadErrors = discoveryHasReadErrors;
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`
@@ -491,7 +582,14 @@ export class SkillManager {
       `Skills cache refreshed: ${totalSkills} total skills loaded ` +
         `(${conditional.length} conditional)`,
     );
-    await this.notifyChangeListeners();
+    try {
+      await this.notifyChangeListeners(options);
+    } catch (error) {
+      errors.push(error);
+    }
+    if (options?.throwOnError && errors.length > 0) {
+      throw new AggregateError(errors, 'Skill cache refresh failed.');
+    }
   }
 
   /**
@@ -538,7 +636,7 @@ export class SkillManager {
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();
     for (const filePath of filePaths) {
-      for (const name of registry.matchAndConsume(filePath)) {
+      for (const name of await registry.matchAndConsume(filePath)) {
         newlyAcrossPaths.add(name);
       }
     }
@@ -584,7 +682,7 @@ export class SkillManager {
   stopWatching(): void {
     debugLogger.info('Stopping skill directory watchers...');
     for (const watcher of this.watchers.values()) {
-      void watcher.close().catch((error) => {
+      void closeFileWatcher(watcher).catch((error) => {
         debugLogger.warn('Failed to close skills watcher:', error);
       });
     }
@@ -897,12 +995,32 @@ export class SkillManager {
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
-      case 'user':
-        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          v === QWEN_DIR
-            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
-            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+      case 'user': {
+        // Resolve the defaults so they compare byte-equal to the path.resolve'd
+        // custom dirs in the dedup below. `project` has no such comparison and
+        // joins onto an already-absolute root, so it deliberately does not.
+        const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+          path.resolve(
+            v === QWEN_DIR
+              ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+              : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          ),
         );
+        for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
+          const homeExpanded = expandHomeDir(customDir);
+          const expanded = path.resolve(homeExpanded);
+          if (!path.isAbsolute(homeExpanded)) {
+            debugLogger.warn(
+              `Custom skill directory "${customDir}" is relative; ` +
+                `resolved to "${expanded}" against the working directory`,
+            );
+          }
+          if (!dirs.includes(expanded)) {
+            dirs.push(expanded);
+          }
+        }
+        return dirs;
+      }
       case 'bundled':
         return [this.bundledSkillsDir];
       case 'extension':
@@ -920,9 +1038,17 @@ export class SkillManager {
    * @param level - Storage level to scan
    * @returns Array of skill configurations
    */
-  private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
+  private async listSkillsAtLevel(
+    level: SkillLevel,
+    onDiscoveryError?: (error?: unknown) => void,
+  ): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
+    if (this.config.getDisabledSkillLevels?.().has(level)) {
+      debugLogger.debug(`Skipping disabled ${level} skill level`);
       return [];
     }
 
@@ -943,6 +1069,7 @@ export class SkillManager {
       const extensions = this.config.getActiveExtensions();
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
+        if (extension.skillsDiscoveryHasErrors) onDiscoveryError?.();
         extension.skills?.forEach((skill) => {
           // Extension skills bypass parseSkillContent / validateConfig, so a
           // non-number `priority` would silently sort at the bottom of the
@@ -959,7 +1086,15 @@ export class SkillManager {
           }
           skills.push({
             ...skill,
-            extensionName: extension.displayName ?? extension.name,
+            // The registry identity carries the owner, so two extensions
+            // shipping `pdf` contribute two names and a reader can tell where
+            // a skill came from. The manifest and the workspace
+            // extension-skill store keep using the authored spelling;
+            // `Config.isSkillEnabled` bridges the two.
+            name: qualifySkillName(extension.name, skill.name),
+            authoredName: skill.name,
+            extensionName: extension.name,
+            extensionDisplayName: extension.displayName,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.
@@ -977,14 +1112,22 @@ export class SkillManager {
 
     if (level === 'bundled') {
       const bundledDir = this.bundledSkillsDir;
-      if (!fsSync.existsSync(bundledDir)) {
-        debugLogger.warn(
-          `Bundled skills directory not found: ${bundledDir}. This may indicate an incomplete installation.`,
-        );
-        return [];
-      }
       debugLogger.debug(`Loading bundled skills from: ${bundledDir}`);
-      const skills = await this.loadSkillsFromDir(bundledDir, 'bundled');
+      const skills = await this.loadSkillsFromDir(
+        bundledDir,
+        'bundled',
+        onDiscoveryError,
+      );
+      const generatedUiDir = this.config.getBundledGeneratedUiSkillsDir?.();
+      if (generatedUiDir) {
+        skills.push(
+          ...(await this.loadSkillsFromDir(
+            generatedUiDir,
+            'bundled',
+            onDiscoveryError,
+          )),
+        );
+      }
       debugLogger.debug(`Loaded ${skills.length} bundled skills`);
       return skills;
     }
@@ -997,7 +1140,7 @@ export class SkillManager {
     const perDirSkills = await Promise.all(
       baseDirs.map((baseDir) => {
         debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
-        return this.loadSkillsFromDir(baseDir, level);
+        return this.loadSkillsFromDir(baseDir, level, onDiscoveryError);
       }),
     );
     const skills: SkillConfig[] = [];
@@ -1022,6 +1165,7 @@ export class SkillManager {
   async loadSkillsFromDir(
     baseDir: string,
     level: SkillLevel,
+    onDiscoveryError?: (error?: unknown) => void,
   ): Promise<SkillConfig[]> {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
@@ -1035,6 +1179,24 @@ export class SkillManager {
       // any ordering assumption (`tools/skill.ts`); preserve that contract.
       const loaded = await Promise.all(
         entries.map(async (entry) => {
+          // Skip transient install artifacts (backup / staging dirs left
+          // behind by a crashed reinstall). Without this filter a stale
+          // `.backup-*` sibling with a valid SKILL.md would be loaded as a
+          // duplicate skill, and a "deleted" skill could reappear from its
+          // backup sibling.
+          // Match only the actual artifact shape
+          // (`.backup-<pid>-<timestamp>` / `.installing-<pid>-<timestamp>`,
+          // anchored at the end of the entry name) so that legitimate skill
+          // dirs whose names merely contain `.backup-` or `.installing-`
+          // (e.g. `db.backup-2024`) are not skipped.
+          if (
+            /\.backup-\d+-\d+$/.test(entry.name) ||
+            /\.installing-\d+-\d+$/.test(entry.name)
+          ) {
+            debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+            return null;
+          }
+
           const isDirectory = entry.isDirectory();
           const isSymlink = entry.isSymbolicLink();
 
@@ -1052,6 +1214,12 @@ export class SkillManager {
           if (isSymlink) {
             const check = await validateSymlinkTarget(skillDir);
             if (!check.ok) {
+              if (
+                check.reason === 'invalid' &&
+                !(isNodeError(check.error) && check.error.code === 'ENOENT')
+              ) {
+                onDiscoveryError?.();
+              }
               if (check.reason === 'not-directory') {
                 debugLogger.warn(
                   `Skipping symlink ${entry.name} that does not point to a directory`,
@@ -1071,6 +1239,9 @@ export class SkillManager {
             await fs.access(skillManifest);
             return await this.parseSkillFileInternal(skillManifest, level);
           } catch (error) {
+            if (!(isNodeError(error) && error.code === 'ENOENT')) {
+              onDiscoveryError?.(error);
+            }
             if (error instanceof SkillError) {
               debugLogger.error(
                 `Failed to parse skill at ${skillDir}: ${error.message}`,
@@ -1087,6 +1258,13 @@ export class SkillManager {
 
       return loaded.filter((s): s is SkillConfig => s !== null);
     } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) {
+        onDiscoveryError?.();
+      } else if (level === 'bundled') {
+        debugLogger.warn(
+          `Bundled skills directory not found: ${baseDir}. This may indicate an incomplete installation.`,
+        );
+      }
       // Directory doesn't exist or can't be read
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
@@ -1113,7 +1291,15 @@ export class SkillManager {
     const levelSkills = this.skillsCache?.get(level) || [];
 
     // Find the skill with matching name
-    return levelSkills.find((skill) => skill.name === name) || null;
+    return (
+      levelSkills.find(
+        (skill) =>
+          skill.name === name &&
+          (level !== 'bundled' ||
+            !CONDITIONAL_BUNDLED_SKILLS.has(name) ||
+            this.config.isSkillEnabled(skill)),
+      ) || null
+    );
   }
 
   /**
@@ -1147,15 +1333,14 @@ export class SkillManager {
 
     for (const existingPath of this.watchers.keys()) {
       if (!watchTargets.has(existingPath)) {
-        void this.watchers
-          .get(existingPath)
-          ?.close()
-          .catch((error) => {
+        void closeFileWatcher(this.watchers.get(existingPath)).catch(
+          (error) => {
             debugLogger.warn(
               `Failed to close skills watcher for ${existingPath}:`,
               error,
             );
-          });
+          },
+        );
         this.watchers.delete(existingPath);
       }
     }

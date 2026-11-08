@@ -1,0 +1,77 @@
+name: 'Assign issue owner'
+
+# Auto-assign an issue to an area owner once triage has labelled it.
+#
+# Assignment is a pure function of the issue's labels and .github/issue-owners.json
+# — no model runs in this workflow and the script never reads issue title, body,
+# or comments, so untrusted issue text cannot select an assignee. Push access is
+# re-verified against the collaborator API before every write.
+#
+# Trigger note: label events only fire for label writes made with a PAT.
+# The triage agent labels with QWEN_CODE_BOT_TOKEN/CI_BOT_PAT (see
+# qwen-triage.yml), so this chains correctly. If triage ever falls back to the
+# default GITHUB_TOKEN for labelling, this workflow stops firing and must be
+# rehung on `workflow_run` instead — GITHUB_TOKEN writes do not trigger
+# downstream workflow runs.
+#
+# Each label change fires once, so a triage run that applies five labels
+# queues five runs. Every run after the first sees an assignee and no-ops.
+
+on:
+  issues:
+    types: ['labeled', 'unlabeled']
+  workflow_dispatch:
+    inputs:
+      number:
+        description: 'Issue number to evaluate'
+        required: true
+        type: 'string'
+      dry_run:
+        description: 'Report the chosen assignee without assigning'
+        required: false
+        default: true
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'assign-issue-owner-${{ github.event.issue.number || inputs.number }}'
+  cancel-in-progress: false
+
+jobs:
+  assign:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    # Runs only the trusted base-ref script, and label events fire only for
+    # PAT-authored label writes, so the persistent ECS pool is safe and skips
+    # the saturated hosted queue. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Checkout owner map'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          # A directory, not file entries; see assign-pr-owner.yml.
+          sparse-checkout: '.github/scripts'
+          persist-credentials: false
+
+      - name: 'Assign area owner'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number || inputs.number }}'
+          DRY_RUN: "${{ inputs.dry_run || 'false' }}"
+        run: 'node .github/scripts/assign-issue-owner.mjs'

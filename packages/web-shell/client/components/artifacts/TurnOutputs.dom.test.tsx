@@ -1,0 +1,983 @@
+// @vitest-environment jsdom
+import { WebShellCustomizationProvider } from '../../customization';
+import { act, StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import { I18nProvider } from '../../i18n';
+
+const {
+  readFileBytes,
+  stat,
+  secondaryReadFileBytes,
+  secondaryReadWorkspaceFile,
+  secondaryStat,
+  workspaceByCwd,
+} = vi.hoisted(() => ({
+  readFileBytes: vi.fn(),
+  stat: vi.fn(),
+  secondaryReadFileBytes: vi.fn(),
+  secondaryReadWorkspaceFile: vi.fn(),
+  secondaryStat: vi.fn(),
+  workspaceByCwd: vi.fn(),
+}));
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useWorkspaceActions: () => ({
+    readFileBytes,
+    stat,
+  }),
+  useWorkspace: () => ({
+    actions: { readFileBytes, stat },
+    client: { workspaceByCwd },
+    capabilities: {
+      workspaceCwd: '/primary',
+      workspaces: [
+        {
+          id: 'primary-id',
+          cwd: '/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+  }),
+}));
+
+const { TurnOutputs } = await import('./TurnOutputs');
+const styles = (await import('./TurnOutputs.module.css')).default;
+
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
+const createdBlobs: Blob[] = [];
+
+beforeEach(() => {
+  createdBlobs.length = 0;
+  stat.mockResolvedValue({ sizeBytes: 3, modifiedMs: 1 });
+  readFileBytes.mockResolvedValue({
+    contentBase64: btoa('abc'),
+    offset: 0,
+    returnedBytes: 3,
+    sizeBytes: 3,
+  });
+  secondaryStat.mockResolvedValue({ sizeBytes: 9, modifiedMs: 2 });
+  secondaryReadFileBytes.mockResolvedValue({
+    contentBase64: btoa('secondary'),
+    offset: 0,
+    returnedBytes: 9,
+    sizeBytes: 9,
+  });
+  workspaceByCwd.mockReturnValue({
+    readWorkspaceFile: secondaryReadWorkspaceFile,
+    readWorkspaceFileBytes: secondaryReadFileBytes,
+    fileStat: secondaryStat,
+  });
+  Object.defineProperty(URL, 'createObjectURL', {
+    configurable: true,
+    value: vi.fn((blob: Blob) => {
+      createdBlobs.push(blob);
+      return 'blob:artifact';
+    }),
+  });
+  Object.defineProperty(URL, 'revokeObjectURL', {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
+
+afterEach(() => {
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+  readFileBytes.mockReset();
+  stat.mockReset();
+  secondaryReadFileBytes.mockReset();
+  secondaryReadWorkspaceFile.mockReset();
+  secondaryStat.mockReset();
+  workspaceByCwd.mockReset();
+});
+
+describe('TurnOutputs artifact downloads', () => {
+  it('shows Download for available and changed workspace artifact kinds', () => {
+    const kinds = [
+      'file',
+      'link',
+      'html',
+      'image',
+      'video',
+      'audio',
+      'pdf',
+      'notebook',
+      'document',
+      'other',
+    ];
+    const artifacts = kinds.flatMap((kind, index) =>
+      ['available', 'changed'].map(
+        (status) =>
+          ({
+            id: `artifact-${index}-${status}`,
+            kind,
+            storage: 'workspace',
+            status,
+            title: `${kind} ${status} artifact`,
+            workspacePath: `output/${kind}`,
+          }) as DaemonSessionArtifact,
+      ),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={artifacts}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toHaveLength(3);
+
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('more artifacts'),
+    );
+    expect(showMore).toBeTruthy();
+    act(() => {
+      showMore?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toHaveLength(artifacts.length);
+
+    act(() => root.unmount());
+  });
+
+  it('downloads current changed workspace bytes with the artifact basename', async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'artifact-1',
+                kind: 'pdf',
+                storage: 'workspace',
+                status: 'changed',
+                title: 'Report',
+                sizeBytes: 3,
+                metadata: { 'qwen.workspace.sizeBytes': 2 },
+                workspacePath: 'reports/report.pdf',
+                mimeType: 'application/pdf',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    await act(async () => {
+      const download = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Download',
+      );
+      download?.click();
+      await Promise.resolve();
+    });
+
+    expect(readFileBytes).toHaveBeenCalledWith('reports/report.pdf', {
+      offset: 0,
+      maxBytes: 256 * 1024,
+    });
+    expect(click).toHaveBeenCalledOnce();
+    expect(click.mock.instances[0]?.download).toBe('report.pdf');
+    expect(createdBlobs[0]?.type).toBe('application/pdf');
+    const savedContent = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(createdBlobs[0]!);
+    });
+    expect(savedContent).toBe('abc');
+
+    act(() => root.unmount());
+  });
+
+  it('routes a secondary workspace download through its qualified client', async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-secondary"
+              workspaceCwd="/secondary"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'secondary-artifact',
+                  kind: 'file',
+                  storage: 'workspace',
+                  status: 'available',
+                  title: 'Secondary report',
+                  workspacePath: 'report.txt',
+                } as DaemonSessionArtifact,
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>
+        </StrictMode>,
+      );
+    });
+
+    await act(async () => {
+      const download = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Download',
+      );
+      download?.click();
+      await Promise.resolve();
+    });
+
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(secondaryReadFileBytes).toHaveBeenCalledWith('report.txt', {
+      offset: 0,
+      maxBytes: 256 * 1024,
+    });
+    expect(readFileBytes).not.toHaveBeenCalled();
+    expect(click).toHaveBeenCalledOnce();
+
+    act(() => root.unmount());
+  });
+
+  it('hides Download when the artifact workspace cannot be resolved', () => {
+    workspaceByCwd.mockReturnValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-unknown"
+            workspaceCwd="/unknown"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'unknown-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'Unknown report',
+                workspacePath: 'report.txt',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toBeUndefined();
+    expect(readFileBytes).not.toHaveBeenCalled();
+    expect(secondaryReadFileBytes).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('stamps secondary ownership onto every panel open request', () => {
+    const onOpenRequest = vi.fn();
+    const artifact = {
+      id: 'secondary-artifact',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      title: 'Secondary artifact',
+      workspacePath: 'report.txt',
+    } as DaemonSessionArtifact;
+    const scheduledTask = {
+      id: 'secondary-task',
+      toolCallId: 'task-call',
+      title: 'Secondary schedule',
+      cron: '0 9 * * *',
+      prompt: 'secondary only',
+      recurring: true,
+      durable: true,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-secondary"
+            workspaceCwd="/secondary"
+            changes={[
+              {
+                path: 'changed.ts',
+                status: 'modified',
+                toolCallId: 'change-call',
+                isArtifact: false,
+                diffs: [],
+              },
+            ]}
+            artifacts={[artifact]}
+            scheduledTasks={[scheduledTask]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[title="changed.ts"]')
+        ?.click();
+      container
+        .querySelector<HTMLElement>('[title="report.txt"]')
+        ?.querySelector('button')
+        ?.click();
+      container
+        .querySelector<HTMLButtonElement>('button[title="Secondary schedule"]')
+        ?.click();
+    });
+
+    expect(onOpenRequest).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        kind: 'review',
+        workspaceCwd: '/secondary',
+        workspaceId: 'secondary-id',
+      }),
+    );
+    expect(onOpenRequest).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        kind: 'artifact',
+        artifact,
+        workspaceCwd: '/secondary',
+        workspaceId: 'secondary-id',
+      }),
+    );
+    expect(onOpenRequest).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        kind: 'scheduled_task',
+        task: expect.objectContaining({
+          id: 'secondary-task',
+          workspaceId: 'secondary-id',
+        }),
+        workspaceCwd: '/secondary',
+        workspaceId: 'secondary-id',
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('disables repeated downloads and reports failures through the toast callback', async () => {
+    let rejectStat: ((error: Error) => void) | undefined;
+    stat.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectStat = reject;
+      }),
+    );
+    const onError = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'artifact-1',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'Report',
+                workspacePath: 'report.txt',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+            onError={onError}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    act(() => download?.click());
+    expect(download?.disabled).toBe(true);
+    expect(download?.textContent).toContain('Downloading');
+
+    act(() => download?.click());
+    expect(stat).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rejectStat?.(new Error('read denied'));
+      await Promise.resolve();
+    });
+    expect(download?.disabled).toBe(false);
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Download failed: read denied' }),
+      'Download failed: read denied',
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('does not show Download for managed, unavailable, or pathless artifacts', () => {
+    const artifacts = [
+      {
+        id: 'workspace-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'available',
+        title: 'workspace artifact',
+        workspacePath: 'output/file.txt',
+      },
+      {
+        id: 'managed-1',
+        kind: 'file',
+        storage: 'managed',
+        status: 'available',
+        title: 'managed artifact',
+        workspacePath: 'output/managed.txt',
+      },
+      {
+        id: 'pending-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'pending',
+        title: 'pending artifact',
+        workspacePath: 'output/pending.txt',
+      },
+      {
+        id: 'missing-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'missing',
+        title: 'missing artifact',
+        workspacePath: 'output/missing.txt',
+      },
+      {
+        id: 'pathless-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'available',
+        title: 'pathless artifact',
+      },
+    ] as DaemonSessionArtifact[];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={artifacts}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('more artifacts'),
+    );
+    expect(showMore).toBeTruthy();
+    act(() => {
+      showMore?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toHaveLength(1);
+
+    act(() => root.unmount());
+  });
+
+  it('cancels the read and skips the save when the card unmounts mid-download', async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    let resolveRead: ((value: unknown) => void) | undefined;
+    readFileBytes.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'artifact-1',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'Report',
+                workspacePath: 'report.txt',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    act(() => download?.click());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(readFileBytes).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+
+    await act(async () => {
+      resolveRead?.({
+        contentBase64: btoa('abc'),
+        offset: 0,
+        returnedBytes: 3,
+        sizeBytes: 3,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it('disables Open for a missing workspace artifact without showing its path', () => {
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-missing"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'missing-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'missing',
+                title: 'Missing report',
+                workspacePath: 'w/agent/report.csv',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const open = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Open',
+    );
+    expect(open?.disabled).toBe(true);
+    expect(open?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('w/agent/report.csv');
+    expect(open?.title).toBe('');
+    expect(open?.parentElement?.title).toBe(
+      'File not found in the workspace · w/agent/report.csv',
+    );
+
+    act(() => open?.click());
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('marks only changed workspace artifacts as modified since recorded', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-changed"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={(['available', 'changed'] as const).map(
+              (status) =>
+                ({
+                  id: `${status}-artifact`,
+                  kind: 'file',
+                  storage: 'workspace',
+                  status,
+                  title: `${status}.csv`,
+                  workspacePath: `reports/${status}.csv`,
+                }) as DaemonSessionArtifact,
+            )}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      Array.from(
+        container.querySelectorAll(`.${styles.artifactMeta}`),
+        (meta) => meta.textContent?.includes('Modified since recorded'),
+      ),
+    ).toEqual([false, true]);
+
+    act(() => root.unmount());
+  });
+
+  it('opens a recorded link through the external opener instead of the panel', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const onOpenRequest = vi.fn();
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-link"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'recorded-link',
+                kind: 'link',
+                storage: 'external_url',
+                status: 'available',
+                title: 'Recorded link',
+                url: 'https://platform.example.com/detail?id=7',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The card keeps a single control: the address it opens.
+    expect(container.querySelectorAll('button, a')).toHaveLength(1);
+    const link = container.querySelector('a');
+    expect(link?.textContent?.trim()).toBe('Open');
+    expect(link?.getAttribute('href')).toBe(
+      'https://platform.example.com/detail?id=7',
+    );
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://platform.example.com/detail?id=7',
+    });
+    expect(onOpenRequest).not.toHaveBeenCalled();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    delete (window as { __TAURI__?: unknown }).__TAURI__;
+  });
+
+  it('shows a workspace file by its filename and keeps a link title', () => {
+    const onOpenRequest = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const workspaceArtifact = {
+      id: 'pptx',
+      kind: 'document',
+      storage: 'workspace',
+      status: 'available',
+      title: 'artifact_test 节点创建报告 PPT',
+      workspacePath: 'w/agent/artifact_test_节点创建报告.pptx',
+    } as DaemonSessionArtifact;
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              workspaceArtifact,
+              {
+                id: 'link-1',
+                kind: 'link',
+                storage: 'external_url',
+                status: 'available',
+                title: 'Table details',
+                url: 'https://example.com/orders',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('artifact_test_节点创建报告.pptx');
+    expect(container.textContent).not.toContain(
+      'artifact_test 节点创建报告 PPT',
+    );
+    expect(container.textContent).toContain('Table details');
+    expect(
+      container.querySelector('[title="artifact_test_节点创建报告.pptx"]'),
+    ).not.toBeNull();
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    expect(download?.getAttribute('title')).toBe(
+      'Download artifact_test_节点创建报告.pptx',
+    );
+
+    const open = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Open',
+    );
+    act(() => open?.click());
+    expect(onOpenRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'artifact',
+        title: 'artifact_test_节点创建报告.pptx',
+        artifact: workspaceArtifact,
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('ellipsizes artifact names without clamping scheduled-task titles', () => {
+    const taskTitle =
+      'Daily dependency audit and summary post for the platform team';
+    const artifact = {
+      id: 'artifact-1',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      title: 'Quarterly report',
+      workspacePath: 'reports/summary.html',
+    } as DaemonSessionArtifact;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-titles"
+            changes={[]}
+            artifacts={[artifact]}
+            scheduledTasks={[
+              {
+                id: 'task-1',
+                toolCallId: 'task-call',
+                title: taskTitle,
+                cron: '0 9 * * *',
+                prompt: 'audit',
+                recurring: true,
+                durable: true,
+              },
+            ]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const nodes = [...container.querySelectorAll('div')];
+    const artifactTitle = nodes.find(
+      (node) => node.textContent === 'summary.html',
+    );
+    const scheduledTitle = nodes.find((node) => node.textContent === taskTitle);
+    expect(artifactTitle?.className.split(/\s+/)).toEqual(
+      expect.arrayContaining([styles.title, styles.artifactTitle]),
+    );
+    expect(scheduledTitle?.className.split(/\s+/)).toContain(styles.title);
+    expect(scheduledTitle?.className.split(/\s+/)).not.toContain(
+      styles.artifactTitle,
+    );
+
+    act(() => root.unmount());
+  });
+});
+
+describe('host artifact visibility', () => {
+  it('filters before counting and updates without mutating the source artifacts', () => {
+    const artifacts = Array.from({ length: 6 }, (_, i) => ({
+      id: `a${i}`,
+      title: `Report ${i}`,
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      workspacePath: `/primary/report-${i}.txt`,
+    })) as DaemonSessionArtifact[];
+    const originalArtifacts = structuredClone(artifacts);
+    artifacts.forEach(Object.freeze);
+    Object.freeze(artifacts);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const filterArtifact = vi.fn(
+      (artifact: DaemonSessionArtifact) => Number(artifact.id.slice(1)) >= 2,
+    );
+    const render = (filter = filterArtifact) =>
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ filterArtifact: filter }}>
+              <TurnOutputs
+                turnId="turn-1"
+                sourceSessionId="session-1"
+                changes={[]}
+                artifacts={artifacts}
+                scheduledTasks={[]}
+                onReviewChanges={() => {}}
+                onOpenArtifact={() => {}}
+                onOpenScheduledTask={() => {}}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        ),
+      );
+    render();
+    expect(container.textContent).not.toContain('report-0.txt');
+    expect(container.textContent).toContain('report-2.txt');
+    expect(container.textContent).not.toContain('report-5.txt');
+    expect(filterArtifact).toHaveBeenCalledWith(artifacts[0], {
+      turnId: 'turn-1',
+      sourceSessionId: 'session-1',
+    });
+    const more = Array.from(container.querySelectorAll('button')).find(
+      (button) => /1.*more|more.*1/i.test(button.textContent ?? ''),
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain('report-5.txt');
+    render(vi.fn(() => false));
+    expect(container.textContent).toBe('');
+    render();
+    expect(container.textContent).toContain('report-2.txt');
+    expect(artifacts).toEqual(originalArtifacts);
+    act(() => root.unmount());
+  });
+});

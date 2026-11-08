@@ -22,7 +22,9 @@ vi.mock('./extractionAgentPlanner.js', () => ({
 describe('auto-memory extraction with agent planner', () => {
   let tempDir: string;
   let projectRoot: string;
-  const mockConfig = {} as Config;
+  const mockConfig = {
+    getSessionId: () => 'session-1',
+  } as Config;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(
@@ -67,6 +69,7 @@ describe('auto-memory extraction with agent planner', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: 'Managed auto-memory updated: user.md',
       };
     });
@@ -87,6 +90,8 @@ describe('auto-memory extraction with agent planner', () => {
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
       mockConfig,
       projectRoot,
+      undefined,
+      undefined,
     );
 
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);
