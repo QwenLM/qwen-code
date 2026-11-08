@@ -193,7 +193,7 @@ The capture job matches the pool's security
 model exactly (untrusted PR code, read-only token, only the event-scoped
 `GITHUB_TOKEN`), which supersedes the browser-dependency exclusion above for
 this one job: it reuses the image's Node behind the self-hosted preflight,
-gates on a lane-calibrated disk floor (8 GiB free and at most 85% used —
+gates on a lane-calibrated disk floor (8 GiB free and less than 85% used —
 the shared 2 GiB default passed a slot with 14.6 GB free on an 89%-used
 filesystem and pnpm died on ENOSPC minutes later), renders with pinned
 `--workers=2` (an unpinned run sizes Chromium from the host's cores inside
@@ -207,9 +207,9 @@ the same archive; the best-effort step degrades only its own extra
 font/ffmpeg install failure to fallback fonts and .webm-only recordings
 instead of failing the preview, with bounded apt calls and a post-install
 font check. The first complete pooled render still needs acceptance for
-font metrics and end-to-end duration. The capture reverts to hosted under
-`MAINTAINER_ECS_RUNNER_DISABLED` on same-repo runs; fork-triggered runs
-receive empty repository variables (see the fork section above), so the
+font metrics and end-to-end duration. Same-repo PRs never leave the hosted lane, so there is
+nothing to revert. Fork-triggered runs receive empty repository variables
+(see the fork section above), so the kill-switch cannot reach them; the
 real fork-path escape is changing the selector on `main`, not the switch.
 The E2E OpenTUI leg deliberately stays hosted: it injects long-lived model
 secrets, which this pool's boundary forbids until a separate trusted pool
