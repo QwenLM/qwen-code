@@ -126,10 +126,11 @@ also reads `application.yml` and `config/application.yml` in its working
 directory beside the file `SPRING_CONFIG_ADDITIONAL_LOCATION` names, so
 `--working-directory` must match the unit's `WorkingDirectory`. The sandbox
 properties repeat the unit's, so the preflight sees the files the server sees:
-the unit hides `/home`, `/root` and the host's `/tmp`, and writes only to its
-`ReadWritePaths`. Keep them in step when you change the unit. The preflight
-prints a `config` row for each file it read, and fails that row where the
-server would not start, or where this run cannot check what it reads:
+the unit hides `/home`, `/root`, `/run/user`, and the host's `/tmp` and
+`/var/tmp`, and writes only to its `ReadWritePaths`. Keep them in step when
+you change the unit. The preflight prints a `config` row for each file it
+read, and fails that row where the server would not start, or where this run
+cannot check what it reads:
 
 - a named file that does not exist;
 - a file the service account cannot read;
@@ -137,6 +138,9 @@ server would not start, or where this run cannot check what it reads:
   run it as the service account;
 - a YAML error, with its line, and with its file unless an import inside
   another file named it.
+
+A file that holds a secret and that group or others can read gets a `WARN` row
+with its `chmod 600`; a `WARN` does not fail the check.
 
 `--check` binds the configured ports, and its `workers` row warns about Runtime
 workers still running from an earlier start, so run it while the service is

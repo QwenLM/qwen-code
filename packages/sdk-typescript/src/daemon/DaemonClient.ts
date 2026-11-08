@@ -127,6 +127,7 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceGitIgnoredPaths,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
@@ -7696,6 +7697,22 @@ export class DaemonClient {
     );
   }
 
+  async getWorkspaceOrder(): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'GET /workspace-order', {
+      mode: 'rest',
+    });
+  }
+
+  async setWorkspaceOrder(
+    cwds: readonly string[],
+  ): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'POST /workspace-order', {
+      method: 'POST',
+      body: { cwds },
+      mode: 'rest',
+    });
+  }
+
   async updateWorkspace(
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,
@@ -8495,6 +8512,27 @@ export class WorkspaceDaemonClient {
       suffix,
       'GET /workspaces/:workspace/git',
       { mode: 'rest' },
+    );
+  }
+
+  /**
+   * Return confirmed Git-ignored paths for at most 256 inputs.
+   * Paths are relative to cwd, or the workspace root when cwd is omitted.
+   */
+  workspaceGitIgnoredPaths(
+    paths: readonly string[],
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonWorkspaceGitIgnoredPaths> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitIgnoredPaths>(
+      this.workspaceSelector,
+      `/git/check-ignore${query ? `?${query}` : ''}`,
+      'POST /workspaces/:workspace/git/check-ignore',
+      { method: 'POST', body: { paths }, mode: 'rest' },
     );
   }
 
