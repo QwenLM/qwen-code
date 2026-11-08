@@ -1385,7 +1385,7 @@ const EN: Messages = {
 
 The main session is waiting for me to answer the questions above. I want to understand the details before answering. Read the relevant code and context first. Base every claim on what you verify, and mark anything unverified.
 
-Write the explanation as a self-contained single-file HTML (inline CSS, no external resources) in English. Borrow the ASD-STE100 controlled-language sentence rules: one idea per sentence, active voice, short sentences (about 20 words max), one term per concept, conditions before actions, lists for three or more items, no metaphors or exclamations. Keep code, commands, paths, and config keys verbatim. Cover the background of each question, every option's meaning, differences, impact and risks, and a recommendation with reasons. Do not answer the questions for me and do not change the main session. Save the file under .qwen/tmp/ (for example .qwen/tmp/ask-details.html), then reply with its path and a one-sentence summary.`,
+Write the explanation as a self-contained single-file HTML (inline CSS, no external resources). Language requirement: write the entire page in English — every heading, body sentence, list item, and label must be in English; do not mix in another language. Borrow the ASD-STE100 controlled-language sentence rules: one idea per sentence, active voice, short sentences (about 20 words max), one term per concept, conditions before actions, lists for three or more items, no metaphors or exclamations. Keep code, commands, paths, and config keys verbatim. Cover the background of each question, every option's meaning, differences, impact and risks, and a recommendation with reasons. Do not answer the questions for me and do not change the main session. Save the file under .qwen/tmp/ (for example .qwen/tmp/ask-details.html), then reply with its path and a one-sentence summary.`,
   'askUser.multiHint': 'multiple choice',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
@@ -2137,6 +2137,41 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
+  'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.off': 'Delivery off',
+  'scheduledTasks.delivery.hint':
+    'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
+  'scheduledTasks.delivery.unavailable':
+    'This daemon does not support Channel delivery changes.',
+  'scheduledTasks.delivery.discardChanges': 'Discard delivery changes',
+  'scheduledTasks.delivery.perRun':
+    'A new session every run does not support Channel delivery. Choose a persistent session or turn delivery off before saving.',
+  'scheduledTasks.delivery.required':
+    'Choose a Channel and enter a destination ID.',
+  'scheduledTasks.delivery.whitespace':
+    'This ID has leading or trailing whitespace, which will be sent as part of the destination.',
+  'scheduledTasks.delivery.trimWhitespace': 'Remove surrounding whitespace',
+  'scheduledTasks.delivery.loading': 'Loading Channels…',
+  'scheduledTasks.delivery.loadingContacts': 'Loading suggested destinations…',
+  'scheduledTasks.delivery.channelsFailed':
+    'Could not load Channels. Close and reopen the form to retry; existing delivery is preserved.',
+  'scheduledTasks.delivery.noChannels':
+    'No Channels are configured in this workspace. Configure one in Channels first.',
+  'scheduledTasks.delivery.targetUnavailable':
+    'This Channel is unavailable in this workspace. The saved destination is preserved; you can choose another Channel or turn delivery off.',
+  'scheduledTasks.delivery.notObserved':
+    'This destination is not in the recent suggestions. Its ID is preserved; contact discovery is not required for delivery.',
+  'scheduledTasks.delivery.suggestion': 'Suggested destination',
+  'scheduledTasks.delivery.manual': 'Enter a destination ID below',
+  'scheduledTasks.delivery.contactsFailed':
+    'Could not load suggestions. You can still enter a destination ID; existing delivery is preserved.',
+  'scheduledTasks.delivery.suggestionsHint':
+    'Suggestions come from recently observed contacts. You can also enter a known user or chat ID supported by the Channel.',
+  'scheduledTasks.delivery.type': 'Destination type',
+  'scheduledTasks.delivery.id': 'Destination ID',
+  'scheduledTasks.delivery.user': 'User',
+  'scheduledTasks.delivery.chat': 'Chat',
+  'scheduledTasks.delivery.cardPrefix': 'Delivery:',
   'scheduledTasks.gate': 'Gate command (optional)',
   'scheduledTasks.gatePlaceholder':
     'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
@@ -2362,6 +2397,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Workspaces',
   'sidebar.pinnedSessions': 'Pinned',
+  'sidebar.sessionSort': 'Sort sessions',
+  'sidebar.sortActivity': 'Recent activity',
+  'sidebar.sortQuestion': 'Last question',
   'sidebar.recentSessions': 'Recent',
   'sidebar.standalonePinUnavailable':
     'Pinning no-workspace sessions is not supported yet.',
@@ -2373,6 +2411,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionIdCopied': 'Session ID copied',
   'sidebar.workspaceUntrusted': 'untrusted',
   'sidebar.manageWorkspaces': 'Manage workspaces…',
+  'sidebar.collapseAllWorkspaces': 'Collapse all workspaces',
+  'sidebar.expandAllWorkspaces': 'Expand all workspaces',
+  'sidebar.workspaceOrderError':
+    'Could not load or save workspace order. Reload and try again.',
   'sidebar.workspaceReadOnly': 'read-only',
   'sidebar.workspaceTrustToOpen': 'Trust this workspace to open the session.',
   'sidebar.addWorkspace': 'Add workspace',
@@ -6395,7 +6437,7 @@ const ZH: Messages = {
 
 主会话正在等我回答上面的问题。我想先了解细节，再作答。请先阅读相关代码与上下文。结论以你核实到的事实为准，未核实的内容要标注。
 
-请把解释写成自包含单文件 HTML（内联 CSS，不引用外部资源），用中文写作。借鉴 ASD-STE100 受控句式：一句一个意思、主动语态、每句不超过 20 字（代码与标识符按 1 词计）、同一概念只用一个词、条件写在动作之前、三项以上用列表、不用比喻和感叹号。代码、命令、路径、配置键名原样保留。内容覆盖：每个问题的背景；每个选项的含义、差异、影响与风险；给出建议并说明理由。不要替我作答，也不要改动主会话。文件保存到 .qwen/tmp/ 下（例如 .qwen/tmp/ask-details.html），完成后回复文件路径和一句话摘要。`,
+请把解释写成自包含单文件 HTML（内联 CSS，不引用外部资源）。语言要求：整页必须用简体中文写作——每个标题、正文句子、列表项和标签都用中文，不要混用其他语言。借鉴 ASD-STE100 受控句式：一句一个意思、主动语态、每句不超过 20 字（代码与标识符按 1 词计）、同一概念只用一个词、条件写在动作之前、三项以上用列表、不用比喻和感叹号。代码、命令、路径、配置键名原样保留。内容覆盖：每个问题的背景；每个选项的含义、差异、影响与风险；给出建议并说明理由。不要替我作答，也不要改动主会话。文件保存到 .qwen/tmp/ 下（例如 .qwen/tmp/ask-details.html），完成后回复文件路径和一句话摘要。`,
   'askUser.multiHint': '可多选',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
@@ -7089,6 +7131,39 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
+  'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.off': '不投递',
+  'scheduledTasks.delivery.hint':
+    '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
+  'scheduledTasks.delivery.unavailable': '此 daemon 不支持修改频道投递配置。',
+  'scheduledTasks.delivery.discardChanges': '放弃投递修改',
+  'scheduledTasks.delivery.perRun':
+    '每次新会话不支持频道投递。请在保存前选择固定会话，或关闭投递。',
+  'scheduledTasks.delivery.required': '请选择频道并输入目标 ID。',
+  'scheduledTasks.delivery.whitespace':
+    '此 ID 的首尾含有空白字符，它们会作为目标 ID 的一部分原样发送。',
+  'scheduledTasks.delivery.trimWhitespace': '去除首尾空白',
+  'scheduledTasks.delivery.loading': '正在加载频道…',
+  'scheduledTasks.delivery.loadingContacts': '正在加载目标候选…',
+  'scheduledTasks.delivery.channelsFailed':
+    '无法加载频道。请关闭并重新打开表单重试；已有投递配置会保留。',
+  'scheduledTasks.delivery.noChannels':
+    '此工作区尚未配置频道。请先在频道页面中配置。',
+  'scheduledTasks.delivery.targetUnavailable':
+    '此频道在当前工作区不可用。已保存的目标会保留；你可以选择其他频道或关闭投递。',
+  'scheduledTasks.delivery.notObserved':
+    '此目标不在最近的候选中。其 ID 会保留；联系人发现不是投递的必要条件。',
+  'scheduledTasks.delivery.suggestion': '目标候选',
+  'scheduledTasks.delivery.manual': '在下方输入目标 ID',
+  'scheduledTasks.delivery.contactsFailed':
+    '无法加载候选。你仍可输入目标 ID；已有投递配置会保留。',
+  'scheduledTasks.delivery.suggestionsHint':
+    '候选来自最近观察到的联系人。你也可以输入频道支持的已知用户或群 ID。',
+  'scheduledTasks.delivery.type': '目标类型',
+  'scheduledTasks.delivery.id': '目标 ID',
+  'scheduledTasks.delivery.user': '用户',
+  'scheduledTasks.delivery.chat': '群聊',
+  'scheduledTasks.delivery.cardPrefix': '投递：',
   'scheduledTasks.gate': '闸门命令（可选）',
   'scheduledTasks.gatePlaceholder':
     '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
@@ -7301,6 +7376,9 @@ const ZH: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '工作区',
   'sidebar.pinnedSessions': '置顶',
+  'sidebar.sessionSort': '会话排序',
+  'sidebar.sortActivity': '最近活动',
+  'sidebar.sortQuestion': '最后提问时间',
   'sidebar.recentSessions': '最近',
   'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
@@ -7311,6 +7389,9 @@ const ZH: Messages = {
   'sidebar.sessionIdCopied': '会话 ID 已复制',
   'sidebar.workspaceUntrusted': '未信任',
   'sidebar.manageWorkspaces': '管理工作区…',
+  'sidebar.collapseAllWorkspaces': '收起所有工作区',
+  'sidebar.expandAllWorkspaces': '展开所有工作区',
+  'sidebar.workspaceOrderError': '无法加载或保存工作区顺序，请刷新后重试。',
   'sidebar.workspaceReadOnly': '只读',
   'sidebar.workspaceTrustToOpen': '信任此工作区后才能打开会话。',
   'sidebar.addWorkspace': '添加工作区',
