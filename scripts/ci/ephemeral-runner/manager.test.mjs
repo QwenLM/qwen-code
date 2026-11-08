@@ -1456,7 +1456,10 @@ test('stop() interrupts a long backoff sleep instead of waiting it out', async (
     },
   });
   await manager.start();
-  assert.ok(sleeps.length >= 1);
+  // Exactly one slice: stop() fires inside the first 1 s chunk, and the
+  // guard must cut the wait there. >= 1 would also pass on a vacuous
+  // empty array if the loop never ran a slice at all.
+  assert.equal(sleeps.length, 1);
   assert.ok(
     sleeps.every((ms) => ms <= 1000),
     `backoff slept in unsliced chunks: ${sleeps.join(', ')}`,

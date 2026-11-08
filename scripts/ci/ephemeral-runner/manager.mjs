@@ -191,10 +191,12 @@ export function createManager(config, dependencies = {}) {
   // A backoff sleep must stay interruptible: the service gives the manager
   // TimeoutStopSec to exit, and an unsliced five-minute sleep would have
   // systemd SIGKILL it mid-cycle. Wake at least once a second and cut the
-  // sleep short once stop() sets the shutdown deadline.
+  // sleep short once stop() sets the stopping flag. The flag alone bounds
+  // the overshoot to one 1 s slice; a stopAt term here would also make the
+  // loop skip every slice when shutdownGraceSeconds is 0.
   const interruptibleWait = async (ms) => {
     let remaining = ms;
-    while (!stopping && remaining > 0 && Date.now() < stopAt) {
+    while (!stopping && remaining > 0) {
       const chunk = Math.min(1000, remaining);
       await wait(chunk);
       remaining -= chunk;
