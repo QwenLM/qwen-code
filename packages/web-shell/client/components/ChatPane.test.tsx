@@ -4309,7 +4309,7 @@ describe('pane floating todo panel (#13353)', () => {
       },
     ] as never[];
 
-  it('shows the pane\'s own session todos as a floating chip', () => {
+  it("shows the pane's own session todos as a floating chip", () => {
     messagesState = todoGroupMessage([
       { id: 'a', content: 'First step', status: 'in_progress' },
       { id: 'b', content: 'Second step', status: 'pending' },
