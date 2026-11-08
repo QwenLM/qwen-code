@@ -395,6 +395,51 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('attributes a creation after a heredoc with a plain body (heredoc control)', () => {
+    const entry = shellResult(
+      "cat > /tmp/note.md <<'EOF'\nplain body\nEOF\ngh pr comment 42 --body-file /tmp/note.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('attributes a creation after a heredoc whose body contains an apostrophe', () => {
+    // The heredoc body is data: its apostrophe must not open a shell quote that
+    // swallows the following creation stage. stripHeredocBodies consumes the
+    // body up to the delimiter before segmentation.
+    const entry = shellResult(
+      "cat > /tmp/note.md <<'EOF'\nit's quoted\nEOF\ngh pr comment 42 --body-file /tmp/note.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not scan creation-shaped text inside a heredoc body as a creation', () => {
+    // The body is written to a file, not executed: a `gh pr comment` line inside
+    // it is data and must not attribute when no real creation follows.
+    const entry = shellResult(
+      "cat > /tmp/note.md <<'EOF'\ngh pr comment 42 --body x\nEOF",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not mistake a herestring for a heredoc (create after still attributes)', () => {
+    const entry = shellResult(
+      'cat <<< "it\'s a test" >/dev/null\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not mistake an arithmetic left-shift for a heredoc', () => {
+    const entry = shellResult(
+      'n=$((1 << 2))\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments -X POST -f body='--method GET' --jq '.id'",

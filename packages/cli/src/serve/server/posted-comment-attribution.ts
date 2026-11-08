@@ -124,6 +124,125 @@ function stripShellComment(segment: string): string {
 }
 
 /**
+ * Remove heredoc bodies before segmentation. A heredoc body is data written to
+ * a file/stdin, not shell structure: a quote character in the body (e.g. the
+ * apostrophe in `it's quoted`) must not open a shell quote that swallows the
+ * creation command following the heredoc, and creation-shaped text inside the
+ * body must not be scanned as a creation. Consume each `<<DELIM` / `<<-DELIM` /
+ * `<<'DELIM'` / `<<"DELIM"` body up to its delimiter line, keeping the command
+ * line that carries the redirection and the line boundary after it, so the next
+ * command is segmented normally. A herestring (`<<<`) is not a heredoc. The
+ * body is stripped only when its delimiter line is actually present; otherwise
+ * (an arithmetic `<<` or a malformed heredoc) the text is left for normal
+ * processing rather than swallowing the commands that follow. Best-effort,
+ * like the quote handling.
+ */
+function stripHeredocBodies(command: string): string {
+  let result = '';
+  let quote: string | null = null;
+  let i = 0;
+  while (i < command.length) {
+    const ch = command[i]!;
+    if (quote !== null) {
+      result += ch;
+      if (ch === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      result += ch;
+      i++;
+      continue;
+    }
+    // A herestring (<<<) is not a heredoc; consume all three so the trailing
+    // two are not re-read as a `<<` heredoc on the next iteration.
+    if (ch === '<' && command[i + 1] === '<' && command[i + 2] === '<') {
+      result += '<<<';
+      i += 3;
+      continue;
+    }
+    if (ch === '<' && command[i + 1] === '<' && command[i + 2] !== '<') {
+      let j = i + 2;
+      let stripTabs = false;
+      if (command[j] === '-') {
+        stripTabs = true;
+        j++;
+      }
+      while (command[j] === ' ' || command[j] === '\t') j++;
+      let delim = '';
+      const dq = command[j];
+      if (dq === "'" || dq === '"') {
+        j++;
+        while (j < command.length && command[j] !== dq) {
+          delim += command[j];
+          j++;
+        }
+        if (j < command.length) j++;
+      } else {
+        while (j < command.length && !/[\s;|&<>]/.test(command[j]!)) {
+          delim += command[j];
+          j++;
+        }
+      }
+      if (delim === '') {
+        result += command.slice(i, j);
+        i = j;
+        continue;
+      }
+      // The body starts on the next line; find the end of the current line.
+      let lineEnd = j;
+      while (
+        lineEnd < command.length &&
+        command[lineEnd] !== '\n' &&
+        command[lineEnd] !== '\r'
+      ) {
+        lineEnd++;
+      }
+      if (lineEnd >= command.length) {
+        result += command.slice(i, j);
+        i = j;
+        continue;
+      }
+      let bodyStart = lineEnd + 1;
+      if (command[lineEnd] === '\r' && command[lineEnd + 1] === '\n') {
+        bodyStart = lineEnd + 2;
+      }
+      // Only strip when the delimiter line actually exists. Otherwise (an
+      // arithmetic `<<` or a malformed heredoc) fall back to normal processing
+      // instead of swallowing the commands that follow.
+      let scan = bodyStart;
+      let afterDelim = -1;
+      while (scan < command.length) {
+        let le = command.indexOf('\n', scan);
+        if (le === -1) le = command.length;
+        let line = command.slice(scan, le);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        const candidate = stripTabs ? line.replace(/^\t+/, '') : line;
+        if (candidate === delim) {
+          afterDelim = le + 1;
+          break;
+        }
+        scan = le + 1;
+      }
+      if (afterDelim === -1) {
+        result += command.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      // Keep the command line carrying the redirection (through its newline)
+      // and skip the body plus the delimiter line.
+      result += command.slice(i, bodyStart);
+      i = afterDelim;
+      continue;
+    }
+    result += ch;
+    i++;
+  }
+  return result;
+}
+
+/**
  * Split a shell chain into pipeline stages on separators OUTSIDE quotes only.
  * A write flag must sit in the SAME stage as the collection path to count as a
  * creation: `gh api …/comments --jq … ; stat -f '%Sm' …` is a GET listing
@@ -134,6 +253,7 @@ function stripShellComment(segment: string): string {
  * too. Best-effort: escaped quotes are not modeled.
  */
 function commandSegments(command: string): string[] {
+  command = stripHeredocBodies(command);
   const segments: string[] = [];
   let current = '';
   let quote: string | null = null;
