@@ -91,6 +91,13 @@ function stripBoundaryArtifactsFromRawOutput(resultDisplay: unknown): unknown {
   return changed ? { ...resultDisplay, toolCalls } : resultDisplay;
 }
 
+function todoWriteFailureText(resultDisplay: unknown): string {
+  if (typeof resultDisplay === 'string' && resultDisplay.trim()) {
+    return resultDisplay;
+  }
+  return 'todo_write failed';
+}
+
 /**
  * Unified tool call event emitter.
  *
@@ -194,7 +201,8 @@ export class ToolCallEmitter extends BaseEmitter {
 
   /**
    * Emits a terminal frame when a prepared tool call is discarded before
-   * execution. TodoWrite remains represented exclusively by plan updates.
+   * execution. TodoWrite has no card to update on a normal result, but a
+   * discarded preparation would otherwise leave no trace at all.
    *
    * @param callId - ID of the prepared tool call
    * @param toolName - Name of the prepared tool
@@ -203,8 +211,6 @@ export class ToolCallEmitter extends BaseEmitter {
     callId: string,
     toolName: string,
   ): Promise<void> {
-    if (this.isTodoWriteTool(toolName)) return;
-
     this.preparedCallIds.delete(callId);
     const lifecycle = this.preparedLifecycles
       .get(callId)
@@ -216,7 +222,7 @@ export class ToolCallEmitter extends BaseEmitter {
       );
     }
     const provenance = ToolCallEmitter.resolveToolProvenance(toolName);
-    await this.sendUpdate({
+    const update: SessionUpdate = {
       sessionUpdate: 'tool_call_update',
       toolCallId: callId,
       status: 'failed',
@@ -228,7 +234,15 @@ export class ToolCallEmitter extends BaseEmitter {
         provenance: provenance.provenance,
         ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
       },
-    });
+    };
+    if (!this.isTodoWriteTool(toolName)) {
+      await this.sendUpdate(update);
+      return;
+    }
+    // `title` and `kind` make the client render this as a card instead of
+    // silently dropping an update for a block it never had.
+    const { title, kind } = this.resolveToolMetadata(toolName, undefined);
+    await this.sendUpdate({ ...update, title, kind });
   }
 
   /**
@@ -241,7 +255,20 @@ export class ToolCallEmitter extends BaseEmitter {
     // Handle TodoWriteTool specially - send plan update instead
     if (this.isTodoWriteTool(params.toolName)) {
       if (params.subagentMeta) return;
-      if (!params.success) return;
+      if (!params.success) {
+        // A failed todo_write changes no plan, so without a terminal frame the
+        // call is invisible on the wire: no plan, no tool_call update.
+        await this.emitError(
+          params.callId,
+          params.toolName,
+          params.error ?? new Error(todoWriteFailureText(params.resultDisplay)),
+          params.subagentMeta,
+          params.startedAt !== undefined && params.durationMs !== undefined
+            ? { startedAt: params.startedAt, durationMs: params.durationMs }
+            : undefined,
+        );
+        return;
+      }
       const plan = this.planEmitter.extractPlan(
         params.resultDisplay,
         params.args,

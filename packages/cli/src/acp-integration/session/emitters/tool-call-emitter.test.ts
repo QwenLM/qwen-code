@@ -422,10 +422,31 @@ describe('ToolCallEmitter', () => {
         status: 'pending',
         phase: 'preparing',
       });
-      await emitter.emitPreparationDiscarded('call-todo', ToolNames.TODO_WRITE);
 
       expect(emitted).toBe(false);
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a discarded TodoWrite preparation as a failed card', async () => {
+      await emitter.emitPreparationDiscarded(
+        'call-todo',
+        ToolNames.TODO_WRITE,
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-todo',
+          status: 'failed',
+          title: expect.any(String),
+          kind: expect.any(String),
+          _meta: expect.objectContaining({
+            toolName: ToolNames.TODO_WRITE,
+            preparationDiscarded: true,
+          }),
+        }),
+      );
     });
   });
 
@@ -921,6 +942,79 @@ describe('ToolCallEmitter', () => {
             type: 'todo_list',
             todos: [{ id: '1', content: 'Child task', status: 'pending' }],
           },
+          subagentMeta: {
+            parentToolCallId: 'parent-agent',
+            subagentType: 'explore',
+          },
+        });
+
+        expect(sendUpdateSpy).not.toHaveBeenCalled();
+      });
+
+      it('surfaces a failed TodoWrite as a failed card', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-todo-failed',
+          success: false,
+          message: [],
+          resultDisplay:
+            'Error writing todos: dependency graph contains a cycle',
+        });
+
+        expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-todo-failed',
+            status: 'failed',
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: 'Error writing todos: dependency graph contains a cycle',
+                },
+              },
+            ],
+            _meta: { toolName: ToolNames.TODO_WRITE, provenance: 'builtin' },
+          }),
+        );
+      });
+
+      it('prefers the execution error message over the display text', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-todo-error',
+          success: false,
+          message: [],
+          resultDisplay: 'Error writing todos: disk full',
+          error: new Error('Todo list modification failed'),
+        });
+
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolCallId: 'call-todo-error',
+            status: 'failed',
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: 'Todo list modification failed',
+                },
+              },
+            ],
+          }),
+        );
+      });
+
+      it('does not surface a subagent TodoWrite failure', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-subagent-todo-failed',
+          success: false,
+          message: [],
+          resultDisplay: 'Error writing todos: nope',
           subagentMeta: {
             parentToolCallId: 'parent-agent',
             subagentType: 'explore',

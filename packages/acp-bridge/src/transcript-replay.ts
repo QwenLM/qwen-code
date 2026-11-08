@@ -1676,8 +1676,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
               : {}),
           }),
         );
+        return;
       }
-      return;
+      const failed =
+        result?.['status'] === undefined
+          ? Boolean(result?.['error'])
+          : result['status'] !== 'success';
+      // A todo_write that changed no plan has no frame of its own; on failure
+      // fall through so replay surfaces it like the live path does.
+      if (!failed) return;
     }
 
     yield emit(
