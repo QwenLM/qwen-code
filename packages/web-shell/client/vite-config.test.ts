@@ -17,6 +17,7 @@ import viteConfig, {
   createDevelopmentMiddleware,
   MANAGED_AGENT_JAVA_ROUTE_PROXY,
   MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
+  probeHostname,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
 } from '../vite.config';
@@ -366,5 +367,20 @@ describe('Web Shell daemon proxy failure', () => {
     const res = { destroy: vi.fn() };
 
     expect(() => emitProxyError(res)).not.toThrow();
+  });
+});
+
+describe('Web Shell daemon probe hostname', () => {
+  // The launcher's `--hostname ::1` exports QWEN_DAEMON_URL=http://[::1]:<port>.
+  // WHATWG URL keeps the brackets, so a raw `.hostname` hands net the literal
+  // "[::1]", which fails name resolution instead of connecting.
+  it.each([
+    ['http://[::1]:51840', '::1'],
+    // Node compresses an explicit long form to `[::1]` before it reaches us.
+    ['http://[0:0:0:0:0:0:0:1]:51840', '::1'],
+    ['http://127.0.0.1:4170', '127.0.0.1'],
+    ['http://daemon.internal:8080', 'daemon.internal'],
+  ])('probes %s as host %s', (target, expected) => {
+    expect(probeHostname(new URL(target).hostname)).toBe(expected);
   });
 });

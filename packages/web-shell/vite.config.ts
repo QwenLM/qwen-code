@@ -10,13 +10,21 @@ import { getAllowedDaemonOrigin } from './client/config/daemon';
 
 const daemonTarget = process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170';
 
+// WHATWG URL keeps the brackets an IPv6 literal needs inside a URL, but a TCP
+// probe takes the bare address; `[::1]` reaches DNS and fails with ENOTFOUND.
+export function probeHostname(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
 // One probe per dev server, not per request: an unreachable daemon is not
 // fatal (the E2E suites mock it per page), but the operator learns about it
 // at startup instead of through a suite of slow browser timeouts.
 function probeDaemonTarget(): void {
   const url = new URL(daemonTarget);
   const probe = createConnection(
-    { host: url.hostname, port: Number(url.port || 4170) },
+    { host: probeHostname(url.hostname), port: Number(url.port || 4170) },
     () => probe.destroy(),
   );
   const unreachable = () => {
