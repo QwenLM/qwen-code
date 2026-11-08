@@ -105,6 +105,139 @@ describe('desktop rpm build-root dependencies', () => {
       source.indexOf('sha256sum -c -'),
     );
   });
+
+  it('keeps the smoke runnable on rpm roots without Xvfb', () => {
+    const install = release.jobs.build.steps.find(
+      (step) => step.name === 'Install rpm build-root dependencies',
+    );
+    // The display server a leg can install is a matrix property: EPEL, which
+    // supplies weston, is only enabled on the leg that has no Xvfb.
+    const displays = Object.fromEntries(
+      release.jobs.build.strategy.matrix.include.map((leg) => [
+        leg.name,
+        leg.display,
+      ]),
+    );
+    expect(displays['Linux x64 (rpm, Fedora 44)']).toBe('xvfb');
+    expect(displays['Linux x64 (rpm, RHEL 10)']).toBe('weston');
+
+    // Fedora 44 ships weston from its own updates repo, so "weston ⇒ EPEL" is
+    // not the rule; the rule is that a non-Fedora root taking the weston arm
+    // has the EPEL bootstrap above enabled. Read the coupling from the matrix
+    // so a new leg with `display: 'weston'` and `epel: 'false'` turns this red
+    // instead of dying at `dnf install` in a release run.
+    const containerLegs = release.jobs.build.strategy.matrix.include.filter(
+      (leg) => leg.container,
+    );
+    expect(containerLegs.length).toBeGreaterThan(0);
+    for (const leg of containerLegs) {
+      expect(['xvfb', 'weston']).toContain(leg.display);
+      if (
+        leg.display !== 'xvfb' &&
+        !String(leg.artifact_suffix).includes('fedora')
+      ) {
+        expect(leg.epel).toBe('true');
+      }
+    }
+
+    // Bound the shared package list by the arm switch that follows it, not by
+    // a prose comment: rewording the comment must not move the bound.
+    const switchAt = install.run.indexOf("case '${{ matrix.display }}' in");
+    expect(switchAt).toBeGreaterThan(-1);
+    const sharedInstalls = install.run
+      .slice(0, switchAt)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(sharedInstalls).not.toContain('Xvfb');
+    // Each arm is bounded by its own pattern and terminating `;;`, so another
+    // `case`/`if` above cannot re-point the slice.
+    const installArm = (pattern) => {
+      const start = install.run.indexOf(`\n  ${pattern})`, switchAt);
+      expect(start).toBeGreaterThan(switchAt);
+      const end = install.run.indexOf(';;', start);
+      expect(end).toBeGreaterThan(start);
+      return install.run.slice(start, end);
+    };
+    const xvfbArm = installArm('xvfb');
+    const westonArm = installArm('weston');
+    expect(xvfbArm).toContain('xorg-x11-server-Xvfb');
+    expect(xvfbArm).not.toContain('weston');
+    expect(westonArm).toContain('weston xorg-x11-server-Xwayland');
+    expect(westonArm).not.toContain('xorg-x11-server-Xvfb');
+    // An unrecognised `matrix.display` must fail closed: defaulting it to the
+    // weston arm installs packages the root may have no repository for.
+    const fallbackArm = installArm('*');
+    expect(fallbackArm).toContain('exit 1');
+
+    const smoke = release.jobs.build.steps.find(
+      (step) =>
+        step.name === 'Smoke packaged application' &&
+        String(step.if).includes("runner.os == 'Linux'"),
+    );
+    expect(smoke.run).toContain('command -v xvfb-run');
+    expect(smoke.run).not.toContain('GDK_BACKEND=dummy');
+    // Both arms must run the same smoke under the step's own -e -u -o pipefail;
+    // a function shipped through `declare -f` into a child shell drops them.
+    expect(smoke.run).not.toContain('declare -f');
+    expect(
+      smoke.run.match(/npm run smoke:packaged -- "\$executable"/gu),
+    ).toHaveLength(2);
+
+    // The compositor socket the step exports has to be the one weston opens,
+    // and the export has to precede the launch: Xwayland reads its own
+    // environment at startup.
+    const socket = /--socket=(\S+)/u.exec(smoke.run)?.[1];
+    expect(socket).toBeTruthy();
+    // Without this flag weston finds no DRM device in the container and the
+    // leg dies in a release run, where nothing else reads this step.
+    expect(smoke.run).toContain(
+      `weston --backend=headless-backend.so --socket=${socket}`,
+    );
+    expect(smoke.run).toContain('XDG_RUNTIME_DIR');
+    const waylandExport = `export WAYLAND_DISPLAY=${socket}`;
+    expect(smoke.run).toContain(waylandExport);
+    expect(smoke.run.indexOf(waylandExport)).toBeLessThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+
+    // Xwayland must not start before its compositor exists, so the weston
+    // readiness wait has to sit between the two launches.
+    const westonWait = `wait_for_socket "$XDG_RUNTIME_DIR/${socket}" weston`;
+    expect(smoke.run).toContain(westonWait);
+    expect(smoke.run.indexOf(westonWait)).toBeGreaterThan(
+      smoke.run.indexOf('weston_pid=$!'),
+    );
+    expect(smoke.run.indexOf(westonWait)).toBeLessThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+
+    // Both daemons have to be reaped, or the runner hangs on the sockets.
+    expect(smoke.run).toContain("trap 'kill ${xwayland_pid:-} $weston_pid");
+
+    // A timed-out wait must fail the step: `[ -S ... ] && break` is exempt
+    // from `set -e`, so a helper that only prints would blame the app.
+    const helper = /wait_for_socket\(\) \{([\s\S]*?)\n\}/u.exec(smoke.run);
+    expect(helper).not.toBeNull();
+    expect(helper[1]).toContain('return 1');
+
+    // The display Xwayland serves, the socket the step waits on and the
+    // DISPLAY the app receives must all name the same number.
+    const display = /Xwayland :(\d+)/u.exec(smoke.run)?.[1];
+    expect(display).toBeTruthy();
+    expect(smoke.run).toContain(`wait_for_socket /tmp/.X11-unix/X${display}`);
+    const displayExport = `export DISPLAY=:${display}`;
+    expect(smoke.run).toContain(displayExport);
+    expect(smoke.run.indexOf(displayExport)).toBeGreaterThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+
+    // With both displays exported GTK3 prefers Wayland, which would leave the
+    // X11 bridge above unused; the app has to be pinned to it.
+    expect(smoke.run.indexOf('export GDK_BACKEND=x11')).toBeGreaterThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+  });
 });
 
 describe('desktop isolation guard — nativePrefixes coverage', () => {

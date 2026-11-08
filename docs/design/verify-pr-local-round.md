@@ -61,7 +61,9 @@ them rather than at the end of the document.
   coordinates: fetch the snapshot with the field list the lane uses, verify both
   OIDs exist in this clone, refuse a tree that is not a clean checkout of the
   PR head, create the artifact directory with its `evidence/` subdirectory,
-  and report the isolation signals the process can observe. It
+  snapshot the PR's review threads and standing change requests the way the
+  lane does (best-effort: a failed fetch leaves no file, which the round reads
+  as unknown), and report the isolation signals the process can observe. It
   does not gate on them: resolving metadata needs `gh`, and `gh` and the
   boundary are mutually exclusive, so this path always runs on the host. The
   gate is `--require-isolation`, meant to run inside the boundary before the
@@ -71,7 +73,10 @@ them rather than at the end of the document.
   self-consistent assertion triple, and no `merge-ready` carrying a failed
   assertion. Report shape and evidence naming are warnings, because a
   documentation-only round has no capture and a checker cannot know whether a
-  harness ran.
+  harness ran. With `--context <snapshot>` the expected head comes from that
+  host-held file instead of the artifact's writable `context.json`, and an
+  unusable snapshot is a hard exit 1, not a warning: the artifact directory is
+  writable by the PR code the round just ran.
 - `scripts/verify-pr-guard.mjs` owns both halves of the pre-publish guard.
   `--pr <n> --repo <owner>/<repo> --snapshot <file>` fetches the head, the PR
   state and all three comment lists with `--paginate`, and writes the file only
@@ -416,6 +421,11 @@ A published verification comment ends with the same attribution shape
 - A report with its own round snapshot keeps the same checked head after a
   later preparation into a different artifact directory. Publishable round
   snapshots contain no PR title or body.
+
+## Related designs
+
+- The container boundary and its host-side model proxy:
+  [verify-pr-local-model-proxy.md](verify-pr-local-model-proxy.md).
 
 ## Open questions
 

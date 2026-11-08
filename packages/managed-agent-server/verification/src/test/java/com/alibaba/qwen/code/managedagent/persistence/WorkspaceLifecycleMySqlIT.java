@@ -252,7 +252,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                     MySqlLockProbe.awaitLockWaits(fixture.jdbc, schema, 1, "the same-Session authorisation");
                     assertThat(sameSession.get()).isNotDone();
                 } catch (Exception error) {
-                    throw new IllegalStateException(error);
+                    throw new IllegalStateException(MySqlLockProbe.describeLockWaits(fixture.jdbc, schema), error);
                 }
             });
             sameSession.get().get(10, TimeUnit.SECONDS);

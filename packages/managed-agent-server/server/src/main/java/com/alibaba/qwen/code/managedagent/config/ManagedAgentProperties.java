@@ -83,6 +83,7 @@ public class ManagedAgentProperties
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
     private List<ModelOption> modelCatalog = List.of();
+    private List<String> modelConfigBaseUrls = List.of();
     private String trustedActorHeader = "";
     // The account the server runs as; preflight checks file access as it.
     private String serviceUser = "";
@@ -974,7 +975,7 @@ public class ManagedAgentProperties
     @Setter
     public static class Automation
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Automation {
-        private boolean enabled;
+        private boolean enabled = true;
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration scanDelay = Duration.ofSeconds(10);
         @DurationUnit(ChronoUnit.MILLIS)

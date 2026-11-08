@@ -115,11 +115,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     boundedParameters(jdbc, timeoutSeconds, tenant, session, hash(tenant), hash(session),
                             com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
             return jdbc.query(
-                    "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
+                    "SELECT tenant_id, session_id, is_csi_guard FROM ma_session WHERE tenant_id = ? AND"
                             + " session_id = ? FOR UPDATE",
                     boundedParameters(jdbc, timeoutSeconds, tenant, session),
                     (row, index) -> {
-                        boolean guarded = row.getBoolean("csi_guard");
+                        boolean guarded = row.getBoolean("is_csi_guard");
                         if (legacyMutation) {
                             ManagedLegacySessionGuard.requireLegacyMutation(guarded);
                         }
@@ -128,7 +128,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         });
     }
 
-    private static PreparedStatementSetter boundedParameters(
+    static PreparedStatementSetter boundedParameters(
             JdbcTemplate jdbc, int timeoutSeconds, Object... parameters) {
         PreparedStatementSetter arguments = jdbc instanceof ManagedSchemaJdbcTemplate managed
                 ? managed.newArgPreparedStatementSetter(parameters)
@@ -150,12 +150,19 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
 
     private static Map<String, Object> lockSessionHead(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
+        return lockSessionHead(jdbc, tenant, session, legacyMutation, true);
+    }
+
+    private static Map<String, Object> lockSessionHead(
+            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation, boolean tenantGuard) {
         // Bound the root and head waits as well: holding the tenant guard
         // behind one Session's writer must not convoy unrelated Sessions
         // until the database's default lock timeout (#14393 A.2).
         return ManagedSessionStore.lockBoundedResult(() -> {
             int timeoutSeconds = ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS;
-            lockTenant(jdbc, tenant, timeoutSeconds);
+            if (tenantGuard) {
+                lockTenant(jdbc, tenant, timeoutSeconds);
+            }
             lockSessionRoot(jdbc, tenant, session, legacyMutation, timeoutSeconds);
             var heads = jdbc.query(
                     "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
@@ -225,7 +232,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         }
         jdbc.update(
                 "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retirement_operation_id = ?, retirement_generation ="
-                        + " retirement_generation + 1, retired_at = ?, recovery_protected = ? WHERE"
+                        + " retirement_generation + 1, retired_at = ?, is_recovery_protected = ? WHERE"
                         + " tenant_key = ? AND session_key = ? AND retired_at IS NULL",
                 operation,
                 time,
@@ -249,12 +256,25 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 session);
     }
 
+    /**
+     * The Session's root and head without the tenant publication guard, for a
+     * lane that never takes the guard after them: root, head, then its own
+     * rows is the order collection takes below the guard.
+     */
+    static Map<String, Object> lockSessionHeadWithoutGuard(JdbcTemplate jdbc, String tenant, String session) {
+        return lockSessionHead(jdbc, tenant, session, false, false);
+    }
+
     static Map<String, Object> lockGenericSession(
             JdbcTemplate jdbc, String tenant, String session) {
         return lockSessionHead(jdbc, tenant, session, true);
     }
 
     void lockRetainedPublication(String scope, String publication) {
+        lockRetainedPublication(scope, publication, true);
+    }
+
+    private void lockRetainedPublication(String scope, String publication, boolean tenantGuard) {
         var row =
                 jdbc.query(
                                 "SELECT tenant_id, session_id FROM ma_output_capture"
@@ -263,7 +283,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                 scope,
                                 publication)
                         .getFirst();
-        lockGenericSession(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"));
+        lockSessionHead(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"), true, tenantGuard);
         String state =
                 jdbc.queryForObject(
                         "SELECT retention_state FROM ma_output_capture"
@@ -290,9 +310,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                             objectKey)
                                     .getFirst();
                     String publication = (String) row.get("publication_id");
-                    lockRetainedPublication(scope, publication);
+                    // Quarantine is Session-local: root, head and publication suffice,
+                    // including when a reader already holds the root in this transaction.
+                    lockRetainedPublication(scope, publication, false);
                     jdbc.update(
-                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", quarantined = TRUE WHERE scope_key = ?"
+                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_key = ?"
                                     + " AND publication_id = ?",
                             scope,
                             publication);
@@ -376,10 +398,18 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         return read(key.path("tenantId").asText(), key.path("sessionId").asText());
     }
 
+    /**
+     * Takes a read lease under the Session's root and head only. Retirement
+     * and collection check leases while holding that root and head, so they
+     * and a new lease exclude each other without the tenant publication
+     * guard; a caller that already holds the root and head (a publication
+     * writer) relocks them re-entrantly, and never takes the guard after its
+     * root (design 2026-11-04-managed-publication-tenant-guards).
+     */
     public ReadLease read(String tenant, String session) {
         return transactions.execute(
                 status -> {
-                    lockGenericSession(jdbc, tenant, session);
+                    lockSessionHead(jdbc, tenant, session, true, false);
                     requireLive(jdbc, tenant, session);
                     long generation =
                             jdbc.queryForObject(
@@ -461,7 +491,6 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     && number(row, "expires_at") - number(row, "db_now")
                             <= READ_BUDGET_MILLIS * 3 / 4) {
                 Boolean renewed = transactions.execute(status -> {
-                    lockTenant(jdbc, tenant);
                     var roots = jdbc.query(
                                                     "SELECT retirement_generation, retired_at FROM"
                                                             + " ma_session WHERE tenant_id = ? AND"
@@ -668,7 +697,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 .query(
                         "SELECT scope_key, publication_id, tenant_id, session_id,"
                             + " capture_used_bytes, producer_used_bytes, admission_used_bytes,"
-                            + " write_evidence, quarantined, accepted_complete, producer_phase FROM"
+                            + " is_write_evidence, is_quarantined, is_accepted_complete, producer_phase FROM"
                             + " ma_output_capture WHERE retention_state = 'RETIRING' ORDER BY"
                             + " scope_key, publication_id LIMIT 100",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow))
@@ -686,7 +715,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 + number(row, "admission_used_bytes");
         var roots =
                 jdbc.query(
-                        "SELECT retired_at, recovery_protected FROM ma_session WHERE tenant_key = ?"
+                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_key = ?"
                                 + " AND session_key = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         hash(tenant),
@@ -694,16 +723,16 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         String blocker;
         if (roots.isEmpty()) {
             blocker = "session_not_retired";
-        } else if (flag(roots.getFirst(), "recovery_protected")) {
+        } else if (flag(roots.getFirst(), "is_recovery_protected")) {
             blocker = "recovery_protected";
         } else if (number(roots.getFirst(), "retired_at") > now(jdbc) - grace.toMillis()) {
             blocker = "grace_period";
-        } else if (!flag(row, "write_evidence")) {
+        } else if (!flag(row, "is_write_evidence")) {
             blocker = "legacy_write_evidence_missing";
-        } else if (flag(row, "quarantined")) {
+        } else if (flag(row, "is_quarantined")) {
             blocker = "quarantined";
         } else if (!"REFERENCED".equals(row.get("producer_phase"))
-                || !flag(row, "accepted_complete")) {
+                || !flag(row, "is_accepted_complete")) {
             blocker = "not_accepted_complete";
         } else if (count(
                         "SELECT COUNT(*) FROM ma_read_lease WHERE tenant_key = ? AND session_key ="
