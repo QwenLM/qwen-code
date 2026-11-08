@@ -1846,7 +1846,10 @@ export function ScheduledTasksDialog({
               >
                 <option
                   value="per_run"
-                  disabled={!deliveryAvailable && delivery !== null}
+                  disabled={
+                    !deliveryAvailable &&
+                    (delivery !== null || editedDelivery !== null)
+                  }
                 >
                   {t('scheduledTasks.sessionMode.perRun')}
                 </option>

@@ -3240,6 +3240,11 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       );
       enterPrompt();
       await rerender({ ...options, deliveryAvailable: false });
+      expect(
+        findSessionModeSelect()?.querySelector<HTMLOptionElement>(
+          'option[value="per_run"]',
+        )?.disabled,
+      ).toBe(true);
       expect(document.querySelector('[role="alert"]')).toBeNull();
       click(findButton('Save'));
       await flush();
