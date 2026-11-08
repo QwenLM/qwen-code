@@ -156,7 +156,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant,"owner", session, window.floorSequence() - 1);
+                    .publicStream(tenant, "owner", session, window.floorSequence() - 1);
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.ids).isEmpty();
             assertThat(expired.failed).isEmpty();
@@ -283,7 +283,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant,"owner", session, initial.lastSequence());
+                    .publicStream(tenant, "owner", session, initial.lastSequence());
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.failed).isEmpty();
             assertThat(expired.resync).containsExactly(new SessionResyncRequired(

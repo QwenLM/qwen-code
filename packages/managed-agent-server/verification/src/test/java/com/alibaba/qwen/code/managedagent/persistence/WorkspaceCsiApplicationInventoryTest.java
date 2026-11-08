@@ -2135,5 +2135,4 @@ class WorkspaceCsiApplicationInventoryTest {
                 .filter(table -> !table.equals("ma_session_principal"))
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
-
 }

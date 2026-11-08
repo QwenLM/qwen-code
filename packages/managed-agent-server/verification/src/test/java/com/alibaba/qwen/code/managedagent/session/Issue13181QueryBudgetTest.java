@@ -298,7 +298,7 @@ class Issue13181QueryBudgetTest {
         try {
             ManagedEventStreamService streams = EventStreams.streams(
                     fixture.service, fixture.hub, executor, emitter);
-            streams.publicStream(tenant,"owner", sessionId, after);
+            streams.publicStream(tenant, "owner", sessionId, after);
             for (int index = 0; index < events; index++) {
                 fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
                         "turn-1", "test.progress", Map.of("index", index),
@@ -357,7 +357,7 @@ class Issue13181QueryBudgetTest {
                 + " 'COMPLETED' WHERE tenant_id = ? AND session_id = ?",
                 plain, plainIds.get(7));
         fixture.ledger.reset();
-        var publicPage = fixture.service.listPublicSessions(plain,"owner", null,
+        var publicPage = fixture.service.listPublicSessions(plain, "owner", null,
                 20).data();
         assertThat(publicPage).hasSize(20);
         System.out.println("[issue-13181] listPublicSessions(20 rows): "
@@ -390,7 +390,7 @@ class Issue13181QueryBudgetTest {
         }
 
         fixture.ledger.reset();
-        var webShellPage = fixture.service.listWebShellSessions(plain,"owner",
+        var webShellPage = fixture.service.listWebShellSessions(plain, "owner",
                 null, 20).data();
         assertThat(webShellPage).hasSize(20);
         System.out.println("[issue-13181] listWebShellSessions(20 rows): "
@@ -425,7 +425,7 @@ class Issue13181QueryBudgetTest {
 
         // The single-session WebShell detail shares the batched assembly.
         fixture.ledger.reset();
-        assertThat(fixture.service.getWebShellSession(plain,"owner",
+        assertThat(fixture.service.getWebShellSession(plain, "owner",
                 plainIds.get(0)).sessionId()).isEqualTo(plainIds.get(0));
         // Session read + latest turns + environment events + lifecycle summary, one each.
         assertThat(fixture.ledger.total()).isEqualTo(4);
@@ -843,7 +843,7 @@ class Issue13181QueryBudgetTest {
                 assertThat(event.sequence()).isLessThanOrEqualTo(covered));
         assertThat(fixture.ledger.count("from ma_public_event", "sequence_id >")).isZero();
         assertThat(fixture.ledger.rows("from ma_message m", "limit")).isEqualTo(11);
-        var tail = fixture.service.publicEvents(tenant,"owner", sessionId,
+        var tail = fixture.service.publicEvents(tenant, "owner", sessionId,
                 transcript.lastSequence(), 100).data();
         assertThat(tail).hasSize((int) (lastSequence - covered));
         assertThat(tail.getFirst().sequence()).isEqualTo(covered + 1);
@@ -942,7 +942,7 @@ class Issue13181QueryBudgetTest {
         // The batch reads behind the page must report the latest Turn by
         // admission order and that Turn's own environment, not the newest
         // environment event of the Session.
-        var page = fixture.service.listWebShellSessions(tenant,"owner", null,
+        var page = fixture.service.listWebShellSessions(tenant, "owner", null,
                 20).data();
         assertThat(page).hasSize(1);
         var row = page.getFirst();

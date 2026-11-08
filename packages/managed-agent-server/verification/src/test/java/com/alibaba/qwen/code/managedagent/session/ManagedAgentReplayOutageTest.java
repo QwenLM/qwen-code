@@ -69,7 +69,7 @@ class ManagedAgentReplayOutageTest {
         int replays = new ManagedAgentProperties().getDispatch()
                 .getMaxPreAdmissionRetries() + 1;
         for (int attempt = 0; attempt < replays; attempt++) {
-            CommandAdmission replayed = service.submitTurn(tenant,"owner",
+            CommandAdmission replayed = service.submitTurn(tenant, "owner",
                     "outage-submit", session.sessionId(), blocks);
             assertThat(replayed.replayed()).isTrue();
             assertThat(replayed.turnId()).isEqualTo(turn.turnId());

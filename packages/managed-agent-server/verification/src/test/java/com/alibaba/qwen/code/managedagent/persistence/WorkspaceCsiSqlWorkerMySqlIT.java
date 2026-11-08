@@ -475,8 +475,11 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         schema = connection.getCatalog();
                     }
                 }
+                // Every ma_* table in the closed contract plus Flyway's own history table;
+                // BackfillWitnessesTest pins the same 40 for the H2 path.
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(39);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema))
+                        .isEqualTo(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size() + 1);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");

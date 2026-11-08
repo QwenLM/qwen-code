@@ -64,7 +64,7 @@ class ManagedInputAttachmentTest {
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.turnId()).isEqualTo(admission.turnId());
         store.materializeNextBatch("tenant", admission.sessionId(), 100);
-        var items = service.listPublicItems("tenant","owner", admission.sessionId(), 0, 100).data();
+        var items = service.listPublicItems("tenant", "owner", admission.sessionId(), 0, 100).data();
         assertThat(items).singleElement().satisfies(item -> {
             assertThat(item.attributes().get("inputAttachments")).isEqualTo(input);
             assertThat(item.content()).singleElement().satisfies(part -> assertThat(part.text()).isEqualTo("Review"));
@@ -88,7 +88,7 @@ class ManagedInputAttachmentTest {
         assertThat(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input().get(1))
                 .isEqualTo(Map.of("type", "image", "data", data, "mimeType", "image/png"));
         store.materializeNextBatch("tenant", admission.sessionId(), 100);
-        assertThat(service.listPublicItems("tenant","owner", admission.sessionId(), 0, 100).data())
+        assertThat(service.listPublicItems("tenant", "owner", admission.sessionId(), 0, 100).data())
                 .singleElement().satisfies(item -> assertThat(item.attributes().get("inputAttachments"))
                         .isEqualTo(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input()));
     }
@@ -107,7 +107,7 @@ class ManagedInputAttachmentTest {
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.turnId()).isEqualTo(admission.turnId());
         store.materializeNextBatch("tenant", admission.sessionId(), 100);
-        assertThat(service.listPublicItems("tenant","owner", admission.sessionId(), 0, 100).data())
+        assertThat(service.listPublicItems("tenant", "owner", admission.sessionId(), 0, 100).data())
                 .singleElement().satisfies(item -> assertThat(item.attributes().get("inputAttachments"))
                         .isEqualTo(expected));
     }

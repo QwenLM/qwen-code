@@ -332,9 +332,9 @@ class ManagedEventReplayTest {
     private static void open(ManagedEventStreamService streams,
             boolean webShell, String tenant, String sessionId) {
         if (webShell) {
-            streams.webShellStream(tenant,"owner", sessionId, RESUME_AFTER);
+            streams.webShellStream(tenant, "owner", sessionId, RESUME_AFTER);
         } else {
-            streams.publicStream(tenant,"owner", sessionId, RESUME_AFTER);
+            streams.publicStream(tenant, "owner", sessionId, RESUME_AFTER);
         }
     }
 
