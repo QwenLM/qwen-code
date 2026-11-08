@@ -1536,3 +1536,18 @@ test('a rate-limited JIT failure keeps its status when cleanup fails too', async
   const manager = createManager(f.config, { command: f.command });
   await assert.rejects(manager.cycle(1), (error) => error.status === 403);
 });
+
+test('the shipped example config pins the documented stall threshold', async () => {
+  // config.example.json is what an operator copies to
+  // /etc/qwen-ephemeral-runner/config.json, and an explicit value there
+  // overrides the code default — so a stale example quietly replaces the
+  // threshold the docs promise. The default lives in manager.mjs as
+  // `config.stallAlertSeconds ?? 1800`; change one, change both.
+  const example = JSON.parse(
+    await readFile(new URL('./config.example.json', import.meta.url), 'utf8'),
+  );
+  assert.equal(example.stallAlertSeconds, 1800);
+  // The example is also the only config most operators ever load, so it has to
+  // keep passing the manager's own validation.
+  assert.doesNotThrow(() => createManager(example));
+});
