@@ -612,7 +612,14 @@ function checkWorkflowSandboxBindings(name, doc) {
         (typeof step.run === 'string' &&
           step.run.includes('QWEN_SANDBOX_IMAGE')) ||
         (typeof step.env?.SETTINGS_JSON === 'string' &&
-          step.env.SETTINGS_JSON.includes('"sandbox": "docker"')),
+          step.env.SETTINGS_JSON.includes('"sandbox": "docker"')) ||
+        // A `uses:` consumer hands its settings to an action through `with:`,
+        // so it has neither a `run:` body nor env.SETTINGS_JSON — but binding
+        // env.QWEN_SANDBOX_IMAGE is the same contract. Detect it here: without
+        // this branch such a job still enrols in the protected set (it runs
+        // the resolver) while contributing zero consumers, and the closing
+        // vacuity assert fails for a workflow whose bindings are all correct.
+        typeof step.env?.QWEN_SANDBOX_IMAGE === 'string',
     );
     if (consumers.length === 0) continue;
     totalConsumers += consumers.length;
