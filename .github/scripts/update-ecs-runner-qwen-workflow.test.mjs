@@ -262,8 +262,15 @@ describe('ECS runner qwen update workflow', () => {
         "    runs-on: ['self-hosted', 'linux', '${{ matrix.runner }}']",
       ),
     );
-    // Every matrix label must be declared for actionlint.
-    const actionlint = readFileSync('.github/actionlint.yaml', 'utf8');
+    // Every matrix label must be declared for actionlint, and no declaration
+    // may outlive its leg. Both directions read the file with comments gone:
+    // a commented-out declaration carries no behavior, so `includes` on the raw
+    // text kept calling a leg declared after someone commented its declaration
+    // out, and the reverse scan reported that same comment as a stray label
+    // (#16666 review, R1-1).
+    const actionlint = codeLines(
+      readFileSync('.github/actionlint.yaml', 'utf8'),
+    );
     for (const pool of pools) {
       assert.ok(
         actionlint.includes(`- '${pool}'`),
