@@ -266,6 +266,27 @@ vi.mock('./TranscriptViewport', () => ({
           })
         }
       />
+      <button
+        data-testid="pane-open-review"
+        type="button"
+        onClick={() =>
+          props.onTurnOutputOpen?.({
+            id: 'review',
+            kind: 'review',
+            title: 'Turn review',
+            turnId: 'turn-1',
+            changes: [
+              {
+                path: '/w/source.ts',
+                status: 'modified',
+                toolCallId: 'write-0',
+                isArtifact: false,
+                diffs: [],
+              },
+            ],
+          })
+        }
+      />
     </div>
   ),
 }));
@@ -686,6 +707,44 @@ describe('ChatPane', () => {
       else expect(paneWorkspaceClient.sessionStatus).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps the unfiltered review snapshot when opening a filtered review', async () => {
+    connectionState.workspaceCwd = '/w';
+    messagesState = [
+      { id: 'turn-1', role: 'user', content: 'write' },
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'write-0',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: '/w/source.ts', content: 'source' },
+          },
+          {
+            callId: 'write-1',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: '/outside/notes.md', content: 'notes' },
+          },
+        ],
+      },
+    ];
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+    await act(async () => testid('pane-open-review')!.click());
+    expect(onRightPanelOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'review',
+        changes: [expect.objectContaining({ path: '/w/source.ts' })],
+        unfilteredChanges: [
+          expect.objectContaining({ path: '/w/source.ts' }),
+          expect.objectContaining({ path: '/outside/notes.md' }),
+        ],
+      }),
+    );
+  });
 
   it('keeps the title without a details tooltip when details are disabled', () => {
     render({

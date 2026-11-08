@@ -15,6 +15,7 @@ const mock = vi.hoisted(() => ({
   },
   capabilitiesReady: true,
   sessionStatus: vi.fn(),
+  availability: 'available',
 }));
 const client = {
   workspaceByCwd: mock.workspaceByCwd,
@@ -28,6 +29,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
       : undefined,
   }),
   useConnection: () => mock.connection,
+}));
+vi.mock('../../daemon/availability-context', () => ({
+  useDaemonAvailability: () => mock.availability,
 }));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -75,6 +79,7 @@ beforeEach(() => {
   mock.connection.status = 'connected';
   mock.connection.loadingTranscript = false;
   mock.capabilitiesReady = true;
+  mock.availability = 'available';
   mock.sessionStatus.mockReset().mockResolvedValue({});
   mock.workspaceByCwd.mockReturnValue({
     workspaceGitIgnoredPaths: mock.ignored,
@@ -99,6 +104,28 @@ describe('useWorkspaceFileChanges', () => {
     await act(async () => root.render(<Host input={input} />));
     expect(mock.sessionStatus).toHaveBeenCalledTimes(1);
     expect(output.get('turn')).toHaveLength(1);
+  });
+
+  it('does not resolve metadata while the shell is disconnected', async () => {
+    mock.features = [];
+    mock.connection.status = 'disconnected';
+    const input = messages('source.ts');
+    await act(async () => root.render(<Host input={input} />));
+    expect(mock.sessionStatus).not.toHaveBeenCalled();
+    expect(output.get('turn')?.map((change) => change.path)).toEqual([
+      'source.ts',
+    ]);
+  });
+
+  it('does not resolve metadata while the daemon is unavailable', async () => {
+    mock.features = [];
+    mock.availability = 'unavailable';
+    const input = messages('source.ts');
+    await act(async () => root.render(<Host input={input} />));
+    expect(mock.sessionStatus).not.toHaveBeenCalled();
+    expect(output.get('turn')?.map((change) => change.path)).toEqual([
+      'source.ts',
+    ]);
   });
 
   it('resolves worktree containment without the ignore capability', async () => {

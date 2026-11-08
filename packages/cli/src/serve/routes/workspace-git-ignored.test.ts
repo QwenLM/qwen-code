@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +25,11 @@ import {
 } from '../workspace-registry.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
 import { registerWorkspaceQualifiedGitRoutes } from './workspace-git.js';
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, execFile: vi.fn(actual.execFile) };
+});
 
 let directory: string;
 let repo: string;
@@ -137,8 +142,29 @@ describe('workspace Git ignore query', () => {
       expect(query).toHaveBeenCalledOnce();
     } finally {
       abort.abort();
+      server.closeAllConnections?.();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it('passes the request abort signal to the Git child process', async () => {
+    const exec = vi.mocked(execFile);
+    exec.mockClear();
+    const controller = new AbortController();
+    const pending = getGitIgnoredPaths(
+      repo,
+      ['file.ts'],
+      process.env,
+      controller.signal,
+    );
+    const options = exec.mock.calls.at(-1)?.[2] as unknown as
+      | { signal?: AbortSignal; timeout?: number }
+      | undefined;
+    expect(options?.timeout).toBe(5_000);
+    expect(options?.signal?.aborted).toBe(false);
+    controller.abort();
+    expect(options?.signal?.aborted).toBe(true);
+    await expect(pending).resolves.toEqual([]);
   });
 
   it('inherits daemon global excludes only for a parent-process runtime without a snapshot', async () => {
@@ -212,6 +238,7 @@ describe('workspace Git ignore query', () => {
     } finally {
       finish(repo);
       abort.abort();
+      server.closeAllConnections?.();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

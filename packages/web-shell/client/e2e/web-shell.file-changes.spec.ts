@@ -15,7 +15,9 @@ for (const onlyNoise of [false, true]) {
     baseURL,
   }, testInfo) => {
     const cwd = '/tmp/qwen-file-changes';
-    const visible = onlyNoise ? [] : ['src/app.ts', 'tracked.log'];
+    const visible = onlyNoise
+      ? []
+      : ['src/app.ts', 'tracked.log', 'tmp-script.sh'];
     const paths = [
       ...visible.map((file) => `${cwd}/${file}`),
       `${cwd}/ignored.log`,
@@ -106,16 +108,20 @@ for (const onlyNoise of [false, true]) {
     expect(batches.flat().every((path) => !path.startsWith('/'))).toBe(true);
     if (!onlyNoise) {
       await expect(
-        page.getByText('Edited 2 files', { exact: true }),
+        page.getByText('Edited 3 files', { exact: true }),
       ).toBeVisible();
-      await expect(rows).toHaveText(['src/app.ts+1-0', 'tracked.log+1-0']);
+      await expect(rows).toHaveText([
+        'src/app.ts+1-0',
+        'tracked.log+1-0',
+        'tmp-script.sh+1-0',
+      ]);
       await page.screenshot({
         path: testInfo.outputPath('filtered-card.png'),
         fullPage: true,
       });
       await page.getByRole('button', { name: 'Changes', exact: true }).click();
       const reviewRows = page.locator('[class*="reviewRowToggle"]');
-      await expect(reviewRows).toHaveCount(2);
+      await expect(reviewRows).toHaveCount(3);
       await expect(reviewRows.nth(0)).toHaveAttribute(
         'aria-label',
         `${cwd}/src/app.ts`,
@@ -124,6 +130,10 @@ for (const onlyNoise of [false, true]) {
         'aria-label',
         `${cwd}/tracked.log`,
       );
+      await expect(reviewRows.nth(2)).toHaveAttribute(
+        'aria-label',
+        `${cwd}/tmp-script.sh`,
+      );
       holdRequests = true;
       await page.reload();
       await expect.poll(() => releases.length).toBeGreaterThan(0);
@@ -131,9 +141,9 @@ for (const onlyNoise of [false, true]) {
       holdRequests = false;
       for (const release of releases.splice(0)) release();
       await expect(
-        page.getByText('Edited 2 files', { exact: true }),
+        page.getByText('Edited 3 files', { exact: true }),
       ).toBeVisible();
-      await expect(page.locator('[class*="reviewRowToggle"]')).toHaveCount(2);
+      await expect(page.locator('[class*="reviewRowToggle"]')).toHaveCount(3);
     } else {
       await expect(rows).toHaveText(['control.ts+1-0']);
       await expect(page.getByText(/^Edited \d+ files$/)).toHaveCount(1);

@@ -5748,12 +5748,14 @@ describe('task activity key', () => {
     'unknown-root',
     'incomplete-memory',
     'missing-persisted-edit',
+    'no-capability',
   ])(
     'restores file visibility reviews or reports missing snapshots (%s)',
     async (mode) => {
       testState.captureArtifactPanelOnly = true;
       mockWorkspace.capabilities = {
-        features: ['workspace_git_check_ignore'],
+        features:
+          mode === 'no-capability' ? [] : ['workspace_git_check_ignore'],
         workspaceCwd: '/tmp/project',
         workspaces: [
           { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
@@ -5792,6 +5794,19 @@ describe('task activity key', () => {
                       content: 'source',
                     },
                   },
+                  ...(mode === 'no-capability'
+                    ? [
+                        {
+                          callId: 'write-outside',
+                          toolName: 'write_file',
+                          status: 'completed',
+                          args: {
+                            file_path: '/tmp/outside/notes.md',
+                            content: 'notes',
+                          },
+                        },
+                      ]
+                    : []),
                 ],
               },
             ];
@@ -5842,7 +5857,9 @@ describe('task activity key', () => {
                   'missing-persisted-edit',
                 ].includes(mode)
                   ? ['write-old', 'write-missing']
-                  : ['write-old'],
+                  : mode === 'no-capability'
+                    ? ['write-old', 'write-outside']
+                    : ['write-old'],
               },
             ],
           },
