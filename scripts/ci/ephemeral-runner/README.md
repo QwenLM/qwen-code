@@ -137,6 +137,10 @@ stall alert means the slot is serving no jobs and needs reconciliation; the
 manager keeps retrying and never exits on its own, so systemd does not restart
 it. Alert on that journal marker rather than on service state.
 
+Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
+read. A config that still carries it has no effect and falls back to the
+1800 s default, so set `stallAlertSeconds` explicitly if you had tuned it.
+
 ## Install and operate
 
 Install `manager.mjs` in `/opt/qwen-ephemeral-runner/`, install the supplied
