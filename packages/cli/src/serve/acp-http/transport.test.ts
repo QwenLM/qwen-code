@@ -12997,6 +12997,54 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(403);
   });
 
+  it('logs a repeated identical upgrade rejection once per window (#13966)', async () => {
+    await startServer();
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const before = rejections().length;
+
+    for (let i = 0; i < 5; i++) {
+      const result = await wsConnectRaw(
+        '127.0.0.1',
+        'chrome-extension://abcdefghijklmnop',
+      );
+      expect(result.code).toBe(403);
+    }
+    expect(rejections().length - before).toBe(1);
+    expect(String(rejections().at(-1)![0])).toContain(
+      'origin-not-allowed chrome-extension://abcdefghijklmnop',
+    );
+
+    // A different reason is a different failure and still gets its own line.
+    const otherOrigin = await wsConnectRaw('127.0.0.1', 'https://evil.com');
+    expect(otherOrigin.code).toBe(403);
+    expect(rejections().length - before).toBe(2);
+  });
+
+  it('logs the same upgrade rejection again once the window elapses (#13966)', async () => {
+    await startServer();
+    const origin = 'chrome-extension://abcdefghijklmnop';
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      const withinWindow = rejections().length;
+      expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      expect(rejections()).toHaveLength(withinWindow);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      expect(rejections().length).toBeGreaterThan(withinWindow);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects cross-origin WS upgrade even when allow-origin '*' is configured", async () => {
     await startServer({
       token: 'secret-token-123',

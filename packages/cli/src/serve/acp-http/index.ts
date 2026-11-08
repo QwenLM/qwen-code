@@ -424,6 +424,17 @@ function isSameLoopbackOrigin(
  */
 const MAX_INFLIGHT_MCP_DISPATCH = 8;
 
+/**
+ * A permanently-rejecting client — most often the Chrome extension retrying an
+ * origin the daemon was never told to allow — reconnects forever, so one log
+ * line per rejection buries the journal (#13966). Each distinct reason and
+ * client address is logged once, then suppressed until this window elapses.
+ */
+const UPGRADE_REJECT_LOG_INTERVAL_MS = 60_000;
+
+/** Upper bound on the rejection-log dedupe map, evicting least recent first. */
+const MAX_UPGRADE_REJECT_LOG_KEYS = 256;
+
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
   /** Process-level fallback for embedded mounts and parent-process runtimes. */
@@ -1561,6 +1572,9 @@ export function mountAcpHttp(
   let upgradeListener:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
     | undefined;
+  // Last time each `reason@address` rejection was logged, so a client stuck in
+  // a retry loop cannot flood the journal (see UPGRADE_REJECT_LOG_INTERVAL_MS).
+  const upgradeRejectLoggedAt = new Map<string, number>();
   // A Set, not a single server: while Local Control is on, the same app is
   // served by both the primary listener and the LAN listener, and each needs
   // its own `'upgrade'` registration. The `ExtraWsRoute` invariant is
@@ -1611,6 +1625,20 @@ export function mountAcpHttp(
         'ws-unknown';
       const localPort = (socket as { localPort?: number }).localPort;
       const logReject = (reason: string) => {
+        const key = `${reason}@${rawAddr}`;
+        const now = Date.now();
+        const last = upgradeRejectLoggedAt.get(key);
+        if (last !== undefined && now - last < UPGRADE_REJECT_LOG_INTERVAL_MS) {
+          return;
+        }
+        // Re-insert so the map stays in least-recently-logged order: a daemon
+        // accumulating one entry per rejected client is otherwise unbounded.
+        upgradeRejectLoggedAt.delete(key);
+        upgradeRejectLoggedAt.set(key, now);
+        if (upgradeRejectLoggedAt.size > MAX_UPGRADE_REJECT_LOG_KEYS) {
+          const oldest = upgradeRejectLoggedAt.keys().next().value;
+          if (oldest !== undefined) upgradeRejectLoggedAt.delete(oldest);
+        }
         writeStderrLine(
           `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
         );
