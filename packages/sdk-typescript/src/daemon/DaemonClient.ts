@@ -3670,12 +3670,14 @@ export class DaemonClient {
     if (options?.liveOnly === true) {
       query.set('liveOnly', '1');
     }
-    // The ACP session/list mapping does not carry liveOnly; force native REST
-    // rather than silently serving persisted history.
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
-      options?.liveOnly === true ? { mode: 'rest' } : {},
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 
@@ -9166,13 +9168,15 @@ export class WorkspaceDaemonClient {
     if (options?.liveOnly === true) {
       query.set('liveOnly', '1');
     }
-    // The ACP session/list mapping does not carry liveOnly; force native REST
-    // rather than silently serving persisted history.
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
     return await this.client.workspaceJsonRequest<DaemonSessionListPage>(
       this.workspaceSelector,
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',
-      options?.liveOnly === true ? { mode: 'rest' } : {},
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 

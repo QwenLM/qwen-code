@@ -54,10 +54,12 @@ describe('merged session catalog pagination', () => {
   async function persist(
     session: BridgeSessionSummary,
     promptTime = session.createdAt,
+    archived = false,
   ): Promise<void> {
     const chats = path.join(
       new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
       'chats',
+      ...(archived ? ['archive'] : []),
     );
     await fs.mkdir(chats, { recursive: true });
     const file = path.join(chats, `${session.sessionId}.jsonl`);
@@ -131,6 +133,34 @@ describe('merged session catalog pagination', () => {
       ).rejects.toThrow();
     },
   );
+
+  it('sorts archived sessions by their archived question time, not activity', async () => {
+    const sessions = [summary(0), summary(1), summary(2)];
+    await persist(sessions[0]!, '2026-01-01T00:02:00.000Z', true);
+    await persist(sessions[1]!, '2026-01-01T00:03:00.000Z', true);
+    await persist(sessions[2]!, '2026-01-01T00:01:00.000Z', true);
+    const { bridge } = bridgeFor([]);
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {
+        size: 10,
+        sortBy: 'lastUserPromptAt' as const,
+        archiveState: 'archived' as const,
+      },
+      { runtimeBaseDir },
+    );
+    expect(page.sessions.map((row) => row.sessionId)).toEqual([
+      sessions[1]!.sessionId,
+      sessions[0]!.sessionId,
+      sessions[2]!.sessionId,
+    ]);
+    expect(page.sessions.map((row) => row.lastUserPromptAt)).toEqual([
+      '2026-01-01T00:03:00.000Z',
+      '2026-01-01T00:02:00.000Z',
+      '2026-01-01T00:01:00.000Z',
+    ]);
+  });
 
   it('places unknown question times last with stable ties and preserves organized pins', async () => {
     const { bridge } = bridgeFor([summary(0), summary(1), summary(2)]);

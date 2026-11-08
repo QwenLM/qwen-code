@@ -6963,6 +6963,54 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('routes sortBy through native REST when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['session_last_user_prompt_sort'],
+              modelServices: [],
+            })
+          : jsonResponse(200, { sessions: [] }),
+      );
+      const transport = new AcpHttpTransport('http://daemon', undefined, fetch);
+      const transportFetch = vi
+        .spyOn(transport, 'fetch')
+        .mockImplementation(async (url, init) => {
+          if (new URL(url).pathname.endsWith('/sessions')) {
+            throw new Error('ACP transport must not serve sortBy');
+          }
+          return await fetch(url, init);
+        });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.listWorkspaceSessionsPage('/work/a', {
+        pageSize: 100,
+        sortBy: 'lastUserPromptAt',
+      });
+      await client.workspaceByCwd('/work/a').listWorkspaceSessionsPage({
+        pageSize: 100,
+        sortBy: 'lastUserPromptAt',
+      });
+
+      expect(
+        transportFetch.mock.calls.map(([url]) => new URL(url).pathname),
+      ).toEqual(['/capabilities']);
+      expect(
+        calls
+          .filter((call) => call.url.includes('/sessions?'))
+          .map((call) => call.url),
+      ).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=100&sortBy=lastUserPromptAt',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=100&sortBy=lastUserPromptAt',
+      ]);
+    });
+
     it('serializes source filters into both workspace session-list clients', async () => {
       const { fetch, calls } = recordingFetch((request) =>
         request.url.endsWith('/capabilities')
