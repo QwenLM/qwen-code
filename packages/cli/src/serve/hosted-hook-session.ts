@@ -29,6 +29,7 @@ import type {
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type {
   ManagedSessionDurableRef,
+  ManagedSessionKey,
   ManagedSessionSubject,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -98,16 +99,31 @@ interface HookPlan {
   readonly toolInputOrder?: HostedToolInputOrder;
 }
 
+const CONFIG_SCOPED_OWNER_PREFIX = 'extensions-components-';
+
 /**
- * The config-scoped owner an active extension bundle names
- * (`extensions-components-<hash(sessionKey, configRevision)>`). The same id is
+ * The config-scoped owner an active extension bundle names. The same id is
  * recomputed on every load of that configRevision, so a terminal release
- * tombstones the id a later load must re-acquire (R13-1). Shared with the
- * close's held-Runtime drains, which must not release one on a detach even
- * when the Broker's hold rows named it (R28-1).
+ * tombstones the id a later load must re-acquire (R13-1). One builder for every
+ * producer, so the predicate below cannot silently stop recognising an owner
+ * the Harness still constructs.
+ */
+export function hostedConfigScopedOwnerId(
+  sessionKey: ManagedSessionKey,
+  configRevision: number,
+): string {
+  return `${CONFIG_SCOPED_OWNER_PREFIX}${createHash('sha256')
+    .update(JSON.stringify([sessionKey, configRevision]))
+    .digest('hex')}`;
+}
+
+/**
+ * Recognises an id built by `hostedConfigScopedOwnerId`. Only trustworthy
+ * for ids the Harness constructed: a channel `inputId` is client-chosen and
+ * carries no prefix rule, so shape alone never proves ownership.
  */
 export function isHostedConfigScopedOwner(runtimeSessionId: string): boolean {
-  return runtimeSessionId.startsWith('extensions-components-');
+  return runtimeSessionId.startsWith(CONFIG_SCOPED_OWNER_PREFIX);
 }
 
 function exceedsHookResourceLimit(value: unknown): boolean {

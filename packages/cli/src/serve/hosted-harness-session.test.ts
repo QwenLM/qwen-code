@@ -98,6 +98,7 @@ import {
 import {
   HostedHookRecoveryRequiredError,
   HostedHookSession,
+  hostedConfigScopedOwnerId,
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import {
@@ -12730,15 +12731,14 @@ describe('Hosted Harness no-tool session', () => {
     ).toEqual([...restored].sort());
   });
 
-  it('never terminally releases a restored config-scoped owner on a v2 detach (R28-1)', async () => {
-    // A bare load carries no lifecycle authority, so lifecycleProtocolVersion
-    // is never spread onto the resident and the restore's `!== 2` gate does
-    // not exclude it — yet the same Session can settle as v2 afterwards. The
-    // restored id is the deterministic Hook owner, whose RELEASED row would
-    // make every Hook after the reload unacquirable, so the guard has to sit
-    // at the release rather than at that gate. A second, ordinary id rides
-    // along as the control: it must still drain, which proves the loop ran
-    // and the owner was skipped rather than never reached.
+  it('drains a prefix-shaped turn id when the Session owns no config-scoped owner (R1-2)', async () => {
+    // A channel inputId is client-chosen and only length-bounded, so a turn
+    // can carry the owner prefix without being an owner. This Session has no
+    // extension bundle and therefore no config-scoped owner at all: both
+    // restored ids are ordinary obligations and both must drain. Exempting by
+    // id shape would strand the first one for the rest of its life. The
+    // ownership-positive case lives beside the R13-1 fixture, where an active
+    // bundle really constructs the id.
     await prewriteShellProfileSession();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
@@ -12752,10 +12752,10 @@ describe('Hosted Harness no-tool session', () => {
     );
     const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
     release.mockResolvedValue();
-    const owner = `extensions-components-${'e'.repeat(64)}`;
+    const prefixShaped = `extensions-components-${'e'.repeat(64)}`;
     const activeHolds = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
-      .mockResolvedValue([owner, PROMPT_ID]);
+      .mockResolvedValue([prefixShaped, PROMPT_ID]);
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -12764,7 +12764,9 @@ describe('Hosted Harness no-tool session', () => {
       .expect(200);
     expect(activeHolds).toHaveBeenCalledTimes(1);
     const resident = capturedWakeSession();
-    expect(resident.heldRuntimeTurns.has(owner)).toBe(true);
+    // The premise, asserted: no bundle, so nothing here is an owner.
+    expect(resident.hooks).toBeUndefined();
+    expect(resident.heldRuntimeTurns.has(prefixShaped)).toBe(true);
     await headers(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
       .set('X-Qwen-Client-Id', loaded.body.clientId as string)
       .send({
@@ -12774,15 +12776,16 @@ describe('Hosted Harness no-tool session', () => {
         toolProfile: 'hosted-workspace-shell/1',
         sessionKey: resident.managed.authority.sessionHeader.sessionKey,
         authority: {
-          operationId: 'close-restored-owner',
+          operationId: 'close-prefix-shaped-turn',
           claimGeneration: 1,
         },
-      });
+      })
+      .expect(200);
     const releasedIds = (release.mock.contexts as HostedWorkspaceBroker[]).map(
       (broker) => broker.runtimeSessionId,
     );
     expect(releasedIds).toContain(PROMPT_ID);
-    expect(releasedIds).not.toContain(owner);
+    expect(releasedIds).toContain(prefixShaped);
   });
 
   it('closes a Session whose restored hold the restarted Broker cannot drain (#13986 R2-1)', async () => {
@@ -25458,6 +25461,253 @@ describe('Hosted Harness tool approvals', () => {
     // exactly the condition that would wedge the reload.
     expect(releasedOwners.has(ownerFor(1))).toBe(false);
   });
+
+  it.each([
+    { arm: 'v2 close', terminal: false, protocol: 2 },
+    { arm: 'v2 delete', terminal: true, protocol: 2 },
+    { arm: 'legacy detach', terminal: false, protocol: 1 },
+    { arm: 'legacy delete', terminal: true, protocol: 1 },
+  ])(
+    'stops only what it may stop with a restored config-scoped owner ($arm)',
+    async ({ terminal, protocol }) => {
+      // R28-1 on a Session that really owns the id: the owner is derived from
+      // (sessionKey, configRevision) by an active extension bundle, not typed
+      // as a literal. Three ids ride the restore — the owner, an ordinary turn,
+      // and a client-chosen id that merely shares the owner's prefix. Only the
+      // first is exempt, and only on a non-terminal close (R1-2).
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST);
+      const releasedOwners = new Set<string>();
+      const runtime = {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+      vi.mocked(HostedWorkspaceBroker.prototype.warm).mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = runtime;
+        },
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = runtime;
+        },
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          releasedOwners.add(this.runtimeSessionId);
+        },
+      );
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'releaseMount',
+      ).mockResolvedValue();
+      const catalog: ManagedHookCatalog = {
+        ...hookPin,
+        hooks: [
+          {
+            hookId: 'Notification',
+            eventName: HookEventName.Notification,
+            sequential: false,
+            async: false,
+            failClosed: true,
+            onceKey: null,
+            config: { type: 'command' },
+          },
+        ],
+      };
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'hookControl',
+      ).mockImplementation(async (operation) => {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog,
+          };
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: {
+            success: true,
+            outcome: 'success',
+            duration: 0,
+            output: { hookSpecificOutput: { additionalContext: 'checked' } },
+          },
+        };
+      });
+      const runtimeStates = new Map<string, string>();
+      let currentRevision = 0;
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'extensionControl',
+      ).mockImplementation(async (operation) => {
+        const common = {
+          operationId: operation.operationId,
+          executionMode: 'developer-process-group',
+        };
+        if (operation.kind === 'extension-prepare') {
+          runtimeStates.set(operation.operationId, 'prepared');
+          currentRevision = operation.expectedRevision + 1;
+          return {
+            ...common,
+            state: 'prepared',
+            expectedRevision: operation.expectedRevision,
+            revision: currentRevision,
+            packages: operation.extensions.map((pin) => ({
+              pin,
+              assetRoot: `extension://${pin.extensionId}/`,
+              contributions: {
+                skills: [],
+                commands: [],
+                agents: [],
+                context: [],
+                mcpServers: {},
+                hooks: {},
+                settings: [],
+              },
+            })),
+            mcpServers: [],
+            hookCatalog: hookPin,
+          };
+        }
+        if (operation.kind === 'extension-activate')
+          runtimeStates.set(operation.operationId, 'active');
+        return {
+          ...common,
+          state: runtimeStates.get(operation.operationId),
+          revision: currentRevision,
+        };
+      });
+      const sessionKey = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const owner = hostedConfigScopedOwnerId(sessionKey, 1);
+      const ordinary = 'turn-ordinary';
+      // A channel inputId is only length-bounded, so a caller can choose this.
+      // It is not an owner and its Runtime is still owed a drain.
+      const lookalike = `extensions-components-${'f'.repeat(64)}`;
+      expect(lookalike).not.toBe(owner);
+      const definition = {
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        publicChildAgentsVersion: 1,
+        initialSelection: {
+          operationId: randomUUID(),
+          actorKey: 'a'.repeat(64),
+          expectedRevision: 0,
+          extensions: [
+            {
+              extensionId: 'sample',
+              packageRevision: 1,
+              packageDigest: 'b'.repeat(64),
+            },
+          ],
+        },
+      };
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({ ...definition, sessionId: SESSION_ID, sessionScope: 'thread' })
+        .expect(200);
+      const clientId = created.body.clientId as string;
+      await headers(
+        supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          operationId: randomUUID(),
+          event: 'Notification',
+          input: { message: 'ready', notification_type: 'test' },
+        })
+        .expect(200);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      releasedOwners.clear();
+      const activeHolds = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+        .mockResolvedValue([owner, ordinary, lookalike]);
+      // A bare load carries no lifecycle authority, so the restore runs and
+      // seeds the hold rows; the same Session can then settle under either
+      // protocol (R28-1).
+      const reloaded = await app(true);
+      const loaded = await headers(
+        supertest(reloaded).post(`/session/${SESSION_ID}/load`),
+      ).send(definition);
+      expect(loaded.status, JSON.stringify(loaded.body)).toBe(200);
+      expect(activeHolds).toHaveBeenCalled();
+      const resident = (
+        wakeDeps.last as {
+          session: {
+            heldRuntimeTurns: Set<string>;
+            hooks?: HostedHookSession;
+            shell?: {
+              monitorLoops?: Map<
+                string,
+                {
+                  prepareLifecycle: () => void;
+                  stop: (settle?: string) => Promise<void>;
+                }
+              >;
+            };
+          };
+        }
+      ).session;
+      // Ownership control: without a real owner the exemption has nothing to
+      // match, and every assertion below would pass for the wrong reason.
+      expect(resident.hooks?.broker.runtimeSessionId).toBe(owner);
+      expect(resident.heldRuntimeTurns.has(owner)).toBe(true);
+      const stop = vi.fn(async () => {});
+      resident.shell ??= {};
+      resident.shell.monitorLoops = new Map([
+        ['watch', { prepareLifecycle: () => {}, stop }],
+      ]);
+      const response =
+        protocol === 2
+          ? await headers(
+              supertest(reloaded).post(`/session/${SESSION_ID}/lifecycle`),
+            )
+              .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+              .send({
+                protocolVersion: 2,
+                phase: 'settle_resources',
+                kind: terminal ? 'delete' : 'close',
+                toolProfile: 'hosted-workspace-shell/1',
+                sessionKey,
+                authority: {
+                  operationId: `settle-${protocol}-${terminal ? 'delete' : 'close'}`,
+                  claimGeneration: 1,
+                },
+              })
+          : terminal
+            ? await headers(
+                supertest(reloaded).delete(`/session/${SESSION_ID}`),
+              ).set('X-Qwen-Client-Id', loaded.body.clientId as string)
+            : await headers(
+                supertest(reloaded).post(`/session/${SESSION_ID}/detach`),
+              ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+      expect(response.status, JSON.stringify(response.body)).toBe(
+        protocol === 2 ? 200 : 204,
+      );
+      // The ordinary turn and the lookalike always drain: they prove the loop
+      // ran, and the lookalike pins that the exemption is not the prefix.
+      expect(releasedOwners.has(hostedRuntimeSessionId(ordinary))).toBe(true);
+      expect(releasedOwners.has(lookalike)).toBe(true);
+      expect(releasedOwners.has(owner)).toBe(terminal);
+      // A skipped owner is a Runtime this close never stopped, so the loop
+      // must not certify stop_requested for it (R1-1). The spy is reached on
+      // every arm, so a wrong settle is a failure, not a silent pass.
+      expect(stop).toHaveBeenCalledWith(
+        terminal ? 'stop_requested' : 'runtime_lost',
+      );
+    },
+  );
 
   it('refuses the tool_stage recovery domain when extensions are disabled', async () => {
     const key = {

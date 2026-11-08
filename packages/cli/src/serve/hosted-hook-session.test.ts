@@ -38,7 +38,9 @@ import {
   HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
+  hostedConfigScopedOwnerId,
   hostedHookOccurrenceId,
+  isHostedConfigScopedOwner,
   semanticInputDigest,
   type HostedToolInputOrder,
 } from './hosted-hook-session.js';
@@ -315,6 +317,26 @@ it.each([HookEventName.SessionEnd, HookEventName.SessionDelete])(
     expect(hooks.hasPendingOperations).toBe(false);
   },
 );
+
+it('recognises every owner id its own builder produces (R1-6)', () => {
+  // The producers and the predicate must agree: a renamed prefix or a
+  // different hashed tuple at any construction site would otherwise leave
+  // the predicate compiling and returning false, handing every detach the
+  // terminal arm and bringing the R13-1 tombstone back with the suite green.
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  for (const revision of [1, 2, 17])
+    expect(
+      isHostedConfigScopedOwner(
+        hostedConfigScopedOwnerId(sessionKey, revision),
+      ),
+    ).toBe(true);
+  expect(isHostedConfigScopedOwner('hooks-activation-1')).toBe(false);
+  expect(isHostedConfigScopedOwner('turn-ordinary')).toBe(false);
+});
 
 it('keeps a lifecycle Hook intent retryable when its original owner cannot be restored', async () => {
   let lifecycle = false;

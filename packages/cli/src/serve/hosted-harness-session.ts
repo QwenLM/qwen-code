@@ -241,6 +241,7 @@ import {
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
+  hostedConfigScopedOwnerId,
   isHostedConfigScopedOwner,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
@@ -655,6 +656,25 @@ function blockRecovery(
     (session.managed.authority.writesStopped
       ? session.recoveryReason
       : undefined);
+}
+
+/**
+ * The config-scoped owners this Session actually holds. A detach must never
+ * terminally release one: the id is recomputed on the next load and a RELEASED
+ * row makes every later Hook unacquirable (R13-1/R14-1/R28-1). Keyed on the
+ * owners the Harness constructed, not on the id's shape — a channel `inputId`
+ * is client-chosen and only length-bounded, so a turn can carry the same
+ * prefix without being an owner, and that turn's Runtime is still owed a drain.
+ */
+function configScopedOwnerIds(session: HostedSession): Set<string> {
+  return new Set(
+    [
+      session.hooks?.broker.runtimeSessionId,
+      session.mcp?.broker.runtimeSessionId,
+    ].filter(
+      (id): id is string => id !== undefined && isHostedConfigScopedOwner(id),
+    ),
+  );
 }
 
 interface HostedSession {
@@ -6444,14 +6464,10 @@ export function registerHostedHarnessSessionRoutes(
         if (extensionBundle)
           await HostedMcpSession.releaseSupersededDrained(
             managed,
-            `extensions-components-${createHash('sha256')
-              .update(
-                JSON.stringify([
-                  managed.authority.sessionHeader.sessionKey,
-                  extensionBundle.configRevision,
-                ]),
-              )
-              .digest('hex')}`,
+            hostedConfigScopedOwnerId(
+              managed.authority.sessionHeader.sessionKey,
+              extensionBundle.configRevision,
+            ),
           );
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
@@ -6470,14 +6486,10 @@ export function registerHostedHarnessSessionRoutes(
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
           extensionBundle
-            ? `extensions-components-${createHash('sha256')
-                .update(
-                  JSON.stringify([
-                    session.managed.authority.sessionHeader.sessionKey,
-                    extensionBundle.configRevision,
-                  ]),
-                )
-                .digest('hex')}`
+            ? hostedConfigScopedOwnerId(
+                session.managed.authority.sessionHeader.sessionKey,
+                extensionBundle.configRevision,
+              )
             : undefined,
         );
       if (extensionBundle && extensionManagement)
@@ -8372,6 +8384,7 @@ export function registerHostedHarnessSessionRoutes(
           // needs a keep-READY drain to close: the release used here would
           // tombstone the deterministic Hook owner (R13-1/R14-1).
           let heldDrainUnproven = false;
+          const configScopedOwners = configScopedOwnerIds(session);
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {
               // A detach must never terminally release a config-scoped owner:
@@ -8384,9 +8397,14 @@ export function registerHostedHarnessSessionRoutes(
               // park #16579 tracks. A delete is terminal, so it may release.
               if (
                 kind !== 'delete' &&
-                isHostedConfigScopedOwner(hostedRuntimeSessionId(heldTurn))
-              )
+                configScopedOwners.has(hostedRuntimeSessionId(heldTurn))
+              ) {
+                // The owner's Runtime is deliberately left running, so this
+                // close proved no stop. Settle the loops on runtime_lost below
+                // rather than certifying a stop_requested it never issued.
+                heldDrainUnproven = true;
                 continue;
+              }
               try {
                 await new HostedWorkspaceBroker(
                   brokerOptions,
@@ -8425,11 +8443,12 @@ export function registerHostedHarnessSessionRoutes(
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
-          // Neither an unprovable drain nor a Session whose own settlement
-          // already failed proved to the Runtime that anything stopped, so
-          // both settle on the runtime_lost line — the only state
-          // rebuildFromRuntimeLost accepts (R25-1/R26-1, matching the v1
-          // close). v2 has no heldDrainFailed: that arm throws above instead.
+          // An unprovable drain, an owner this detach deliberately left
+          // running, and a Session whose own settlement already failed all
+          // proved nothing stopped, so they settle on the runtime_lost line —
+          // the only state rebuildFromRuntimeLost accepts (R25-1/R26-1,
+          // matching the v1 close). v2 has no heldDrainFailed: that arm throws
+          // above instead.
           const stopSettle =
             session.blocked || heldDrainUnproven
               ? 'runtime_lost'
@@ -9392,14 +9411,10 @@ export function registerHostedHarnessSessionRoutes(
           }
         },
         enable: async (bundle, packages, operationId) => {
-          const ownerId = `extensions-components-${createHash('sha256')
-            .update(
-              JSON.stringify([
-                session.managed.authority.sessionHeader.sessionKey,
-                bundle.configRevision,
-              ]),
-            )
-            .digest('hex')}`;
+          const ownerId = hostedConfigScopedOwnerId(
+            session.managed.authority.sessionHeader.sessionKey,
+            bundle.configRevision,
+          );
           if (bundle.mcpServers.length && !session.mcp) {
             const broker =
               session.hooks?.broker ??
@@ -13097,6 +13112,7 @@ export function registerHostedHarnessSessionRoutes(
         // tolerated so the close is not wedged, but it is not a proven stop
         // either — the loops below must still settle runtime_lost.
         let heldDrainUnproven = false;
+        const configScopedOwners = configScopedOwnerIds(session);
         if (brokerOptions) {
           for (const heldTurn of [...session.heldRuntimeTurns]) {
             // Same invariant as the v2 drain, and it predates it: the restore
@@ -13105,9 +13121,14 @@ export function registerHostedHarnessSessionRoutes(
             // (R13-1/R14-1/R28-1). A DELETE is terminal and may release.
             if (
               req.method !== 'DELETE' &&
-              isHostedConfigScopedOwner(hostedRuntimeSessionId(heldTurn))
-            )
+              configScopedOwners.has(hostedRuntimeSessionId(heldTurn))
+            ) {
+              // Unproven, not failed: a detach declines to certify the stop,
+              // it must not turn the park into a close failure at the rethrow
+              // below.
+              heldDrainUnproven = true;
               continue;
+            }
             try {
               await new HostedWorkspaceBroker(
                 brokerOptions,
