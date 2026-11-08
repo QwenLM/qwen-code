@@ -1309,10 +1309,32 @@ describe('settleOrphanedShellStatusFiles', () => {
       const fifo = join(dir, 'shell-fifo.status');
       expect(spawnSync('mkfifo', [fifo]).status).toBe(0);
       write('shell-big.status', { ...running, command: 'x'.repeat(1 << 20) });
-      expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
-        settled: 0,
-        unsettled: [],
-      });
+      // An open without O_NONBLOCK would wait for a writer forever on this
+      // thread, so it is refused here: the FIFO then reads as unreadable
+      // and the assertion below fails instead of the run hanging.
+      const originalOpen = fs.openSync;
+      const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
+        ...args: Parameters<typeof fs.openSync>
+      ) => {
+        const [path, flags] = args;
+        if (
+          path === fifo &&
+          ((flags as number) & fsConstants.O_NONBLOCK) === 0
+        ) {
+          throw new Error('opened the FIFO without O_NONBLOCK');
+        }
+        return originalOpen(...args);
+      }) as typeof fs.openSync);
+      syncBuiltinESMExports();
+      try {
+        expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+          settled: 0,
+          unsettled: [],
+        });
+      } finally {
+        openSpy.mockRestore();
+        syncBuiltinESMExports();
+      }
       expect(lstatSync(fifo).isFIFO()).toBe(true);
       expect(read('shell-big.status')['status']).toBe('running');
     },

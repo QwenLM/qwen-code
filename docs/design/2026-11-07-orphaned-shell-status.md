@@ -124,14 +124,13 @@ no-op. A Config with an execution environment skips it.
 The model guidance lists `unknown` and says it means the session that started
 the process ended without recording how it finished. It also says a `running`
 value can outlive the session that wrote it, and that if that session ended
-without shutting down, the recorded pid should be checked (`ps -p`, or
-`tasklist` on Windows) before the process is treated as running. This covers
-the sidecars the scope check keeps `running`: those on macOS and Windows, and
-those written by older versions. The guidance applies the settler's rule: the
-pid is judged only when the sidecar's `pidScope` matches the reader's
-environment (the hostname, and the boot ID and pid namespace where recorded).
-A missing or different `pidScope` means the pid may belong to another machine,
-boot or container, so the outcome is left unverified rather than read as
+without shutting down, the recorded pid should be checked (e.g. `ps -p`)
+before the process is treated as running, but only under the same condition
+the settler uses: the sidecar's `pidScope` has the reader's hostname and a boot
+ID and pid namespace that are both present and equal to the reader's. A
+missing or different `pidScope`, or one with a null boot ID or pid namespace
+(as on macOS and Windows), cannot show that the pid is local, so the model is
+told not to check it and to treat the outcome as unverified rather than as
 ended.
 
 ## Key design decisions
@@ -146,8 +145,7 @@ ended.
 - **Scope before liveness.** A pid from another pid namespace, machine or boot
   can be absent here while its process still runs, and the guidance would then
   tell the model a live command had ended. The scope check makes such a
-  sidecar keep `running`, which is today's behaviour. The same fail-closed rule
-  applies to the peer registry in `packages/sdk-typescript/src/peer/registry.ts`.
+  sidecar keep `running`, which is today's behaviour.
 - **Sidecars without a scope stay `running`.** Older versions wrote no
   `pidScope`, so it cannot be told whether their pid is local. They keep
   today's behaviour; sidecars are per session, so this affects only sessions
@@ -194,8 +192,9 @@ ended.
   environment does not settle; a settle that throws does not stop
   initialization.
 - Guidance tests assert `unknown`, its meaning, the stale-`running`
-  cross-check and its `pidScope` condition in both the launch and the promote
-  messages.
+  cross-check and its `pidScope` condition, including that a null boot ID or
+  pid namespace leaves the outcome unverified, in both the launch and the
+  promote messages.
 - `openSyncNoFollow` tests: `nonBlocking` opens a FIFO without waiting, on
   the native path and on the fallback. The native open runs in a child process
   under a kill deadline, and the fallback's mocked `openSync` refuses an open
