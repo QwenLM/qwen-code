@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
-import { render } from 'ink-testing-library';
+import { cleanup, render } from 'ink-testing-library';
 import type {
   Config,
   WorkflowApproval,
@@ -285,6 +285,7 @@ describe('BackgroundTasksDialog', () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.restoreAllMocks();
   });
 
