@@ -503,6 +503,24 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('900')]);
   });
 
+  it('attributes a creation whose JSON object is followed by a trailer line', () => {
+    const entry = shellResult(
+      'gh api repos/o/r/pulls/42/comments/7/replies -f body=x',
+      '{ "id": 3180644908 }\nALL DONE',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([
+      reviewCommentKey('3180644908'),
+    ]);
+  });
+
+  it('does not scan a URL in the trailer of a structured creation result', () => {
+    const entry = shellResult(
+      'gh api repos/o/r/issues/42/comments -f body=x',
+      '{"id":900}\nsee https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('900')]);
+  });
+
   it('ignores non-shell tool results and malformed entries', () => {
     expect(extractPostedCommentIds(null)).toEqual([]);
     expect(extractPostedCommentIds({})).toEqual([]);

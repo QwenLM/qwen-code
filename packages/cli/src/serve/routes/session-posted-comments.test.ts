@@ -173,6 +173,13 @@ describe('GET /sessions/:id/posted-comments', () => {
   });
 
   it('answers empty for a session belonging to a different project', async () => {
+    // Seed a real creation at the transcript path so the gate is load-bearing:
+    // without the gate the route would read these ids and return them. An empty
+    // path would answer [] with or without the gate (vacuous fixture).
+    writeFileSync(
+      join(dir, `${SESSION_ID}.jsonl`),
+      shellCreationEntry(42) + '\n',
+    );
     mockSessionService.mockReturnValue({
       sessionPrSidecarBelongsToCurrentProject: async () => false,
       getSessionTranscriptPath: () => join(dir, `${SESSION_ID}.jsonl`),

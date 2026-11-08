@@ -459,8 +459,11 @@ event.
 `%pr%`, `%url%`, `%title%`, `%event%`, `%sender%`, and `%role%` variables;
 `%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
 visible. Substituted GitHub values are sanitized, and `%title%` and
-`%sender%` are also capped at 200 code points with a visible marker. The
-rendered instruction appears under an `[Operator instruction — trusted]`
+`%sender%` are also capped at 200 code points with a visible marker. `%title%`
+comes from the last observed PR title, which the state watch records; on a
+comment-only channel (no `prWatchEvents`) no title is observed, so `%title%`
+renders empty there — subscribe a state event if a template needs the PR name.
+The rendered instruction appears under an `[Operator instruction — trusted]`
 label and a `Source: this channel's configuration` line; the untrusted-data
 warning explicitly covers the substituted values. Example
 for a review / verify / fix split across three workspaces:

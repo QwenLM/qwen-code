@@ -294,6 +294,35 @@ function creationTarget(
 }
 
 /**
+ * The leading balanced `{…}` object, tolerating a trailer: real creations often
+ * print the JSON object and then a status line (`…}\nALL DONE`). Returns the
+ * object's substring, or undefined when the braces never balance. Braces inside
+ * JSON strings do not count. The caller still requires the output to start with
+ * `{`, so this only relaxes the trailing edge, not the leading one.
+ */
+function leadingJsonObject(text: string): string | undefined {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(0, i + 1);
+    }
+  }
+  return undefined;
+}
+
+/**
  * Extract posted comment identifiers from one parsed transcript entry.
  * Returns an empty array for anything that is not a shell creation result.
  * Never throws on malformed input.
@@ -353,9 +382,14 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     const trimmed = result.trim();
     const keyFor = (id: string | number): string =>
       target === 'issue-comment' ? issueCommentKey(id) : reviewCommentKey(id);
-    if (target && trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    if (target && trimmed.startsWith('{')) {
+      // A creation may print the JSON object plus a trailer line (`…}\nALL
+      // DONE`); parse the leading balanced object rather than requiring the
+      // whole output to be JSON.
+      const objectText = leadingJsonObject(trimmed);
       try {
-        const parsed: unknown = JSON.parse(trimmed);
+        const parsed: unknown =
+          objectText === undefined ? undefined : JSON.parse(objectText);
         if (
           parsed !== null &&
           typeof parsed === 'object' &&
