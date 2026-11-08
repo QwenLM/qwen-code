@@ -641,11 +641,27 @@ export function decodeAnsiCEscape(
     if (digits) {
       const code = parseInt(digits, 16);
       const length = 2 + digits.length;
-      // `String.fromCodePoint` throws above U+10FFFF, and bash rejects such a
-      // word rather than running it, so keep the escape literal. Throwing here
-      // would escape the permission guard instead of answering it.
+      // `String.fromCodePoint` throws above U+10FFFF, but bash does not reject
+      // the word: it writes the four-byte encoding anyway (`printf %s
+      // $'a\U00110000' | xxd -p` is `61f4908080`, exit 0, on bash 5.3.20). Emit
+      // those bytes so the resolved word is the word the shell builds; above the
+      // four-byte maximum there is nothing to encode, so the escape stays
+      // literal rather than throwing out of the permission guard
+      // (#16540 review, R3-3).
       if (next !== 'x' && code > 0x10ffff) {
-        return { text: body.slice(index, index + length), length };
+        if (code > 0x1fffff) {
+          return { text: body.slice(index, index + length), length };
+        }
+        return {
+          text: body.slice(index, index + length),
+          bytes: [
+            0xf0 | (code >> 18),
+            0x80 | ((code >> 12) & 0x3f),
+            0x80 | ((code >> 6) & 0x3f),
+            0x80 | (code & 0x3f),
+          ],
+          length,
+        };
       }
       // bash writes BYTES for `\xHH` (and octal below); decoding each byte as
       // U+00xx turned a UTF-8 sequence into mojibake, so the byte is carried
@@ -715,7 +731,27 @@ export function decodeAnsiCWord(body: string): string {
     if (escape.text === '\0') break;
     if (escape.bytes) bytes.push(...escape.bytes);
     else pushText(escape.text);
-    index += escape.length - 1;
+    // After `\c\` the operand backslash is consumed and the character it
+    // escapes is LITERAL text, not a new escape: bash writes 61 1c 74 62 for
+    // both `$'a\c\\tb'` and `$'a\c\tb'`, so the `t` is a `t` and not a TAB
+    // (#16540 review, R3-3).
+    if (
+      escape.length === 3 &&
+      body[index + 2] === '\\' &&
+      index + 3 < body.length
+    ) {
+      let at = index + 3;
+      // That literal character can itself be a backslash, which then escapes
+      // the character after it: bash writes 61 1c 74 62 for BOTH `$'a\c\tb'`
+      // and `$'a\c\\tb'`, so the extra backslash is consumed rather than
+      // emitted (#16540 review, R3-3).
+      if (body[at] === '\\' && at + 1 < body.length) at++;
+      const codePoint = body.codePointAt(at)!;
+      pushText(String.fromCodePoint(codePoint));
+      index = at + (codePoint > 0xffff ? 1 : 0);
+    } else {
+      index += escape.length - 1;
+    }
   }
   return Buffer.from(bytes).toString('utf8');
 }

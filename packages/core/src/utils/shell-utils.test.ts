@@ -14,6 +14,7 @@ import {
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
   detectSelfKillCommand,
+  decodeAnsiCEscape,
   decodeAnsiCWord,
   doesToolInvocationMatch,
   escapeShellArg,
@@ -1750,6 +1751,30 @@ describe('splitCommands', () => {
 // multi-byte UTF-8 sequence spelled with `\xHH` decodes to the character it
 // writes, and `\c?` is DEL.
 describe('decodeAnsiCWord byte semantics', () => {
+  // R3-3 (#16540 review): bash 5.3.20 writes `61 1c 74 62` for BOTH
+  // `$'a\c\\tb'` and `$'a\c\tb'`, so the character after a `\c\` operand is
+  // literal text — and a second backslash there escapes the character after it
+  // instead of being emitted. Decoding it as an escape produced a TAB, and
+  // emitting the backslash produced a word bash never builds.
+  it('reads the character after a \\c\\ operand as literal text', () => {
+    expect(decodeAnsiCWord('a\\c\\\\tb')).toBe('a\u001ctb');
+    expect(decodeAnsiCWord('a\\c\\tb')).toBe('a\u001ctb');
+  });
+
+  // R3-3: bash does not reject an out-of-range `\U` — `printf %s
+  // $'a\U00110000' | xxd -p` is `61f4908080` with exit 0 — so the escape has to
+  // contribute those bytes. Keeping it literal read a different program name
+  // than the shell builds, and the old comment claimed the opposite of what bash
+  // does.
+  it('writes the bytes bash writes for an out-of-range \\U escape', () => {
+    expect(decodeAnsiCEscape('a\\U00110000', 1)?.bytes).toEqual([
+      0xf4, 0x90, 0x80, 0x80,
+    ]);
+    // An in-range code point is unchanged, and above the four-byte maximum there
+    // is nothing bash could encode, so the escape stays literal.
+    expect(decodeAnsiCWord('\\U0010FFFF')).toBe('\u{10FFFF}');
+    expect(decodeAnsiCEscape('\\U00200000', 0)?.bytes).toBeUndefined();
+  });
   it.each([
     ['\\xc3\\xa9', 'é'],
     ['\\xe4\\xbd\\xa0', '你'],
