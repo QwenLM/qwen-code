@@ -95,7 +95,7 @@ export const sdkInitializeReplyTimeoutMs = (
   // The margin is the full 5 s only for a declared budget of at least 10 s.
   // Below that it is capped at half the budget: a 9 s budget reserves 4.5 s,
   // not 5 s, and a 1 s budget reserves 0.5 s. That leaves the reply and the
-  // error frame each half of a short deadline to land in.
+  // retry that follows each half of a short deadline to land in.
   const margin = Math.min(
     SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS,
     declaredBudget / 2,
