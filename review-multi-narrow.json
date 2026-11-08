@@ -1,0 +1,33 @@
+{
+  "observations": [
+    {
+      "fullPath": "/tmp/workspaces/customer-portal/department/customer-success/financial-year-2026/quarter-four/very-long-workspace-directory-name-for-layout-verification",
+      "label": "Customer portal financial reporting and operations workspace with a deliberately very long name",
+      "pillRight": 219,
+      "iconWidth": 12,
+      "iconHeight": 12,
+      "iconFlexShrink": "0",
+      "textOverflow": "ellipsis",
+      "overflowX": "hidden",
+      "scrollWidth": 538,
+      "clientWidth": 143,
+      "documentWidth": 390,
+      "viewport": 390
+    },
+    {
+      "fullPath": "/tmp/workspaces/operations-reporting/department/customer-success/financial-year-2026/quarter-four/very-long-workspace-directory-name-for-layout-verification",
+      "label": "Customer portal financial reporting and operations workspace with a deliberately very long name",
+      "pillRight": 219,
+      "iconWidth": 12,
+      "iconHeight": 12,
+      "iconFlexShrink": "0",
+      "textOverflow": "ellipsis",
+      "overflowX": "hidden",
+      "scrollWidth": 538,
+      "clientWidth": 143,
+      "documentWidth": 390,
+      "viewport": 390
+    }
+  ],
+  "errors": []
+}
