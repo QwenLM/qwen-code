@@ -127,8 +127,8 @@ export async function readHostedApprovalContinuation(
   );
   const plan = raw as unknown as HostedApprovalContinuation;
   const header = session.authority.sessionHeader;
-  const providerPinned = Object.hasOwn(plan.runtime ?? {}, 'provisionerKind');
-  const memoryOnly = plan.runtime === null;
+  const conflict =
+    'Hosted approval continuation conflicts with the original Turn.';
   const runtimeSessionId =
     plan.runtime?.runtimeSessionId ?? hostedRuntimeSessionId(promptId);
   if (
@@ -145,33 +145,41 @@ export async function readHostedApprovalContinuation(
     !Number.isSafeInteger(plan.approvalOrdinal) ||
     plan.approvalOrdinal < 0 ||
     plan.approvalOrdinal >= plan.calls.length ||
-    (memoryOnly
-      ? Boolean(plan.commandStep || plan.publicChildModel) ||
-        plan.calls.some((item) => !isHostedMemoryTool(item.call?.name))
-      : !plan.runtime ||
-        Object.keys(plan.runtime).sort().join(',') !==
-          (providerPinned
-            ? 'bindingId,generation,provisionerKind,runtimeSessionId,workspaceGeneration'
-            : 'bindingId,generation,runtimeSessionId,workspaceGeneration') ||
-        (providerPinned &&
-          (plan.runtime.provisionerKind !== 'local-process' ||
-            plan.commandStep !== undefined ||
-            plan.calls.length !== 1 ||
-            plan.calls[0]?.call?.name !== 'ask_user_question')) ||
-        (!plan.commandStep &&
-          runtimeSessionId !== hostedRuntimeSessionId(promptId)) ||
-        !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
-        !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.workspaceGeneration) ||
-        BigInt(plan.runtime.generation) > 2n ** 63n - 1n ||
-        BigInt(plan.runtime.workspaceGeneration) > 2n ** 63n - 1n) ||
     !plan.sourceActivation ||
     Object.keys(plan.sourceActivation).length !== 2 ||
     !Number.isSafeInteger(plan.sourceActivation.epoch) ||
     plan.sourceActivation.epoch < 1
   )
-    throw new Error(
-      'Hosted approval continuation conflicts with the original Turn.',
-    );
+    throw new Error(conflict);
+  if (plan.runtime === null) {
+    if (
+      plan.commandStep ||
+      plan.publicChildModel ||
+      plan.calls.some((item) => !isHostedMemoryTool(item.call?.name))
+    )
+      throw new Error(conflict);
+  } else {
+    const providerPinned = Object.hasOwn(plan.runtime ?? {}, 'provisionerKind');
+    if (
+      !plan.runtime ||
+      Object.keys(plan.runtime).sort().join(',') !==
+        (providerPinned
+          ? 'bindingId,generation,provisionerKind,runtimeSessionId,workspaceGeneration'
+          : 'bindingId,generation,runtimeSessionId,workspaceGeneration') ||
+      (providerPinned &&
+        (plan.runtime.provisionerKind !== 'local-process' ||
+          plan.commandStep !== undefined ||
+          plan.calls.length !== 1 ||
+          plan.calls[0]?.call?.name !== 'ask_user_question')) ||
+      (!plan.commandStep &&
+        runtimeSessionId !== hostedRuntimeSessionId(promptId)) ||
+      !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
+      !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.workspaceGeneration) ||
+      BigInt(plan.runtime.generation) > 2n ** 63n - 1n ||
+      BigInt(plan.runtime.workspaceGeneration) > 2n ** 63n - 1n
+    )
+      throw new Error(conflict);
+  }
   if (plan.commandStep) {
     if (
       Object.keys(plan.commandStep).sort().join(',') !==

@@ -13355,6 +13355,18 @@ it('reuses committed memory results when recovering a partially completed batch'
     ),
   ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
   expect(await findHostedMemoryResults(session, 'prompt')).toBeUndefined();
+  await session.sink.write({
+    uuid: 'umsg_later:1',
+    parentUuid: null,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    type: 'user',
+    subtype: 'mid_turn_user_message',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: { role: 'user', parts: [{ text: 'A later input' }] },
+  });
   const planned = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .findLast((event) => event.kind === 'hosted.batch.planned')!;
@@ -13377,8 +13389,12 @@ it('reuses committed memory results when recovering a partially completed batch'
   expect(
     query.mock.calls
       .filter(([request]) => request.operation === 'remember')
-      .map(([request]) => request.callId),
-  ).toEqual(['call-0', 'second', 'second']);
+      .map(([request]) => [request.callId, request.inputId]),
+  ).toEqual([
+    ['call-0', 'prompt'],
+    ['second', 'prompt'],
+    ['second', 'prompt'],
+  ]);
   expect(
     (await session.sink.project()).filter(
       (entry) => entry.type === 'tool_result',
@@ -13388,34 +13404,44 @@ it('reuses committed memory results when recovering a partially completed batch'
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-it('associates memory tools with the queued input preceding their original batch', async () => {
-  await session.sink.write({
-    uuid: 'umsg_queued:2',
-    parentUuid: null,
-    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
-    timestamp: new Date().toISOString(),
-    type: 'user',
-    subtype: 'mid_turn_user_message',
-    cwd: root,
-    version: 'test',
-    daemonPromptId: 'prompt',
-    message: { role: 'user', parts: [{ text: 'Please remember this' }] },
-  });
+it('associates each memory batch with its preceding queued input', async () => {
   const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
   turn = createMemoryTurn(query);
-  const call = personalMemoryCall();
-  await turn.execute(
-    [call],
-    memoryParts(call),
-    'model',
-    new AbortController().signal,
+  const inputIds = ['umsg_queued:2', 'umsg_next:3'];
+  for (const inputId of inputIds) {
+    await session.sink.write({
+      uuid: inputId,
+      parentUuid: null,
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      subtype: 'mid_turn_user_message',
+      cwd: root,
+      version: 'test',
+      daemonPromptId: 'prompt',
+      message: { role: 'user', parts: [{ text: 'Please remember this' }] },
+    });
+    const batch = [0, 1].map((index) => ({
+      ...personalMemoryCall(),
+      callId: `${inputId}:${index}`,
+    }));
+    await turn.execute(
+      batch,
+      batch.flatMap(memoryParts),
+      'model',
+      new AbortController().signal,
+    );
+    await turn.consumeResults();
+  }
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => [request.callId, request.inputId]),
+  ).toEqual(
+    inputIds.flatMap((inputId) =>
+      [0, 1].map((index) => [`${inputId}:${index}`, inputId]),
+    ),
   );
-  expect(query).toHaveBeenLastCalledWith({
-    operation: 'remember',
-    inputId: 'umsg_queued:2',
-    callId: call.callId,
-    content: call.args['content'],
-  });
 });
 
 it('refuses restored personal memory mutations while Plan Mode is active', async () => {

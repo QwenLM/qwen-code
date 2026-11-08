@@ -65,6 +65,12 @@ approval continuation has `runtime:null`, accepted only for the four memory
 tools without command-step or child-model execution; mixed batches retain the
 existing runtime requirements.
 
+Approval recovery validates the common envelope, memory-only restrictions and
+Runtime identity in separate steps without changing the stored continuation
+format. Within one tool batch, memory calls reuse one history projection and
+the accepted input preceding the original assistant batch; the next batch reads
+history again. Recovery still replays committed results before dispatching work.
+
 Each fresh real user input, including queued inputs, triggers recall from the
 original submitted text. Existing query sanitization is retained. Before the
 query is truncated, the shared secret scanner and checks for known credential

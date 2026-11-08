@@ -5637,22 +5637,22 @@ export class HostedWorkspaceToolTurn {
       const skillBatch = skillResponses.length
         ? enforceFunctionResponseBudget(skillResponses, this.toolOutputBudget)
         : undefined;
-      const journaledMemoryRecords =
+      let memoryRecords =
         restored && requests.some((request) => request.memory)
           ? await this.session.sink.project()
-          : [];
-      const journaledMemory = journaledMemoryRecords
-        .slice(
-          journaledMemoryRecords.findIndex(
-            (entry) => entry.uuid === messageId,
-          ) + 1,
-        )
-        .filter(
-          (entry) =>
-            entry.daemonPromptId === this.promptId &&
-            entry.type === 'tool_result',
-        )
-        .flatMap((entry) => entry.message?.parts ?? []);
+          : undefined;
+      const journaledMemory =
+        memoryRecords
+          ?.slice(
+            memoryRecords.findIndex((entry) => entry.uuid === messageId) + 1,
+          )
+          .filter(
+            (entry) =>
+              entry.daemonPromptId === this.promptId &&
+              entry.type === 'tool_result',
+          )
+          .flatMap((entry) => entry.message?.parts ?? []) ?? [];
+      let acceptedMemoryInputId: string | undefined;
       executing = true;
       for (const [index, request] of requests.entries()) {
         if (request.memory) {
@@ -5775,9 +5775,13 @@ export class HostedWorkspaceToolTurn {
             throw new HostedToolRecoveryRequiredError(
               HOSTED_PUBLIC_PLAN_REFUSAL,
             );
+          acceptedMemoryInputId ??= this.memoryInputId(
+            messageId,
+            (memoryRecords ??= await this.session.sink.project()),
+          );
           const result = await this.memory!.execute(
             request.call.name,
-            await this.memoryInputId(messageId),
+            acceptedMemoryInputId,
             request.call.callId,
             request.input,
             signal,
@@ -6406,8 +6410,10 @@ export class HostedWorkspaceToolTurn {
     return responses;
   }
 
-  private async memoryInputId(messageId: string): Promise<string> {
-    const history = await this.session.sink.project();
+  private memoryInputId(
+    messageId: string,
+    history: readonly ChatRecord[],
+  ): string {
     const batch = history.findIndex((entry) => entry.uuid === messageId);
     if (batch < 0)
       throw new HostedToolRecoveryRequiredError(
