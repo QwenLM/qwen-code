@@ -7,10 +7,12 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { createShowMemoryAction } from '../hooks/useShowMemoryCommand.js';
+import { MessageType } from '../types.js';
 
 export const memoryCommand: SlashCommand = {
   name: 'memory',
-  argumentHint: '[migrate-team]',
+  argumentHint: '[show|migrate-team]',
   get description() {
     return t('Open the memory manager.');
   },
@@ -21,11 +23,33 @@ export const memoryCommand: SlashCommand = {
     if (!action) {
       return { type: 'dialog', dialog: 'memory' };
     }
+    if (action === 'show') {
+      await createShowMemoryAction(
+        context.services.config,
+        context.services.settings,
+        (message) => {
+          if (
+            message.type !== MessageType.INFO &&
+            message.type !== MessageType.ERROR
+          ) {
+            return;
+          }
+          context.ui.addItem(
+            {
+              type: message.type,
+              text: message.content,
+            },
+            message.timestamp.getTime(),
+          );
+        },
+      )();
+      return;
+    }
     if (action !== 'migrate-team') {
       return {
         type: 'message',
         messageType: 'error',
-        content: t('Usage: /memory migrate-team'),
+        content: t('Usage: /memory [show|migrate-team]'),
       };
     }
     const config = context.services.config;
