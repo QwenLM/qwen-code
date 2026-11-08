@@ -32,7 +32,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
-import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
