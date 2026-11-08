@@ -43,6 +43,21 @@ import {
 import { escapeXml } from '../utils/xml.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
+// The registry's logger is module-private, so its warnings are counted
+// through this stand-in. Without a debug log session the real logger
+// writes nothing, so no other test here depends on it.
+const debugLogger = vi.hoisted(() => ({
+  isEnabled: () => false,
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => debugLogger,
+}));
+
 /**
  * Builds the expected `<output-file>` element with the same
  * `stripDisplayControlChars` + `escapeXml` pipeline the registry applies.
@@ -1491,6 +1506,7 @@ describe('settleOrphanedShellStatusFiles', () => {
             { statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 },
           ],
         });
+        debugLogger.warn.mockClear();
         const stop = watchOrphanedShellStatusFiles(
           [
             ...unsettled,
@@ -1506,6 +1522,14 @@ describe('settleOrphanedShellStatusFiles', () => {
               readFileSync(join(sibling, 'shell-bg_2.status'), 'utf8'),
             )['status'],
           ).toBe('unknown');
+          vi.advanceTimersByTime(100);
+          // Retried on every tick, but logged once for the sidecar.
+          const statusPath = join(dir, 'shell-bg_1.status');
+          expect(
+            debugLogger.warn.mock.calls.filter(([message]) =>
+              String(message).includes(statusPath),
+            ),
+          ).toHaveLength(1);
           chmodSync(dir, 0o700);
           vi.advanceTimersByTime(100);
           expect(read('shell-bg_1.status')['status']).toBe('unknown');

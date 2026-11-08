@@ -7,7 +7,8 @@
 - Issue: #15800
 - Scope: `packages/core/src/services/backgroundShellRegistry.ts`,
   `packages/core/src/config/config.ts`, the status-file guidance in
-  `packages/core/src/tools/shell.ts`
+  `packages/core/src/tools/shell.ts`, and the `nonBlocking` option of
+  `openSyncNoFollow` in `packages/core/src/utils/no-follow-open.ts`
 
 ## Problem statement
 
@@ -123,9 +124,15 @@ no-op. A Config with an execution environment skips it.
 The model guidance lists `unknown` and says it means the session that started
 the process ended without recording how it finished. It also says a `running`
 value can outlive the session that wrote it, and that if that session ended
-without shutting down, the recorded pid should be checked before the process
-is treated as running. This covers the sidecars the scope check keeps
-`running`: those on macOS and Windows, and those written by older versions.
+without shutting down, the recorded pid should be checked (`ps -p`, or
+`tasklist` on Windows) before the process is treated as running. This covers
+the sidecars the scope check keeps `running`: those on macOS and Windows, and
+those written by older versions. The guidance applies the settler's rule: the
+pid is judged only when the sidecar's `pidScope` matches the reader's
+environment (the hostname, and the boot ID and pid namespace where recorded).
+A missing or different `pidScope` means the pid may belong to another machine,
+boot or container, so the outcome is left unverified rather than read as
+ended.
 
 ## Key design decisions
 
@@ -177,8 +184,8 @@ is treated as running. This covers the sidecars the scope check keeps
   and a registry-written sidecar: settled with the native scope on Linux, kept
   `running` where the platform cannot prove the scope.
 - Watcher tests: a watched sidecar is settled once its process exits and not
-  after the watch is stopped; a failed rewrite is retried until it lands while
-  a sibling settles; a sidecar unreadable at takeover is watched and settled
+  after the watch is stopped; a failed rewrite is retried until it lands, and
+  logged once, while a sibling settles; a sidecar unreadable at takeover is watched and settled
   once it can be read; the timer is unref'd; and, with a real child, a process
   alive at takeover that exits later is settled with no second takeover.
 - `Config` tests: initialization settles the session it starts with; switching
@@ -186,10 +193,14 @@ is treated as running. This covers the sidecars the scope check keeps
   sidecars are watched until a switch or shutdown; a Config with an execution
   environment does not settle; a settle that throws does not stop
   initialization.
-- Guidance tests assert `unknown`, its meaning and the stale-`running`
-  cross-check in both the launch and the promote messages.
+- Guidance tests assert `unknown`, its meaning, the stale-`running`
+  cross-check and its `pidScope` condition in both the launch and the promote
+  messages.
 - `openSyncNoFollow` tests: `nonBlocking` opens a FIFO without waiting, on
-  the native path and on the fallback.
+  the native path and on the fallback. The native open runs in a child process
+  under a kill deadline, and the fallback's mocked `openSync` refuses an open
+  without `O_NONBLOCK`, so a regression fails the test instead of hanging the
+  run.
 - Mutation checks: removing each of these guards turns a test red.
 - On Ubuntu 24.04 with Node 22, and on macOS: drive the bundled CLI with the
   repo's fake OpenAI server, kill it with SIGKILL and with SIGHUP to its

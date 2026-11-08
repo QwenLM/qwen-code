@@ -6,8 +6,9 @@
 - 日期：2026-11-07
 - Issue：#15800
 - 范围：`packages/core/src/services/backgroundShellRegistry.ts`、
-  `packages/core/src/config/config.ts`，以及 `packages/core/src/tools/shell.ts` 中的状态文件
-  引导文字
+  `packages/core/src/config/config.ts`、`packages/core/src/tools/shell.ts` 中的状态文件
+  引导文字，以及 `packages/core/src/utils/no-follow-open.ts` 中 `openSyncNoFollow` 的
+  `nonBlocking` 选项
 
 ## 问题陈述
 
@@ -98,8 +99,11 @@ FIFO 上等待；只有 `fstat` 报告为不超过 1 MiB 的普通文件才会�
 
 模型引导文字列出 `unknown`，并说明其含义：启动该进程的会话结束时没有记录进程是如何结束的。
 引导文字还说明，`running` 可能比写入它的会话存活得更久：如果该会话没有正常关闭，应先核对记录的
-pid 是否仍存活，再认定进程仍在运行。这覆盖了范围核对保持为 `running` 的状态文件，即 macOS 和
-Windows 上的，以及旧版本写入的。
+pid 是否仍存活（`ps -p`，Windows 上用 `tasklist`），再认定进程仍在运行。这覆盖了范围核对保持为
+`running` 的状态文件，即 macOS 和 Windows 上的，以及旧版本写入的。引导文字沿用收尾逻辑的规则：
+只有状态文件的 `pidScope` 与读取方所在环境一致（主机名相同，且已记录的开机 ID 和 pid 命名空间
+也相同）时才判断该 pid。`pidScope` 缺失或不同，说明该 pid 可能属于另一台机器、另一次开机或另一个
+容器，此时结果视为未验证，而不是当作已结束。
 
 ## 关键设计决策
 
@@ -136,14 +140,17 @@ Windows 上的，以及旧版本写入的。
   检查时抛错、符号链接形式的状态文件、目录不存在、通过默认 `isPidAlive` 检查一个真实已退出的
   进程，以及注册表写入的状态文件：在 Linux 上以本机范围收尾，在无法证明范围的平台上保持
   `running`。
-- 监视测试：被监视的状态文件在进程退出后收尾，停止监视后不再改动；改写失败会重试直到成功，同时
-  其他状态文件照常收尾；接管时无法读取的状态文件会被监视，可读后收尾；定时器已 unref；并用真实子进程验证接管时仍存活、之后才退出的进程，在
+- 监视测试：被监视的状态文件在进程退出后收尾，停止监视后不再改动；改写失败会重试直到成功且只记录一次
+  警告，同时其他状态文件照常收尾；接管时无法读取的状态文件会被监视，可读后收尾；定时器已 unref；并用真实子进程验证接管时仍存活、之后才退出的进程，在
   没有第二次接管的情况下也会被收尾。
 - `Config` 测试：初始化时收尾其启动所在的会话；切换时收尾新会话；恢复当前会话时不收尾；仍为
   `running` 的状态文件会被监视，切换和关闭时停止；带执行环境的 Config 不收尾；收尾抛错不影响
   初始化。
-- 引导文字测试：在启动和转入后台两种消息中断言 `unknown`、其含义，以及对陈旧 `running` 的核对说明。
-- `openSyncNoFollow` 测试：设置 `nonBlocking` 后，原生路径和兼容路径打开 FIFO 都不会等待。
+- 引导文字测试：在启动和转入后台两种消息中断言 `unknown`、其含义、对陈旧 `running` 的核对说明
+  及其 `pidScope` 前提。
+- `openSyncNoFollow` 测试：设置 `nonBlocking` 后，原生路径和兼容路径打开 FIFO 都不会等待。原生
+  路径的打开在子进程中执行并设有强制结束的期限，兼容路径中被 mock 的 `openSync` 会拒绝不带
+  `O_NONBLOCK` 的打开，因此回归会让测试失败，而不是卡住整次运行。
 - 变异检查：逐一移除上述保护时，都会有测试失败。
 - 在 Ubuntu 24.04 与 Node 22 上，以及 macOS 上：用仓库的模拟 OpenAI 服务驱动打包后的 CLI，
   在后台 shell 运行期间分别以 SIGKILL 和向进程组发送 SIGHUP 结束 CLI，等命令跑完后恢复会话并

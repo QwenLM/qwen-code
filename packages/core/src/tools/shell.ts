@@ -144,7 +144,9 @@ function statusFileGuidance(outputPath: string): string {
     `status file: ${statusFilePathFor(outputPath)}\n` +
     `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled|unknown). ` +
     `unknown means the session that started it ended without recording how the process finished. ` +
-    `A running value can outlive the session that wrote it: if that session ended without shutting down, check whether the recorded pid is still alive (e.g. \`ps -p <pid>\`) before treating the process as running. ` +
+    `A running value can outlive the session that wrote it: if that session ended without shutting down, check whether the recorded pid is still alive (\`ps -p <pid>\`, or \`tasklist /FI "PID eq <pid>"\` on Windows) before treating the process as running. ` +
+    `Only judge the pid when the status file's pidScope matches this environment: the same hostname and, where recorded, the same bootId (/proc/sys/kernel/random/boot_id) and pidNamespace (the number in \`readlink /proc/self/ns/pid\`). ` +
+    `If pidScope is missing or differs, the pid may belong to another machine, boot or container and cannot be checked from here, so treat the outcome as unverified. ` +
     `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive (for live output, re-run with e.g. \`python -u\` or \`stdbuf -oL\`).`
   );
 }
