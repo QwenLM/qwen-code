@@ -1304,7 +1304,10 @@ user or system settings. The member is omitted entirely when no channel
 resolves, and older daemons never send it; a settings read failure degrades
 to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
 message it accepted or skipped (with the machine reason: `reason_filter`,
-`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`,
+`mention_required`, `duplicate`, `edited_comment` (a GitHub comment created
+before the poll window that mentions the bot, was edited after the window
+opened and is not in the channel's dedupe record; the channel does not answer
+it, and `actor` names the comment's author, who need not be the editor), a sender-gate rejection, `github_api_error`,
 `no_role_matched`),
 a GitHub thread whose handling failed and that it will read again (`failed`
 with `github_api_error`: a GitHub error, or a local error while the channel
@@ -1333,10 +1336,11 @@ reconciliation failed (the recovered row carries no error). A GitHub poll that f
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. While the cursor is held, a comment the
-poll reads again is journaled as `duplicate` or `mention_required` once per
-window, and a failing thread as `github_api_error` on its first failing poll in
-the window and on every tenth failing poll (a rate limit or credential failure:
-its first and every tenth poll), and once when it is skipped. The once-per-window
+poll reads again is journaled as `duplicate`, `mention_required` or
+`edited_comment` once per window, and a failing thread as `github_api_error`
+on its first failing poll in the window and on every tenth failing poll (a
+rate limit or credential failure: its first and every tenth poll), and once
+when it is skipped. The once-per-window
 rows are tracked under up to 8,192 keys; a row whose key no longer fits is
 journaled on every poll. Query parameters: `limit` (1-500, default 100), `type`
 (comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
