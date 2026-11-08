@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
@@ -11,8 +12,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 public interface ManagedActionStore {
+    String ACTION_ID_PATTERN = "(?:tool_approval_[0-9a-f]{32}|command_approval_[0-9a-f]{48})";
+    Pattern ACTION_ID = Pattern.compile(ACTION_ID_PATTERN);
+
     public record Action(
             String id,
             String state,
@@ -72,7 +77,7 @@ public interface ManagedActionStore {
 
     public static String decisionDigest(JsonNode response) {
         if (response.has("answers")) {
-            return com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions.decisionDigest(response);
+            return ManagedUserQuestions.decisionDigest(response);
         }
         Map<String, Object> decision = new LinkedHashMap<>();
         decision.put("v", 1);

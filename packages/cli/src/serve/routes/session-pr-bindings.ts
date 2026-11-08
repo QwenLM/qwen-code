@@ -161,8 +161,9 @@ async function resolveAttribution(
  * bindings the bridge holds in memory, and returns true when anything could
  * not be read (a sidecar, a transcript, or the live session list), so the
  * caller flags the answer partial; such bindings are UNKNOWN, not absent.
+ * Shared in-process by the bindings route and the daemon PR-watch refresh.
  */
-async function scanWorkspaceBindings(
+export async function scanWorkspaceBindings(
   runtime: WorkspaceRuntime,
   out: SessionPrBindingSummary[],
 ): Promise<boolean> {
