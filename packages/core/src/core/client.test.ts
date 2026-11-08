@@ -9900,6 +9900,139 @@ Other open files:
       }
     });
 
+    it.each([
+      { skipNextSpeakerCheck: false, skipMemoryExtraction: false },
+      { skipNextSpeakerCheck: false, skipMemoryExtraction: true },
+      { skipNextSpeakerCheck: true, skipMemoryExtraction: false },
+      { skipNextSpeakerCheck: true, skipMemoryExtraction: true },
+    ])(
+      'extracts at the stop of a turn unless it skips extraction (%o)',
+      async ({ skipNextSpeakerCheck, skipMemoryExtraction }) => {
+        vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(
+          skipNextSpeakerCheck,
+        );
+        mockMemoryManager.scheduleExtract.mockClear();
+        mockMemoryManager.scheduleDream.mockClear();
+        mockMemoryManager.scheduleMetadataMigration.mockClear();
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([userText('A comment.'), modelText('Done')]),
+        });
+
+        await run([{ text: 'A comment.' }], 'prompt-id-relayed-extract', {
+          type: SendMessageType.UserQuery,
+          ...(skipMemoryExtraction && { skipMemoryExtraction }),
+        });
+
+        const calls = skipMemoryExtraction ? 0 : 1;
+        expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledTimes(calls);
+        expect(mockMemoryManager.scheduleDream).toHaveBeenCalledTimes(calls);
+        // Recall still serves the turn.
+        expect(mockMemoryManager.recall).toHaveBeenCalledOnce();
+        // The metadata migration reads no turn: it still runs.
+        expect(
+          mockMemoryManager.scheduleMetadataMigration,
+        ).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each([false, true])(
+      'carries the extraction skip through a next-speaker continuation (skip: %s)',
+      async (skipMemoryExtraction) => {
+        mockMemoryManager.scheduleExtract.mockClear();
+        mockMemoryManager.scheduleDream.mockClear();
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([userText('A comment.'), modelText('Done')]),
+        });
+        const { checkNextSpeaker } = await import(
+          '../utils/nextSpeakerChecker.js'
+        );
+        vi.mocked(checkNextSpeaker)
+          .mockResolvedValueOnce({ reasoning: 'forced', next_speaker: 'model' })
+          .mockResolvedValue(null);
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'A comment.' }], 'prompt-id-relayed-next-speaker', {
+          type: SendMessageType.UserQuery,
+          ...(skipMemoryExtraction && { skipMemoryExtraction }),
+        });
+
+        // The continuation's stop ends the turn and schedules its memory work.
+        expect(send).toHaveBeenCalledTimes(2);
+        const calls = skipMemoryExtraction ? 0 : 1;
+        expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledTimes(calls);
+        expect(mockMemoryManager.scheduleDream).toHaveBeenCalledTimes(calls);
+      },
+    );
+
+    it.each([false, true])(
+      'carries the extraction skip through a Stop hook continuation (skip: %s)',
+      async (skipMemoryExtraction) => {
+        mockMemoryManager.scheduleExtract.mockClear();
+        mockMemoryManager.scheduleDream.mockClear();
+        installMessageBus(blockStopOnce(), 'Stop');
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([userText('A comment.'), modelText('Done')]),
+        });
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'A comment.' }], 'prompt-id-relayed-stop-hook', {
+          type: SendMessageType.UserQuery,
+          ...(skipMemoryExtraction && { skipMemoryExtraction }),
+        });
+
+        // The Stop hook's continuation ends the turn.
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+        });
+        const calls = skipMemoryExtraction ? 0 : 1;
+        expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledTimes(calls);
+        expect(mockMemoryManager.scheduleDream).toHaveBeenCalledTimes(calls);
+      },
+    );
+
+    it("carries a relayed turn's extraction skip to the continuation that ends it", async () => {
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+      mockTurnRunFn.mockReturnValue(textTurn('Done'));
+      installChat({
+        getHistory: vi
+          .fn()
+          .mockReturnValue([userText('A comment.'), modelText('Done')]),
+      });
+      const policy = {
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      };
+      const send = vi.spyOn(client, 'sendMessageStream');
+
+      await run([{ text: 'A comment.' }], 'prompt-id-relayed-continuation', {
+        type: SendMessageType.UserQuery,
+        skipMemoryExtraction: true,
+        stopPolicies: [policy],
+      });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1][3]).toMatchObject({
+        type: SendMessageType.Hook,
+        skipMemoryExtraction: true,
+      });
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
