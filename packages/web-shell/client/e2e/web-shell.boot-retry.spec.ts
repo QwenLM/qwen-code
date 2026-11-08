@@ -9,6 +9,11 @@ import {
 // graph and the boot watchdog shows "failed to load" instead of the shell.
 // The harness reloads such a boot; without that, every assertion on the shell
 // times out and the shard fails on a run no diff of it caused.
+//
+// Every mount assertion here allows for a second full boot of the graph: the
+// suite's 20 s visibility budget measures one, and a cold dev server under
+// load can spend it on the first before the reload even starts.
+const BOOT_VISIBLE_TIMEOUT_MS = 40_000;
 test('an aborted entry module reloads instead of stranding the boot @smoke', async ({
   page,
 }, testInfo) => {
@@ -31,7 +36,7 @@ test('an aborted entry module reloads instead of stranding the boot @smoke', asy
 
   await expect(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: BOOT_VISIBLE_TIMEOUT_MS });
   await expect(page.locator('[data-boot-fallback]')).toHaveCount(0);
   expect(entryRequests).toBe(2);
 });
@@ -54,10 +59,17 @@ test('an entry module that never loads stops after the reload budget @smoke', as
 
   await page.goto(`/session/${scenario.sessionId}?theme=light&language=en`);
 
-  await expect(page.locator('[data-boot-fallback]')).toHaveCount(1, {
-    timeout: 30_000,
-  });
+  // The watchdog paints its panel on the first failed fetch, before the
+  // reload it triggers has even been issued, so the panel is not a signal
+  // that the budget is spent. Poll the counter instead: engines differ by
+  // tens to hundreds of milliseconds between the panel and the reload.
+  await expect.poll(() => entryRequests, { timeout: 30_000 }).toBe(3);
+  // Polling sees the third attempt the moment it happens, so the bound needs
+  // a quiet window as well: one more reload would follow within a cycle of
+  // the third attempt's load.
+  await page.waitForTimeout(4_000);
   expect(entryRequests).toBe(3);
+  await expect(page.locator('[data-boot-fallback]')).toHaveCount(1);
 });
 
 // The budget is per boot, not per page: a boot that completes must hand it
@@ -86,7 +98,7 @@ test('a completed boot keeps the reload budget for later navigations @smoke', as
     );
     await expect(
       page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: BOOT_VISIBLE_TIMEOUT_MS });
   }
 
   expect(entryRequests).toBe(6);
