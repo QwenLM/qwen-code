@@ -152,7 +152,9 @@ export function buildSessionRecoveryPlanFromApiHistory({
   const planId = createPlanId(sessionId, originalApiHistory.length);
 
   const apiHistory = cloneApiHistory(originalApiHistory);
-  const repairResult = repairOrphanedToolUseTurns(apiHistory);
+  const repairResult = repairOrphanedToolUseTurns(apiHistory, undefined, {
+    hoistNonAdjacentResponses: true,
+  });
   const repairs: RecoveryRepair[] = [
     ...repairResult.injected.map((repair) => ({
       type: 'synthesized_tool_result' as const,

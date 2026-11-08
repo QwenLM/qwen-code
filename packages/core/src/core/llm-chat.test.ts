@@ -12616,6 +12616,34 @@ describe('LlmChat', async () => {
       expect(chat.getHistory()).toEqual(happy);
     });
 
+    it('hoists a later real response only for session recovery', () => {
+      const history = [
+        callTurn('call_resume'),
+        userText('follow-up prompt'),
+        modelText('continuing response'),
+        resultTurn('call_resume', 'real result'),
+      ];
+
+      const inline = repair(structuredClone(history));
+      expect(inline.result.injected).toEqual([
+        { callId: 'call_resume', name: 'read_file' },
+      ]);
+
+      const recovered = repair(structuredClone(history), undefined, {
+        hoistNonAdjacentResponses: true,
+      });
+      expect(recovered.result).toEqual({ injected: [], droppedDuplicates: [] });
+      expect(recovered.history).toEqual([
+        history[0],
+        content(
+          'user',
+          fnResponse('read_file', { output: 'real result' }, 'call_resume'),
+          { text: 'follow-up prompt' },
+        ),
+        history[2],
+      ]);
+    });
+
     it('repairs multiple non-adjacent dangling tool_uses across history', () => {
       // Forward-walk stress: dangling turns at the start AND the end are
       // repaired, without re-scanning synthetic user turns just inserted.
