@@ -17416,7 +17416,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     /** A paginate map function, as @octokit/plugin-paginate-rest calls it. */
     type ChecksMapFn = (
-      response: { data: unknown[] },
+      response: { data: unknown[]; headers?: { link?: string } },
       done: () => void,
     ) => unknown[];
 
@@ -17467,12 +17467,19 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           mapFn?: ChecksMapFn,
         ) => {
           if ('ref' in params) {
-            for (const page of pages) {
+            for (const [index, page] of pages.entries()) {
               // Called for its request count only: the page body comes from
               // the fixture, so assertions count pages actually read.
               await mockOctokit.rest.checks.listForRef();
               let stopped = false;
-              mapFn?.({ data: page }, () => {
+              // The real iterator follows this header, so every page but the
+              // last carries it — that is how the adapter tells "stopped with
+              // pages left" from "read everything".
+              const headers =
+                index < pages.length - 1
+                  ? { link: '<https://api.github.com/next>; rel="next"' }
+                  : {};
+              mapFn?.({ data: page, headers }, () => {
                 stopped = true;
               });
               if (stopped) break;
@@ -17962,6 +17969,26 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
         expect(prompt).toContain('Failed checks: build');
         expect(prompt).not.toContain('later-page');
+        // Pages went unread, so the list must not read as complete: this
+        // fires once per head, so the marker is the only notice that later
+        // pages went unread.
+        expect(prompt).toContain('list may be incomplete');
+      });
+
+      it('does not mark the list incomplete when the failing page is the last', async () => {
+        // Stopping on the last page read everything, so a marker here would
+        // falsely claim that pages went unread.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'success' }],
+          [{ status: 'completed', conclusion: 'failure', name: 'last-page' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(3);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Failed checks: last-page');
+        expect(prompt).not.toContain('list may be incomplete');
       });
 
       it('keeps paging until it finds a failure on a later page', async () => {
@@ -18019,6 +18046,37 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
           'failure',
         );
+      });
+
+      it('still fires ci_failure when the skipped statuses endpoint would fail', async () => {
+        // The behavioural half of the skip, which a resolving mock cannot
+        // show: 403 is fail-fast for the watch, so without the guard the
+        // whole observation aborts, ciResult stays undefined, the baseline
+        // 'success' stands and the red head is silent until the next
+        // re-check interval.
+        await baselineThenRecheck();
+        mockOctokit.rest.repos.getCombinedStatusForRef.mockRejectedValue(
+          Object.assign(new Error('Resource not accessible by integration'), {
+            status: 403,
+          }),
+        );
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'CI failed on head sha-1',
+        );
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        // Baseline only: the failing poll never reached the endpoint, so the
+        // 403 could not be retried either.
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(1);
       });
 
       it('still reads the combined status when no check run failed', async () => {

@@ -631,6 +631,14 @@ interface CiObservation {
   aggregate: CiAggregate;
   /** Names of failed checks (capped), for actionable event summaries. */
   failedChecks: string[];
+  /**
+   * The walk stopped on a failing page that still had a next page, so any
+   * failures beyond it went unread. Whether there ARE more is unknown — that
+   * is what skipping the page means — so the summary says "may be incomplete".
+   * It has to say something: ci_failure fires once per head, so this is the
+   * only notice those later failures would ever get.
+   */
+  namesIncomplete: boolean;
 }
 
 const MAX_REPORTED_FAILED_CHECKS = 5;
@@ -6943,7 +6951,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       const failedChecks =
         ciResult && ciResult.failedChecks.length > 0
-          ? ` Failed checks: ${ciResult.failedChecks.join(', ')}.`
+          ? ` Failed checks: ${ciResult.failedChecks.join(', ')}${
+              ciResult.namesIncomplete
+                ? ' (list may be incomplete: later check pages were not read)'
+                : ''
+            }.`
           : '';
       events.push({
         type: 'ci_failure',
@@ -7497,6 +7509,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         let sawFailure = false;
         let sawPending = false;
         let sawSuccess = false;
+        let namesIncomplete = false;
         const failedChecks: string[] = [];
         await this.octokit.paginate(
           this.octokit.rest.checks.listForRef,
@@ -7546,23 +7559,35 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             }
             // A failure decides the aggregate: no later page can overturn
             // it, so stop paging instead of spending one request per page
-            // of a head that carries hundreds of check runs. Whole pages
-            // are still read, so the reported names are unchanged for a
-            // single-page head; past the first failing page they stay
-            // best-effort, which the MAX_REPORTED_FAILED_CHECKS cap already
-            // made them.
-            if (sawFailure) done();
+            // of a head that carries hundreds of check runs. Whole pages are
+            // still read, so a head whose failures all fit in the pages read
+            // reports the same names as before.
+            if (sawFailure) {
+              // Only unread pages make the list partial: stopping on the
+              // LAST page read everything. The iterator follows this same
+              // header, so its presence is exactly "a page went unread".
+              namesIncomplete = /<[^<>]+>;\s*rel="next"/.test(
+                response.headers?.link ?? '',
+              );
+              done();
+            }
             return [];
           },
         );
-        return { sawFailure, sawPending, sawSuccess, failedChecks };
+        return {
+          sawFailure,
+          sawPending,
+          sawSuccess,
+          failedChecks,
+          namesIncomplete,
+        };
       },
       `checks.listForRef(${sha})`,
       3,
       (err) => !isWatchFailFastError(err),
     );
     let { sawFailure, sawPending, sawSuccess } = checks;
-    const { failedChecks } = checks;
+    const { failedChecks, namesIncomplete } = checks;
     // A check run already failed, so the combined status could only confirm
     // 'failure' — skip the request rather than pay for a decided aggregate.
     if (!sawFailure) {
@@ -7597,7 +7622,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : sawSuccess
           ? 'success'
           : 'none';
-    return { aggregate, failedChecks };
+    return { aggregate, failedChecks, namesIncomplete };
   }
 
   private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
