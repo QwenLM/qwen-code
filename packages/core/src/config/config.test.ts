@@ -212,7 +212,7 @@ vi.mock('../services/backgroundShellRegistry.js', async (importOriginal) => ({
   ...(await importOriginal<
     typeof import('../services/backgroundShellRegistry.js')
   >()),
-  settleOrphanedShellStatusFiles: vi.fn(() => ({ settled: 0, alive: [] })),
+  settleOrphanedShellStatusFiles: vi.fn(() => ({ settled: 0, unsettled: [] })),
   watchOrphanedShellStatusFiles: vi.fn(() => vi.fn()),
 }));
 vi.mock('../memory/metadata-migration.js', async (importOriginal) => ({
@@ -3301,7 +3301,7 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
-    it('watches orphans still alive until it switches away or shuts down', async () => {
+    it('watches unsettled orphans until it switches away or shuts down', async () => {
       const orphan = { statusPath: '/tmp/shell-bg_1.status', pid: 4242 };
       const stopFirst = vi.fn();
       const stopSecond = vi.fn();
@@ -3311,8 +3311,8 @@ describe('Server Config (config.ts)', () => {
         .mockReturnValueOnce(stopSecond);
       const config = makeConfig({ sessionId: 'current-session' });
       vi.mocked(settleOrphanedShellStatusFiles)
-        .mockReturnValueOnce({ settled: 0, alive: [orphan] })
-        .mockReturnValueOnce({ settled: 0, alive: [orphan] });
+        .mockReturnValueOnce({ settled: 0, unsettled: [orphan] })
+        .mockReturnValueOnce({ settled: 0, unsettled: [orphan] });
 
       config.startNewSession('resumed-session');
       expect(watchOrphanedShellStatusFiles).toHaveBeenCalledWith([orphan]);
@@ -3323,6 +3323,29 @@ describe('Server Config (config.ts)', () => {
 
       await config.shutdown();
       expect(stopSecond).toHaveBeenCalledOnce();
+    });
+
+    it('does not settle for a Config with an execution environment', () => {
+      const config = makeConfig({
+        sessionId: 'current-session',
+        executionEnvironment: new SshExecutionEnvironment(
+          { host: 'host', directory: '/srv/project' },
+          '/local/anchor',
+        ),
+      });
+      vi.mocked(settleOrphanedShellStatusFiles).mockClear();
+      config.startNewSession('other-session');
+      expect(settleOrphanedShellStatusFiles).not.toHaveBeenCalled();
+    });
+
+    it('still initializes when settling throws', async () => {
+      vi.mocked(settleOrphanedShellStatusFiles).mockImplementationOnce(() => {
+        throw Object.assign(new Error('permission denied'), {
+          code: 'EACCES',
+        });
+      });
+      const config = await initConfig({ sessionId: 'resumed-session' });
+      expect(config.getSessionId()).toBe('resumed-session');
     });
   });
 

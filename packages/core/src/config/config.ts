@@ -6650,10 +6650,10 @@ export class Config {
   /**
    * Settles the status sidecars a previous process left `running` for this
    * session (#15800). This Config has just taken the session and tracks none of
-   * its shells yet. A sidecar whose process is still alive is watched until it
-   * exits, for as long as this Config holds the session. Shells of an
-   * execution environment may not run on this host, so their pids cannot be
-   * checked here.
+   * its shells yet. A sidecar left `running`, because its process is still
+   * alive or its rewrite failed, is watched for as long as this Config holds
+   * the session. Shells of an execution environment may not run on this host,
+   * so their pids cannot be checked here.
    */
   private settleOrphanedBackgroundShells(): void {
     this.stopOrphanedShellWatch?.();
@@ -6665,14 +6665,14 @@ export class Config {
       this.sessionId,
     );
     try {
-      const { settled, alive } = settleOrphanedShellStatusFiles(dir);
+      const { settled, unsettled } = settleOrphanedShellStatusFiles(dir);
       if (settled > 0) {
         this.debugLogger.debug(
           `Settled ${settled} orphaned background shell status file(s) in ${dir}`,
         );
       }
-      if (alive.length > 0) {
-        this.stopOrphanedShellWatch = watchOrphanedShellStatusFiles(alive);
+      if (unsettled.length > 0) {
+        this.stopOrphanedShellWatch = watchOrphanedShellStatusFiles(unsettled);
       }
     } catch (error) {
       this.debugLogger.warn(

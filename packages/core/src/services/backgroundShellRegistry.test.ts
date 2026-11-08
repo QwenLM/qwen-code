@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -1059,6 +1059,11 @@ describe('BackgroundShellRegistry', () => {
 
 describe('settleOrphanedShellStatusFiles', () => {
   let dir: string;
+  const scope = {
+    hostname: 'host-a',
+    bootId: 'boot-a',
+    pidNamespace: 4026531836,
+  };
   const running = {
     id: 'bg_1',
     status: 'running',
@@ -1067,7 +1072,9 @@ describe('settleOrphanedShellStatusFiles', () => {
     startTime: '2026-11-07T00:00:00.000Z',
     updatedAt: '2026-11-07T00:00:00.000Z',
     pid: 4242,
+    pidScope: scope,
   };
+  const dead = { isAlive: () => false, scope };
   const write = (name: string, payload: unknown) =>
     writeFileSync(
       join(dir, name),
@@ -1078,19 +1085,22 @@ describe('settleOrphanedShellStatusFiles', () => {
       string,
       unknown
     >;
+  const cannotDenyWrites =
+    process.platform === 'win32' || process.getuid?.() === 0;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'qwen-shell-status-'));
   });
   afterEach(() => {
+    chmodSync(dir, 0o700);
     rmSync(dir, { recursive: true, force: true });
   });
 
   it('settles a running sidecar whose process is gone and keeps its fields', () => {
     write('shell-bg_1.status', running);
-    expect(settleOrphanedShellStatusFiles(dir, () => false)).toEqual({
+    expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
       settled: 1,
-      alive: [],
+      unsettled: [],
     });
     const { updatedAt, ...kept } = running;
     const settled = read('shell-bg_1.status');
@@ -1100,37 +1110,91 @@ describe('settleOrphanedShellStatusFiles', () => {
 
   it('keeps a running sidecar whose process is alive and reports it', () => {
     write('shell-bg_1.status', running);
-    expect(settleOrphanedShellStatusFiles(dir, () => true)).toEqual({
+    expect(
+      settleOrphanedShellStatusFiles(dir, { isAlive: () => true, scope }),
+    ).toEqual({
       settled: 0,
-      alive: [{ statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 }],
+      unsettled: [{ statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 }],
     });
     expect(read('shell-bg_1.status')).toEqual(running);
   });
 
-  it('leaves settled, pid-less, unreadable and non-status files alone', () => {
+  it('leaves a sidecar written in another pid scope, or without one, running', () => {
+    const { pidScope: _pidScope, ...withoutScope } = running;
+    write('shell-ns.status', {
+      ...running,
+      pidScope: { ...scope, pidNamespace: 4026532512 },
+    });
+    write('shell-boot.status', {
+      ...running,
+      pidScope: { ...scope, bootId: 'boot-b' },
+    });
+    write('shell-host.status', {
+      ...running,
+      pidScope: { ...scope, hostname: 'host-b' },
+    });
+    write('shell-legacy.status', withoutScope);
+    expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+      settled: 0,
+      unsettled: [],
+    });
+    for (const name of [
+      'shell-ns.status',
+      'shell-boot.status',
+      'shell-host.status',
+      'shell-legacy.status',
+    ]) {
+      expect(read(name)['status']).toBe('running');
+    }
+  });
+
+  it('leaves settled, pid-less, invalid-pid, malformed and non-status files alone', () => {
     const { pid: _pid, ...withoutPid } = running;
     write('shell-done.status', { ...running, status: 'completed' });
     write('shell-nopid.status', withoutPid);
+    const invalidPids = [0, -5, 1.5, 2 ** 53, '4242'];
+    invalidPids.forEach((pid, i) =>
+      write(`shell-pid${i}.status`, { ...running, pid }),
+    );
     write('shell-bad.status', '{not json');
-    write('shell-bg_1.output', 'output');
-    expect(settleOrphanedShellStatusFiles(dir, () => false)).toEqual({
+    write('shell-bg_1.output', running);
+    expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
       settled: 0,
-      alive: [],
+      unsettled: [],
     });
     expect(read('shell-done.status')['status']).toBe('completed');
     expect(read('shell-nopid.status')['status']).toBe('running');
+    invalidPids.forEach((_pid, i) =>
+      expect(read(`shell-pid${i}.status`)['status']).toBe('running'),
+    );
+    expect(read('shell-bg_1.output')['status']).toBe('running');
   });
 
-  it('keeps settling the other sidecars when one of them fails', () => {
+  it.skipIf(process.platform === 'win32')(
+    'skips a FIFO and an oversized file without waiting on either',
+    () => {
+      const fifo = join(dir, 'shell-fifo.status');
+      expect(spawnSync('mkfifo', [fifo]).status).toBe(0);
+      write('shell-big.status', { ...running, command: 'x'.repeat(1 << 20) });
+      expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+        settled: 0,
+        unsettled: [],
+      });
+      expect(lstatSync(fifo).isFIFO()).toBe(true);
+      expect(read('shell-big.status')['status']).toBe('running');
+    },
+  );
+
+  it('keeps checking the other sidecars when one of them throws', () => {
     write('shell-a.status', { ...running, pid: 1 });
     write('shell-b.status', { ...running, id: 'bg_2', pid: 4343 });
     const isAlive = (pid: number) => {
       if (pid === 1) throw new Error('liveness check failed');
       return false;
     };
-    expect(settleOrphanedShellStatusFiles(dir, isAlive)).toEqual({
+    expect(settleOrphanedShellStatusFiles(dir, { isAlive, scope })).toEqual({
       settled: 1,
-      alive: [],
+      unsettled: [],
     });
     expect(read('shell-a.status')['status']).toBe('running');
     expect(read('shell-b.status')['status']).toBe('unknown');
@@ -1139,13 +1203,29 @@ describe('settleOrphanedShellStatusFiles', () => {
   it('returns nothing for a session without a sidecar directory', () => {
     expect(settleOrphanedShellStatusFiles(join(dir, 'missing'))).toEqual({
       settled: 0,
-      alive: [],
+      unsettled: [],
     });
   });
 
   it('detects an exited process with the default liveness probe', () => {
     const { pid } = spawnSync(process.execPath, ['-e', '']);
     write('shell-bg_1.status', { ...running, pid });
+    expect(settleOrphanedShellStatusFiles(dir, { scope }).settled).toBe(1);
+    expect(read('shell-bg_1.status')['status']).toBe('unknown');
+  });
+
+  it('settles a sidecar the registry wrote, with its own pid scope', () => {
+    const { pid } = spawnSync(process.execPath, ['-e', '']);
+    new BackgroundShellRegistry().register(
+      makeEntry({
+        shellId: 'bg_1',
+        pid,
+        outputPath: join(dir, 'shell-bg_1.output'),
+      }),
+    );
+    expect(read('shell-bg_1.status')['pidScope']).toMatchObject({
+      hostname: hostname(),
+    });
     expect(settleOrphanedShellStatusFiles(dir).settled).toBe(1);
     expect(read('shell-bg_1.status')['status']).toBe('unknown');
   });
@@ -1157,14 +1237,17 @@ describe('settleOrphanedShellStatusFiles', () => {
       write('shell-b.status', { ...running, id: 'bg_2', pid: 4343 });
       let processesAlive = true;
       const isAlive = () => processesAlive;
-      const { alive } = settleOrphanedShellStatusFiles(dir, isAlive);
+      const { unsettled } = settleOrphanedShellStatusFiles(dir, {
+        isAlive,
+        scope,
+      });
       const watching = watchOrphanedShellStatusFiles(
-        alive.filter((orphan) => orphan.pid === 4242),
-        { intervalMs: 100, isAlive },
+        unsettled.filter((orphan) => orphan.pid === 4242),
+        { intervalMs: 100, isAlive, scope },
       );
       const stopped = watchOrphanedShellStatusFiles(
-        alive.filter((orphan) => orphan.pid === 4343),
-        { intervalMs: 100, isAlive },
+        unsettled.filter((orphan) => orphan.pid === 4343),
+        { intervalMs: 100, isAlive, scope },
       );
       vi.advanceTimersByTime(100);
       expect(read('shell-a.status')['status']).toBe('running');
@@ -1179,16 +1262,86 @@ describe('settleOrphanedShellStatusFiles', () => {
     }
   });
 
+  it.skipIf(cannotDenyWrites)(
+    'retries a rewrite that failed until it lands, while a sibling settles',
+    () => {
+      vi.useFakeTimers();
+      const sibling = mkdtempSync(join(tmpdir(), 'qwen-shell-status-'));
+      try {
+        write('shell-bg_1.status', running);
+        writeFileSync(
+          join(sibling, 'shell-bg_2.status'),
+          JSON.stringify({ ...running, id: 'bg_2', pid: 4343 }),
+        );
+        chmodSync(dir, 0o500);
+        const { settled, unsettled } = settleOrphanedShellStatusFiles(
+          dir,
+          dead,
+        );
+        expect({ settled, unsettled }).toEqual({
+          settled: 0,
+          unsettled: [
+            { statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 },
+          ],
+        });
+        const stop = watchOrphanedShellStatusFiles(
+          [
+            ...unsettled,
+            { statusPath: join(sibling, 'shell-bg_2.status'), pid: 4343 },
+          ],
+          { intervalMs: 100, ...dead },
+        );
+        try {
+          vi.advanceTimersByTime(100);
+          expect(read('shell-bg_1.status')['status']).toBe('running');
+          expect(
+            JSON.parse(
+              readFileSync(join(sibling, 'shell-bg_2.status'), 'utf8'),
+            )['status'],
+          ).toBe('unknown');
+          chmodSync(dir, 0o700);
+          vi.advanceTimersByTime(100);
+          expect(read('shell-bg_1.status')['status']).toBe('unknown');
+        } finally {
+          stop();
+        }
+      } finally {
+        vi.useRealTimers();
+        rmSync(sibling, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not keep the process alive while it watches', () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    try {
+      const stop = watchOrphanedShellStatusFiles(
+        [{ statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 }],
+        { isAlive: () => true, scope },
+      );
+      const timer = setIntervalSpy.mock.results[0]?.value as NodeJS.Timeout;
+      expect(timer.hasRef()).toBe(false);
+      stop();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
   it('settles an orphan alive at takeover after it exits, with no second takeover', async () => {
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)']);
     const exited = new Promise((resolve) => child.once('exit', resolve));
     write('shell-bg_1.status', { ...running, pid: child.pid });
-    const { settled, alive } = settleOrphanedShellStatusFiles(dir);
-    expect({ settled, watched: alive.length }).toEqual({
+    const { settled, unsettled } = settleOrphanedShellStatusFiles(dir, {
+      scope,
+    });
+    expect({ settled, watched: unsettled.length }).toEqual({
       settled: 0,
       watched: 1,
     });
-    const stop = watchOrphanedShellStatusFiles(alive, { intervalMs: 20 });
+    const stop = watchOrphanedShellStatusFiles(unsettled, {
+      intervalMs: 20,
+      scope,
+    });
     try {
       await exited;
       await vi.waitFor(

@@ -3717,6 +3717,8 @@ describe('ShellTool', () => {
         expect(text).toContain('status file: ');
         expect(text).toMatch(/status file: .*shell-bg_[0-9a-f]+\.status/);
         expectText(text, [
+          'running|completed|failed|cancelled|unknown',
+          'unknown means the session that started it ended',
           'Do NOT infer liveness from the output file',
           'block-buffer',
           'python -u',
@@ -4308,6 +4310,8 @@ describe('ShellTool', () => {
           '/tasks',
           `task_stop({ task_id: '${entry.shellId}'`,
           `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
+          'running|completed|failed|cancelled|unknown',
+          'unknown means the session that started it ended',
           'Do NOT infer liveness from the output file',
           'python -u',
           'stdbuf -oL',
