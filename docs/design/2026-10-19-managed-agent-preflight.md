@@ -26,19 +26,27 @@ The command reads the configuration the server reads, prepared as
 keeps Spring's precedence:
 
 - the command line (`--server.address=...`, `--qwen.managed-agent.*`);
-- the process environment, `SPRING_APPLICATION_JSON` included, and the JVM
-  system properties (`-D…`, such as those in `JAVA_TOOL_OPTIONS`);
+- `SPRING_APPLICATION_JSON`, then the JVM system properties (`-D…`, such as
+  those in `JAVA_TOOL_OPTIONS`), then the rest of the process environment;
 - the configuration files Spring Boot reads: those named by
   `spring.config.location`, `spring.config.additional-location` or
   `spring.config.import`, as an argument or a `SPRING_CONFIG_*` variable (the
   launcher sets `SPRING_CONFIG_ADDITIONAL_LOCATION` when
   `config/application.yml` exists, and the systemd unit's `server.env` names
   `/etc/qwen-managed-agent/application.yml`); those at its default locations
-  `./`, `./config/` and `./config/*/`, unless `spring.config.location`
-  replaces them; as `.yml`, `.yaml`, `.properties` or `.xml`, under
-  `spring.config.name`; their profile variants, the files they import and
-  config trees;
+  `./`, `./config/` and `./config/*/`; as `.yml`, `.yaml`, `.properties` or
+  `.xml`, under `spring.config.name`; their profile variants, the files they
+  import and config trees;
 - the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables.
+
+`spring.config.location` replaces every default location, the classpath ones
+among them, so with it set the server reads only the locations it names. Unless
+it names `classpath:/`, that leaves out the classpath `application.yml`: a
+variable only that file maps, such as `QWEN_MANAGED_AGENT_SERVER_ADDRESS`, then
+sets nothing, and its defaults, such as the loopback `server.address` and the
+Flyway locations, are gone. Without an address the server would listen on every
+address, which the default `auth.mode=auto` refuses to start with. Where Spring
+prepares the environment, the check reads the same configuration.
 
 Relative locations, the default ones among them, are read in the working
 directory, as the server reads them, so the command runs in the server's
@@ -52,7 +60,7 @@ server read from `config/application.yml` in its working directory.
 | Check        | Passing condition                                                                                                                                                                                                                                                                                    |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `java`       | Runtime feature version is 21 or later.                                                                                                                                                                                                                                                              |
-| `config`     | One row per file the server reads: readable by the service account, not group- or world-readable when it holds a secret; WARN for none. FAIL where Spring would not start, for a YAML error, with its line and usually its file, or where this process cannot look in a directory or read a file.    |
+| `config`     | One row per file the server reads: readable by the service account; WARN for none, or where group or others can read one with a secret. FAIL where Spring would not start, for a YAML error, with its line and usually its file, or where this process cannot look in a directory or read a file.    |
 | `key-ring`   | At least an active key ID is configured; previous key IDs are reported.                                                                                                                                                                                                                              |
 | `validation` | The startup property validations accept the bound configuration.                                                                                                                                                                                                                                     |
 | `auth`       | A non-loopback bind does not use `auto`; signed mode has a signing key; insecure bind is reported.                                                                                                                                                                                                   |
