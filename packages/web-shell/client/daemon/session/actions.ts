@@ -91,6 +91,7 @@ import {
   persistStableClientId,
 } from './clientLifecycle.js';
 import {
+  daemonClientSessionContext,
   getDaemonErrorCode,
   getStandaloneConnectionState,
   resolveActionSessionContext,
@@ -1038,12 +1039,7 @@ export function createDaemonSessionActions({
       currentConnection.sessionContext ??
       (currentConnection.workspaceCwd
         ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
-        : currentSession?.workspaceCwd
-          ? {
-              kind: 'workspace' as const,
-              cwd: currentSession.workspaceCwd,
-            }
-          : undefined);
+        : daemonClientSessionContext(currentSession));
     const fallbackContext = currentConnection.error
       ? getDefaultSessionContext()
       : (currentSessionContext ?? getDefaultSessionContext());
@@ -1322,6 +1318,8 @@ export function createDaemonSessionActions({
         );
       }
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const localPrompt = { sessionId, startedAt: Date.now() };
+      setConnection((current) => ({ ...current, localPrompt }));
       setPromptStatus('waiting');
       const ctrl = new AbortController();
       activePromptsRef.current.set(sessionId, {
@@ -1529,6 +1527,12 @@ export function createDaemonSessionActions({
           'send_prompt',
         );
       } finally {
+        setConnection((current) => {
+          if (current.localPrompt !== localPrompt) return current;
+          const next = { ...current };
+          delete next.localPrompt;
+          return next;
+        });
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
@@ -2516,10 +2520,9 @@ export function createDaemonSessionActions({
         session.sessionId,
         'load',
         {
-          sessionContext: getConnection().sessionContext ?? {
-            kind: 'workspace',
-            cwd: session.workspaceCwd,
-          },
+          sessionContext:
+            getConnection().sessionContext ??
+            daemonClientSessionContext(session),
         },
         signal,
         options?.replaySource,

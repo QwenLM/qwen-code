@@ -4179,6 +4179,8 @@ export function App({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+  const [standaloneSessionsReloadToken, setStandaloneSessionsReloadToken] =
+    useState(0);
 
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const refreshWorkspaceBrand = workspace.refreshBrand;
@@ -4215,12 +4217,85 @@ export function App({
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
   );
+  // Daemon-authoritative "turn is running" signal for the connected session:
+  // keeps the conversation indicator (and its cancel affordances) alive
+  // through >3s silent tool gaps where streamingState drops to idle (#9487).
+  const trustedLiveWorkspaces = useMemo(
+    () =>
+      workspaces.filter(
+        (entry) =>
+          entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+      ),
+    [workspaces],
+  );
+  // A cleared session leaves connection.workspaceCwd set; without the
+  // sessionId gate the activity bridge would keep arming its full-catalog
+  // fallback for that cwd on the welcome view, issuing one idle catalog
+  // fetch for a result it then discards (#16355).
+  const activePromptWorkspaceCwd = !connection.sessionId
+    ? undefined
+    : connection.sessionContext?.kind === 'live'
+      ? trustedLiveWorkspaces.length === 1
+        ? trustedLiveWorkspaces[0]?.cwd
+        : undefined
+      : connection.workspaceCwd;
+  const [splitPaneWorkspaces, setSplitPaneWorkspaces] = useState<
+    readonly string[]
+  >([]);
+  const reportSplitPaneWorkspaces = useCallback((cwds: readonly string[]) => {
+    setSplitPaneWorkspaces((current) =>
+      current.length === cwds.length &&
+      current.every((cwd, index) => cwd === cwds[index])
+        ? current
+        : cwds,
+    );
+  }, []);
+  const [overviewLiveStateWorkspaceCwds, setOverviewLiveStateWorkspaceCwds] =
+    useState<readonly string[]>([]);
+  const reportOverviewLiveStateWorkspaceCwds = useCallback(
+    (cwds: readonly string[]) => {
+      setOverviewLiveStateWorkspaceCwds((current) =>
+        current.length === cwds.length &&
+        current.every((cwd, index) => cwd === cwds[index])
+          ? current
+          : cwds,
+      );
+    },
+    [],
+  );
+  // Without the sidebar the app-level poller covers exactly the workspaces
+  // the shell is attached to: the connected session's workspace (every
+  // trusted live workspace for a Live session), the mounted split panes, and
+  // the session overview's displayed set (#16355).
   const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
     if (sidebarOptions.enabled) return [];
+    const targets = new Set<string>([
+      ...splitPaneWorkspaces,
+      ...overviewLiveStateWorkspaceCwds,
+    ]);
+    if (connection.sessionId) {
+      if (connection.sessionContext?.kind === 'live') {
+        for (const entry of trustedLiveWorkspaces) targets.add(entry.cwd);
+      } else if (connection.workspaceCwd) {
+        targets.add(connection.workspaceCwd);
+      }
+    }
     return workspaces
-      .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+      .filter(
+        (entry) =>
+          targets.has(entry.cwd) && entry.trusted && isAbsolutePath(entry.cwd),
+      )
       .map((entry) => entry.cwd);
-  }, [sidebarOptions.enabled, workspaces]);
+  }, [
+    sidebarOptions.enabled,
+    splitPaneWorkspaces,
+    overviewLiveStateWorkspaceCwds,
+    connection.sessionId,
+    connection.sessionContext?.kind,
+    connection.workspaceCwd,
+    trustedLiveWorkspaces,
+    workspaces,
+  ]);
   useWorkspaceSessionLiveState(workspace.client, {
     pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
@@ -4233,19 +4308,6 @@ export function App({
     workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });
-  // Daemon-authoritative "turn is running" signal for the connected session:
-  // keeps the conversation indicator (and its cancel affordances) alive
-  // through >3s silent tool gaps where streamingState drops to idle (#9487).
-  const trustedLiveWorkspaces = workspaces.filter(
-    (entry) =>
-      entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
-  );
-  const activePromptWorkspaceCwd =
-    connection.sessionContext?.kind === 'live'
-      ? trustedLiveWorkspaces.length === 1
-        ? trustedLiveWorkspaces[0]?.cwd
-        : undefined
-      : connection.workspaceCwd;
   const {
     hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
@@ -9252,6 +9314,12 @@ export function App({
   }
   previousStreamingStateRef.current = streamingState;
   const activeTurnStartedAt = useMemo(() => {
+    if (
+      connection.localPrompt &&
+      connection.localPrompt.sessionId === connection.sessionId
+    ) {
+      return connection.localPrompt.startedAt;
+    }
     if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (streamingState === 'idle') return undefined;
     for (let i = displayMessages.length - 1; i >= 0; i--) {
@@ -9261,7 +9329,13 @@ export function App({
       }
     }
     return localStreamingStartedAtRef.current;
-  }, [displayMessages, streamingState, connection.backgroundTurn]);
+  }, [
+    displayMessages,
+    streamingState,
+    connection.backgroundTurn,
+    connection.localPrompt,
+    connection.sessionId,
+  ]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
@@ -12244,6 +12318,8 @@ export function App({
                   catalogWorkspaceCwd,
                   sessionId,
                 );
+              } else if (creationSessionContext?.kind === 'standalone') {
+                setStandaloneSessionsReloadToken((value) => value + 1);
               }
               await onSessionCreatedRef.current?.(sessionId);
             },
@@ -13500,6 +13576,8 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canQueryPendingPrompts:
+      connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
     workspaceFileActions: artifactWorkspaceActions,
     streamingState,
@@ -15657,6 +15735,8 @@ export function App({
     autoRecapVersionRef.current += 1;
   }, [logicalSessionKey]);
   useEffect(() => {
+    // OpenAPI and Managed hosts may not expose the daemon's recap route.
+    if (!connection.capabilities?.features.includes('session_recap')) return;
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
@@ -15727,6 +15807,7 @@ export function App({
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [
+    connection.capabilities,
     connection.sessionId,
     sessionActions,
     sessionOwnerGuard,
@@ -17391,6 +17472,7 @@ export function App({
             setStandaloneRecoveryResolution('archived');
             return;
           }
+          setStandaloneSessionsReloadToken((value) => value + 1);
           await loadSidebarSession(sessionId, undefined, {
             kind: 'standalone',
           });
@@ -17453,6 +17535,7 @@ export function App({
       return;
     }
     try {
+      setStandaloneSessionsReloadToken((value) => value + 1);
       await loadSidebarSession(sessionId, undefined, { kind: 'standalone' });
     } catch (error) {
       if (!isCurrent()) return;
@@ -23341,6 +23424,7 @@ export function App({
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
+                  standaloneSessionsReloadToken={standaloneSessionsReloadToken}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
@@ -24124,6 +24208,11 @@ export function App({
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         manageLiveState={false}
+                        onLiveStateWorkspaceCwdsChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportOverviewLiveStateWorkspaceCwds
+                        }
                       />
                     )}
                     </ShadowDomBoundary>
@@ -24536,6 +24625,11 @@ export function App({
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPaneWorkspacesChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportSplitPaneWorkspaces
+                        }
                         onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}

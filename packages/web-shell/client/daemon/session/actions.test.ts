@@ -266,6 +266,64 @@ describe('context usage counter reconciliation', () => {
   );
 });
 
+describe('local prompt timing before the authoritative echo', () => {
+  it.each(['completed', 'cancelled'] as const)(
+    'clears its local clock after an admitted turn is %s',
+    async (outcome) => {
+      const session = createMockSession('session-a');
+      const h = createActionsHarness({ session });
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      await vi.waitFor(() =>
+        expect(h.activePromptsRef.current.get('session-a')?.resolve).toBeTypeOf(
+          'function',
+        ),
+      );
+      expect(h.getConnection().localPrompt?.sessionId).toBe('session-a');
+      const active = h.activePromptsRef.current.get('session-a')!;
+      if (outcome === 'completed') active.resolve?.({ stopReason: 'end_turn' });
+      else active.controller.abort();
+      await result;
+      expect(h.getConnection().localPrompt).toBeUndefined();
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'clears only its own clock after rejection (newer owner: %s)',
+    async (newerOwner) => {
+      const session = createMockSession('session-a');
+      const admission = createDeferred<{ promptId: string }>();
+      session.submitPrompt.mockReturnValueOnce(admission.promise);
+      const h = createActionsHarness({ session });
+      const before = Date.now();
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      const rejected = result.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledOnce(),
+      );
+      const local = h.getConnection().localPrompt;
+      expect(local?.sessionId).toBe('session-a');
+      expect(local?.startedAt).toBeGreaterThanOrEqual(before);
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      const replacement = {
+        sessionId: 'session-b',
+        startedAt: Date.now() + 1000,
+      };
+      if (newerOwner)
+        h.replaceConnection({ ...h.getConnection(), localPrompt: replacement });
+      admission.reject(new DaemonHttpError(413, {}, 'Rejected'));
+      await rejected;
+      expect(h.getConnection().localPrompt).toEqual(
+        newerOwner ? replacement : undefined,
+      );
+    },
+  );
+});
+
 describe('sendPrompt admission notices', () => {
   it.each([
     {
@@ -3652,6 +3710,98 @@ describe('createDaemonSessionActions', () => {
       kind: 'workspace',
       cwd: '/workspace/secondary',
     });
+  });
+
+  it('reloads a standalone session with the standalone context when the connection context is missing', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'standalone-a' },
+        session: standalone,
+      });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(standalone);
+    expect(standalone.detach).not.toHaveBeenCalled();
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('keeps the workspace reload context for a workspace session', () => {
+    const workspace = createMockSession('session-a');
+    workspace.workspaceCwd = '/work/a';
+    Object.assign(workspace, {
+      session: {
+        sessionId: 'session-a',
+        workspaceCwd: '/work/a',
+        sourceType: 'default',
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: workspace,
+    });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'workspace',
+      cwd: '/work/a',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('falls back to the standalone context for a contextless load of the current standalone session', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'standalone-a' },
+      session: standalone,
+    });
+
+    void actions.loadSession('standalone-a').catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
   });
 
   it('uses the default standalone context after a failed connection', () => {

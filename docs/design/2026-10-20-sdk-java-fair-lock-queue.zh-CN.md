@@ -102,17 +102,21 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 缓存写回会修改 `~/.m2`，因此只有写回取锁。种子复制（`cp -aln`）是只读且
 尽力而为的，放在取锁之前；它随后会从 job 本地副本中删除内部固定发布
 坐标，使不持锁的 `mvn install` 写入新的 inode，而不是穿透硬链接改写宿主机
-缓存。Maven 维护跟踪标记（`resolver-status.properties`、`*.lastUpdated`、
-`_remote.repositories`）、版本元数据及校验文件（`maven-metadata-*.xml*`）。
-播种时删除这些条目，以及 `*.tmp`、`*.part` 和 `*.part.lock` 残留，
-使每个 job 在本地重新解析这些状态；这不假定所有 Resolver 版本都会原地改写 inode。
-清理同样覆盖继承的可变状态：池上的 `RUNNER_TEMP` 跨 job 保留，
-上一个 job 遗留的单链接标记必须和本次播种建立的硬链接一并删除。
-宿主机缓存缺失保持安静，真正的复制失败才告警，因此该告警仍然表示播种失败。
-两次 Maven 运行不持锁；写回只取一次锁，且它的 `mkdir` 和有界 `find`/`cp`
-子进程会关闭 fd 9，避免幸存进程继续持有锁。写回只发布构件：跟踪标记与
-版本元数据记录的是本次运行的解析结果，不会复制进共享缓存。这样一次持锁
-只量一次复制，而不是一整套测试，fast 通道的预算又远大于一次持锁时长。
+缓存。Maven 可能原地截断重写跟踪标记（`resolver-status.properties`、
+`*.lastUpdated`、`_remote.repositories`）、版本元数据及校验文件
+（`maven-metadata-*.xml*`）。播种时删除这些条目，以及 `*.tmp`、`*.part`
+和 `*.part.lock` 残留，使每个 job 在本地重新解析这些状态；这不假定所有
+Resolver 版本都会原地改写 inode。清理同样覆盖继承的可变状态：池上的
+`RUNNER_TEMP` 跨 job 保留，上一个 job 遗留的单链接标记必须和本次播种建立的
+硬链接一并删除。宿主机缓存缺失保持安静，真正的复制失败才告警，因此该告警
+仍然表示播种失败。播种删除与持锁的宿主清理按任意深度匹配 `qwencode-sdk`
+和 `qwen-managed-agent-*`，覆盖旧版遗留的嵌套 `repository/com/alibaba/`
+树。两处写回 prune 保留每个显式坐标，并加入同一个模块 glob，避免宿主侧
+删除文件名后，其播种 inode 因链接数降为 1 而重新符合写回条件。两次 Maven
+运行不持锁；写回只取一次锁，且它的 `mkdir` 和有界 `find`/`cp` 子进程会
+关闭 fd 9，避免幸存进程继续持有锁。写回只发布构件：解析器记账记录的是
+本次运行的解析结果，不会复制进共享缓存。这样一次持锁只量一次复制，而不是
+一整套测试，fast 通道的预算又远大于一次持锁时长。
 
 test job 现在遵循同一规则。它的测试套件曾是另一处长时间持锁：2026-10-22，
 run 39771949573 的 fast 档 job 两次在 5400 秒预算处失败，分别在
@@ -272,15 +276,18 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   的 Maven 运行都在取锁之前、每条 `mvn` 行都以 `|| mvn_status=$?` 结尾
   并带阶段名、容忍跳过分支分别以绿色与红色状态各跑一次（红色分支断言
   阶段注解与 300 秒预算）、写回子进程关闭 fd 9、每个播种 job 本地仓库与
-  两处写回 prune 都排除了内部坐标、跟踪标记、版本元数据与 `*.tmp`、
-  seed 的 prune 仍以 `2>/dev/null || true` 保持尽力而为、同时照旧删除它
-  能删的去别名项、该注解保持在 `INFRA_FAILURE_SIGNATURES` 之外，以及每个
-  站点的 seed 删除集合与 prune 集合一致。故障分支覆盖 `flock` 缺失、
-  `mkdir` 损坏、队列路径被占、锁路径是目录、`flock` 超时、`flock` 返回
-  意外状态、宿主机缓存不可用、job 本地仓库缺失、播种树中 prune 无法
-  删除的条目——该情形下仍必须到达 Maven——以及复用的 job 本地仓库中
-  继承的单链接 resolver 状态，prune 必须将其清除。`.size-baseline` 条目
-  在最后一次编辑后重新实测到工作流的尺寸。
+  两处写回 prune 都排除了内部坐标与解析器记账文件——
+  `_remote.repositories`、`maven-metadata-*.xml*`、
+  `resolver-status.properties`、`*.lastUpdated`、`*.part`、`*.part.lock` 与
+  `*.tmp`、写回在宿主侧按任意深度删除内部坐标、seed 的 prune 仍以
+  `2>/dev/null || true` 保持尽力而为、同时照旧删除它能删的去别名项、
+  该注解保持在 `INFRA_FAILURE_SIGNATURES` 之外、每个站点的 seed 与宿主清理
+  family glob 一致，以及每处写回 prune 保留全部显式坐标并加入模块 glob。
+  故障分支覆盖 `flock` 缺失、`mkdir` 损坏、队列路径被占、锁路径是目录、
+  `flock` 超时、`flock` 返回意外状态、宿主机缓存不可用、job 本地仓库缺失、
+  播种树中 prune 无法删除的条目——该情形下仍必须到达 Maven——以及复用的
+  job 本地仓库中继承的单链接 resolver 状态，prune 必须将其清除。
+  `.size-baseline` 条目在最后一次编辑后重新实测到工作流的尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
