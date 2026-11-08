@@ -320,12 +320,30 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
-  it('still attributes a creation chained after a non-comments read', () => {
+  it('does not attribute a creation chained with another gh command (output origin unprovable)', () => {
+    // Even a non-comments read shares the chain; enumerating read shapes cannot
+    // prove no other command contributed comment output, so stay fail-open.
     const entry = shellResult(
       'gh pr view 42 --json state --jq .state && gh pr comment 42 --body-file comment.md',
       'OPEN\nhttps://github.com/o/r/pull/42#issuecomment-802',
     );
-    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('802')]);
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not credit a single-comment-endpoint read chained after a redirected creation', () => {
+    const entry = shellResult(
+      'gh pr comment 42 --body hi >/dev/null && gh api repos/o/r/issues/comments/111 --jq .html_url',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not credit a gh pr view --json comments read chained after a redirected creation', () => {
+    const entry = shellResult(
+      "gh pr comment 42 --body hi >/dev/null && gh pr view 42 --json comments --jq '.comments[0].url'",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
