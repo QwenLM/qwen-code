@@ -875,9 +875,15 @@ export class BaseLlmClient {
     const mainGeneratorConfig = this.config.getContentGeneratorConfig();
     const mainAuthType = mainGeneratorConfig?.authType;
     const mainRetryErrorCodes = mainGeneratorConfig?.retryErrorCodes;
-    // An unresolvable selector falls back to the main generator; otherwise
-    // the shared predicate decides whether the request rides the main route.
-    if (selector === undefined || isMainRouteSelector(model, this.config)) {
+    // An unresolvable selector falls back to the main generator only when
+    // its endpoint pin does not point elsewhere; otherwise the shared
+    // predicate decides whether the request rides the main route.
+    if (
+      (selector === undefined &&
+        (requested.baseUrl === undefined ||
+          requested.baseUrl === mainGeneratorConfig?.baseUrl)) ||
+      isMainRouteSelector(model, this.config)
+    ) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
         contentGeneratorConfig: mainGeneratorConfig,
