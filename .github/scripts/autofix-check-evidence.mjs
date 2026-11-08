@@ -14,13 +14,14 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parseArgs } from 'node:util';
+import { parseArgs, stripVTControlCharacters } from 'node:util';
 import { skillLog } from './ci-flaky-rerun.mjs';
 
-// Mirrors the workflow's failed-check selectors, including the self-lane
-// exclusion: the loop's own lanes are not the PR's code, except a
-// review-address leg (the round itself). CANCELLED is deliberately absent —
-// a cancelled job is not a failure to diagnose, and its log is mostly noise.
+// Mirrors the workflow's `## Still-red checks` selector, including the
+// self-lane exclusion: the loop's own lanes are not the PR's code, except a
+// review-address leg (the round itself). The sibling `## Failed checks` list
+// also admits CANCELLED; a cancelled job is not a failure to diagnose and its
+// log is mostly noise, so it is omitted here.
 const FAILED_CONCLUSIONS = new Set([
   'FAILURE',
   'FAILED',
@@ -31,10 +32,15 @@ const FAILED_CONCLUSIONS = new Set([
 // Rollup order, first three distinct jobs. Enough to name the failing step
 // of a multi-lane red without turning prepare into a log-download burst.
 const MAX_JOBS = 3;
-const MAX_EXCERPT_LINES = 60;
+// skillLog already bounds its selection to ~120 lines (the first error window
+// plus the log's tail). Keep that whole selection: truncating it further from
+// the head drops the tail that carries the failure summary and the final
+// `Process completed with exit code 1` on a noisy multi-error log.
+const MAX_EXCERPT_LINES = 120;
 // A job log can be tens of MB. Past this bound execFileSync throws and the
 // excerpt is dropped, rather than buffering the whole log into prepare.
 const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+const NAME_MAX_CHARS = 80;
 
 export function jobIdFromUrl(url) {
   const match = /\/actions\/runs\/\d+\/job\/(\d+)(?:[/?#]|$)/.exec(
@@ -70,7 +76,18 @@ export function selectJobs(checks, maxJobs = MAX_JOBS) {
 function label(value) {
   return String(value ?? '')
     .replace(/[^A-Za-z0-9 _./()-]/g, '')
-    .slice(0, 80);
+    .slice(0, NAME_MAX_CHARS);
+}
+
+// A fenced block whose delimiter is longer than any backtick run inside it,
+// so a log line carrying backticks cannot close the fence early and spill the
+// rest of the excerpt into feedback.md as markdown.
+function fenceFor(excerpt) {
+  const longest = (excerpt.match(/`+/g) ?? []).reduce(
+    (max, run) => Math.max(max, run.length),
+    0,
+  );
+  return '`'.repeat(Math.max(4, longest + 1));
 }
 
 export function renderEvidence(jobs, head, fetchJob) {
@@ -90,7 +107,10 @@ export function renderEvidence(jobs, head, fetchJob) {
         .split('\n')
         .slice(0, MAX_EXCERPT_LINES)
         .join('\n');
-      if (excerpt.trim()) lines.push('', '````text', excerpt, '````');
+      if (excerpt.trim()) {
+        const fence = fenceFor(excerpt);
+        lines.push('', `${fence}text`, excerpt, fence);
+      }
     }
     blocks.push(lines.join('\n'));
   }
@@ -106,16 +126,42 @@ export function renderEvidence(jobs, head, fetchJob) {
   ].join('\n');
 }
 
-function gh(args) {
+// gh as {out, stderr}: the log endpoint's refusal must be told apart from an
+// old gh that lacks the flag, so the caller can read stderr.
+function ghResult(args) {
   try {
-    return execFileSync('gh', args, {
-      encoding: 'utf8',
-      maxBuffer: MAX_BUFFER_BYTES,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch {
-    return null;
+    return {
+      out: execFileSync('gh', args, {
+        encoding: 'utf8',
+        maxBuffer: MAX_BUFFER_BYTES,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+      stderr: '',
+    };
+  } catch (error) {
+    return { out: null, stderr: String(error?.stderr ?? '') };
   }
+}
+
+function gh(args) {
+  return ghResult(args).out;
+}
+
+// Current gh refuses to print a response containing terminal escape sequences
+// unless --allow-escape-sequences is passed; Actions job logs essentially
+// always contain them, so a bare call exits 1 with empty stdout and the
+// excerpt would silently never render. Older gh has neither the check nor the
+// flag, so fall back to the bare call ONLY when stderr says `unknown flag`.
+// Strip VT control characters either way: raw ANSI would otherwise reach
+// feedback.md and step stdout, where the existing defang handles only `::`
+// and `##[`. Same three-part shape as autofix-pr/ci-log.ts's jobLog.
+function fetchLog(repo, id) {
+  const path = `repos/${repo}/actions/jobs/${id}/logs`;
+  let result = ghResult(['api', '--allow-escape-sequences', path]);
+  if (result.out === null && result.stderr.includes('unknown flag')) {
+    result = ghResult(['api', path]);
+  }
+  return result.out === null ? null : stripVTControlCharacters(result.out);
 }
 
 function fetchJob(repo, id) {
@@ -132,7 +178,7 @@ function fetchJob(repo, id) {
   }
   // Independent of the metadata read: a job whose steps cannot be listed
   // still has a log worth excerpting.
-  const log = gh(['api', `repos/${repo}/actions/jobs/${id}/logs`]);
+  const log = fetchLog(repo, id);
   return { steps, log };
 }
 

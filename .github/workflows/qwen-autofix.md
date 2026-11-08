@@ -4896,13 +4896,32 @@ asymmetry was a missing wire, not a missing capability.
 The collector (.github/scripts/autofix-check-evidence.mjs) prints the
 failed STEP NAMES plus a bounded log excerpt per failing job, reusing
 the patrol's skillLog so both automations redact secrets identically.
-Bounds: the first three distinct jobs in rollup order, 60 excerpt
-lines each, an 8 MiB execFileSync buffer past which the log is dropped
-rather than buffered. Selection mirrors the workflow's own gates —
-the same failure conclusions, the same "Qwen Autofix" self-lane
-exclusion with the review-address exception — and omits CANCELLED,
-which is not a failure to diagnose. External commit statuses carry no
+Bounds: the first three distinct jobs in rollup order, skillLog's own
+~120-line selection kept whole (truncating it from the head drops the
+tail that carries the failure summary on a noisy multi-error log), an
+8 MiB execFileSync buffer past which the log is dropped rather than
+buffered. Selection mirrors the workflow's `## Still-red checks` gate
+— the same failure conclusions, the same "Qwen Autofix" self-lane
+exclusion with the review-address exception. The sibling `## Failed
+checks` list also admits CANCELLED; a cancelled job is not a failure
+to diagnose, so it is omitted here. External commit statuses carry no
 job URL and stay name-only.
+
+THE LOG FETCH NEEDS THREE PARTS, copied from autofix-pr/ci-log.ts's
+jobLog. Current gh refuses to print a response containing terminal
+escape sequences — which Actions job logs essentially always do —
+unless `--allow-escape-sequences` is passed; a bare call exits 1 with
+empty stdout, and a helper that swallows non-zero exits would silently
+render no excerpt at all. So: pass the flag; fall back to the bare
+call ONLY when stderr says `unknown flag` (older gh has neither the
+check nor the flag); and stripVTControlCharacters the result, because
+raw ANSI would otherwise reach feedback.md and step stdout, where the
+existing defang handles only `::` and `##[`. The behavioral suite's
+fake gh reproduces the refusal, so a missing flag turns it red. The
+same fix lands on the patrol's own GhClient.jobLog, which was equally
+log-blind on current gh. The excerpt fence is sized past any backtick
+run inside it, so a log line carrying backticks cannot close the fence
+early and spill the rest into feedback.md as markdown.
 
 PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
 switches the working tree to the PR branch, so the collector AND the

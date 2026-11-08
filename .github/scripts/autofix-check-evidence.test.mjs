@@ -1,7 +1,8 @@
 // Behavioral tests for the failed-check evidence collector: selection mirrors
 // the workflow's failed-check gates, the rendered section stays bounded and
-// redacted, and every degradation path leaves the round alive. The workflow
-// wiring pins live in scripts/tests/qwen-autofix-workflow.test.js.
+// redacted, the log fetch survives a current gh's escape-sequence refusal, and
+// every degradation path leaves the round alive. The workflow wiring pins live
+// in scripts/tests/qwen-autofix-workflow.test.js.
 import assert from 'node:assert/strict';
 import {
   chmodSync,
@@ -46,12 +47,15 @@ const failedCheck = (overrides = {}) => ({
   ...overrides,
 });
 
-// A fake `gh` on PATH: the metadata and log endpoints read fixture files, and
-// FAKE_LOG_FAIL / FAKE_META_FAIL exercise the two independent degradation
-// paths without a network.
+// A fake `gh` on PATH. By default it behaves like a CURRENT gh: the log
+// endpoint refuses (exit 1, empty stdout, the escape-sequence stderr) unless
+// --allow-escape-sequences is passed — so any test that sees an excerpt
+// witnesses the flag. FAKE_OLD_GH instead behaves like an old gh that rejects
+// the unknown flag and serves the bare call. FAKE_LOG_FAIL / FAKE_META_FAIL
+// exercise the independent degradation paths.
 function runCli(
   payload,
-  { log = '', meta, logFail = false, metaFail = false } = {},
+  { log = '', meta, logFail = false, metaFail = false, oldGh = false } = {},
 ) {
   const dir = freshTmp();
   const checksPath = join(dir, 'checks.json');
@@ -84,8 +88,21 @@ function runCli(
       '#!/usr/bin/env bash',
       'case "$*" in',
       '  *"/logs")',
-      '    [[ "${FAKE_LOG_FAIL}" == "1" ]] && exit 22',
-      '    cat "${FAKE_LOG_FILE}" ;;',
+      '    if [[ "${FAKE_LOG_FAIL}" == "1" ]]; then exit 22; fi',
+      '    if [[ "${FAKE_OLD_GH}" == "1" ]]; then',
+      '      case "$*" in',
+      '        *"--allow-escape-sequences"*)',
+      '          echo "unknown flag: --allow-escape-sequences" >&2; exit 1 ;;',
+      '        *) cat "${FAKE_LOG_FILE}" ;;',
+      '      esac',
+      '    else',
+      '      case "$*" in',
+      '        *"--allow-escape-sequences"*) cat "${FAKE_LOG_FILE}" ;;',
+      '        *)',
+      '          echo "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway" >&2',
+      '          exit 1 ;;',
+      '      esac',
+      '    fi ;;',
       '  *"actions/jobs/"*)',
       '    [[ "${FAKE_META_FAIL}" == "1" ]] && exit 22',
       '    cat "${FAKE_META_FILE}" ;;',
@@ -107,6 +124,7 @@ function runCli(
         FAKE_META_FILE: metaPath,
         FAKE_LOG_FAIL: logFail ? '1' : '0',
         FAKE_META_FAIL: metaFail ? '1' : '0',
+        FAKE_OLD_GH: oldGh ? '1' : '0',
       },
     },
   );
@@ -158,11 +176,22 @@ describe('selectJobs', () => {
         conclusion,
       );
     }
-    // A StatusContext exposes `state`, not `conclusion`.
-    assert.equal(
-      selectJobs([failedCheck({ conclusion: undefined, state: 'ERROR' })])
-        .length,
-      1,
+  });
+
+  it('reads a StatusContext state but keeps it name-only (no job URL)', () => {
+    // A real StatusContext exposes `state` and `targetUrl`, not `conclusion`
+    // or `detailsUrl`. The state fallback still classifies it, but with no job
+    // id it must stay name-only rather than fetch a wrong endpoint.
+    assert.deepEqual(
+      selectJobs([
+        {
+          __typename: 'StatusContext',
+          context: 'external-ci',
+          state: 'ERROR',
+          targetUrl: 'https://ci.example.com/build/9',
+        },
+      ]),
+      [],
     );
   });
 
@@ -257,18 +286,36 @@ describe('renderEvidence', () => {
     assert.ok(out.includes('[redacted]'));
   });
 
-  it('bounds the excerpt line count', () => {
-    const log = Array.from(
-      { length: 200 },
-      (_, i) => `##[error] boom ${i}`,
-    ).join('\n');
+  it('keeps skillLog’s whole selection, including the failure-summary tail', () => {
+    // A noisy multi-error log: skillLog selects the first error window plus
+    // the tail. Truncating from the head (the old 60-line cap) dropped the
+    // final `Process completed` line; keeping the full ~120-line selection
+    // preserves both ends.
+    const log = [
+      ...Array.from({ length: 200 }, (_, i) => `##[error] boom ${i}`),
+      '##[error]Process completed with exit code 1.',
+    ].join('\n');
     const out = renderEvidence([job], '', () => ({ steps: [], log }));
     const fenced = out.split('````text\n')[1].split('\n````')[0];
-    assert.ok(fenced.split('\n').length <= 60);
+    assert.ok(fenced.split('\n').length <= 120);
     assert.ok(fenced.includes('boom 0'));
+    assert.ok(fenced.includes('Process completed with exit code 1.'));
   });
 
-  it('strips markup from names and ignores a malformed head', () => {
+  it('sizes the fence past any backtick run in the excerpt', () => {
+    // A log line carrying four backticks must not close a four-backtick fence
+    // early and spill the rest into feedback.md as markdown.
+    const out = renderEvidence([job], '', () => ({
+      steps: [],
+      log: '##[error] boom ```` inline\nafter the run\n',
+    }));
+    assert.match(out, /`````text\n/);
+    assert.ok(out.includes('boom ```` inline'));
+    assert.ok(out.includes('after the run'));
+    assert.match(out, /\n`````\n/);
+  });
+
+  it('strips markup from names, bounds them, and ignores a malformed head', () => {
     const out = renderEvidence(
       [{ id: '1', name: '<img src=x> `tick`', workflowName: 'CI<script>' }],
       'not-a-sha',
@@ -279,6 +326,14 @@ describe('renderEvidence', () => {
     assert.ok(!out.includes('<b>'));
     assert.ok(!out.includes('`tick`'));
     assert.ok(!out.includes('on head'));
+    // The name cap is 80 characters: 80 survive, 81 do not.
+    const long = renderEvidence(
+      [{ id: '2', name: 'x'.repeat(100), workflowName: '' }],
+      '',
+      () => ({ steps: [], log: '##[error] x' }),
+    );
+    assert.ok(long.includes(`### ${'x'.repeat(80)}`));
+    assert.ok(!long.includes('x'.repeat(81)));
   });
 
   it('drops jobs with no evidence and returns empty when nothing renders', () => {
@@ -303,16 +358,33 @@ describe('renderEvidence', () => {
 });
 
 describe('CLI', () => {
-  it('prints the section for a failed check', () => {
+  it('renders the excerpt against a gh that refuses colourised logs', () => {
+    // The witness for --allow-escape-sequences: the fake gh refuses the bare
+    // call exactly like a current gh, so an excerpt appears ONLY if the flag
+    // was passed. The fixture carries ANSI; stripVTControlCharacters must
+    // remove it before it reaches feedback.md / step stdout.
     const result = runCli(
       { headRefOid: 'b'.repeat(40), statusCheckRollup: [failedCheck()] },
-      { log: '##[error]AssertionError: expected 1 to be 2\n' },
+      {
+        log: '##[error]AssertionError: expected 1 to be 2\n\x1b[31mcolored\x1b[0m\n',
+      },
     );
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /## Failed check evidence/);
     assert.ok(result.stdout.includes('Failed steps: Run unit tests'));
     assert.ok(result.stdout.includes('AssertionError'));
+    assert.ok(result.stdout.includes('colored'));
+    assert.ok(!result.stdout.includes('\x1b'));
     assert.ok(!result.stdout.includes('Post cleanup'));
+  });
+
+  it('falls back to the bare call for a gh without the flag', () => {
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      { log: '##[error]AssertionError: boom\n', oldGh: true },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('AssertionError: boom'));
   });
 
   it('stays silent when nothing is red', () => {
@@ -360,9 +432,24 @@ describe('CLI', () => {
     assert.equal(result.stdout, '');
   });
 
-  it('fails loudly on a usage error', () => {
-    const result = spawnSync(process.execPath, [script], { encoding: 'utf8' });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /usage: autofix-check-evidence\.mjs/);
+  it('fails loudly when either argument is missing', () => {
+    // Pins the `||`: dropping to `&&` would let a half-invocation through.
+    const noRepo = spawnSync(
+      process.execPath,
+      [script, '--checks', '/tmp/x.json'],
+      {
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(noRepo.status, 1);
+    assert.match(noRepo.stderr, /usage: autofix-check-evidence\.mjs/);
+    const noChecks = spawnSync(process.execPath, [script, '--repo', 'o/r'], {
+      encoding: 'utf8',
+    });
+    assert.equal(noChecks.status, 1);
+    assert.match(noChecks.stderr, /usage: autofix-check-evidence\.mjs/);
+    const neither = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+    assert.equal(neither.status, 1);
+    assert.match(neither.stderr, /usage: autofix-check-evidence\.mjs/);
   });
 });

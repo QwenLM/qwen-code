@@ -60,8 +60,9 @@ Per failing job the collector emits:
 - `Failed steps:` — the names of steps whose conclusion is `failure`, read from
   `repos/<repo>/actions/jobs/<id>`;
 - a fenced log excerpt from `repos/<repo>/actions/jobs/<id>/logs`, passed through
-  the patrol's `skillLog` (redaction + error-marker line selection) and capped
-  at 60 lines.
+  the patrol's `skillLog` (redaction + error-marker line selection) and kept
+  whole at its own ~120-line bound; the fence is sized past any backtick run in
+  the excerpt so a log line cannot close it early.
 
 The job id comes from the check's `detailsUrl`
 (`…/actions/runs/<run>/job/<job>`), so no extra lookup is needed to resolve it.
@@ -78,12 +79,15 @@ feedback` while the working tree is still the trusted base, the same position
    has executed).
 2. **Mirror the existing selection.** The collector applies the same failure
    conclusions and the same `Qwen Autofix` self-lane exclusion with the
-   `review-address` exception. `CANCELLED` is omitted: a cancelled job is not a
-   failure to diagnose. External commit statuses have no job URL and stay
-   name-only.
-3. **Bound the fan-out.** The first three distinct jobs in rollup order, 60
-   excerpt lines each, and an 8 MiB `execFileSync` buffer past which the log is
-   dropped rather than buffered.
+   `review-address` exception, matching the `## Still-red checks` gate. The
+   sibling `## Failed checks` list also admits `CANCELLED`; a cancelled job is
+   not a failure to diagnose, so it is omitted here. External commit statuses
+   have no job URL and stay name-only.
+3. **Bound the fan-out.** The first three distinct jobs in rollup order,
+   skillLog's own ~120-line selection kept whole (truncating it from the head
+   drops the tail that carries the failure summary and the final `Process
+completed with exit code 1` on a noisy multi-error log), and an 8 MiB
+   `execFileSync` buffer past which the log is dropped rather than buffered.
 4. **Best-effort everywhere.** The script is absent from the trusted base until
    this merges, so the `node` call is `|| true`; an unreadable rollup, a failed
    API read, or an oversized log yields an empty or partial section. Collector
@@ -98,6 +102,24 @@ feedback` while the working tree is still the trusted base, the same position
    workflow-command syntaxes (`::` and `##[`) before anything reaches step
    stdout. The skill tells the agent the section is a bounded snapshot and that
    it must still reproduce the failure locally.
+7. **The log fetch needs three parts.** Current `gh` refuses to print a response
+   containing terminal escape sequences — which Actions job logs essentially
+   always do — unless `--allow-escape-sequences` is passed; a bare call exits 1
+   with empty stdout, and a helper that swallows non-zero exits would silently
+   render no excerpt. So the fetch passes the flag, falls back to the bare call
+   only when stderr says `unknown flag` (older `gh` has neither the check nor the
+   flag), and applies `stripVTControlCharacters` so raw ANSI never reaches
+   `feedback.md` or step stdout. This is the same shape as
+   `packages/cli/src/commands/autofix-pr/ci-log.ts`'s `jobLog`, and the behavioral
+   suite's fake `gh` reproduces the refusal so a missing flag turns it red. The
+   identical fix is applied to the patrol's own `GhClient.jobLog`
+   (`.github/scripts/ci-flaky-rerun.mjs`), which was equally log-blind on current
+   `gh`; it is handled here rather than deferred so the reused scrubber's fetch
+   actually works.
+8. **The fence cannot be closed by the log.** The excerpt's Markdown fence is
+   sized longer than the longest backtick run inside it, so a log line carrying
+   backticks cannot close the fence early and spill the rest into `feedback.md`
+   as markup.
 
 ## Constraints and risks
 
@@ -114,9 +136,17 @@ feedback` while the working tree is still the trusted base, the same position
 ## Validation plan
 
 - `.github/scripts/autofix-check-evidence.test.mjs` (node:test): selection
-  mirrors the workflow gates, dedupe and fan-out bounds, redaction witness,
-  excerpt line bound, markup stripping, and every degradation path through a
-  fake `gh` on PATH.
+  mirrors the workflow gates (including a realistic `StatusContext` that stays
+  name-only), dedupe and fan-out bounds, redaction witness, the ~120-line bound
+  with the failure-summary tail kept, fence sizing past a backtick run, the
+  80-character name cap, markup stripping, the usage guard for each missing
+  argument, and every degradation path through a fake `gh` on PATH. The fake
+  `gh` reproduces a current gh's escape-sequence refusal (exit 1 unless the flag
+  is passed) and an old gh's `unknown flag`, so the excerpt-rendering test
+  witnesses the flag and the ANSI-strip together.
+- `scripts/tests/ci-flaky-rerun.test.js` (vitest): the patrol's `GhClient.jobLog`
+  passes the flag, falls back only on `unknown flag`, strips VT control
+  characters, and propagates a non-refusal error.
 - `scripts/tests/qwen-autofix-workflow.test.js` (vitest): the call precedes the
   checkout and uses the working-tree path; the tolerant fallbacks and stderr
   sink; the section's position between the name-only lists and the gate
@@ -125,22 +155,26 @@ feedback` while the working tree is still the trusted base, the same position
 - Mutation checks: moving the call below the checkout, staging it under
   `RUNNER_TEMP`, dropping `|| true`, dropping the feedback guard, dropping
   either CI membership entry, and dropping the skill sentence each turn the
-  workflow pins red; rendering the raw log, dropping the self-lane exclusion,
-  the job cap, the dedupe, or adding `CANCELLED` each turn the collector tests
-  red.
+  workflow pins red; dropping the flag, the ANSI strip, the old-gh fallback,
+  reverting the line cap to 60, fixing the fence at four backticks, narrowing
+  the usage guard to `&&`, rendering the raw log, dropping the self-lane
+  exclusion, the job cap, the dedupe, or adding `CANCELLED` each turn the
+  collector tests red; dropping the patrol's flag turns its witness red.
 - `scripts/tests/ci-platform-lanes.test.js` re-runs because `ci.yml` changed.
 
 ## Acceptance criteria
 
 - A red PR's `feedback.md` carries failed step names and a redacted excerpt for
-  up to three failing jobs.
+  up to three failing jobs, and the excerpt actually renders against a current
+  `gh` (the flag is passed) with no raw ANSI reaching `feedback.md` or step
+  stdout.
 - No secret from a job log reaches `feedback.md` or step stdout.
 - An absent script, an unreadable rollup, or a failed API read never fails a
   round.
 - The collector and its imported helper execute from the trusted base, before
   the PR branch is checked out.
-- Both helper-test lists run the behavioral suite; the workflow pins and the
-  collector tests pass.
+- Both helper-test lists run the behavioral suite; the workflow pins, the
+  collector tests, and the patrol tests pass.
 
 ## Open questions
 
