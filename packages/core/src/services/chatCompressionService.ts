@@ -27,8 +27,8 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  getContextLengthExceededInfo,
-  type ContextLengthExceededInfo,
+  isContextLengthExceededError,
+  statedContextWindows,
 } from '../utils/contextLengthError.js';
 import {
   estimateContentChars,
@@ -91,10 +91,10 @@ function minCompactionOutputTokens(window: number): number {
 }
 
 /**
- * Output room a retry that cuts the overflow is sized to leave: a quarter of
- * the window, up to the full output budget. It is never below
- * minCompactionOutputTokens, so a retry sized to leave it passes that
- * minimum.
+ * Most output room a retry after a context-length rejection asks for: a
+ * quarter of the window, up to the full output budget. The estimate that
+ * sized the rejected request has just run low, so room it claims past this
+ * is not taken.
  */
 function compactionOutputReserve(window: number): number {
   return Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(window / 4));
@@ -104,10 +104,7 @@ function compactionOutputReserve(window: number): number {
 interface ColdRequestSizing {
   /** The receiving model's window, or the smaller one a rejection reported. */
   window: number;
-  /**
-   * The output budget a retry set from the provider's own count of the
-   * rejected prompt. Unset, the budget follows the local estimate.
-   */
+  /** The output budget a retry was sized with. Unset, it follows the estimate. */
   outputTokens?: number;
 }
 
@@ -116,43 +113,6 @@ type OverflowRetry =
   // The rejection was a context overflow, but no reduction fits the window.
   | { kind: 'too-large' }
   | { kind: 'none' };
-
-/**
- * Lowest provider count, per locally estimated token, still taken as a count
- * of the rejected prompt. char/4 under-counts; well below it, the number
- * belongs to something else in the message.
- */
-const MIN_COUNT_PER_ESTIMATED_TOKEN = 0.5;
-
-/**
- * The rejected prompt's real size, from the rejection's own count, or an
- * upper bound on it. A total that also counts the requested output budget,
- * with no breakdown, is taken whole: the transport can lower `max_tokens`
- * below the budget this service asked for (a configured or model output
- * cap), so subtracting that budget could undercount the prompt and size a
- * retry that overruns again. Undefined when the rejection states no count,
- * or one this request cannot have produced: far below its estimate, or one
- * under which it would have fit the limit the same message states.
- */
-function rejectedPromptTokens(
-  overflow: ContextLengthExceededInfo,
-  sentOutputTokens: number,
-  estimatedTokens: number,
-): number | undefined {
-  const prompt = overflow.promptTokens ?? overflow.requestedTokens;
-  if (
-    prompt === undefined ||
-    prompt < estimatedTokens * MIN_COUNT_PER_ESTIMATED_TOKEN
-  ) {
-    return undefined;
-  }
-  if (overflow.limitTokens !== undefined) {
-    const counted =
-      overflow.limitKind === 'input' ? prompt : prompt + sentOutputTokens;
-    if (counted <= overflow.limitTokens) return undefined;
-  }
-  return prompt;
-}
 
 /**
  * Output budget for the compression side-query: the fixed ceiling clamped to
@@ -604,6 +564,22 @@ function hasUnclosedStateSnapshot(summary: string): boolean {
   return opening !== null && !body.includes('</state_snapshot>', opening.index);
 }
 
+const STATE_SNAPSHOT_OPENING = '<state_snapshot>';
+
+/**
+ * Whether the summary ends inside the snapshot's opening tag (`<state_snap`).
+ * A model does not stop there, so only a cut can leave it, whatever the usage
+ * says (#15936 R5-9).
+ */
+function endsInsideSnapshotOpening(summary: string): boolean {
+  const lastLine = summary.slice(summary.lastIndexOf('\n') + 1).trim();
+  return (
+    lastLine.length > 1 &&
+    lastLine.length < STATE_SNAPSHOT_OPENING.length &&
+    STATE_SNAPSHOT_OPENING.startsWith(lastLine)
+  );
+}
+
 export class ChatCompressionService {
   async compress(
     chat: LlmChat,
@@ -981,8 +957,7 @@ export class ChatCompressionService {
       fixedColdTokens;
     // Clamp the output budget to the receiving model's remaining window so
     // `prompt + max_tokens <= window` holds even on small-window
-    // deployments (issue #7960). A retry sized from the provider's own count
-    // carries the budget that count leaves room for.
+    // deployments (issue #7960). A retry carries the budget it was sized with.
     const initialSizing: ColdRequestSizing = { window: budgetWindow };
     const coldBudgetFor = (
       history: Content[],
@@ -1003,117 +978,34 @@ export class ChatCompressionService {
             maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
           }).slimmedHistory;
     // A context-length rejection means the estimate ran low for this request.
-    // The window it reports (a self-hosted server's can be below the one
-    // configured) bounds the one retry. When it also states the prompt's
-    // real size, the retry is sent once the reduced request is below it by
-    // the overflow, with the summary's reserve. Without a count, the reduced
-    // request is sent when it is smaller than the rejected one.
+    // The one retry is sized from the local estimate alone. The rejection's
+    // prose is read only for a window it states, which can only make the
+    // retry smaller: a self-hosted server's window can be below the one
+    // configured. A provider's count of the rejected prompt is not read: its
+    // wordings differ by provider, one error can carry several attempts, and
+    // a misread count sized the retry wrongly (#15936 round 5). The retry is
+    // the reduced request, or the rejected one when the reduction cuts
+    // nothing, with an output budget held to the reserve, since the estimate
+    // that sized the rejected request has just run low. It is sent when it
+    // asks for less than the rejected request and its estimate leaves room
+    // in the window, the test the first send passes.
     const shrinkAfterOverflow = (
       error: unknown,
       rejected: Content[],
     ): OverflowRetry => {
-      const overflow = getContextLengthExceededInfo(error);
-      if (!overflow.isExceeded) return { kind: 'none' };
-      const rejectedTokens = estimateColdRequest(rejected);
-      const promptTokens = rejectedPromptTokens(
-        overflow,
-        coldOutputBudget,
-        rejectedTokens,
-      );
-      // A limit the wording leaves untyped ("N tokens > M maximum") bounds
-      // the window too once this request's own count is past it: the
-      // endpoint takes no more than M, whatever window was configured.
-      const limit = overflow.limitTokens;
-      const window =
-        limit &&
-        (overflow.limitKind === 'total' ||
-          (overflow.limitKind === undefined &&
-            promptTokens !== undefined &&
-            promptTokens > limit))
-          ? Math.min(budgetWindow, limit)
-          : budgetWindow;
-      const reserve = compactionOutputReserve(window);
-      // The reduced request, its output budget sized as if every estimated
-      // token cost `tokensPerEstimate` real ones, and no more than the
-      // reserve: the rejection has just shown the estimate runs low, so the
-      // room it claims past the reserve is not there to take. Without counts,
-      // the full budget that room allowed made the retry overrun again.
-      const retrySizedBy = (tokensPerEstimate: number): OverflowRetry => {
-        const retry = reduceColdInput();
-        const outputTokens = Math.min(
-          reserve,
-          computeCompactionOutputBudget(
-            Math.ceil(estimateColdRequest(retry) * tokensPerEstimate),
-            window,
-          ),
-        );
-        if (outputTokens < minCompactionOutputTokens(window)) {
-          return { kind: 'too-large' };
-        }
-        // The provider rejected this for context length, so a reduction
-        // that cannot get any smaller leaves nothing that would fit.
-        return estimateColdRequest(retry) < rejectedTokens
-          ? { kind: 'retry', history: retry, sizing: { window, outputTokens } }
-          : { kind: 'too-large' };
-      };
-      if (promptTokens !== undefined) {
-        const inputLimit =
-          overflow.limitKind === 'input' ? overflow.limitTokens : undefined;
-        const overflowTokens = Math.max(
-          promptTokens + reserve + COMPACTION_BUDGET_SAFETY_MARGIN - window,
-          inputLimit === undefined
-            ? -Infinity
-            : promptTokens + COMPACTION_BUDGET_SAFETY_MARGIN - inputLimit,
-        );
-        if (overflowTokens <= 0) {
-          // The prompt fits with the reserve to spare, so only the output
-          // budget overran: resend the request unchanged with the room the
-          // provider's count leaves, which is never below the reserve. When
-          // that room is no smaller than the budget sent, the request fit
-          // this window by the count, so the server's is smaller by an
-          // amount the message does not state: send the reduced request.
-          const outputTokens = Math.min(
-            COMPACT_MAX_OUTPUT_TOKENS,
-            window - promptTokens - COMPACTION_BUDGET_SAFETY_MARGIN,
-          );
-          return outputTokens < coldOutputBudget
-            ? {
-                kind: 'retry',
-                history: rejected,
-                sizing: { window, outputTokens },
-              }
-            : retrySizedBy(1);
-        }
-        // char/4 usually under-counts, so an estimated token removed takes at
-        // least one real token with it. A reduction that cuts the overflow
-        // from the estimate then leaves the real prompt inside the window
-        // minus the reserve, whatever mix of dense and sparse text remains.
-        // A single ratio for the whole request cannot promise that: the text
-        // the reduction keeps can be denser than the text it removes. Where
-        // the count runs below the estimate (sparse ASCII), a token removed
-        // takes less than one with it, so the cut grows by that ratio.
-        const targetTokens =
-          rejectedTokens -
-          Math.ceil(
-            overflowTokens / Math.min(1, promptTokens / rejectedTokens),
-          );
-        const retry = reduceColdInput();
-        if (estimateColdRequest(retry) <= targetTokens) {
-          return {
-            kind: 'retry',
-            history: retry,
-            sizing: { window, outputTokens: reserve },
-          };
-        }
-        // The reduction does not remove the overflow at one real token per
-        // estimated token. When the text removed is as dense as the rest,
-        // less suffices, so rather than refuse, size the retry by the
-        // rejected prompt's average density. It overruns only if the text
-        // kept is denser than the text removed, and then fails like any
-        // second rejection.
-        return retrySizedBy(Math.max(1, promptTokens / rejectedTokens));
+      if (!isContextLengthExceededError(error)) return { kind: 'none' };
+      const window = Math.min(budgetWindow, ...statedContextWindows(error));
+      const reduced = reduceColdInput();
+      const inputShrinks =
+        estimateColdRequest(reduced) < estimateColdRequest(rejected);
+      const history = inputShrinks ? reduced : rejected;
+      const room =
+        window - estimateColdRequest(history) - COMPACTION_BUDGET_SAFETY_MARGIN;
+      const outputTokens = Math.min(compactionOutputReserve(window), room);
+      if (room < 1 || (!inputShrinks && outputTokens >= coldOutputBudget)) {
+        return { kind: 'too-large' };
       }
-      return retrySizedBy(1);
+      return { kind: 'retry', history, sizing: { window, outputTokens } };
     };
     const runColdCompression = (
       history: Content[],
@@ -1389,7 +1281,7 @@ export class ChatCompressionService {
           const retry: OverflowRetry =
             attempt === 0
               ? shrinkAfterOverflow(error, coldHistory)
-              : getContextLengthExceededInfo(error).isExceeded
+              : isContextLengthExceededError(error)
                 ? { kind: 'too-large' }
                 : { kind: 'none' };
           if (retry.kind !== 'retry') {
@@ -1562,7 +1454,9 @@ export class ChatCompressionService {
       typeof compressionOutputTokenCount === 'number' &&
       compressionInputTokenCount + compressionOutputTokenCount <
         coldWindow - COMPACTION_BUDGET_SAFETY_MARGIN;
-    const cutMidSnapshot = !usageShowsRoom && hasUnclosedStateSnapshot(summary);
+    const cutMidSnapshot =
+      (!usageShowsRoom && hasUnclosedStateSnapshot(summary)) ||
+      endsInsideSnapshotOpening(summary);
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&

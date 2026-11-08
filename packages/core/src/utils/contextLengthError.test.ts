@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getContextLengthExceededInfo,
   isContextLengthExceededError,
+  statedContextWindows,
 } from './contextLengthError.js';
 
 describe('contextLengthError', () => {
@@ -184,48 +185,6 @@ describe('contextLengthError', () => {
     expect(info.limitKind).toBe('total');
   });
 
-  it('reads the vLLM input token count as the prompt size only', () => {
-    // The reactive path reads `actualTokens` and falls back to the limit
-    // here; only the compression retry reads the prompt's size.
-    const info = getContextLengthExceededInfo(
-      new Error(
-        "This model's maximum context length is 16384 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.",
-      ),
-    );
-
-    expect(info.isExceeded).toBe(true);
-    expect(info.promptTokens).toBe(25000);
-    expect(info.actualTokens).toBeUndefined();
-    expect(info.limitTokens).toBe(16384);
-    expect(info.limitKind).toBe('total');
-  });
-
-  it('keeps vLLM "contains at least N" limit-only: the count is a tokenization cut-off', () => {
-    const info = getContextLengthExceededInfo(
-      new Error(
-        "This model's maximum context length is 16384 tokens. However, your prompt contains at least 16385 input tokens, which exceeds this limit even without any output tokens.",
-      ),
-    );
-
-    expect(info.isExceeded).toBe(true);
-    expect(info.actualTokens).toBeUndefined();
-    expect(info.limitTokens).toBe(16384);
-    expect(info.limitKind).toBe('total');
-  });
-
-  it('reads SGLang\'s "maximum context length of N" as the window', () => {
-    const info = getContextLengthExceededInfo(
-      new Error(
-        "Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total of 40000 tokens: 36000 tokens from the input messages and 4000 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.",
-      ),
-    );
-
-    expect(info.isExceeded).toBe(true);
-    expect(info.promptTokens).toBe(36000);
-    expect(info.limitTokens).toBe(32768);
-    expect(info.limitKind).toBe('total');
-  });
-
   it('marks an input token-count maximum as an input bound', () => {
     const info = getContextLengthExceededInfo(
       new Error(
@@ -382,346 +341,93 @@ describe('contextLengthError', () => {
     });
   });
 
-  describe('prompt token count apart from the output budget (#9455)', () => {
+  it('reads the window SGLang states as "maximum context length of N"', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        "Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total of 40000 tokens: 36000 tokens from the input messages and 4000 tokens for the completion.",
+      ),
+    );
+
+    expect(info.limitTokens).toBe(32_768);
+    expect(info.limitKind).toBe('total');
+  });
+
+  describe('statedContextWindows', () => {
+    const vllm = (window: number) =>
+      `This model's maximum context length is ${window} tokens. However, your prompt contains 40000 input tokens.`;
+
     it.each([
+      ['OpenAI and vLLM', vllm(32_768), [32_768]],
       [
-        'OpenAI, DeepSeek and older vLLM, with the completion broken out',
-        "This model's maximum context length is 131072 tokens. However, you requested 131329 tokens (123137 in the messages, 8192 in the completion). Please reduce the length of the messages or completion.",
-        123_137,
-      ],
-      [
-        'OpenAI legacy completions',
-        "This model's maximum context length is 4097 tokens, however you requested 5360 tokens (1360 in your prompt; 4000 for the completion). Please reduce your prompt; or completion length.",
-        1_360,
-      ],
-      [
-        'OpenRouter, an approximate total with the output broken out',
-        "This endpoint's maximum context length is 262144 tokens. However, you requested about 300000 tokens (250000 of text input, 2000 of tool input, 48000 in the output). Please reduce the length of either one.",
-        252_000,
-      ],
-      [
-        'OpenAI, a prompt-only total',
-        "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens (134000 in the messages, 1000 in the functions). Please reduce the length of the messages or functions.",
-        135_000,
-      ],
-      [
-        'Anthropic',
-        'prompt is too long: 210000 tokens > 200000 maximum',
-        210_000,
-      ],
-      [
-        'vLLM, prompt over the window with an output budget requested',
-        "This model's maximum context length is 16384 tokens. However, you requested 2048 output tokens and your prompt contains 20000 input tokens, for a total of 22048 tokens. Please reduce the length of the input prompt or the number of requested output tokens.",
-        20_000,
-      ],
-      [
-        'vLLM, prompt alone over the window',
-        "This model's maximum context length is 16384 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit even without any output tokens.",
-        25_000,
-      ],
-      [
-        'vLLM, max_tokens too large for the prompt',
-        "'max_tokens' or 'max_completion_tokens' is too large: 8000. This model's maximum context length is 16384 tokens and your request has 10000 input tokens (8000 > 16384 - 10000).",
-        10_000,
-      ],
-      [
-        'Gemini, older wording',
-        'The input token count (1196265) exceeds the maximum number of tokens allowed (1048575).',
-        1_196_265,
-      ],
-      [
-        'the same wording with "length"',
-        'The input token length (127234) exceeds the maximum number of tokens allowed (100000).',
-        127_234,
+        'SGLang',
+        "Requested token count exceeds the model's maximum context length of 32768 tokens.",
+        [32_768],
       ],
       [
         'llama.cpp',
         'request (279935 tokens) exceeds the available context size (262144 tokens), try increasing it',
-        279_935,
+        [262_144],
       ],
       [
-        'SGLang',
-        "Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total of 40000 tokens: 36000 tokens from the input messages and 4000 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.",
-        36_000,
+        'TGI, the total',
+        'Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32768. Given: 40000 `inputs` tokens and 1000 `max_new_tokens`',
+        [32_768],
       ],
-      [
-        'TGI, prompt and output over the total',
-        'Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32768. Given: 23362 `inputs` tokens and 12629 `max_new_tokens`',
-        23_362,
-      ],
-      [
-        'TGI, prompt over the input limit',
-        'Input validation error: `inputs` must have less than 32000 tokens. Given: 40000',
-        40_000,
-      ],
-      [
-        'vLLM, input length past the window',
-        "Input length (40000) exceeds model's maximum context length (32768).",
-        40_000,
-      ],
-      [
-        'Bedrock, prompt tokens past the model maximum',
-        'prompt tokens (40000) exceed model maximum (32768)',
-        40_000,
-      ],
-    ])('reads the prompt count from %s', (_label, message, promptTokens) => {
-      const info = getContextLengthExceededInfo(new Error(message));
-
-      expect(info.isExceeded).toBe(true);
-      expect(info.promptTokens).toBe(promptTokens);
-      expect(info.requestedTokens).toBeUndefined();
-    });
-
-    it('reports a total that includes an unseparated output budget as requested, not as the prompt', () => {
-      const info = getContextLengthExceededInfo(
-        new Error(
-          "This model's maximum context length is 65536 tokens. However, you requested 70000 tokens. Please reduce the length of the messages or completion.",
-        ),
-      );
-
-      expect(info.promptTokens).toBeUndefined();
-      expect(info.requestedTokens).toBe(70_000);
+    ])('reads the window %s states', (_label, message, windows) => {
+      expect(statedContextWindows(new Error(message))).toEqual(windows);
     });
 
     it.each([
+      // An untyped "N > M" may be a rate limit or a quota, not a window.
       [
-        'a tokenization cut-off',
-        "This model's maximum context length is 16384 tokens. However, your prompt contains at least 16385 input tokens.",
+        'an untyped comparison',
+        'prompt is too long: 210000 tokens > 200000 maximum',
       ],
-      [
-        'a limit with no count',
-        'The input token count exceeds the maximum number of tokens allowed 1048576.',
-      ],
-      ['a bare count comparison', 'Error: 70000 tokens > 65536 limit'],
-      [
-        'a requested output budget alone',
-        "This model's maximum context length is 4096 tokens. However, you requested 1000000 tokens in the completion.",
-      ],
-      [
-        'a maximum input length',
-        'Prompt is too long: the maximum input length (32768) was exceeded.',
-      ],
-      [
-        'a maximum count of prompt tokens',
-        'Prompt is too long: maximum prompt tokens (32768) exceeded.',
-      ],
-      // A limit the clause names as one is not a count, whatever the verb's
-      // tense (#15936 R3-2).
-      [
-        'a maximum count of prompt tokens, present tense',
-        'Prompt is too long: maximum prompt tokens (32768) exceed the limit.',
-      ],
-      [
-        'a maximum input token count',
-        'The maximum input token count (1048575) has been exceeded.',
-      ],
-      [
-        'a max input length',
-        'Input is too long: max input length (32768) exceeds the request.',
-      ],
-      [
-        'a requested output budget, "in your completion"',
-        "This model's maximum context length is 4096 tokens. However, you requested 1000000 tokens in your completion.",
-      ],
-    ])('reports no prompt count for %s', (_label, message) => {
-      const info = getContextLengthExceededInfo(new Error(message));
-
-      expect(info.isExceeded).toBe(true);
-      expect(info.promptTokens).toBeUndefined();
-      expect(info.requestedTokens).toBeUndefined();
+      // An input bound lets `prompt + max_tokens` exceed it; sizing a
+      // request's window by it floors the summary budget (#13876).
+      ['an input bound', 'Range of input length should be [1, 196608]'],
+      ['no figure', 'context_length_exceeded'],
+    ])('reads no window from %s', (_label, message) => {
+      expect(statedContextWindows(new Error(message))).toEqual([]);
     });
 
-    it('does not pair a count from one fragment with the wording of another', () => {
-      const body = JSON.stringify({
-        error: {
-          code: 400,
-          message:
-            'The input token count exceeds the maximum number of tokens allowed 1048576.',
-          status: 'INVALID_ARGUMENT',
+    it('reads a window from each rejection the error carries', () => {
+      // An earlier attempt's window is still one the same server stated; the
+      // caller takes the smallest, so it can only shrink the request.
+      const error = Object.assign(new Error(vllm(4_096)), {
+        previousAttempt: { error: vllm(65_536) },
+      });
+
+      expect(statedContextWindows(error)).toEqual([4_096, 65_536]);
+    });
+
+    it.each([
+      ['a rate-limit field', { quota: 'quota: 120 tokens > 60 per minute' }],
+      [
+        'a timeout field',
+        {
+          detail:
+            'request timed out after 60s (maximum context length is 4096 tokens)',
         },
-      });
+      ],
+      [
+        "another attempt's untyped comparison",
+        {
+          previousAttempt: 'prompt is too long: 310000 tokens > 300000 maximum',
+        },
+      ],
+    ])('reads no window from %s beside the rejection', (_label, fields) => {
+      const error = Object.assign(new Error(vllm(32_768)), fields);
 
-      const info = getContextLengthExceededInfo(body);
-
-      expect(info.isExceeded).toBe(true);
-      expect(info.promptTokens).toBeUndefined();
+      expect(statedContextWindows(error)).toEqual([32_768]);
     });
 
-    it('does not read a count that follows the wording only in another field', () => {
-      // Joined, the two fields would read "prompt is too long:\n42 ...".
-      const body = JSON.stringify({
-        error: { message: 'prompt is too long:', detail: '42 requests queued' },
-      });
-
-      const info = getContextLengthExceededInfo(body);
-
-      expect(info.isExceeded).toBe(true);
-      expect(info.promptTokens).toBeUndefined();
-    });
-
-    it.each([
-      [
-        'a sibling field',
-        (main: string, other: string) =>
-          Object.assign(new Error(main), { previousAttempt: { error: other } }),
-      ],
-      [
-        'a wrapped cause',
-        (main: string, other: string) =>
-          new Error(main, { cause: new Error(other) }),
-      ],
-      [
-        'another field of the same JSON body',
-        (main: string, other: string) =>
-          new Error(
-            `400 ${JSON.stringify({ error: { message: main, previous: { message: other } } })}`,
-          ),
-      ],
-    ])(
-      'reads the count and limit from the rejection itself, not from %s',
-      (_label, build) => {
-        // Another attempt's rejection rides along in the error object; its
-        // numbers must not size this one (#15936 R3-2).
-        const info = getContextLengthExceededInfo(
-          build(
-            "This model's maximum context length is 32768 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit.",
-            'prompt is too long: 310000 tokens > 300000 maximum',
-          ),
-        );
-
-        expect(info.promptTokens).toBe(25_000);
-        expect(info.limitTokens).toBe(32_768);
-        expect(info.limitKind).toBe('total');
-      },
-    );
-
-    it.each([
-      [
-        'a stale count far above the current one',
-        'Previous attempt: prompt is too long: 310000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
-      ],
-      [
-        'a stale count below the current one',
-        'Previous attempt: prompt is too long: 30000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
-      ],
-      [
-        'two prompt counts',
-        'Previous attempt: prompt is too long: 210000 tokens > 200000 maximum; current: prompt is too long: 230000 tokens > 200000 maximum',
-      ],
-    ])(
-      'takes no count from one text that states two different sizes: %s',
-      (_label, message) => {
-        // One text carrying two attempts cannot say which size is this
-        // request's, whatever order they come in (#15936 R3-2).
-        const info = getContextLengthExceededInfo(new Error(message));
-
-        expect(info.isExceeded).toBe(true);
-        expect(info.promptTokens).toBeUndefined();
-        expect(info.requestedTokens).toBeUndefined();
-      },
-    );
-
-    it('keeps the window a text with two different sizes states once', () => {
-      const info = getContextLengthExceededInfo(
-        new Error(
-          'Previous attempt: prompt is too long: 310000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
+    it('reads nothing from an error that is not a context overflow', () => {
+      expect(
+        statedContextWindows(
+          new Error('rate limit: 120 tokens > 60 per minute'),
         ),
-      );
-
-      expect(info.limitTokens).toBe(40_000);
-      expect(info.limitKind).toBe('total');
-    });
-
-    it('reads a size the text states twice with the same figure', () => {
-      const info = getContextLengthExceededInfo(
-        new Error(
-          "Input length (40000) exceeds model's maximum context length (32768). Your prompt contains 40000 input tokens.",
-        ),
-      );
-
-      expect(info.promptTokens).toBe(40_000);
-    });
-
-    it('does not fall back to another field when the rejection itself states two sizes', () => {
-      // The other field is likely an earlier attempt too; when the
-      // rejection's own text is ambiguous, no field supplies the size.
-      const info = getContextLengthExceededInfo(
-        Object.assign(
-          new Error(
-            'Previous attempt: prompt is too long: 310000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
-          ),
-          {
-            previousAttempt: {
-              error:
-                "This model's maximum context length is 32768 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit.",
-            },
-          },
-        ),
-      );
-
-      expect(info.promptTokens).toBeUndefined();
-      expect(info.requestedTokens).toBeUndefined();
-    });
-
-    it.each([
-      [
-        'the error object',
-        (body: object) => Object.assign(new Error('400 Bad Request'), body),
-      ],
-      [
-        'its JSON body',
-        (body: object) => new Error(`400 ${JSON.stringify(body)}`),
-      ],
-    ])(
-      'takes no count from a field of %s that reports no overflow',
-      (_label, build) => {
-        // Only a rejection supplies figures: a usage note ahead of it is not
-        // this request's size (#15936 R3-2).
-        const info = getContextLengthExceededInfo(
-          build({
-            note: 'your prompt contains 5000 input tokens',
-            error: {
-              message:
-                "This model's maximum context length is 32768 tokens. However, your prompt contains 40000 input tokens, which exceeds this limit.",
-            },
-          }),
-        );
-
-        expect(info.promptTokens).toBe(40_000);
-      },
-    );
-
-    it.each([
-      [
-        'vLLM',
-        "Input length (40000) exceeds model's maximum context length (32768).",
-        'total',
-      ],
-      [
-        'Bedrock',
-        'prompt tokens (40000) exceed model maximum (32768)',
-        undefined,
-      ],
-    ])(
-      'reads the limit %s states beside the count',
-      (_label, message, limitKind) => {
-        const info = getContextLengthExceededInfo(new Error(message));
-
-        expect(info.promptTokens).toBe(40_000);
-        expect(info.limitTokens).toBe(32_768);
-        expect(info.limitKind).toBe(limitKind);
-      },
-    );
-
-    it('leaves actualTokens as the reactive path has always read it', () => {
-      const info = getContextLengthExceededInfo(
-        new Error(
-          "This model's maximum context length is 131072 tokens. However, you requested 131329 tokens (123137 in the messages, 8192 in the completion).",
-        ),
-      );
-
-      expect(info.actualTokens).toBe(131_329);
-      expect(info.promptTokens).toBe(123_137);
+      ).toEqual([]);
     });
   });
 });
