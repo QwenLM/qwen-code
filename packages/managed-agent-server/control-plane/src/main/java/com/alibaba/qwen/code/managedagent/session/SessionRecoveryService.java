@@ -127,7 +127,11 @@ public class SessionRecoveryService {
 
     private SessionRecovery targetRecovery(SessionRecord session,
             SessionPrincipal principal, String turnId) {
-        SessionRecovery recovery = query(principal, session.sessionId());
+        // Keep the tenant explicit: an anonymous caller has a null principal,
+        // and re-deriving the tenant from it would collapse this re-read to a
+        // null-tenant 404 on a legacy Session the caller already reads.
+        SessionRecovery recovery = query(session.tenantId(), principal,
+                session.sessionId());
         if (!turnId.equals(recovery.turnId())) {
             throw new ManagedAgentException(409,
                     "recovery_target_changed", "The Session's recovery Turn has changed.");

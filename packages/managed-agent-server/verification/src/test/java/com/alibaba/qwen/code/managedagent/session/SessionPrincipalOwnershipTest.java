@@ -74,6 +74,22 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void actorlessReadCannotBypassTheOwnershipRowButLegacyStaysTenantWide() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String owned = f.create(OWNER, "owned");
+            denied(() -> f.service.getPublicSession("tenant", null, owned));
+            String legacy = f.service.createSession("tenant", null,
+                    "legacy", "qwen-code", null, "shared", Map.of(), List.of())
+                    .sessionId();
+            assertThat(f.service.getPublicSession("tenant", null, legacy).id())
+                    .isEqualTo(legacy);
+            assertThat(f.service.getPublicSession(OWNER, legacy).id())
+                    .isEqualTo(legacy);
+        });
+    }
+
+    @Test
     void storeRejectsPrincipalFromAnotherTenantBeforeReadingOrCreatingOwnership() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {

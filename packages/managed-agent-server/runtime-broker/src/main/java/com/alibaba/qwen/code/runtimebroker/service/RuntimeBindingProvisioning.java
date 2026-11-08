@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -108,7 +107,6 @@ final class RuntimeBindingProvisioning {
     private static final Set<String> IDENTITY_FAILURES = Set.of(
             "managed_runtime_identity_conflict",
             "managed_runtime_unauthorized");
-
 
     CompletionStage<BindingContext> ensureBinding(
             RuntimeProvisionRequest request) {

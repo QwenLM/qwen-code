@@ -111,6 +111,18 @@ class ExternalWorkspaceProvisionerTest {
     /** Places the worker for one test and returns its handle and lease. */
     private Placement place(ExternalWorkspaceProvisioner subject, String name) throws Exception {
         RuntimeProvisionRequest request = request();
+        return place(subject, name, request);
+    }
+
+    /** The resident (workspace-isolated) request shape reattachment serves. */
+    private static RuntimeProvisionRequest residentRequest() {
+        return new RuntimeProvisionRequest(new RuntimeScope(TENANT, ALIAS, "1", MOUNT,
+                CAPABILITY, "workspace"), null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE, ALIAS);
+    }
+
+    private Placement place(ExternalWorkspaceProvisioner subject, String name,
+            RuntimeProvisionRequest request) throws Exception {
         RuntimeProvisionSeed seed = seed(name);
         RuntimeResourceHandle handle = join(subject.ensureResource(request, seed, null));
         client.provisionResponse = Map.of("protocolVersion", 1,
@@ -287,6 +299,20 @@ class ExternalWorkspaceProvisionerTest {
         assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(placement.request(),
                 placement.seed(), placement.handle(), placement.lease())).getOutcome());
         assertTrue(subject.isUsable(placement.lease()));
+    }
+
+    @Test
+    void aSessionIsolatedUnknownNeverAttemptsReattach() throws Exception {
+        // The design keeps reattachment on the resident (workspace-isolated)
+        // profile only: a session-isolated provider without a reattach
+        // endpoint must keep its placement and answer UNKNOWN, not conflict.
+        ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        Placement placement = place(subject, "session-unknown");
+        client.observeState = "UNKNOWN";
+        assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(placement.request(),
+                placement.seed(), placement.handle(), placement.lease())).getOutcome());
+        assertTrue(subject.isUsable(placement.lease()));
+        assertEquals(0, client.reattaches.size());
     }
 
     @Test
@@ -592,7 +618,7 @@ class ExternalWorkspaceProvisionerTest {
     @Test
     void freshProvisionerReattachesAnUnknownOldBindingWithoutProvisioning() throws Exception {
         var first = provisioner(registration(PROVIDER, 1, MOUNT));
-        var original = place(first, "reattach-ready");
+        var original = place(first, "reattach-ready", residentRequest());
         first.close();
 
         var subject = provisioner(registration(PROVIDER, 1, MOUNT));
@@ -623,7 +649,7 @@ class ExternalWorkspaceProvisionerTest {
     @Test
     void reattachEndpointDriftFailsClosedWithoutProvisioning() throws Exception {
         var first = provisioner(registration(PROVIDER, 1, MOUNT));
-        var original = place(first, "reattach-drift");
+        var original = place(first, "reattach-drift", residentRequest());
         first.close();
 
         var subject = provisioner(registration(PROVIDER, 1, MOUNT));
@@ -643,7 +669,7 @@ class ExternalWorkspaceProvisionerTest {
     @Test
     void reattachUnknownRemainsUnknownAndRetryable() throws Exception {
         var first = provisioner(registration(PROVIDER, 1, MOUNT));
-        var original = place(first, "reattach-unknown");
+        var original = place(first, "reattach-unknown", residentRequest());
         first.close();
 
         var subject = provisioner(registration(PROVIDER, 1, MOUNT));
@@ -661,7 +687,7 @@ class ExternalWorkspaceProvisionerTest {
     @Test
     void reattachGoneIsPermanentAndCreatesNothing() throws Exception {
         var first = provisioner(registration(PROVIDER, 1, MOUNT));
-        var original = place(first, "reattach-gone");
+        var original = place(first, "reattach-gone", residentRequest());
         first.close();
 
         var subject = provisioner(registration(PROVIDER, 1, MOUNT));

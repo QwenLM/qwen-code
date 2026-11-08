@@ -143,6 +143,50 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
     },
   );
 
+  it('admits an ephemeral boot without a registration journal and fences its identity', async () => {
+    boot = {
+      ...boot,
+      storage: {
+        kind: 'ephemeral',
+        workspaceId: 'workspace-a',
+        mountRoot: boot.mountRoot,
+        registrationRevision: 1,
+        provisionRequestId: 'provision-a',
+        runtimeIncarnation: 'incarnation-a',
+      },
+    } as ManagedExternalContextBoot;
+    await fs.writeFile(path.join(root, 'boot.json'), JSON.stringify(boot), {
+      mode: 0o600,
+    });
+    const parsed = await readManagedRuntimeContainerBoot(
+      path.join(root, 'boot.json'),
+    );
+    expect(parsed).toEqual(boot);
+    const mounted = await activateManagedExternalStorage(
+      parsed as ManagedExternalContextBoot,
+    );
+    await mounted.verify();
+    // Identity substitution against the trusted boot envelope is refused.
+    for (const drift of [
+      { workspaceId: 'workspace-b' },
+      { provisionRequestId: 'provision-b' },
+      { runtimeIncarnation: 'incarnation-b' },
+    ]) {
+      const drifted = {
+        ...boot,
+        storage: { ...boot.storage, ...drift },
+      };
+      await fs.writeFile(
+        path.join(root, 'boot.json'),
+        JSON.stringify(drifted),
+        { mode: 0o600 },
+      );
+      await expect(
+        readManagedRuntimeContainerBoot(path.join(root, 'boot.json')),
+      ).rejects.toThrow('boot payload is invalid');
+    }
+  });
+
   it.each(['/', '/a/../b', '/a//b', '/a/./b', '/a/', 'relative'])(
     'rejects noncanonical mount %s',
     async (mountRoot) => {

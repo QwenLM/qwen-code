@@ -185,6 +185,27 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
+    void dispatchesQueuedMessagesOfALegacySessionWithoutAnOwnershipRow() {
+        String legacy = agents.createSession(TENANT, null,
+                "legacy-" + UUID.randomUUID(), "qwen-code", null, "legacy",
+                Map.of(), List.of()).sessionId();
+        Message first = messages.command(TENANT, ACTOR, legacy, "legacy-first",
+                submit("legacy")).messages().getFirst();
+        messages.startNext(TENANT, legacy, (principal, key, target, input) -> {
+            var admission = store.insertTurnCommand(principal.tenantId(),
+                    "queue-test", key, "digest", target, first.input(),
+                    "sha256:" + "0".repeat(64), principal);
+            return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
+                    target, admission.turnId(), "ACCEPTED", false);
+        });
+        assertThat(messages.queryMessages(TENANT, ACTOR, legacy).messages())
+                .singleElement().satisfies(message -> {
+                    assertThat(message.state()).isEqualTo("claimed");
+                    assertThat(message.turnId()).isNotBlank();
+                });
+    }
+
+    @Test
     void editsInPlaceAndRejectsStaleRevisionBeforeWithdrawing() {
         Message first = command("first", submit("first")).messages().getFirst();
         command("second", submit("second"));

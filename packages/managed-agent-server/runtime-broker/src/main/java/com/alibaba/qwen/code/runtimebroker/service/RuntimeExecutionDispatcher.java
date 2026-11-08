@@ -246,19 +246,8 @@ final class RuntimeExecutionDispatcher {
                         // execution first, so the record the caller polls
                         // carries the refusal instead of hanging PREPARED with
                         // no dispatch owner.
-                        ToolExecutionRecord stranded =
-                                executionRepository.findByExecutionCallId(
-                                        prepared.getExecutionCallId());
-                        if (stranded != null && stranded.sameIdentity(prepared)
-                                && stranded.getState()
-                                        == ToolExecutionRecord.State.PREPARED) {
-                            executionRepository.settlePrepared(stranded, Map.of(
-                                    "executionStatus", "not_started",
-                                    "responseParts", List.of(),
-                                    "error", Map.of("type", "dispatch_timeout",
-                                            "message", "Shared Workspace dispatch slot did not free in time")),
-                                    clock.instant());
-                        }
+                        settleStrandedPrepared(prepared, "dispatch_timeout",
+                                "Shared Workspace dispatch slot did not free in time");
                         throw conflict("runtime_execution_conflict",
                                 "Shared Workspace dispatch slot did not free in time");
                     }
@@ -302,12 +291,36 @@ final class RuntimeExecutionDispatcher {
                                 });
                     }
                 } catch (RuntimeException | Error error) {
+                    // Every exceptional exit feeds the same write-only future,
+                    // so the stranded PREPARED row must settle here too or it
+                    // hangs the caller's poll and fences the binding's release
+                    // forever (the reconciler skips PREPARED rows).
+                    try {
+                        settleStrandedPrepared(prepared, "dispatch_failed",
+                                "Shared Workspace dispatch failed before claim");
+                    } catch (RuntimeException | Error settleFailure) {
+                        error.addSuppressed(settleFailure);
+                    }
                     queued.completeExceptionally(error);
                 }
             }
         };
         scheduler.schedule(tick, 250, TimeUnit.MILLISECONDS);
         return queued;
+    }
+
+    private void settleStrandedPrepared(ToolExecutionRecord prepared,
+            String errorType, String message) {
+        ToolExecutionRecord stranded = executionRepository
+                .findByExecutionCallId(prepared.getExecutionCallId());
+        if (stranded != null && stranded.sameIdentity(prepared)
+                && stranded.getState() == ToolExecutionRecord.State.PREPARED) {
+            executionRepository.settlePrepared(stranded, Map.of(
+                    "executionStatus", "not_started",
+                    "responseParts", List.of(),
+                    "error", Map.of("type", errorType, "message", message)),
+                    clock.instant());
+        }
     }
 
     private CompletionStage<Void> dispatchClaimed(

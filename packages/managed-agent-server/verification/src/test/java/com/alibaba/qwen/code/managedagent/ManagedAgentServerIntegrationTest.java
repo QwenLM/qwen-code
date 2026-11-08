@@ -243,7 +243,7 @@ class ManagedAgentServerIntegrationTest {
                 .agentRevision()).isEqualTo("2");
         assertThat(store.requireSession(tenant, first.sessionId())
                 .agentRevision()).isEqualTo("1");
-        assertThat(upgraded.getPublicSession(tenant, null, first.sessionId())
+        assertThat(upgraded.getPublicSession(tenant, "revision-actor", first.sessionId())
                 .agentRevision()).isEqualTo("1");
     }
 

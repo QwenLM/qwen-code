@@ -38,8 +38,13 @@ class TenantContextFilterTest {
     void acceptsTrustedActorIdsAtTheUnicodeBoundary() throws Exception {
         // The ownership columns bound UTF-8 bytes: 128 astral code points
         // are exactly 512 bytes and must pass, like 512 ASCII characters.
+        // The gate itself counts code points as WorkspaceValues.requireText
+        // does: 257-512 astral code points exceed 512 UTF-16 units yet stay
+        // inside the Workspace contract, so the filter must admit them (the
+        // stricter principal byte bound applies where a principal is built).
         for (String actorId : new String[] {"alice@example.com",
-                "a".repeat(512), "𝄞".repeat(128)}) {
+                "a".repeat(512), "𝄞".repeat(128), "𝄞".repeat(300),
+                "𝄞".repeat(512)}) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor("tenant-a", actorId));
             MockHttpServletResponse response = new MockHttpServletResponse();
@@ -73,10 +78,10 @@ class TenantContextFilterTest {
             throws ServletException, IOException {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
-                // 512 astral code points are 2048 UTF-8 bytes: the principal
-                // would reject them, so the boundary must refuse them before
-                // any controller can commit a Session it cannot represent.
-                actor("tenant-a", "𝄞".repeat(512)),
+                // 513 code points exceed the Workspace contract itself
+                // (WorkspaceValues.requireText), so the gate refuses them;
+                // 512 astral code points stay admitted at the filter and are
+                // refused only where a principal is actually built.
                 actor("tenant-a", "𝄞".repeat(513)),
                 actor("tenant-a", "a".repeat(513)),
                 actor("tenant-a", " "),

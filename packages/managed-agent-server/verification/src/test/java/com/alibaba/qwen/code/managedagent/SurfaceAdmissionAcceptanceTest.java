@@ -690,11 +690,18 @@ public class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"" + bound + "\"}"))
                 .andExpect(status().isOk());
-        // The legacy arm is tenant-wide, anonymous callers included.
+        // The legacy arm is tenant-wide, anonymous callers included — but
+        // only for a genuine no-row Session: the OWNER-created unbound
+        // Session carries an ownership row, so an actorless by-id read of it
+        // answers 404 exactly as the anonymous list page hides it.
         mvc.perform(get("/v1/agents/sessions/" + legacy)
                         .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
+        mvc.perform(get("/v1/agents/sessions/" + actorless)
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.id").value(legacy));
+                .andExpect(jsonPath("$.id").value(actorless));
     }
 
     @Test

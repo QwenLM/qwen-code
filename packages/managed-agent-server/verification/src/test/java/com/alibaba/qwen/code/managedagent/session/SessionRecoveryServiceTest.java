@@ -29,6 +29,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -258,6 +261,32 @@ class SessionRecoveryServiceTest {
                 .isInstanceOf(ManagedAgentException.class)
                 .hasMessage("The Session's recovery Turn has changed.");
         verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
+    void anAnonymousRecheckKeepsTheExplicitTenantOnTheLegacySession() {
+        // A null-principal read only answers inside an explicit tenant; the
+        // principal-derived overload would resolve tenant null and 404.
+        when(sessions.requireReadableSession(eq("tenant"),
+                isNull(SessionPrincipal.class), eq("session")))
+                .thenReturn(session);
+        when(sessions.requireReadableSession(
+                isNull(String.class), isNull(SessionPrincipal.class),
+                eq("session")))
+                .thenThrow(new ManagedAgentException(404, "session_not_found",
+                        "The Session was not found."));
+        turn("FAILED", "failure");
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("ready", null, "private-prompt",
+                        true, true, true));
+        var recovery = service.recheck("tenant", null, "session", "turn");
+        assertThat(recovery.state()).isEqualTo("ready");
+        verify(sessions, org.mockito.Mockito.atLeastOnce())
+                .requireReadableSession(eq("tenant"),
+                        isNull(SessionPrincipal.class), eq("session"));
+        verify(sessions, never()).requireReadableSession(
+                argThat(tenant -> tenant == null),
+                isNull(SessionPrincipal.class), eq("session"));
     }
 
     @Test

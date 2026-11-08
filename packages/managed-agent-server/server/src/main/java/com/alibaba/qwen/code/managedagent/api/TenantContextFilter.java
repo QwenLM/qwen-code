@@ -108,14 +108,14 @@ public class TenantContextFilter extends OncePerRequestFilter {
             // The global gate keeps the Workspace surface's actor contract, not
             // the principal's 512-UTF-8-byte bound: a 512-code-point BMP actor
             // (e.g. 512 CJK characters, 1536 bytes) is admitted here so
-            // workspace-only routes keep working, while an astral actor whose
-            // UTF-16 length exceeds the bound (e.g. 512 astral code points =
-            // 1024 units / 2048 bytes) is still refused before any controller
-            // runs. The stricter byte bound is enforced where a principal is
-            // actually built (TenantContext.requirePrincipal / the ownership
-            // row), so a Session can never be committed under an actor the
-            // principal cannot represent.
-            if (actorId.length()
+            // workspace-only routes keep working. The bound counts code
+            // points, exactly as WorkspaceValues.requireText does — a
+            // UTF-16 length check would refuse astral actors the Workspace
+            // contract admits. The stricter byte bound is enforced where a
+            // principal is actually built (TenantContext.requirePrincipal /
+            // the ownership row), so a Session can never be committed under
+            // an actor the principal cannot represent.
+            if (actorId.codePointCount(0, actorId.length())
                     > com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceValues.MAXIMUM_TEXT_CODE_POINTS) {
                 return false;
             }

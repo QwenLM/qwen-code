@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -72,9 +73,17 @@ class ExternalWorkspaceBootContractTest {
     }
 
     private static Map<String, Object> mintedBoot(String mountRoot, String isolationClass) throws Exception {
+        return mintedBoot(mountRoot, isolationClass, false);
+    }
+
+    private static Map<String, Object> mintedBoot(String mountRoot, String isolationClass,
+            boolean ephemeral) throws Exception {
         ExternalStorageRegistry registry = (tenant, alias) -> Optional.of(
-                new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL, 1,
-                        ALIAS, ALIAS_PATH, mountRoot));
+                ephemeral
+                        ? new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, null, 1,
+                                ALIAS, ALIAS_PATH, mountRoot, TENANT)
+                        : new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL, 1,
+                                ALIAS, ALIAS_PATH, mountRoot));
         var client = new CapturingClient();
         try (var provisioner = new ExternalWorkspaceProvisioner(client, registry, PROVIDER,
                 Duration.ofSeconds(5))) {
@@ -152,6 +161,46 @@ class ExternalWorkspaceBootContractTest {
         writeDescriptor(directory, "physical-other");
         Run refused = runParser(repoRoot, bootFile);
         assertNotEquals(0, refused.exitCode(), "a foreign registration must be refused");
+        assertTrue(refused.stderr().contains("boot payload is invalid"), refused.stderr());
+    }
+
+    @Test
+    @Timeout(120)
+    @DisabledOnOs(OS.WINDOWS)
+    void theShippedWorkerParserAdmitsTheMintedEphemeralBoot() throws Exception {
+        Path repoRoot = VerificationFixtures.repositoryRoot();
+        Assumptions.assumeTrue(Files.isRegularFile(repoRoot.resolve(
+                        "packages/cli/src/serve/managed-runtime-attestation-worker.ts")),
+                "needs the qwen-code checkout this module lives in");
+        Assumptions.assumeTrue(Files.isDirectory(repoRoot.resolve("node_modules/tsx")),
+                "needs the repository root dev install (node_modules/tsx) to run the worker parser");
+
+        Path directory = Files.createDirectory(temporary.toRealPath().resolve("boot"));
+        privateDirectory(directory, Set.of(PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
+        Path mountRoot = Files.createDirectory(directory.resolve("workspace"));
+        privateDirectory(mountRoot, Set.of(PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
+        // No registration.json: sandbox-owned storage carries its identity in
+        // the trusted boot envelope itself.
+        Map<String, Object> boot = mintedBoot(mountRoot.toString(), "workspace", true);
+        Path bootFile = writeBoot(directory, boot);
+
+        Run admitted = runParser(repoRoot, bootFile);
+        assertEquals(0, admitted.exitCode(), admitted.stderr());
+        assertTrue(admitted.stdout().contains("\"kind\":\"ephemeral\""), admitted.stdout());
+
+        // Negative control: identity drift against the boot envelope must be
+        // refused, proving the ephemeral arm fences something.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> storage = (Map<String, Object>) boot.get("storage");
+        Map<String, Object> drifted = new java.util.LinkedHashMap<>(boot);
+        Map<String, Object> driftedStorage = new java.util.LinkedHashMap<>(storage);
+        driftedStorage.put("runtimeIncarnation", "incarnation-other");
+        drifted.put("storage", driftedStorage);
+        writeBoot(directory, drifted);
+        Run refused = runParser(repoRoot, bootFile);
+        assertNotEquals(0, refused.exitCode(), "a drifted ephemeral identity must be refused");
         assertTrue(refused.stderr().contains("boot payload is invalid"), refused.stderr());
     }
 

@@ -227,8 +227,10 @@ final class AgentSessionQueries {
     /**
      * Bound Sessions keep Workspace read grants. Unbound Sessions require
      * the immutable ownership row to match tenant, user and actor presence
-     * plus subject exactly; legacy rows without an ownership record remain
-     * invisible.
+     * plus subject exactly. A genuine legacy unbound Session that never
+     * wrote an ownership row (and carries no principal-created creation
+     * receipt) lists tenant-wide, anonymous callers included; only
+     * row-bearing Sessions are owner-scoped.
      */
     SessionPage listSessions(String tenantId,
             SessionPrincipal principal, Long beforeCreatedAt,

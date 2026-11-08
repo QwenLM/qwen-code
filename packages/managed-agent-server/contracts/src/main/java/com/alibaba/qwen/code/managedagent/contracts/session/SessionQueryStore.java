@@ -47,7 +47,8 @@ public interface SessionQueryStore {
     /**
      * A page whose ownership filter runs before the cursor and limit. Bound
      * Sessions retain Workspace grants; unbound Sessions require an exact
-     * principal match and legacy rows without an ownership row stay hidden.
+     * principal match, while genuine legacy rows that never wrote an
+     * ownership row list tenant-wide (anonymous callers included).
      */
     public default SessionPage listSessions(String tenantId,
             SessionPrincipal principal, Long beforeCreatedAt,

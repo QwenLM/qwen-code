@@ -79,7 +79,12 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
 
     @Override
     protected boolean supportsReattach(RuntimeProvisionRequest request) {
-        return isWorkspaceRequest(request);
+        // Only the resident Workspace profile reattaches (design:
+        // managed-external-reattach). The session-isolated arm keeps the
+        // provision/observe shape: a provider without a reattach endpoint
+        // would turn its UNKNOWN observation into a permanent conflict.
+        return isWorkspaceRequest(request)
+                && "workspace".equals(request.getScope().getIsolationClass());
     }
 
     /** Verifies the saved original for acquisition; never provisions a replacement. */

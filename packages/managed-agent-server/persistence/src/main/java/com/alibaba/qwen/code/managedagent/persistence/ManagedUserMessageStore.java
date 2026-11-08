@@ -313,7 +313,18 @@ public class ManagedUserMessageStore
         }
         ManagedSessionPrincipal.Row row = ManagedSessionPrincipal.find(jdbc,
                 tenant, session);
-        if (row == null || !owner.actorId().equals(row.userId())) {
+        if (row == null) {
+            // A legacy Session never wrote an ownership row: dispatch on
+            // behalf of the actor recorded on the queued message under the
+            // unified authority, so a principal-created Session whose row
+            // was deleted still refuses while genuine legacy queues run.
+            SessionPrincipal queued = SessionPrincipal.ofUser(tenant,
+                    owner.actorId());
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenant, session,
+                    queued);
+            return queued;
+        }
+        if (!owner.actorId().equals(row.userId())) {
             throw new ManagedAgentException(404, "session_not_found",
                     "The Session was not found.");
         }

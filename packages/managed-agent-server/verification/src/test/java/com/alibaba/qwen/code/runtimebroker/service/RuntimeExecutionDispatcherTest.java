@@ -302,6 +302,70 @@ class RuntimeExecutionDispatcherTest {
                 any(Instant.class));
     }
 
+    @Test
+    void anExceptionalSharedDispatchExitSettlesTheStrandedPreparedRecord() throws Exception {
+        var registry = mock(RuntimeBindingRegistry.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var scheduler = mock(ScheduledExecutorService.class);
+        var context = mock(SessionContext.class);
+        var binding = mock(RuntimeBindingRecord.class);
+        var session = mock(RuntimeSession.class);
+        var prepared = mock(ToolExecutionRecord.class);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(binding.getRequest()).thenReturn(request);
+        when(context.binding()).thenReturn(binding);
+        when(context.session()).thenReturn(session);
+        when(session.getScope()).thenReturn(scope);
+        when(session.getHarnessSessionId()).thenReturn("harness");
+        when(prepared.getExecutionCallId()).thenReturn("execution");
+        when(prepared.getState()).thenReturn(ToolExecutionRecord.State.PREPARED);
+        when(prepared.sameIdentity(prepared)).thenReturn(true);
+        when(prepared.getReference()).thenReturn(Map.of("sessionId", "runtime", "dispatchMode", "deferred"));
+        when(executions.findByExecutionCallId("execution")).thenReturn(prepared);
+        var ticks = new java.util.ArrayList<Runnable>();
+        when(scheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> {
+            ticks.add(call.getArgument(0));
+            return mock(ScheduledFuture.class);
+        });
+        var dispatcher = new RuntimeExecutionDispatcher(registry, mock(RuntimeExecutionState.class), bindings,
+                sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
+                mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
+                Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
+                scheduler, mock(ScheduledExecutorService.class), new AtomicBoolean());
+        dispatcher.beginDispatch(context, prepared, Map.of("toolName", "read_file", "input", Map.of()), null,
+                com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file"));
+        var field = RuntimeExecutionDispatcher.class.getDeclaredField("dispatches");
+        field.setAccessible(true);
+        var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>) field.get(dispatcher);
+        var queued = dispatches.get("execution");
+        assertNotNull(queued);
+        // The admission gate passes at beginDispatch and fails inside the
+        // wait, so the exceptional exit under test is the tick's own.
+        org.mockito.Mockito.doThrow(new RuntimeBrokerException(409,
+                "runtime_binding_not_ready", "Binding is not ready.", false))
+                .when(bindings).requireHarnessAdmission(eq(request), eq(scope),
+                        eq("harness"), org.mockito.ArgumentMatchers.isNull());
+        ticks.getFirst().run();
+        var error = assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> queued.get(1, TimeUnit.SECONDS));
+        assertEquals("runtime_binding_not_ready",
+                ((RuntimeBrokerException) error.getCause()).getCode());
+        // The write-only future never surfaces this refusal to the caller, so
+        // the stranded PREPARED row must settle here — otherwise it hangs the
+        // caller's poll and fences the binding's release forever.
+        verify(executions).settlePrepared(eq(prepared), argThat(result ->
+                "not_started".equals(result.get("executionStatus"))
+                        && result.get("error") instanceof Map<?, ?> refusal
+                        && "dispatch_failed".equals(refusal.get("type"))),
+                any(Instant.class));
+    }
+
     private static final class Fixture {
         private static final Duration LEASE = Duration.ofSeconds(60);
         private static final Map<String, Object> REFERENCE = Map.of("sessionId", "runtime");

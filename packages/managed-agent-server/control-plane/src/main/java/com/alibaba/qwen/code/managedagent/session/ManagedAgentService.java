@@ -2457,14 +2457,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     void requireReadGrant(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            // A present principal meets the unified read authority — its
-            // ownership row, or tenant-wide visibility for a legacy Session
-            // that never wrote a row. The action surface reads tenant-wide
-            // through requireActionReadableSession instead.
-            if (principal != null) {
-                store.requireSessionReadAuthority(session.tenantId(),
-                        session.sessionId(), principal);
-            }
+            // The unified read authority runs for every caller, anonymous
+            // included: a present ownership row is the sole authority (a
+            // null principal never matches it), while a genuine legacy
+            // Session that never wrote a row stays tenant-wide. The action
+            // surface reads tenant-wide through requireActionReadableSession
+            // instead.
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), principal);
             return;
         }
         if (!workspaces.canRead(session.tenantId(),

@@ -2320,7 +2320,7 @@ final class WorkspaceCsiApplicationInventory {
                     }
                     case "ma_session", "ma_turn", "ma_public_event", "ma_event_stream", "ma_message",
                             "ma_session_record", "ma_session_journal_tx", "ma_channel_binding", "ma_schedule",
-                            "ma_schedule_occurrence", "ma_session_principal" ->
+                            "ma_schedule_occurrence" ->
                             otherSession(row.text("tenant_id"), row.text("workspace_id"), row.text("session_id"))
                                     && (row.cell("session_scope_key") == null || Objects.equals(row.text("session_scope_key"),
                                             com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))));
