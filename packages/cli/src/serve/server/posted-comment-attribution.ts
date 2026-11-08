@@ -37,19 +37,24 @@ export function reviewCommentKey(id: string | number): string {
 const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'shell']);
 
 /**
- * Commands that CREATE a comment. Reads/lists (`gh pr view`, `gh api` GET,
- * `listComments`) deliberately do not match, so inspecting a comment never
- * suppresses its delivery. Subcommand patterns are tested on the quote-stripped
- * stage; path patterns on a quote-unwrapped copy (a quoted collection path
- * still counts). Review bodies (`gh pr review`, `pulls/<n>/reviews`) are out of
- * scope — the watch does not deliver them — and a review-object id lives in a
- * different id table than inline review comments, so neither pattern is
- * recognized here.
+ * A comment subcommand must sit at the COMMAND position (optionally behind a
+ * wrapper or environment assignment), not merely appear as a substring: a shell
+ * comment `… # gh pr comment` or an unquoted `grep gh pr comment …` is a read.
+ * Reads/lists never match, so inspecting a comment never suppresses its
+ * delivery. Review bodies (`gh pr review`, `pulls/<n>/reviews`) are out of scope
+ * — the watch does not deliver them — and a review-object id lives in a
+ * different id table than inline review comments, so they are not recognized.
  */
-const SUBCOMMAND_PATTERNS: readonly RegExp[] = [
-  /\bgh\s+pr\s+comment\b/,
-  /\bgh\s+issue\s+comment\b/,
-];
+const SUBCOMMAND_STAGE_START =
+  /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)*gh\s+(?:pr|issue)\s+comment\b/;
+
+/**
+ * Leads a `gh`/`curl` invocation (read or write). Used to count how many API
+ * commands a chain runs: when a creation is chained with another API command,
+ * a bare-URL output cannot be proven to come from the creation.
+ */
+const API_COMMAND_LEAD =
+  /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+|(?:env|time|nohup|command|sudo)\s+)*(?:gh|curl)\b/;
 
 const PATH_PATTERNS: readonly RegExp[] = [
   // gh api / curl writing to a comments collection.
@@ -70,14 +75,16 @@ const PATH_PATTERNS: readonly RegExp[] = [
  * pattern matches and a session that only read comments is recorded as their
  * author, permanently withholding events it should receive.
  */
-const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|-X\s*)GET\b/i;
+const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|--request[=\s]+|-X\s*)GET\b/i;
 
 /**
- * A quoted GET method value (`--method "GET"`, `-X 'GET'`) is a real GET flag;
- * unwrap it so the veto still sees it after quote-stripping. GET text inside a
- * quoted body (`-f body='--method GET'`) is not a flag and must not veto a POST.
+ * A quoted GET method value (`--method "GET"`, `-X 'GET'`, `--request "GET"`) is
+ * a real GET flag; unwrap it so the veto still sees it after quote-stripping. GET
+ * text inside a quoted body (`-f body='--method GET'`) is not a flag and must not
+ * veto a POST.
  */
-const QUOTED_GET_VALUE_PATTERN = /(--method[=\s]+|-X\s*)["']GET["']/gi;
+const QUOTED_GET_VALUE_PATTERN =
+  /(--method[=\s]+|--request[=\s]+|-X\s*)["']GET["']/gi;
 
 /**
  * Drop quoted spans so a creation subcommand or write flag inside a quoted
@@ -88,6 +95,31 @@ const QUOTED_GET_VALUE_PATTERN = /(--method[=\s]+|-X\s*)["']GET["']/gi;
  */
 function stripQuotedSpans(command: string): string {
   return command.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+}
+
+/**
+ * Drop a trailing shell comment: an unquoted `#` at the start of a word begins
+ * a comment, so `gh api …/comments --jq … # gh pr comment` is a read, not a
+ * creation. A `#` inside quotes (a body) or inside a word (`foo#bar`, a URL
+ * fragment) is not a comment. Best-effort, like the quote handling.
+ */
+function stripShellComment(segment: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!;
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /\s/.test(segment[i - 1]!))) {
+      return segment.slice(0, i);
+    }
+  }
+  return segment;
 }
 
 /**
@@ -165,7 +197,10 @@ function commandSegments(command: string): string[] {
 const API_STAGE_START =
   /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)*(?:gh\s+api|curl)\b/;
 
-function segmentIsCreation(segment: string): boolean {
+function segmentIsCreation(rawSegment: string): boolean {
+  // A trailing shell comment is not part of the command: `… # gh pr comment`
+  // must not pass for a creation.
+  const segment = stripShellComment(rawSegment);
   // An explicit GET is a read even with field flags (gh api sends them as query
   // parameters on a GET). Unwrap a quoted GET method value first so the veto
   // still sees it, then strip quoted spans so GET text inside a body does not
@@ -183,8 +218,9 @@ function segmentIsCreation(segment: string): boolean {
   ) {
     return false;
   }
-  if (SUBCOMMAND_PATTERNS.some((pattern) => pattern.test(stripped)))
-    return true;
+  // The subcommand must be at the command position, not a substring of a comment
+  // or a search argument.
+  if (SUBCOMMAND_STAGE_START.test(stripped)) return true;
   // A quoted collection path still counts, so test the path patterns on a copy
   // with quote characters removed (content kept). Require the stage to be led by
   // gh api / curl (possibly behind a wrapper or capture) so a read-only search
@@ -202,6 +238,18 @@ function segmentIsCreation(segment: string): boolean {
 /** The first stage that is a creation, for both detection and target typing. */
 function creationSegment(command: string): string | undefined {
   return commandSegments(command).find((segment) => segmentIsCreation(segment));
+}
+
+/**
+ * How many `gh`/`curl` invocations (read or write) the chain runs. A bare-URL
+ * output is only attributable to a creation when it is the sole API command:
+ * `gh pr comment … >/dev/null && gh api … --jq '.[0].html_url'` takes its URL
+ * from the read, so counting URLs cannot prove ownership there.
+ */
+function apiCommandCount(command: string): number {
+  return commandSegments(command).filter((segment) =>
+    API_COMMAND_LEAD.test(stripQuotedSpans(stripShellComment(segment))),
+  ).length;
 }
 
 /**
@@ -261,12 +309,40 @@ export function extractPostedCommentIds(entry: unknown): string[] {
       output.match(/\nOutput: ([\s\S]*)$/)?.[1] ??
       '';
 
-    // Harvest only a creation-shaped response, never a listing or free text: a
-    // create returns exactly one comment URL, a single JSON object, or a bare
-    // id. A compound "create && list" or a body quoting another comment's URL
-    // yields several candidates, which is ambiguous — attribute nothing there
-    // (fail-open: the author may self-echo once, but a mere reader is never
-    // credited with comments it only listed).
+    // Harvest only a creation-shaped response, never a listing or free text.
+    // Prefer the structured result: a single JSON object's top-level id is the
+    // created comment, and a URL quoted inside its body is data, not another
+    // posted comment — so do not URL-scan a structured result. A bare id is the
+    // `--jq '.id'` shape. A bare URL is only attributable when the creation is
+    // the sole API command in the chain; otherwise the URL may come from a
+    // chained read (fail-open: the author may self-echo once, but a mere reader
+    // is never credited with comments it only read).
+    const target = creationTarget(segment);
+    const trimmed = result.trim();
+    const keyFor = (id: string | number): string =>
+      target === 'issue-comment' ? issueCommentKey(id) : reviewCommentKey(id);
+    if (target && trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (
+          parsed !== null &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed)
+        ) {
+          const id = (parsed as { id?: unknown }).id;
+          if (typeof id === 'number' && Number.isSafeInteger(id)) {
+            ids.add(keyFor(id));
+            continue;
+          }
+        }
+      } catch {
+        // Not JSON; fall through to the bare shapes.
+      }
+    }
+    if (target && /^\d+$/.test(trimmed)) {
+      ids.add(keyFor(trimmed));
+      continue;
+    }
     const urlMatches = [...result.matchAll(/issuecomment-(\d+)/g)].map((m) =>
       issueCommentKey(m[1]!),
     );
@@ -275,38 +351,8 @@ export function extractPostedCommentIds(entry: unknown): string[] {
         reviewCommentKey(m[1]!),
       ),
     );
-    if (urlMatches.length === 1) {
+    if (urlMatches.length === 1 && apiCommandCount(command) <= 1) {
       ids.add(urlMatches[0]!);
-    }
-    const target = creationTarget(segment);
-    if (target) {
-      const trimmed = result.trim();
-      const keyFor = (id: string | number): string =>
-        target === 'issue-comment' ? issueCommentKey(id) : reviewCommentKey(id);
-      // A single JSON object's top-level id (not a listing array, not a nested
-      // user.id).
-      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-        try {
-          const parsed: unknown = JSON.parse(trimmed);
-          if (
-            parsed !== null &&
-            typeof parsed === 'object' &&
-            !Array.isArray(parsed)
-          ) {
-            const id = (parsed as { id?: unknown }).id;
-            if (typeof id === 'number' && Number.isSafeInteger(id)) {
-              ids.add(keyFor(id));
-            }
-          }
-        } catch {
-          // Not JSON; fall through to the bare-id shape.
-        }
-      }
-      // A recognised creation whose whole output is a bare number is the
-      // `gh api … --input payload.json --jq '.id'` publish shape.
-      if (/^\d+$/.test(trimmed)) {
-        ids.add(keyFor(trimmed));
-      }
     }
   }
   return [...ids];

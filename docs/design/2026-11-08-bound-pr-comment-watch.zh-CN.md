@@ -58,8 +58,8 @@
 
 新增只读路由，返回某会话**发过**的评论标识集合，源自其 transcript：
 
-- 扫描 `<chatsDir>/<sessionId>.jsonl` 的 `tool_result` 条目。当所执行命令是评论**创建**（识别模式：`gh pr comment`、`gh issue comment`，以及 `gh api`/`curl` POST 到 `issues/<n>/comments` 或 `pulls/<n>/comments`）时，把评论 id 归因给该会话。review 正文（`gh pr review`、`pulls/<n>/reviews`）超出范围、不被识别。只收割**创建形态的响应**——恰好一条评论 URL（`issuecomment-(\d+)` / `discussion_r(\d+)`）、单个 JSON 对象的顶层 `id`、或一行纯数字——归一化为 `ic:<id>` / `rc:<id>` 并键到创建自身的集合。复合的「创建 && 列表」或正文引用他人评论 URL 属歧义，不归因任何内容（fail-open）。
-- 读取/列表不归因（只有创建归因）：显式 GET 即便带字段参数也被否决，链尾的 `stat -f` 或引号内的 `grep 'gh pr comment'` 属读取，`curl -G` 属读取。仅查看过某评论的会话仍会收到该事件。
+- 扫描 `<chatsDir>/<sessionId>.jsonl` 的 `tool_result` 条目。当所执行命令在**命令位置**是评论**创建**（识别：`gh pr comment`、`gh issue comment`，以及 `gh api`/`curl` POST 到 `issues/<n>/comments` 或 `pulls/<n>/comments`）时，把评论 id 归因给该会话。review 正文（`gh pr review`、`pulls/<n>/reviews`）超出范围、不被识别。收割**优先结构化结果**：单个 JSON 对象的顶层 `id` 即所创建评论，其正文里引用的 URL 属数据（不再扫描）；一行纯数字是 `--jq '.id'` 形态；单条评论 URL（`issuecomment-(\d+)` / `discussion_r(\d+)`）仅当创建是链中**唯一**的 `gh`/`curl` 命令时才归因——链式读取可能产出该 URL。id 归一化为 `ic:<id>` / `rc:<id>` 并键到创建自身的集合。歧义输出不归因任何内容（fail-open）。
+- 读取/列表不归因（只有创建归因）：显式 GET 即便带字段参数也被否决（`--method`/`--request`/`-X`，含带引号的方法值），`curl -G`/`--get` 属读取，剥离行尾 shell 注释（故 `… # gh pr comment` 或注释里的写标志不算创建），子命令须位于命令位置（引号内或未加引号的 `grep gh pr comment` 属读取），链尾的 `stat -f` 不算写标志。仅查看过某评论的会话仍会收到该事件。
 - 增量：按会话以 transcript 水位（size/mtime + 已扫描偏移）为键缓存，受 FIFO 扫描缓存上限约束；只重扫追加的行。transcript 不可读/缺失时返回空集（对投递 fail-open：宁可投递也不静默丢弃），绝不成为剪枝绑定的理由。查询以非 200 或请求异常失败时，worker 记一条节流诊断，使由此产生的自投递回环可与「安静的 PR」区分。
 - 给 `ChannelBoundSessions` 增加 `postedCommentIds(sessionId): Promise<ReadonlySet<string>>`；daemon worker 通过新路由实现。standalone 模式缺失 → 不抑制（今天的行为）。
 

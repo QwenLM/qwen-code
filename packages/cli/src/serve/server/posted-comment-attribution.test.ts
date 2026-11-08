@@ -399,6 +399,70 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('701')]);
   });
 
+  it('credits only the top-level id of a JSON result, not a URL quoted in its body', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments -f body='see https://github.com/o/r/pull/42#issuecomment-111' --jq '{id,body}'",
+      '{"id":900,"body":"see https://github.com/o/r/pull/42#issuecomment-111"}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('900')]);
+  });
+
+  it('does not attribute a bare URL produced by a read chained after a redirected creation', () => {
+    const entry = shellResult(
+      "gh pr comment 42 --body-file report.md >/dev/null && gh api repos/o/r/issues/42/comments --jq '.[0].html_url'",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a lone creation whose output is a single comment URL', () => {
+    const entry = shellResult(
+      'gh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-777',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('777')]);
+  });
+
+  it('does not attribute a read whose shell comment merely names a creation subcommand', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments --jq '.[0].html_url' # gh pr comment",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not attribute a read whose shell comment contains a write flag', () => {
+    const entry = shellResult(
+      'gh api repos/o/r/issues/42/comments # -f body=x',
+      '{"id":111}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not attribute an unquoted search for a creation subcommand', () => {
+    const entry = shellResult(
+      'grep -n gh pr comment scripts/post.sh',
+      'https://github.com/o/r/pull/1#issuecomment-999',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('vetoes curl --request GET even when a jq stage reduces the listing to one URL', () => {
+    const entry = shellResult(
+      "curl --request GET https://api.github.com/repos/o/r/issues/42/comments -d per_page=100 | jq -r '.[0].html_url'",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('vetoes a quoted curl --request "GET" method value', () => {
+    const entry = shellResult(
+      'curl --request "GET" https://api.github.com/repos/o/r/issues/42/comments -d per_page=100',
+      '{"id":111}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
   it('ignores non-shell tool results and malformed entries', () => {
     expect(extractPostedCommentIds(null)).toEqual([]);
     expect(extractPostedCommentIds({})).toEqual([]);
