@@ -348,6 +348,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // admin directory and with it that worktree's HEAD, reflog and any
   // submodule repository.
   workspace_git_worktrees: { since: 'v1' },
+  // Read-only, bounded Git ignore classification for per-turn file summaries.
+  workspace_git_check_ignore: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -490,6 +492,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   multi_workspace_session_shell: { since: 'v1' },
   dynamic_workspace_registration: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  workspace_order: { since: 'v1' },
   // Optional presentation-only names and updates to those names for workspace
   // runtimes. Workspace ids and canonical paths remain the routing identities.
   workspace_display_name: { since: 'v1' },
@@ -882,6 +885,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'persistent_workspace_registration',
+    (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'workspace_order',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
   ],
   [

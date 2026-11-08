@@ -8039,6 +8039,7 @@ export function createSessionControlPlane(
     | 'lifecycleReplayIncomplete'
     | 'lastEventId'
     | 'eventEpoch'
+    | 'replayProjectionWatermark'
     | 'replayDegraded'
     | 'partial'
     | 'replayError'
@@ -8089,6 +8090,9 @@ export function createSessionControlPlane(
         lastEventId: snapshot.lastEventId,
         eventEpoch,
         ...replayStatus,
+        ...(snapshot.replayProjectionWatermark !== undefined
+          ? { replayProjectionWatermark: snapshot.replayProjectionWatermark }
+          : {}),
         ...(snapshot.degraded ? { replayDegraded: true } : {}),
         ...(entry.restoreHistoryHasMore === true
           ? { historyHasMore: true }
@@ -8231,6 +8235,7 @@ export function createSessionControlPlane(
       try {
         const lastEventId = entry.events.lastEventId;
         const eventEpoch = entry.events.epoch;
+        const projectionWatermark = entry.events.replayProjectionWatermark;
         const seenCursors = new Set<string>();
         let emptyPageCount = 0;
         let cursor: string | undefined;
@@ -8270,7 +8275,8 @@ export function createSessionControlPlane(
           !entry.promptActive &&
           !entry.backgroundTurn &&
           entry.events.epoch === eventEpoch &&
-          entry.events.lastEventId === lastEventId
+          entry.events.lastEventId === lastEventId &&
+          entry.events.replayProjectionWatermark === projectionWatermark
         ) {
           let compactedReplay = page.events;
           const turnErrorEvent = entry.turnErrorEvent;
@@ -8570,14 +8576,22 @@ export function createSessionControlPlane(
       );
     }
     const restored = await restoreSessionWithReplay(action, req, options);
-    return action === 'load' &&
-      req.compactedReplayMode === 'summary' &&
-      restored.compactedReplay
-      ? {
-          ...restored,
-          compactedReplay: summarizeReplay(restored.compactedReplay),
-        }
-      : restored;
+    if (
+      action === 'load' &&
+      (req.compactedReplayMode === 'summary' ||
+        req.liveReplayMode === 'summary')
+    ) {
+      const projected = {
+        ...restored,
+        ...(req.compactedReplayMode === 'summary' && restored.compactedReplay
+          ? { compactedReplay: summarizeReplay(restored.compactedReplay) }
+          : {}),
+      };
+      // Coalesced summary waiters can inherit the full owner's fields.
+      delete projected.replayProjectionWatermark;
+      return projected;
+    }
+    return restored;
   }
 
   async function restoreSessionWithReplay(
