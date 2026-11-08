@@ -1338,6 +1338,44 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     });
   });
 
+  it('leaves a warning URL with a port intact when prose follows it', async () => {
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443/v1 — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example:8443/v1 — contact admin@example.com',
+    );
+  });
+
+  it('strips the whole userinfo when the password holds an unescaped @', async () => {
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:p@ssw0rd-tail@broken.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://broken.example/v1',
+    );
+  });
+
   it('sanitizes credentials from provider construction errors', async () => {
     coreMock.throwModelsConfigError = true;
     coreMock.modelsConfigErrorMessage =
