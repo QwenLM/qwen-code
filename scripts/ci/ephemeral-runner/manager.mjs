@@ -74,7 +74,7 @@ function validate(c) {
     ) ||
     !Number.isInteger(c.slots) ||
     c.slots < 1 ||
-    c.slots > 10 ||
+    c.slots > 64 ||
     !Number.isInteger(c.runnerGroupId) ||
     c.runnerGroupId < 1 ||
     !Array.isArray(c.labels) ||
@@ -104,10 +104,38 @@ function validate(c) {
     c.minDiskBytes < 0
   )
     throw new Error('Invalid manager configuration');
+  if (c.proxy !== undefined) {
+    if (
+      typeof c.proxy !== 'object' ||
+      c.proxy === null ||
+      Array.isArray(c.proxy)
+    )
+      throw new Error('Invalid proxy configuration');
+    const { http, https, noProxy } = c.proxy;
+    // The proxy env reaches untrusted fork jobs, so a URL with embedded
+    // credentials would leak them; reject userinfo outright.
+    const validProxyUrl = (value) => {
+      if (typeof value !== 'string' || !value) return false;
+      try {
+        const url = new URL(value);
+        return !url.username && !url.password;
+      } catch {
+        return false;
+      }
+    };
+    if (http !== undefined && !validProxyUrl(http))
+      throw new Error('Invalid proxy.http');
+    if (https !== undefined && !validProxyUrl(https))
+      throw new Error('Invalid proxy.https');
+    if (noProxy !== undefined && (typeof noProxy !== 'string' || !noProxy))
+      throw new Error('Invalid proxy.noProxy');
+  }
 }
 
 export function createManager(config, dependencies = {}) {
   validate(config);
+  const runnerName = (slot) =>
+    `ecs-qwen-${config.poolId}-${String(slot).padStart(2, '0')}`;
   const execute = dependencies.command || command;
   const run = (program, args, options = {}) => {
     if (program !== 'docker') return execute(program, args, options);
@@ -119,6 +147,11 @@ export function createManager(config, dependencies = {}) {
     env.DOCKER_HOST = `unix://${config.dockerSocket || '/var/run/docker.sock'}`;
     if (args[0] === 'create' && options.env?.RUNNER_JIT_CONFIG)
       env.RUNNER_JIT_CONFIG = options.env.RUNNER_JIT_CONFIG;
+    if (args[0] === 'create' && config.proxy) {
+      if (config.proxy.http) env.HTTP_PROXY = config.proxy.http;
+      if (config.proxy.https) env.HTTPS_PROXY = config.proxy.https;
+      if (config.proxy.noProxy) env.NO_PROXY = config.proxy.noProxy;
+    }
     return execute(program, args, { ...options, env });
   };
   const wait = dependencies.sleep || sleep;
@@ -168,6 +201,8 @@ export function createManager(config, dependencies = {}) {
       if (
         !name.startsWith(prefix) ||
         !/^[0-9a-f-]{36}$/.test(name.slice(prefix.length)) ||
+        (state.runnerName !== undefined &&
+          state.runnerName !== runnerName(slot)) ||
         typeof state.uncertain !== 'boolean' ||
         (!state.uncertain &&
           (!Number.isSafeInteger(state.runnerId) || state.runnerId < 1)) ||
@@ -301,14 +336,14 @@ export function createManager(config, dependencies = {}) {
     if ((await listNetworks(slot)).length)
       throw new Error('Network cleanup failed');
     if (state?.name) {
+      const name = state.runnerName ?? state.name;
       const all = await listRunners();
-      const runners = all.filter((runner) => runner.name === state.name);
+      const runners = all.filter((runner) => runner.name === name);
       if (
         state.runnerId &&
         (runners.some((runner) => runner.id !== state.runnerId) ||
           all.some(
-            (runner) =>
-              runner.id === state.runnerId && runner.name !== state.name,
+            (runner) => runner.id === state.runnerId && runner.name !== name,
           ))
       )
         throw new Error(
@@ -365,6 +400,7 @@ export function createManager(config, dependencies = {}) {
       );
     state = {
       name: `ecs-qwen-${config.poolId}-${slot}-${randomUUID()}`,
+      runnerName: runnerName(slot),
       createdAt: new Date().toISOString(),
       uncertain: true,
     };
@@ -379,7 +415,7 @@ export function createManager(config, dependencies = {}) {
             `/repos/${config.repo}/actions/runners/generate-jitconfig`,
           ],
           {
-            name: state.name,
+            name: state.runnerName,
             runner_group_id: config.runnerGroupId,
             labels: config.labels,
             work_folder: '_work',
@@ -396,7 +432,7 @@ export function createManager(config, dependencies = {}) {
     }
     try {
       if (
-        result?.runner?.name !== state.name ||
+        result?.runner?.name !== state.runnerName ||
         !Number.isSafeInteger(result.runner.id) ||
         result.runner.id < 1
       )
@@ -460,6 +496,9 @@ export function createManager(config, dependencies = {}) {
             'max-file=3',
             '--env',
             'RUNNER_JIT_CONFIG',
+            ...(config.proxy?.http ? ['--env', 'HTTP_PROXY'] : []),
+            ...(config.proxy?.https ? ['--env', 'HTTPS_PROXY'] : []),
+            ...(config.proxy?.noProxy ? ['--env', 'NO_PROXY'] : []),
             config.image,
           ],
           { env },
@@ -471,7 +510,7 @@ export function createManager(config, dependencies = {}) {
       if (!stopping) {
         await run('docker', ['start', id]);
         log(
-          `slot ${slot}: started runner ${state.name}, id ${state.runnerId}, container ${id}`,
+          `slot ${slot}: started runner ${state.runnerName}, id ${state.runnerId}, container ${id}`,
         );
         const deadline = Date.now() + config.ttlSeconds * 1000;
         let exitCode;

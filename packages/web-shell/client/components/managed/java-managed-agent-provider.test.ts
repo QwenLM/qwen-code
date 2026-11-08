@@ -124,7 +124,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
         .contextCompression,
-    ).toBeUndefined();
+    ).toBeDefined();
   });
 
   it.each([undefined, true, false])(
@@ -451,7 +451,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
         .approvalChange,
-    ).toBeUndefined();
+    ).toBeDefined();
   });
 
   it('preserves stored-agent effective and initial approval policy from Session summaries', async () => {
@@ -628,7 +628,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
         .modelChange,
-    ).toBeUndefined();
+    ).toBeDefined();
   });
 
   it.each([
@@ -780,7 +780,7 @@ describe('createJavaManagedAgentProvider', () => {
     },
   );
 
-  it('reads tasks without identity scope but only exposes cancellation with a product scope', async () => {
+  it('reads tasks without identity scope and exposes cancellation regardless of product scope', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockResolvedValue(jsonResponse({ data: [], hasMore: false }));
@@ -789,13 +789,7 @@ describe('createJavaManagedAgentProvider', () => {
       fetch: fetchImpl,
     });
     expect(provider.tasks).toBeDefined();
-    expect(provider.tasks!.cancel).toBeUndefined();
-    expect(
-      createJavaManagedAgentProvider({
-        baseUrl: 'https://product.example',
-        productScope: '  ',
-      }).tasks!.cancel,
-    ).toBeUndefined();
+    expect(provider.tasks!.cancel).toBeDefined();
     const abort = new AbortController();
     await provider.tasks!.list('s1', {
       clientId: 'client',
