@@ -53,6 +53,52 @@ describe('personal memory boundary', () => {
     });
   });
 
+  it.each([
+    new ManagedSessionStoreTransportError('binding unavailable'),
+    new ManagedSessionStoreHttpError(503, 'store_unavailable', 'unavailable'),
+  ])('revalidates a failed binding for a new input: %s', async (cause) => {
+    const { session, query } = fixture({
+      status: 'ok',
+      items: [{ memoryId: 'entry', content: 'Use concise answers.' }],
+    });
+    query.mockRejectedValueOnce(cause);
+    await expect(session.recall('input-1', 'preferences', signal)).rejects.toBe(
+      cause,
+    );
+    expect(query.mock.calls.map(([input]) => input.operation)).toEqual([
+      'binding',
+    ]);
+    await expect(
+      session.recall('input-2', 'preferences', signal),
+    ).resolves.toContain('Use concise answers.');
+    await expect(
+      session.recall('input-3', 'preferences', signal),
+    ).resolves.toContain('Use concise answers.');
+    expect(query.mock.calls.map(([input]) => input.operation)).toEqual([
+      'binding',
+      'binding',
+      'recall',
+      'recall',
+    ]);
+  });
+
+  it('shares an in-flight binding check and discards its rejection', async () => {
+    const { session, query } = fixture();
+    const cause = new ManagedSessionStoreTransportError('binding unavailable');
+    query.mockRejectedValueOnce(cause);
+    const first = session.ready();
+    const second = session.ready();
+    expect(second).toBe(first);
+    await expect(first).rejects.toBe(cause);
+    await expect(second).rejects.toBe(cause);
+    await session.ready();
+    await session.ready();
+    expect(query.mock.calls.map(([input]) => input.operation)).toEqual([
+      'binding',
+      'binding',
+    ]);
+  });
+
   it.each([{ enabled: false }, { enabled: true, memoryStoreId: 'foreign' }])(
     'refuses a changed or disabled binding %j',
     async (binding) => {
@@ -64,7 +110,13 @@ describe('personal memory boundary', () => {
       await expect(session.recall('input', 'text', signal)).rejects.toThrow(
         'binding',
       );
-      expect(query).toHaveBeenCalledTimes(1);
+      await expect(
+        session.recall('next-input', 'text', signal),
+      ).rejects.toThrow('binding');
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(
+        query.mock.calls.every(([input]) => input.operation === 'binding'),
+      ).toBe(true);
     },
   );
 
@@ -83,11 +135,22 @@ describe('personal memory boundary', () => {
   it.each([
     'my aws key AKIAIOSFODNN7EXAMPLE keeps failing, help me',
     'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+    'Basic dXNlcjpwYXNzd29yZA==',
+    'Basic "dXNlcjpwYXNzd29yZA=="',
+    'Basic Zm9vOmJhcg',
     'mysql://admin:hunter2@db.internal:3306/app',
+    '//bob:hunter2@example.com/x',
+    'curl -u bob:hunter2 https://example.com',
+    'curl -ubob:hunter2 https://example.com',
+    'curl --user bob:hunter2 https://example.com',
+    'curl --user=bob:hunter2 https://example.com',
+    'sshpass -p hunter2 ssh box',
+    'sshpass -phunter2 ssh box',
     'please run with --password hunter2',
     'please run `--password synthetic-value`',
     'use --api-key synthetic-value',
     `${'x '.repeat(250)}AKIAIOSFODNN7EXAMPLE`,
+    `${'x '.repeat(250)}//bob:hunter2@example.com/x`,
   ])('withholds automatic recall containing credentials: %s', async (text) => {
     const { session, query } = fixture();
     expect(hostedMemoryRecallQuery(text)).toBe('');
@@ -95,6 +158,29 @@ describe('personal memory boundary', () => {
     expect(query.mock.calls.map(([input]) => input.operation)).toEqual([
       'binding',
     ]);
+  });
+
+  it.each([
+    'preferences',
+    'basic concepts are useful',
+    'Basic HTTP authentication overview',
+    'Basic dXNlcg==',
+    '//example.com/x',
+    '//bob@example.com/x',
+    'curl -u bob https://example.com',
+    'curl --user=bob https://example.com',
+    'docker run -u 1000:1000 ubuntu',
+    'ssh -p 2222 bob@example.com',
+  ])('preserves benign recall text: %s', async (text) => {
+    const { session, query } = fixture();
+    expect(hostedMemoryRecallQuery(text)).toBe(text);
+    await session.recall('input', text, signal);
+    expect(query).toHaveBeenLastCalledWith({
+      operation: 'recall',
+      inputId: 'input',
+      callId: 'recall',
+      query: text,
+    });
   });
 
   it('injects bounded data whose delimiters cannot escape the envelope', async () => {

@@ -111,8 +111,13 @@ export function hostedMemoryRecallQuery(text: string): string {
   if (
     scanForSecrets(query).length > 0 ||
     /\bauthorization\s*:\s*basic\s+\S+/iu.test(query) ||
-    /\b[a-z][a-z\d+.-]*:\/\/[^\s/?#@]*:[^\s/?#@]+@/iu.test(query) ||
-    /--(?:password|passwd|token|secret|api[-_]?key)\s+\S+/iu.test(query)
+    [...query.matchAll(/\bbasic\s+["']?([a-z\d+/]+={0,2})/giu)].some((match) =>
+      Buffer.from(match[1] ?? '', 'base64').includes(':'),
+    ) ||
+    /(?:[a-z][a-z\d+.-]*:)?\/\/[^\s/?#@]*:[^\s/?#@]+@/iu.test(query) ||
+    /--(?:password|passwd|token|secret|api[-_]?key)\s+\S+/iu.test(query) ||
+    /\bcurl\b.*?\s(?:--user(?:=|\s+)|-u\s*)["']?[^\s:]+:[^\s]+/iu.test(query) ||
+    /\bsshpass\b.*?\s-p\s*\S+/iu.test(query)
   )
     return '';
   return Array.from(query).slice(0, 512).join('');
@@ -175,7 +180,10 @@ export class HostedMemorySession {
         throw new Error(
           'The saved personal memory binding is unavailable or changed.',
         );
-    })());
+    })().catch((error: unknown) => {
+      this.binding = undefined;
+      throw error;
+    }));
   }
 
   async recall(
