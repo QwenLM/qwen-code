@@ -7488,76 +7488,106 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     repo: string,
     sha: string,
   ): Promise<CiObservation> {
-    const checkRuns = (await this.githubApi(
-      () =>
-        this.octokit.paginate(this.octokit.rest.checks.listForRef, {
-          owner,
-          repo,
-          ref: sha,
-          per_page: 100,
-        }),
+    // The observation is accumulated per ATTEMPT, inside the retried
+    // closure: githubApi retries the whole pagination, and state carried
+    // over from an attempt that died on a later page would let its partial
+    // pending/success readings decide the retry's aggregate.
+    const checks = await this.githubApi(
+      async () => {
+        let sawFailure = false;
+        let sawPending = false;
+        let sawSuccess = false;
+        const failedChecks: string[] = [];
+        await this.octokit.paginate(
+          this.octokit.rest.checks.listForRef,
+          {
+            owner,
+            repo,
+            ref: sha,
+            per_page: 100,
+          },
+          (response, done) => {
+            // Octokit's conclusion union omits 'startup_failure', which the
+            // API does return and this aggregate must count as a failure.
+            const runs = response.data as Array<{
+              name?: string | null;
+              status?: string | null;
+              conclusion?: string | null;
+            }>;
+            for (const run of runs) {
+              if (run.status !== 'completed') {
+                sawPending = true;
+                continue;
+              }
+              if (
+                run.conclusion === 'failure' ||
+                run.conclusion === 'timed_out' ||
+                run.conclusion === 'action_required' ||
+                // A workflow that fails at startup (e.g. a broken workflow
+                // file) never runs a single job; missing it would certify a
+                // broken CI as 'none' or even 'success'. A deliberate SUBSET
+                // of core's FAILING_CHECK_RUN_CONCLUSIONS: core also counts
+                // cancelled/stale, which the design excludes as
+                // concurrency-cancel noise (a superseded run's cancellation
+                // is not a CI failure of this head).
+                run.conclusion === 'startup_failure'
+              ) {
+                sawFailure = true;
+                if (
+                  typeof run.name === 'string' &&
+                  run.name.length > 0 &&
+                  failedChecks.length < MAX_REPORTED_FAILED_CHECKS
+                ) {
+                  failedChecks.push(run.name);
+                }
+              } else if (run.conclusion === 'success') {
+                sawSuccess = true;
+              }
+            }
+            // A failure decides the aggregate: no later page can overturn
+            // it, so stop paging instead of spending one request per page
+            // of a head that carries hundreds of check runs. Whole pages
+            // are still read, so the reported names are unchanged for a
+            // single-page head; past the first failing page they stay
+            // best-effort, which the MAX_REPORTED_FAILED_CHECKS cap already
+            // made them.
+            if (sawFailure) done();
+            return [];
+          },
+        );
+        return { sawFailure, sawPending, sawSuccess, failedChecks };
+      },
       `checks.listForRef(${sha})`,
       3,
       (err) => !isWatchFailFastError(err),
-    )) as Array<{
-      name?: string | null;
-      status?: string | null;
-      conclusion?: string | null;
-    }>;
-    let sawFailure = false;
-    let sawPending = false;
-    let sawSuccess = false;
-    const failedChecks: string[] = [];
-    for (const run of checkRuns) {
-      if (run.status !== 'completed') {
-        sawPending = true;
-        continue;
-      }
-      if (
-        run.conclusion === 'failure' ||
-        run.conclusion === 'timed_out' ||
-        run.conclusion === 'action_required' ||
-        // A workflow that fails at startup (e.g. a broken workflow file)
-        // never runs a single job; missing it would certify a broken CI as
-        // 'none' or even 'success'. A deliberate SUBSET of core's
-        // FAILING_CHECK_RUN_CONCLUSIONS: core also counts cancelled/stale,
-        // which the design excludes as concurrency-cancel noise (a
-        // superseded run's cancellation is not a CI failure of this head).
-        run.conclusion === 'startup_failure'
-      ) {
-        sawFailure = true;
-        if (
-          typeof run.name === 'string' &&
-          run.name.length > 0 &&
-          failedChecks.length < MAX_REPORTED_FAILED_CHECKS
-        ) {
-          failedChecks.push(run.name);
-        }
-      } else if (run.conclusion === 'success') {
-        sawSuccess = true;
-      }
-    }
-    const { data: combined } = await this.githubApi(
-      () =>
-        this.octokit.rest.repos.getCombinedStatusForRef({
-          owner,
-          repo,
-          ref: sha,
-        }),
-      `combinedStatus(${sha})`,
-      3,
-      (err) => !isWatchFailFastError(err),
     );
-    // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
-    // SHA with no legacy commit statuses; an empty combined status must not
-    // count as active CI (it would keep every poll re-fetching forever).
-    if (combined.total_count > 0) {
-      if (combined.state === 'failure' || combined.state === 'error') {
-        sawFailure = true;
-      } else if (combined.state === 'pending') {
-        sawPending = true;
-      } else {
-        sawSuccess = true;
+    let { sawFailure, sawPending, sawSuccess } = checks;
+    const { failedChecks } = checks;
+    // A check run already failed, so the combined status could only confirm
+    // 'failure' — skip the request rather than pay for a decided aggregate.
+    if (!sawFailure) {
+      const { data: combined } = await this.githubApi(
+        () =>
+          this.octokit.rest.repos.getCombinedStatusForRef({
+            owner,
+            repo,
+            ref: sha,
+          }),
+        `combinedStatus(${sha})`,
+        3,
+        (err) => !isWatchFailFastError(err),
+      );
+      // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
+      // SHA with no legacy commit statuses; an empty combined status must not
+      // count as active CI (it would keep every poll re-fetching forever).
+      if (combined.total_count > 0) {
+        if (combined.state === 'failure' || combined.state === 'error') {
+          sawFailure = true;
+        } else if (combined.state === 'pending') {
+          sawPending = true;
+        } else {
+          sawSuccess = true;
+        }
       }
     }
     const aggregate: CiAggregate = sawFailure

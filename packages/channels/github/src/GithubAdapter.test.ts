@@ -17414,13 +17414,71 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockOctokit.rest.pulls.get.mockResolvedValue({ data: makePrMeta(meta) });
     }
 
+    /** A paginate map function, as @octokit/plugin-paginate-rest calls it. */
+    type ChecksMapFn = (
+      response: { data: unknown[] },
+      done: () => void,
+    ) => unknown[];
+
     // The watch pass runs before the notification loop, so paginate is
     // routed by API params instead of a shared once-queue: checks fetches
     // must not consume the notifications slot.
+    //
+    // The checks route honours a map function: the adapter accumulates its
+    // observation inside one, so a routing stub that dropped the callback
+    // would leave every CI aggregate reading as 'none'. One page is served
+    // here; mockCheckPages drives the multi-page contract.
     function installWatchPaginateRouting(): void {
       mockOctokit.paginate.mockImplementation(
-        async (_fn: unknown, params: Record<string, unknown> = {}) => {
-          if ('ref' in params) return mockOctokit.rest.checks.listForRef();
+        async (
+          _fn: unknown,
+          params: Record<string, unknown> = {},
+          mapFn?: ChecksMapFn,
+        ) => {
+          if ('ref' in params) {
+            const runs = (await mockOctokit.rest.checks.listForRef()) ?? [];
+            if (mapFn) {
+              mapFn({ data: runs }, () => {});
+              return [];
+            }
+            return runs;
+          }
+          if ('issue_number' in params)
+            return mockOctokit.rest.issues.listComments();
+          return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+        },
+      );
+    }
+
+    /**
+     * Serve check runs as real pages: one listForRef request per page, and
+     * `done()` stops before the next one. The single-page routing cannot
+     * observe an early exit, so request-count assertions need this.
+     */
+    function mockCheckPages(
+      pages: Array<
+        Array<{ status: string; conclusion: string | null; name?: string }>
+      >,
+    ): void {
+      mockOctokit.paginate.mockImplementation(
+        async (
+          _fn: unknown,
+          params: Record<string, unknown> = {},
+          mapFn?: ChecksMapFn,
+        ) => {
+          if ('ref' in params) {
+            for (const page of pages) {
+              // Called for its request count only: the page body comes from
+              // the fixture, so assertions count pages actually read.
+              await mockOctokit.rest.checks.listForRef();
+              let stopped = false;
+              mapFn?.({ data: page }, () => {
+                stopped = true;
+              });
+              if (stopped) break;
+            }
+            return [];
+          }
           if ('issue_number' in params)
             return mockOctokit.rest.issues.listComments();
           return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
@@ -17868,6 +17926,174 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
         'Failed checks: slow-job, manual-gate',
       );
+    });
+
+    // A busy head carries hundreds of check runs, so one CI observation used
+    // to cost one request per page plus a combined-status request. A failure
+    // decides the aggregate on its own: neither a later page nor a commit
+    // status can overturn it.
+    describe('CI aggregate request cost', () => {
+      /** Advance updated_at so the next poll re-observes a settled head. */
+      async function baselineThenRecheck(): Promise<void> {
+        await initChannel(watchConfig, { boundSessions });
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+      }
+
+      it('stops paging check runs once a page reports a failure', async () => {
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'failure', name: 'build' }],
+          [{ status: 'completed', conclusion: 'failure', name: 'later-page' }],
+          [{ status: 'completed', conclusion: 'success' }],
+        ]);
+        await pollOnce();
+
+        // One page for the baseline, one for the failing head: pages 2 and 3
+        // must never be requested.
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Failed checks: build');
+        expect(prompt).not.toContain('later-page');
+      });
+
+      it('keeps paging until it finds a failure on a later page', async () => {
+        // The passing control for the early exit, and the risk it carries: a
+        // head whose first pages are clean must still be read to the page
+        // that fails, or the red head is certified green.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'success' }],
+          [{ status: 'queued', conclusion: null }],
+          [{ status: 'completed', conclusion: 'failure', name: 'late-job' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(4);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Failed checks: late-job',
+        );
+      });
+
+      it('reports every failure name on the page that decided the aggregate', async () => {
+        // The exit is between pages, not inside one: breaking out of the
+        // per-run loop would drop the second name from the same page.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+            { status: 'completed', conclusion: 'timed_out', name: 'slow-job' },
+          ],
+          [{ status: 'completed', conclusion: 'failure', name: 'later-page' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Failed checks: build, slow-job',
+        );
+      });
+
+      it('skips the combined status once a check run has failed', async () => {
+        await baselineThenRecheck();
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await pollOnce();
+
+        // Only the baseline poll consulted it; a decided 'failure' cannot be
+        // changed by a commit status.
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(1);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+      });
+
+      it('still reads the combined status when no check run failed', async () => {
+        // The control for the skip: legacy commit statuses are the only CI
+        // signal on a status-only head, so an undecided aggregate must ask.
+        await baselineThenRecheck();
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not carry an aborted attempt into the retried observation', async () => {
+        // githubApi retries the whole pagination. A page that dies after an
+        // earlier page read 'pending' must not leave that reading behind to
+        // decide the retry, which observes a fully settled success.
+        await initChannel(watchConfig, { boundSessions });
+        (
+          channel as unknown as {
+            abortableSleep: (ms: number) => Promise<void>;
+          }
+        ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        // The throw must land INSIDE the first pagination, after a page was
+        // already mapped: a rejection on a later paginate call would be a
+        // fresh observation, not a retry of a half-read one.
+        let attempt = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (
+            _fn: unknown,
+            params: Record<string, unknown> = {},
+            mapFn?: ChecksMapFn,
+          ) => {
+            if ('ref' in params) {
+              attempt += 1;
+              await mockOctokit.rest.checks.listForRef();
+              if (attempt === 1) {
+                mapFn?.(
+                  { data: [{ status: 'queued', conclusion: null }] },
+                  () => {},
+                );
+                throw Object.assign(new Error('Server Error'), { status: 500 });
+              }
+              mapFn?.(
+                { data: [{ status: 'completed', conclusion: 'success' }] },
+                () => {},
+              );
+              return [];
+            }
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // Without a second attempt the assertion below would be vacuous.
+        expect(attempt).toBe(2);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'success',
+        );
+      });
     });
 
     it('keeps watching known PRs and the baseline when the snapshot is partial', async () => {
