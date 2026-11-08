@@ -18,6 +18,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readPidfileProcessToken } from '../../commands/channel/pidfile.js';
 import {
@@ -459,6 +460,50 @@ describe('pr-watch-store', () => {
     ).toBe(false);
     expect(existsSync(missing)).toBe(false);
   });
+
+  itPosix(
+    'release racing a concurrent rmdir never leaves a world-listable directory',
+    async () => {
+      const watchDir = path.join(dir, 'watch');
+      const worker = new Worker(
+        `const { parentPort } = require('node:worker_threads');
+         const fs = require('node:fs');
+         const target = ${JSON.stringify(watchDir)};
+         const timer = setInterval(() => {
+           try { fs.rmSync(target, { recursive: true, force: true }); } catch {}
+         }, 0);
+         parentPort.on('message', (m) => {
+           if (m === 'stop') { clearInterval(timer); parentPort.postMessage('stopped'); }
+         });`,
+        { eval: true },
+      );
+      const stopped = new Promise((resolve) => worker.once('message', resolve));
+      const record = buildPrWatchOwnerRecord();
+      let leaks = 0;
+      try {
+        for (let i = 0; i < 2000; i += 1) {
+          try {
+            mkdirSync(watchDir, { recursive: true, mode: 0o700 });
+            writeFileSync(prWatchOwnerPath(watchDir), JSON.stringify(record));
+          } catch {
+            // The worker removed the directory mid-setup; skip this attempt.
+            continue;
+          }
+          releasePrWatchOwnershipSync(watchDir, record);
+          try {
+            if ((lstatSync(watchDir).mode & 0o077) !== 0) leaks += 1;
+          } catch {
+            // Directory absent at observation time: nothing leaked.
+          }
+        }
+      } finally {
+        worker.postMessage('stop');
+        await stopped;
+        await worker.terminate();
+      }
+      expect(leaks).toBe(0);
+    },
+  );
 
   it('release refuses to delete a successor owner record', () => {
     const claim = claimPrWatchOwnershipSync(dir);

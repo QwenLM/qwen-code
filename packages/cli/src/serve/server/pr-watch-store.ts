@@ -721,79 +721,83 @@ function attemptPrWatchClaimSync(
   }
   const ownerPath = prWatchOwnerPath(watchDir);
   try {
-    return withChannelPidfileLock(ownerPath, () => {
-      let existing: PrWatchOwnerRecord | null = null;
-      let staleRecord = false;
-      const ownerFile = readOwnerFileGuardedSync(ownerPath);
-      if (ownerFile.kind === 'error') {
-        return { kind: 'blocked', reason: ownerFile.reason };
-      }
-      if (ownerFile.kind === 'content') {
-        try {
-          existing = parseOwnerRecord(JSON.parse(ownerFile.raw));
-        } catch {
-          existing = null;
+    return withChannelPidfileLock(
+      ownerPath,
+      () => {
+        let existing: PrWatchOwnerRecord | null = null;
+        let staleRecord = false;
+        const ownerFile = readOwnerFileGuardedSync(ownerPath);
+        if (ownerFile.kind === 'error') {
+          return { kind: 'blocked', reason: ownerFile.reason };
         }
-        if (existing && !isLocalIdentity(existing)) {
-          return {
-            kind: 'blocked',
-            reason: `${ownerPath} holds a record this machine cannot verify, written before a reboot or by another machine or PID namespace sharing this home. Confirm no PR watch owner is running, then delete that file to claim again.`,
-          };
-        }
-        if (existing && isSameProcess(existing.pid, existing.procStart)) {
-          if (existing.pid === process.pid) {
-            return { kind: 'retained', record: existing };
+        if (ownerFile.kind === 'content') {
+          try {
+            existing = parseOwnerRecord(JSON.parse(ownerFile.raw));
+          } catch {
+            existing = null;
           }
-          return {
-            kind: 'blocked',
-            reason: `${ownerPath} is held by live pid ${existing.pid}`,
-          };
+          if (existing && !isLocalIdentity(existing)) {
+            return {
+              kind: 'blocked',
+              reason: `${ownerPath} holds a record this machine cannot verify, written before a reboot or by another machine or PID namespace sharing this home. Confirm no PR watch owner is running, then delete that file to claim again.`,
+            };
+          }
+          if (existing && isSameProcess(existing.pid, existing.procStart)) {
+            if (existing.pid === process.pid) {
+              return { kind: 'retained', record: existing };
+            }
+            return {
+              kind: 'blocked',
+              reason: `${ownerPath} is held by live pid ${existing.pid}`,
+            };
+          }
+          // A dead or invalid local record is transient. Build the replacement
+          // before sweeping it so a token-read failure leaves the old record in
+          // place for the next attempt.
+          staleRecord = true;
         }
-        // A dead or invalid local record is transient. Build the replacement
-        // before sweeping it so a token-read failure leaves the old record in
-        // place for the next attempt.
-        staleRecord = true;
-      }
-      let record: PrWatchOwnerRecord;
-      try {
-        record = buildPrWatchOwnerRecord();
-      } catch (error) {
-        return {
-          kind: 'blocked',
-          reason: `cannot build owner record: ${String(error)}`,
-        };
-      }
-      if (staleRecord) {
+        let record: PrWatchOwnerRecord;
         try {
-          unlinkSync(ownerPath);
+          record = buildPrWatchOwnerRecord();
         } catch (error) {
           return {
             kind: 'blocked',
-            reason: `cannot sweep stale ${ownerPath}: ${String(error)}`,
+            reason: `cannot build owner record: ${String(error)}`,
           };
         }
-      }
-      try {
-        writeFileSync(ownerPath, JSON.stringify(record, null, 2), {
-          encoding: 'utf-8',
-          flag: 'wx',
-          mode: 0o600,
-        });
-      } catch (error) {
-        return {
-          kind: 'blocked',
-          reason: `cannot create ${ownerPath}: ${String(error)}`,
-        };
-      }
-      try {
-        sweepPrWatchTempFilesSync(watchDir);
-      } catch (error) {
-        // The claim already succeeded; a failed sweep must not report it as
-        // blocked and leave the live owner record looking like a failure.
-        log(`claimed PR watch but temp sweep failed: ${String(error)}`);
-      }
-      return { kind: 'claimed', record };
-    });
+        if (staleRecord) {
+          try {
+            unlinkSync(ownerPath);
+          } catch (error) {
+            return {
+              kind: 'blocked',
+              reason: `cannot sweep stale ${ownerPath}: ${String(error)}`,
+            };
+          }
+        }
+        try {
+          writeFileSync(ownerPath, JSON.stringify(record, null, 2), {
+            encoding: 'utf-8',
+            flag: 'wx',
+            mode: 0o600,
+          });
+        } catch (error) {
+          return {
+            kind: 'blocked',
+            reason: `cannot create ${ownerPath}: ${String(error)}`,
+          };
+        }
+        try {
+          sweepPrWatchTempFilesSync(watchDir);
+        } catch (error) {
+          // The claim already succeeded; a failed sweep must not report it as
+          // blocked and leave the live owner record looking like a failure.
+          log(`claimed PR watch but temp sweep failed: ${String(error)}`);
+        }
+        return { kind: 'claimed', record };
+      },
+      { dirMode: 0o700 },
+    );
   } catch (error) {
     return {
       kind: 'blocked',
@@ -807,28 +811,32 @@ export function releasePrWatchOwnershipSync(
   watchDir: string,
   expected: PrWatchOwnerRecord,
 ): boolean {
-  // A missing directory must stay missing: the pidfile lock helper would
-  // create it with the default mode instead of the required 0700.
+  // Stay missing when absent; if a concurrent removal slips past this check,
+  // the lock helper still recreates the directory privately via dirMode.
   if (!existsSync(watchDir)) return false;
   const ownerPath = prWatchOwnerPath(watchDir);
   try {
-    return withChannelPidfileLock(ownerPath, () => {
-      const ownerFile = readOwnerFileGuardedSync(ownerPath);
-      if (ownerFile.kind !== 'content') return false;
-      let current: PrWatchOwnerRecord | null;
-      try {
-        current = parseOwnerRecord(JSON.parse(ownerFile.raw));
-      } catch {
-        return false;
-      }
-      if (!current || !sameOwnerRecord(current, expected)) return false;
-      try {
-        unlinkSync(ownerPath);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    return withChannelPidfileLock(
+      ownerPath,
+      () => {
+        const ownerFile = readOwnerFileGuardedSync(ownerPath);
+        if (ownerFile.kind !== 'content') return false;
+        let current: PrWatchOwnerRecord | null;
+        try {
+          current = parseOwnerRecord(JSON.parse(ownerFile.raw));
+        } catch {
+          return false;
+        }
+        if (!current || !sameOwnerRecord(current, expected)) return false;
+        try {
+          unlinkSync(ownerPath);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { dirMode: 0o700 },
+    );
   } catch {
     return false;
   }
