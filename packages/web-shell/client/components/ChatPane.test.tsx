@@ -125,7 +125,7 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
 
 const paneSettings = vi.fn(async () => ({ v: 1, settings: [] }));
 const workspaceByCwd = vi.fn(() => ({ workspaceSettings: paneSettings }));
-const paneWorkspaceClient = { workspaceByCwd };
+const paneWorkspaceClient = { workspaceByCwd, sessionStatus: vi.fn() };
 const subscriptionActions = {
   getSubscriptionConfig: vi.fn().mockResolvedValue({ enabled: false }),
   loadProviders: vi.fn().mockResolvedValue({ current: null }),
@@ -247,6 +247,9 @@ vi.mock('./TranscriptViewport', async () => {
         <div
           data-testid="pane-messages"
           data-approval={props.pendingApproval ? 'yes' : 'no'}
+          data-file-changes={JSON.stringify(
+            [...(props.turnFileChanges?.values() ?? [])].flat(),
+          )}
         >
           {props.messages.length}
           <button
@@ -271,6 +274,27 @@ vi.mock('./TranscriptViewport', async () => {
               props.onAttachmentPreview?.({
                 name: 'data.json',
                 attachmentId: 'attachment-1',
+              })
+            }
+          />
+          <button
+            data-testid="pane-open-review"
+            type="button"
+            onClick={() =>
+              props.onTurnOutputOpen?.({
+                id: 'review',
+                kind: 'review',
+                title: 'Turn review',
+                turnId: 'turn-1',
+                changes: [
+                  {
+                    path: '/w/source.ts',
+                    status: 'modified',
+                    toolCallId: 'write-0',
+                    isArtifact: false,
+                    diffs: [],
+                  },
+                ],
               })
             }
           />
@@ -468,6 +492,7 @@ beforeEach(() => {
   paneSettings.mockReset();
   paneSettings.mockResolvedValue({ v: 1, settings: [] });
   workspaceByCwd.mockClear();
+  paneWorkspaceClient.sessionStatus.mockReset().mockResolvedValue({});
   connectionState = {
     status: 'connected',
     sessionId: 'sess-1',
@@ -651,6 +676,110 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it.each(['summary', 'metadata', 'withheld-cwd'])(
+    'keeps file changes in their execution scope (%s)',
+    async (mode) => {
+      connectionState.capabilities = { features: [] };
+      const worktree = '/repo/.qwen/worktrees/one';
+      connectionState.workspaceCwd =
+        mode === 'withheld-cwd' ? undefined : '/repo/packages/web';
+      paneWorkspaceClient.sessionStatus.mockResolvedValue({
+        worktree: { path: worktree },
+      });
+      const paths =
+        mode === 'withheld-cwd'
+          ? ['/conversations/report.md']
+          : [`${worktree}/source.ts`, '/repo/packages/web/base.ts'];
+      messagesState = [
+        { id: 'turn', role: 'user', content: 'write' },
+        {
+          id: 'tools',
+          role: 'tool_group',
+          tools: paths.map((file_path, index) => ({
+            callId: `write-${index}`,
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path, content: 'source' },
+          })),
+        },
+      ];
+      render({
+        showSessionDetails: false,
+        sessionSummary:
+          mode === 'summary'
+            ? { sessionId: 'sess-1', worktree: { path: worktree } }
+            : undefined,
+      });
+      await act(async () => {});
+      const changes = JSON.parse(
+        testid('pane-messages')!.dataset['fileChanges']!,
+      ) as Array<{ path: string }>;
+      expect(changes.map((change) => change.path)).toEqual([paths[0]]);
+      if (mode === 'metadata')
+        expect(paneWorkspaceClient.sessionStatus).toHaveBeenCalledWith(
+          'sess-1',
+        );
+      else expect(paneWorkspaceClient.sessionStatus).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the unfiltered review snapshot when opening a filtered review', async () => {
+    connectionState.workspaceCwd = '/w';
+    messagesState = [
+      { id: 'turn-1', role: 'user', content: 'write' },
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'write-0',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: '/w/source.ts', content: 'source' },
+          },
+          {
+            callId: 'write-1',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: '/outside/notes.md', content: 'notes' },
+          },
+        ],
+      },
+    ];
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+    await act(async () => testid('pane-open-review')!.click());
+    expect(onRightPanelOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'review',
+        changes: [expect.objectContaining({ path: '/w/source.ts' })],
+        unfilteredChanges: [
+          expect.objectContaining({ path: '/w/source.ts' }),
+          expect.objectContaining({ path: '/outside/notes.md' }),
+        ],
+      }),
+    );
+  });
+
+  it('keeps the title without a details tooltip when details are disabled', () => {
+    render({
+      title: 'Hidden details',
+      showSessionDetails: false,
+      sessionSummary: {
+        sessionId: 'sess-1',
+        workspaceCwd: '/w',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    });
+    expect(container!.textContent).toContain('Hidden details');
+    const anchors = Array.from(
+      container!.querySelectorAll('[data-slot="popover-anchor"]'),
+    );
+    expect(anchors.map((anchor) => anchor.textContent)).not.toContain(
+      'Hidden details',
+    );
+  });
+
   it('publishes owner-specific context controls and withdraws them on unmount', () => {
     connectionState.commands = [
       { name: 'compress', source: 'builtin-command' },
