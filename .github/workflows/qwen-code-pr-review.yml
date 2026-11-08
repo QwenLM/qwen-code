@@ -637,13 +637,16 @@ jobs:
             rm -rf "$QWEN_HOME" 2>/dev/null || true
           fi
           # Pool members without passwordless sudo would otherwise lose the
-          # whole review to a directory this user cannot unlink. A same-parent
-          # rename needs write access to the PARENT, not to the directory —
-          # the one permission this job is known to have — so the review can
-          # proceed on a fresh home while the leftover keeps its contents
-          # under a timestamped name. Same posture as 'Clean stale .qwen
-          # before checkout', which renames what it cannot delete; a read-only
-          # parent refuses the rename and still fails fast below.
+          # whole review to a directory this user cannot unlink. On Linux a
+          # same-parent rename needs write access to the PARENT, not to the
+          # directory — the one permission this job is known to have, and the
+          # review pool is Linux-only (BSD also rewrites the moved directory's
+          # `..`, so it needs write on the directory itself and the rename
+          # buys nothing there). The review proceeds on a fresh home while the
+          # leftover keeps its contents under a timestamped name. Same posture
+          # as 'Clean stale .qwen before checkout', which renames what it
+          # cannot delete; a read-only parent refuses the rename and still
+          # fails fast below.
           if [ -e "$QWEN_HOME" ]; then
             quarantine="${QWEN_HOME}.stale-$(date -u +%Y%m%dT%H%M%SZ)-$$"
             if mv -- "$QWEN_HOME" "$quarantine" 2>/dev/null; then

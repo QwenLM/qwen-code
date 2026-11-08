@@ -7907,19 +7907,29 @@ describe('stale agent-home reclaim guard (#16616)', () => {
 
   const runGuard = (
     runnerTemp,
-    { sudoBlocked = false, sudoDeletes = false, binDir } = {},
+    {
+      sudoBlocked = false,
+      sudoDeletes = false,
+      sudoChownRepairs = false,
+      binDir,
+    } = {},
   ) => {
     binDir = binDir ?? join(runnerTemp, 'stub-bin');
     mkdirSync(binDir, { recursive: true });
-    if (sudoBlocked || sudoDeletes) {
+    if (sudoBlocked || sudoDeletes || sudoChownRepairs) {
       const sudoStub = join(binDir, 'sudo');
       writeFileSync(
         sudoStub,
         // 'deletes' emulates the reclaim a passwordless-sudo pool member
         // performs: make the target writable for this uid, then delete it.
+        // 'repairs' emulates the fallback's shape instead — the sudo rm leg
+        // fails and the chown leg is what hands the directory back, leaving
+        // the unprivileged retry to remove it.
         sudoDeletes
           ? '#!/bin/sh\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last" 2>/dev/null || true\nexec rm -rf -- "$last"\n'
-          : '#!/bin/sh\nexit 1\n',
+          : sudoChownRepairs
+            ? '#!/bin/sh\n[ "$2" = rm ] && exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last"\n'
+            : '#!/bin/sh\nexit 1\n',
       );
       chmodSync(sudoStub, 0o755);
     }
@@ -7927,13 +7937,19 @@ describe('stale agent-home reclaim guard (#16616)', () => {
       env: {
         ...process.env,
         RUNNER_TEMP: runnerTemp,
-        ...(sudoBlocked || sudoDeletes
+        ...(sudoBlocked || sudoDeletes || sudoChownRepairs
           ? { PATH: `${binDir}:/usr/bin:/bin` }
           : {}),
       },
       encoding: 'utf8',
     });
   };
+
+  // A same-parent rename of a mode-0555 directory needs only the parent's
+  // write bit on Linux; BSD-derived kernels also rewrite the moved
+  // directory's `..` entry and answer EACCES. The review pool is Linux-only,
+  // so the case runs where the mechanism it pins actually exists.
+  const renamesForeignDir = process.platform === 'linux';
 
   it('reclaims a stale home and leaves a fresh runner-writable one', () => {
     const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
@@ -8012,7 +8028,7 @@ describe('stale agent-home reclaim guard (#16616)', () => {
     },
   );
 
-  it.skipIf(!arePermissionBitsEnforced())(
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
     'quarantines a home neither rm nor sudo can delete instead of failing',
     () => {
       // The pool members without passwordless sudo: the job still has write
@@ -8045,6 +8061,33 @@ describe('stale agent-home reclaim guard (#16616)', () => {
             // A quarantined home may already be gone; rm below is best-effort.
           }
         }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'retries the unlink after the sudo chown fallback hands the home back',
+    () => {
+      // The chown leg exists for the shape where sudo rm fails but sudo can
+      // still take the directory over, leaving the unprivileged retry to
+      // remove it. Deleting that leg strands the home and hands the review
+      // to the quarantine rung it was not meant to need.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoChownRepairs: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).not.toContain('moved it to');
+        expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        if (existsSync(stale)) chmodSync(stale, 0o755);
         rmSync(runnerTemp, { recursive: true, force: true });
         rmSync(binDir, { recursive: true, force: true });
       }
