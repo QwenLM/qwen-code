@@ -495,11 +495,17 @@ function ArtifactCard({
   // External-URL artifacts only show metadata and an Open link in the panel,
   // so they keep Open even when their kind would otherwise render. Managed
   // artifacts have no content in the default panel (metadata only), so they
-  // keep Open too unless an embedding host claims the preview.
+  // keep Open too unless an embedding host claims the preview. A published
+  // artifact only previews when it is a saved web-preview snapshot or its URL
+  // can be framed (http(s)); a file:// publication falls back to metadata, so
+  // it keeps Open (same protocol test the published-twin dedup uses).
   const rendered =
     isRenderedArtifact(artifact) &&
     artifact.storage !== 'external_url' &&
-    (artifact.storage !== 'managed' || hostOwnsArtifactPreview);
+    (artifact.storage !== 'managed' || hostOwnsArtifactPreview) &&
+    (artifact.storage !== 'published' ||
+      artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+      /^https?:/i.test(artifact.url?.trim() ?? ''));
   return (
     <div className={styles.card}>
       <div className={`${styles.summary} ${styles.artifactSummary}`}>

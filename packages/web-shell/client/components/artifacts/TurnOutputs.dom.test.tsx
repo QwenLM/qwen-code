@@ -1174,6 +1174,65 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it.each([
+    ['file:///tmp/diagram.html', false, 'Open'],
+    ['file:///tmp/diagram.html', true, 'Preview'],
+    ['https://example.com/diagram.html', false, 'Preview'],
+  ])(
+    'labels a published artifact (url=%s, snapshot=%s) %s',
+    (url, snapshot, label) => {
+      // A file:// publication cannot be framed by the preview, so it keeps
+      // Open unless it is a saved web-preview snapshot; an http(s) URL opens
+      // a live preview tab and keeps Preview.
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-published"
+              workspaceCwd="/primary"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'published-artifact',
+                  kind: 'html',
+                  storage: 'published',
+                  status: 'available',
+                  title: 'diagram.html',
+                  url,
+                  ...(snapshot
+                    ? { metadata: { artifactType: 'web_preview_snapshot' } }
+                    : {}),
+                } as DaemonSessionArtifact,
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const buttons = Array.from(container.querySelectorAll('button'));
+      expect(
+        buttons.find((button) => button.textContent?.trim() === label),
+      ).toBeDefined();
+      expect(
+        buttons.find(
+          (button) =>
+            button.textContent?.trim() ===
+            (label === 'Preview' ? 'Open' : 'Preview'),
+        ),
+      ).toBeUndefined();
+
+      act(() => root.unmount());
+    },
+  );
+
   it('marks only changed workspace artifacts as modified since recorded', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
