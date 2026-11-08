@@ -1,20 +1,4 @@
-//! pip-preview — shared types + trait for the experimental
-//! picture-in-picture agent preview window.
-//!
-//! The PiP window is an opt-in, always-on-top floating window that
-//! shows what the cua-driver agent just did: a post-action screenshot
-//! of the target window plus a one-line label summarising the tool
-//! call. It mirrors the architecture used by `cursor-overlay` (shared
-//! config/types here, platform-specific renderer in each `platform-*`
-//! crate) and the registration pattern used by `cua_driver_core::video`
-//! (a `OnceLock` factory set once at startup by `main.rs`).
-//!
-//! macOS is the first working implementation (NSWindow + NSImageView).
-//! Windows + Linux ship as compile-clean stubs whose `start()` returns
-//! a clear "not yet implemented" error so the rest of the daemon
-//! continues without a PiP window.
-
-use std::sync::OnceLock;
+//! Local window-preview configuration and platform backend compatibility.
 
 /// Canonical `~/.cua-driver/config.json` path matching what the per-platform
 /// `set_config` tools write to. Resolves `$HOME` first (Unix/macOS) and falls
@@ -70,20 +54,20 @@ pub fn write_config_key(key: &str, value: serde_json::Value) -> Result<(), Strin
 pub fn read_pip_keys_from_file() -> (bool, Option<String>) {
     let path = match default_config_path() {
         Some(p) => p,
-        None => return (false, None),
+        None => return (PipConfig::default().enabled, None),
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(_) => return (false, None),
+        Err(_) => return (PipConfig::default().enabled, None),
     };
     let json: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
-        Err(_) => return (false, None),
+        Err(_) => return (PipConfig::default().enabled, None),
     };
     let enabled = json
         .get("experimental_pip")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(PipConfig::default().enabled);
     let geometry = json
         .get("experimental_pip_geometry")
         .and_then(|v| v.as_str())
@@ -94,9 +78,8 @@ pub fn read_pip_keys_from_file() -> (bool, Option<String>) {
 /// Geometry of the PiP window, in screen points (top-left origin).
 ///
 /// Parsed from `--experimental-pip-geometry WxH+X+Y`. `x` / `y` are
-/// optional; when `None` the platform backend picks a sensible
-/// "top-right corner with a small inset" default so a user enabling
-/// the feature without any geometry flags still sees a window.
+/// optional; when `None` the floating window starts near the lower-right.
+/// Width/height bound each card; the window also reserves its stack and controls.
 #[derive(Debug, Clone, Copy)]
 pub struct PipGeometry {
     pub width: u32,
@@ -108,8 +91,8 @@ pub struct PipGeometry {
 impl Default for PipGeometry {
     fn default() -> Self {
         Self {
-            width: 320,
-            height: 200,
+            width: 400,
+            height: 300,
             x: None,
             y: None,
         }
@@ -129,6 +112,9 @@ impl PipGeometry {
                 let mut parts = tail.split('+');
                 let x = parts.next()?.parse().ok()?;
                 let y = parts.next()?.parse().ok()?;
+                if parts.next().is_some() {
+                    return None;
+                }
                 (&s[..i], Some((x, y)))
             }
             None => (s, None),
@@ -136,6 +122,9 @@ impl PipGeometry {
         let mut wh = size.split('x');
         let w: u32 = wh.next()?.parse().ok()?;
         let h: u32 = wh.next()?.parse().ok()?;
+        if wh.next().is_some() || !(160..=2048).contains(&w) || !(120..=2048).contains(&h) {
+            return None;
+        }
         Some(Self {
             width: w,
             height: h,
@@ -145,36 +134,33 @@ impl PipGeometry {
     }
 }
 
-/// Configuration for the PiP window. Built by `main.rs` from CLI
-/// flags and handed to `PipBackendFactory::start`.
+/// Local preview defaults, with explicit per-host disabling.
 #[derive(Debug, Clone)]
 pub struct PipConfig {
-    /// `--experimental-pip` is on argv. The factory is only consulted
-    /// when this is true; the field is kept here so backends that
-    /// share a `start()` path can early-return.
+    /// Enabled by default on macOS; unsupported platforms keep their stub.
     pub enabled: bool,
     pub geometry: PipGeometry,
-    /// Window title — kept here so the "experimental" label stays in
-    /// one place. Defaults to "cua-driver — agent view (experimental)".
+    /// Local window title.
     pub title: String,
 }
 
 impl Default for PipConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: cfg!(target_os = "macos"),
             geometry: PipGeometry::default(),
-            title: "cua-driver — agent view (experimental)".to_owned(),
+            title: "Qwen Computer Use".to_owned(),
         }
     }
 }
 
 impl PipConfig {
     /// Parse the PiP-related CLI flags out of `std::env::args()`.
-    /// Recognised flags (all opt-in):
+    /// Recognised flags:
     /// ```text
     /// --experimental-pip
     /// --pip                        (short alias)
+    /// --no-pip
     /// --experimental-pip-geometry  WxH | WxH+X+Y
     /// ```
     /// Unknown flags are ignored so this never conflicts with the
@@ -186,13 +172,19 @@ impl PipConfig {
 
     pub fn parse(args: &[String]) -> Self {
         let mut cfg = PipConfig::default();
+        cfg.apply_args(args);
+        cfg
+    }
+
+    fn apply_args(&mut self, args: &[String]) {
         let mut i = 0usize;
         while i < args.len() {
             match args[i].as_str() {
-                "--experimental-pip" | "--pip" => cfg.enabled = true,
+                "--experimental-pip" | "--pip" => self.enabled = true,
+                "--no-pip" => self.enabled = false,
                 "--experimental-pip-geometry" => {
                     if let Some(geom) = args.get(i + 1).and_then(|s| PipGeometry::parse(s)) {
-                        cfg.geometry = geom;
+                        self.geometry = geom;
                         i += 1;
                     }
                 }
@@ -200,7 +192,6 @@ impl PipConfig {
             }
             i += 1;
         }
-        cfg
     }
 
     /// Resolve the config from (in order of precedence, low → high):
@@ -230,79 +221,46 @@ impl PipConfig {
                 }
             }
         }
-        // CLI args override anything in the file.
         let args: Vec<String> = std::env::args().collect();
-        let cli = PipConfig::parse(&args[1..]);
-        if cli.enabled {
-            cfg.enabled = true;
-        }
-        // CLI geometry only overrides when explicitly passed — detect by
-        // diffing against PipGeometry::default() (the parse() entry point
-        // returns the default when no flag is present).
-        if cli.geometry.width != PipGeometry::default().width
-            || cli.geometry.height != PipGeometry::default().height
-            || cli.geometry.x.is_some()
-            || cli.geometry.y.is_some()
-        {
-            cfg.geometry = cli.geometry;
-        }
+        cfg.apply_args(&args[1..]);
         cfg
     }
 }
 
-/// A single frame pushed into the PiP window after a tool call lands.
-///
-/// `png_bytes` are the raw PNG bytes produced by the platform
-/// screenshot callback — the same path that powers `screenshot.png`
-/// in the recording pipeline, so PiP shows exactly what the recorder
-/// sees.
-#[derive(Debug, Clone)]
-pub struct PipFrame {
-    pub png_bytes: Vec<u8>,
-    /// One-line summary shown overlayed on the frame, e.g.
-    /// `click element_index=2` or `type_text "hello world"`.
-    pub action_label: String,
-    /// Wall-clock timestamp (ms since Unix epoch) — used by backends
-    /// that want to show "last update Xs ago" in the title bar.
-    pub timestamp_ms: u64,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// A live PiP window. Owned by `main.rs` for the lifetime of the
-/// process; `shutdown()` consumes it and closes the window.
-pub trait PipBackend: Send + Sync {
-    /// Push a new frame to the window. Non-blocking; the backend is
-    /// responsible for dispatching the actual draw to whatever thread
-    /// its UI toolkit requires (the macOS impl dispatches to the main
-    /// queue via `dispatch_async`).
-    fn push_frame(&self, frame: PipFrame);
+    #[test]
+    fn default_cards_use_a_four_hundred_by_three_hundred_bound() {
+        let geometry = PipGeometry::default();
+        assert_eq!((geometry.width, geometry.height), (400, 300));
+        assert_eq!((geometry.x, geometry.y), (None, None));
+    }
 
-    /// Close the window and release native resources. Called from
-    /// `main.rs` on shutdown.
-    fn shutdown(self: Box<Self>);
-}
+    #[test]
+    fn explicit_disabled_configuration_survives_empty_arguments() {
+        let mut cfg = PipConfig {
+            enabled: false,
+            ..PipConfig::default()
+        };
+        cfg.apply_args(&[]);
+        assert!(!cfg.enabled);
+        cfg.apply_args(&["--pip".into()]);
+        assert!(cfg.enabled);
+        cfg.apply_args(&["--no-pip".into()]);
+        assert!(!cfg.enabled);
+    }
 
-/// Spawns a fresh PiP window. Registered once at startup via
-/// `set_pip_backend_factory`.
-pub trait PipBackendFactory: Send + Sync {
-    fn start(&self, cfg: &PipConfig) -> anyhow::Result<Box<dyn PipBackend>>;
-}
-
-static PIP_FACTORY: OnceLock<Box<dyn PipBackendFactory>> = OnceLock::new();
-
-/// Register the platform's PiP backend factory. Idempotent — subsequent
-/// calls are silently ignored, matching the other startup-callback
-/// setters in `cua_driver_core`.
-pub fn set_pip_backend_factory(factory: Box<dyn PipBackendFactory>) {
-    let _ = PIP_FACTORY.set(factory);
-}
-
-/// Start a PiP window using the registered backend. Returns an error
-/// when no backend has been registered for this platform — `main.rs`
-/// treats that as "PiP unavailable on this OS" and continues without
-/// the window.
-pub fn start_pip(cfg: &PipConfig) -> anyhow::Result<Box<dyn PipBackend>> {
-    let factory = PIP_FACTORY
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("no PiP backend registered for this platform"))?;
-    factory.start(cfg)
+    #[test]
+    fn geometry_rejects_unbounded_or_ambiguous_shapes() {
+        for value in ["0x0", "4000x200", "320x200x1", "320x200+1+2+3", "320x200+1"] {
+            assert!(PipGeometry::parse(value).is_none(), "{value}");
+        }
+        let geometry = PipGeometry::parse("320x200+-100+25").unwrap();
+        assert_eq!(
+            (geometry.width, geometry.height, geometry.x, geometry.y),
+            (320, 200, Some(-100), Some(25))
+        );
+    }
 }

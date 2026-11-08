@@ -11,7 +11,7 @@ import { PlaywrightRuntime } from '../src/playwright/playwright-runtime.js';
 import { jpegDimensions } from '../src/playwright/runtime-helpers.js';
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
-  CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
 } from '../src/bridge/protocol.js';
 import { withManagedChrome } from './managed-chrome.js';
 
@@ -26,7 +26,9 @@ try {
       await transport.start();
       const ping = asRecord(await transport.request('ping', {}, 20_000));
       assert(
-        ping['extensionId'] === CHROME_EXTENSION_ID &&
+        // Any trusted id, so this runs against a store-keyed build too; the
+        // harness registers the same set.
+        CHROME_EXTENSION_IDS.includes(String(ping['extensionId'])) &&
           ping['protocolVersion'] === CHROME_BRIDGE_PROTOCOL_VERSION,
         'Chrome extension identity did not match',
       );

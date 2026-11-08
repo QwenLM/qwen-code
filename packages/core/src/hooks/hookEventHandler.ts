@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay } from '../utils/shell-result.js';
 import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
 import { getHookMatcherTarget } from './hookPlanner.js';
@@ -56,6 +57,8 @@ import type {
   InstructionLoadReason,
   BackgroundTaskInfo,
   CronJobInfo,
+  FileChangedInput,
+  FileChangeEvent,
 } from './types.js';
 import {
   createHookOutput,
@@ -70,7 +73,11 @@ import {
   type HookProgressOutcome,
 } from '../confirmation-bus/types.js';
 import { approvalModeToPermissionMode } from './permission-mode.js';
-import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { randomUUID } from 'node:crypto';
+import {
+  assertHookExecutionOwner,
+  resolveHookExecutionOwner,
+} from './hook-execution-context.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
@@ -85,6 +92,15 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
  * across every HookEventHandler and every MessageBus in this process.
  */
 let hookInvocationSerial = 0;
+
+export interface ManagedHookDispatcher {
+  hasHooksForEvent(eventName: string): boolean;
+  execute(
+    eventName: HookEventName,
+    input: HookInput,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult>;
+}
 
 /** Longest prompt text used as a hook's display name. */
 const HOOK_DISPLAY_NAME_MAX_LENGTH = 80;
@@ -167,12 +183,15 @@ function getHookDisplayName(config: HookConfig): string {
   }
 }
 
-function normalizeQuestionHookResponse(
+function normalizeHookDisplayResponse(
   toolName: string,
   response: Record<string, unknown>,
   displayKey: 'returnDisplay' | 'result_display',
 ): Record<string, unknown> {
   const display = response[displayKey];
+  if (toolName === ToolNames.SHELL && isShellResultDisplay(display)) {
+    return { ...response, [displayKey]: display.text };
+  }
   if (
     toolName === ToolNames.ASK_USER_QUESTION &&
     display !== null &&
@@ -200,6 +219,24 @@ export class HookEventHandler {
   /** Optional provider for conversation history */
   private messagesProvider?: MessagesProvider;
 
+  async fireFileChangedEvent(
+    filePath: string,
+    event: FileChangeEvent,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: FileChangedInput = {
+      ...this.createBaseInput(HookEventName.FileChanged),
+      file_path: filePath,
+      event,
+    };
+    return this.executeHooks(
+      HookEventName.FileChanged,
+      input,
+      { filePath },
+      signal,
+    );
+  }
+
   constructor(
     config: Config,
     hookPlanner: HookPlanner,
@@ -207,6 +244,8 @@ export class HookEventHandler {
     hookAggregator: HookAggregator,
     sessionHooksManager: SessionHooksManager,
     messagesProvider?: MessagesProvider,
+    private readonly runtimeId: string = randomUUID(),
+    private readonly managedDispatcher?: ManagedHookDispatcher,
   ) {
     this.config = config;
     this.hookPlanner = hookPlanner;
@@ -533,7 +572,7 @@ export class HookEventHandler {
       permission_mode: permissionMode,
       tool_name: toolName,
       tool_input: toolInput,
-      tool_response: normalizeQuestionHookResponse(
+      tool_response: normalizeHookDisplayResponse(
         toolName,
         toolResponse,
         'returnDisplay',
@@ -634,7 +673,7 @@ export class HookEventHandler {
         call.tool_response
           ? {
               ...call,
-              tool_response: normalizeQuestionHookResponse(
+              tool_response: normalizeHookDisplayResponse(
                 call.tool_name,
                 call.tool_response,
                 'result_display',
@@ -926,6 +965,17 @@ export class HookEventHandler {
     context?: HookEventContext,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
+    if (this.managedDispatcher) {
+      if (!this.managedDispatcher.hasHooksForEvent(eventName)) {
+        return { success: true, allOutputs: [], errors: [], totalDuration: 0 };
+      }
+      const messages = this.messagesProvider?.();
+      const managedInput = {
+        ...input,
+        ...(messages ? { messages: structuredClone(messages) } : {}),
+      };
+      return this.managedDispatcher.execute(eventName, managedInput, signal);
+    }
     const failClosedResult: AggregatedHookResult = {
       success: false,
       allOutputs: [],
@@ -942,8 +992,24 @@ export class HookEventHandler {
     };
 
     try {
-      // Create execution plan from registry hooks
-      const plan = this.hookPlanner.createExecutionPlan(eventName, context);
+      const owner = Object.freeze({
+        ...resolveHookExecutionOwner(
+          this.runtimeId,
+          this.config.getSessionId(),
+        ),
+        sessionId: input.session_id,
+        agentId: input.agent_id ?? null,
+      });
+      assertHookExecutionOwner(
+        owner,
+        this.runtimeId,
+        this.config.getSessionId(),
+      );
+      const plan = this.hookPlanner.createExecutionPlan(
+        eventName,
+        context,
+        owner,
+      );
 
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
@@ -960,7 +1026,7 @@ export class HookEventHandler {
           : [];
       // The second side of the project-skill trust gate: a hook registered
       // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
-      // only while the folder is STILL trusted. `Config.isTrustedFolder()`
+      // only while the folder is STILL trusted. `Config.isExplicitlyTrustedFolder()`
       // is live under an IDE connection, so a revocation mid-session
       // silences the hook at its next event without a restart or any
       // per-skill unregistration; trust granted again lets it fire. Only
@@ -969,7 +1035,8 @@ export class HookEventHandler {
         (entry) => entry.trustGated === true,
       )
         ? registeredSessionHooks.filter(
-            (entry) => !entry.trustGated || this.config.isTrustedFolder(),
+            (entry) =>
+              !entry.trustGated || this.config.isExplicitlyTrustedFolder(),
           )
         : registeredSessionHooks;
       if (sessionHooks.length !== registeredSessionHooks.length) {
@@ -1016,7 +1083,7 @@ export class HookEventHandler {
       // Read once per batch so a hook's start and end carry the same value by
       // construction rather than by relying on async context propagation.
       // Same source as the hook input's `agent_id`.
-      const agentId = getCurrentAgentId() ?? undefined;
+      const agentId = owner.agentId ?? undefined;
       const onHookStart = (config: HookConfig, index: number) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
@@ -1162,11 +1229,16 @@ export class HookEventHandler {
     const sourceType = this.config.getSessionSourceType();
     const sourceId = this.config.getSessionSourceId();
 
-    const agentId = getCurrentAgentId();
+    const owner = resolveHookExecutionOwner(
+      this.runtimeId,
+      this.config.getSessionId(),
+    );
+    assertHookExecutionOwner(owner, this.runtimeId, this.config.getSessionId());
+    const agentId = owner.agentId;
     const promptId = promptIdContext.getStore();
 
     return {
-      session_id: this.config.getSessionId(),
+      session_id: owner.sessionId,
       ...(sourceType !== undefined ? { source_type: sourceType } : {}),
       ...(sourceId !== undefined ? { source_id: sourceId } : {}),
       transcript_path: transcriptPath,

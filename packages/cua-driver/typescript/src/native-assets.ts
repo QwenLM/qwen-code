@@ -72,7 +72,7 @@ export function nativeTarget(
     return {
       archive: `cua-driver-rs-${version}-windows-${releaseArch}-binary.zip`,
       cacheKey: `windows-${releaseArch}`,
-      companions: ["qwen-cua-driver-uia.exe"],
+      companions: [],
       library: "cua_driver_sdk.dll",
       runtime,
     }

@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertExecutionSandboxSupported,
+  InvalidExecutionSandboxConfigError,
+} from '../config/execution-sandbox-settings.js';
 import type { RunHandle } from './run-qwen-serve.js';
 import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
+import { normalizeMaxRingBytes } from '@qwen-code/acp-bridge/eventBus';
 import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,
@@ -45,6 +50,7 @@ const NUMBER_OPTIONS = new Map<
   ['maxPendingPromptsPerSession', 'max-pending-prompts-per-session'],
   ['maxConnections', 'max-connections'],
   ['eventRingSize', 'event-ring-size'],
+  ['eventRingMaxBytes', 'event-ring-max-bytes'],
   ['compactedReplayMaxBytes', 'compacted-replay-max-bytes'],
   ['maxJournalEvents', 'max-journal-events'],
   ['maxJournalBytes', 'max-journal-bytes'],
@@ -71,6 +77,7 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
+  ['conversations-dir', 'conversationsDir'],
   ['memory-project-scope', 'memoryProjectScope'],
   ['tls-cert', 'tlsCert'],
   ['tls-key', 'tlsKey'],
@@ -85,6 +92,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['web', 'serveWebShell'],
   ['open', 'open'],
   ['open-with-auth', 'open-with-auth'],
+  ['token-qr', 'tokenQr'],
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
   ['experimental-lsp', 'experimentalLsp'],
@@ -207,6 +215,12 @@ function getServeFastPathValidationError(
       maxPendingPromptsPerSession < 0)
   ) {
     return 'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).';
+  }
+
+  try {
+    normalizeMaxRingBytes(parsed.options.eventRingMaxBytes);
+  } catch (error) {
+    return `qwen serve: ${error instanceof Error ? error.message : String(error)}`;
   }
 
   const compactedReplayMaxBytes = parsed.options.compactedReplayMaxBytes;
@@ -404,8 +418,8 @@ export function parseServeFastPathArgs(
       if (!read) return { kind: 'fallback' };
       i = read.nextIndex;
       if (
-        stringTarget === 'workspace' &&
-        (options.workspace !== undefined || read.value === '')
+        (stringTarget === 'workspace' || stringTarget === 'conversationsDir') &&
+        (options[stringTarget] !== undefined || read.value === '')
       ) {
         return { kind: 'fallback' };
       }
@@ -439,7 +453,8 @@ export function parseServeFastPathArgs(
       if (
         read.value !== 'off' &&
         read.value !== 'observe' &&
-        read.value !== 'admit'
+        read.value !== 'admit' &&
+        read.value !== 'enforce'
       ) {
         return { kind: 'fallback' };
       }
@@ -526,6 +541,7 @@ function emitHeadlessYoloWarning(
   const warning = getHeadlessYoloSafetyWarning({
     getApprovalMode: () => settings.tools?.approvalMode,
     getSandbox: () => settings.tools?.sandbox,
+    getShellExecutionSandbox: () => settings.tools?.executionSandbox,
   });
   if (warning) {
     writeStderrLine(warning);
@@ -582,6 +598,7 @@ export async function tryRunServeFastPath(
       parsed.options.workspace,
     );
   } catch (err) {
+    if (err instanceof InvalidExecutionSandboxConfigError) throw err;
     writeStderrLine(
       `qwen serve: fast-path bootstrap failed, falling back to full startup: ${
         err instanceof Error ? err.message : String(err)
@@ -589,6 +606,10 @@ export async function tryRunServeFastPath(
     );
     return false;
   }
+  assertExecutionSandboxSupported(
+    settings ?? {},
+    'serve / ACP / web terminals',
+  );
   applyRateLimitEnvDefaults(parsed.options, process.env);
   discardRateLimitTuningWhenDisabled(parsed.options);
 
@@ -616,6 +637,7 @@ export async function tryRunServeFastPath(
   let handle: RunHandle;
   try {
     handle = await runQwenServe(parsed.options, {
+      updateRestartArgv: rawArgv,
       ...(settings ? { bootSettings: settings } : {}),
       resolveOnListen: true,
       deferRuntimeUntilFirstHealth: !parsed.open,

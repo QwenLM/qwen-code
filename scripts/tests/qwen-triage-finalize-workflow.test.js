@@ -27,7 +27,7 @@ describe('qwen-triage-finalize workflow', () => {
     expect(workflow.on.workflow_run.workflows).toEqual([
       'Qwen Code CI',
       'Qwen Autofix',
-      'SDK Java',
+      'Managed Agent gate',
       'SDK Python',
       'Serve A/B',
       'Web-shell Visuals',
@@ -51,11 +51,15 @@ describe('qwen-triage-finalize workflow', () => {
     expect(workflow.jobs.finalize.steps).toHaveLength(1);
   });
 
-  it('serializes concurrent finalize runs per head SHA without cancelling', () => {
-    // Two listed workflows can complete near-simultaneously; a cancelled run
-    // would drop its read-modify-write, so queue instead of cancel.
-    expect(workflowText).toContain(
-      "group: 'qwen-triage-finalize-${{ github.event.workflow_run.head_sha }}'",
+  it('serializes PR finalize runs per head SHA without cancelling', () => {
+    // Two listed workflows can complete near-simultaneously; a cancelled PR
+    // run would drop its read-modify-write, so queue instead of cancel.
+    // Non-PR firings get a unique group so they never occupy a PR's group
+    // before the job-level event gate skips them.
+    // Keep the expression on one line: a more-indented continuation would
+    // survive folding as a literal newline inside the group.
+    expect(workflow.concurrency.group).toBe(
+      "qwen-triage-finalize-${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || github.run_id }}",
     );
     expect(workflowText).toContain('cancel-in-progress: false');
   });

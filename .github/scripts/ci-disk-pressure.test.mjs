@@ -41,10 +41,21 @@ function lintStep(name) {
   return value;
 }
 
+// test_build carries the sampling install and then spends its whole timeout
+// building, so it needs the same collector for the same reason.
+function buildStep(name) {
+  const value = ciJobs.test_build.steps.find(
+    (candidate) => candidate.name === name,
+  );
+  assert.ok(value, `missing ${name} step in test_build`);
+  return value;
+}
+
 describe('ci.yml disk-pressure evidence', () => {
-  it('starts sampling before npm ci and preserves those samples for upload', () => {
+  it('starts sampling before the install and preserves those samples for upload', () => {
     const install = step('Install dependencies').run;
-    const npmCi = install.indexOf('npm ci');
+    const npmCi = install.indexOf('pnpm install');
+    assert.ok(npmCi !== -1, 'the install step must run pnpm install');
 
     assert.match(
       install,
@@ -87,13 +98,13 @@ describe('ci.yml disk-pressure evidence', () => {
     );
     assert.match(tests, /hosttests\[\$\{hosttests:-unknown\}\]/);
 
-    // test_macos and test_windows inline the same sampler (plain echo, no
+    // test_macos_shards and test_windows inline the same sampler (plain echo, no
     // DISK_SAMPLES append), and no equality pin reaches them: the cross-leg
     // byte-identity in no-ak-integration-ci.test.js stops at the `( while
     // true` sentinel by design. Pin the sampler expression per leg, or an
     // edit that only touches the pinned test-job copy ships green while
     // these nightly-only lanes silently drop `load`/`hosttests`.
-    for (const jobName of ['test_macos', 'test_windows']) {
+    for (const jobName of ['test_macos_shards', 'test_windows']) {
       const leg = ciJobs[jobName].steps.find(
         (candidate) => candidate.name === 'Run tests and generate reports',
       );
@@ -192,6 +203,55 @@ describe('ci.yml disk-pressure evidence', () => {
     );
   });
 
+  it('gives test_build the same collector, and keeps it last and uniquely named', () => {
+    // test_build samples during install and then builds for up to its whole
+    // timeout, but its sampler dies with the install step's trap … EXIT. It
+    // shipped without a collector, so an ENOSPC build — or the OOM that took
+    // a shard host out mid-run — kept no telemetry at all.
+    const install = buildStep('Install dependencies').run;
+    assert.match(
+      install,
+      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"/,
+    );
+
+    const dump = buildStep('Dump disk state on failure');
+    assert.equal(dump.if, '${{ failure() }}');
+    assert.match(dump.run, /tee -a "\$DISK_SAMPLES"/);
+    assert.doesNotMatch(dump.run, /[^>]> "\$DISK_SAMPLES"/);
+
+    const upload = buildStep('Upload disk-pressure samples');
+    assert.equal(upload.if, '${{ failure() }}');
+    assert.equal(upload.with['if-no-files-found'], 'ignore');
+    assert.equal(
+      upload.with.path,
+      '${{ runner.temp }}/disk-pressure-samples.log',
+    );
+
+    // Same position contract as lint_and_static: failure() is evaluated when
+    // the step is reached, so anything parked earlier only ever collects a
+    // prelude failure.
+    const names = ciJobs.test_build.steps.map((candidate) => candidate.name);
+    assert.equal(
+      names.indexOf('Upload disk-pressure samples'),
+      names.length - 1,
+      'the collector must be the last step of test_build',
+    );
+    assert.ok(
+      names.indexOf('Dump disk state on failure') <
+        names.indexOf('Upload disk-pressure samples'),
+    );
+
+    // upload-artifact v4+ rejects duplicate names when several jobs fail in
+    // one run, so all three collectors must stay distinct.
+    assert.ok(
+      ![
+        step('Upload disk-pressure samples').with.name,
+        lintStep('Upload disk-pressure samples').with.name,
+      ].includes(upload.with.name),
+      'test_build collector artifact name collides with another job',
+    );
+  });
+
   it('keeps the failure dump in the job log when the samples file is unwritable', () => {
     // The dump exists to explain an ENOSPC death, so it cannot depend on the
     // filesystem being writable: redirected straight into the samples file, a
@@ -239,11 +299,116 @@ describe('ci.yml disk-pressure evidence', () => {
     }
   });
 
+  it('reports swap and falls back to df -h in the failure dump', () => {
+    // The three sibling state-at-failure dumps grep SwapTotal|SwapFree and
+    // retry `df -h` when `df -hT` is unavailable; this one did neither, so a
+    // swap-exhausted death on the contended pool uploaded an artifact that
+    // could not show it, and a runner whose df has no -T (busybox, minimal
+    // images) uploaded no filesystem table at all. Execute the step body
+    // instead of pinning its text: the grep pattern is only worth anything if
+    // the fields actually reach the artifact. The stub rejects any option
+    // cluster carrying T — `df -hT` arrives as ONE argument, so matching on
+    // `-T` alone would let it through and fake the fallback. That arm must stay
+    // ahead of `-h`, and must mark its own output: otherwise "retried after
+    // -hT failed" and "never tried -hT" are indistinguishable.
+    //
+    // The three sibling dumps carry the same two fields and no equality pin
+    // reaches them ('Dump disk state on failure' is this lane's alone). Pin
+    // them textually like the sampler loop above — not executed, because
+    // test_windows greps /proc/meminfo, which Git Bash lacks.
+    for (const jobName of ['test', 'test_macos_shards', 'test_windows']) {
+      const leg = ciJobs[jobName].steps.find(
+        (candidate) => candidate.name === 'Run tests and generate reports',
+      );
+      assert.ok(leg, `missing run-tests step in ${jobName}`);
+      assert.match(
+        leg.run,
+        /df -hT .* \|\| df -h /,
+        `${jobName} lost the df -h retry`,
+      );
+      assert.match(leg.run, /SwapTotal\|SwapFree/, `${jobName} lost swap`);
+    }
+
+    const root = mkdtempSync(join(tmpdir(), 'ci-disk-pressure-'));
+    const df = join(root, 'df');
+    writeFileSync(
+      df,
+      '#!/usr/bin/env bash\ncase "$*" in\n  *T*) echo STUB-DF-HT; exit 1 ;;\n  *-h*) echo STUB-DF-H ;;\nesac\n',
+    );
+    chmodSync(df, 0o755);
+
+    try {
+      const result = spawnSync(
+        'bash',
+        [
+          '-e',
+          '-o',
+          'pipefail',
+          '-c',
+          lintStep('Dump disk state on failure').run,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            PATH: `${root}:${process.env.PATH}`,
+            RUNNER_TEMP: root,
+          },
+        },
+      );
+
+      assert.equal(result.error, undefined);
+      assert.equal(
+        result.status,
+        0,
+        `signal: ${result.signal}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+      );
+      const samples = readFileSync(
+        join(root, 'disk-pressure-samples.log'),
+        'utf8',
+      );
+      assert.match(
+        samples,
+        /^SwapTotal:/m,
+        `swap exhaustion is invisible in the artifact\nstdout: ${result.stdout}`,
+      );
+      assert.match(samples, /^SwapFree:/m);
+      // All four fields share the one edited grep line, so a pattern narrowed
+      // to swap alone must go red here. `MemAvailable` has to keep the exact
+      // spelling the sampler's `awk '/MemAvailable/'` uses, or the two stop
+      // being comparable.
+      assert.match(
+        samples,
+        /^MemTotal:/m,
+        `RAM total is invisible in the artifact\nstdout: ${result.stdout}`,
+      );
+      assert.match(samples, /^MemAvailable:/m, 'RAM available is invisible');
+      // -hT must be ATTEMPTED, not merely tolerated: a `df -h || true`
+      // collapse or a reorder still yields STUB-DF-H, silently losing the
+      // filesystem Type column.
+      assert.match(
+        samples,
+        /^STUB-DF-HT$/m,
+        `df -hT was never attempted first\nstdout: ${result.stdout}`,
+      );
+      assert.match(
+        samples,
+        /^STUB-DF-H$/m,
+        `df -hT failed and nothing retried with -h\nstdout: ${result.stdout}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps install failure status while writing the pre-install sample', () => {
     const root = mkdtempSync(join(tmpdir(), 'ci-disk-pressure-'));
-    const npm = join(root, 'npm');
-    writeFileSync(npm, '#!/usr/bin/env bash\nexit 42\n');
-    chmodSync(npm, 0o755);
+    // The install step runs `corepack pnpm install`; stub corepack so the
+    // failing exit comes from the install command itself.
+    const corepack = join(root, 'corepack');
+    writeFileSync(corepack, '#!/usr/bin/env bash\nexit 42\n');
+    chmodSync(corepack, 0o755);
 
     try {
       const result = spawnSync(

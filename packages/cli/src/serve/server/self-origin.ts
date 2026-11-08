@@ -11,11 +11,12 @@ import { isPreAuthWebShellRequest } from '../web-shell-preauth.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
 import { ACCESS_LOG_REJECT_LOCAL } from './access-log.js';
+import type { ListenerScopedCredentials } from '../local-control/credentials.js';
 
 export function installRemoteSelfOriginMiddleware(
   app: Application,
   bind: string,
-  token: string | undefined,
+  token: string | undefined | ListenerScopedCredentials,
 ): void {
   if (isLoopbackBind(bind) || !token) return;
   const authenticate = bearerAuth(token);
@@ -61,9 +62,13 @@ export function installRemoteSelfOriginMiddleware(
       delete req.headers.origin;
       next();
     };
-    // Module scripts carry Origin but cannot attach Authorization. Only
-    // existing public shell routes may bypass the credential check.
-    if (isPreAuthWebShellRequest(req)) allow();
+    // Public shell assets cannot attach Authorization. Pairing exchange has
+    // its own single-use credential check before the ordinary bearer gate.
+    if (
+      isPreAuthWebShellRequest(req) ||
+      (req.method === 'POST' && req.path === '/web-shell/pairing/exchange')
+    )
+      allow();
     else authenticate(req, res, allow);
   });
 }

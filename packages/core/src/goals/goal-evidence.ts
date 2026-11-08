@@ -5,6 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
+import { goalToolResultProvenance } from './goal-tool-result-provenance.js';
 import type {
   GoalEvidenceProofKind,
   GoalRecord,
@@ -35,13 +36,19 @@ export type GoalEvidenceProvenance =
   | 'real_user'
   | 'assistant_output'
   | 'tool_result'
+  | 'execution_output'
   | 'goal_checkpoint';
 
 type GoalRecordProvenance =
   | GoalEvidenceProvenance
   | 'goal_control'
   | 'goal_runtime'
-  | 'system';
+  | 'system'
+  // Session multi-agent records (agent_mention/agent_message) share the
+  // transcript; they carry no Goal context and are never evidence.
+  | 'external_agent'
+  // A Mod's own prompt is not the person's words, so it is never evidence.
+  | 'mod_prompt';
 
 export interface GoalEvidenceRecord {
   uuid: string;
@@ -140,7 +147,8 @@ export function buildGoalVerifierEvidenceWindow(
   options: BuildGoalVerifierEvidenceWindowOptions,
 ): GoalVerifierEvidenceWindow {
   assertPermitMatchesGoal(input);
-  const { cursorIndex } = locateEvidenceCursor(input);
+  const { cursorIndex, executionOutputCallIdsByTurn } =
+    locateEvidenceCursor(input);
   const evidence: GoalVerifierEvidenceRecord[] = [];
   const seenTurnIds = new Set<string>();
   let remaining = options.budgetBytes;
@@ -170,7 +178,11 @@ export function buildGoalVerifierEvidenceWindow(
       uuid: record.uuid,
       provenance,
       turnId: context.turnId,
-      proofKind: proofKindOf(provenance),
+      proofKind: proofKindOf(
+        record,
+        provenance,
+        executionOutputCallIdsByTurn.get(context.turnId),
+      ),
       content: capVerifierEvidenceContent(content),
     };
     // The comma that separates records in the request array counts too, and
@@ -216,7 +228,7 @@ function assertPermitMatchesGoal(input: GoalEvidenceContext): void {
  */
 function locateEvidenceCursor(input: GoalEvidenceContext): {
   cursorIndex: number;
-  indexByUuid: Map<string, number>;
+  executionOutputCallIdsByTurn: Map<string, Set<string>>;
 } {
   const cursorId = input.goal.evidenceCursor.recordId;
   if (cursorId === null) {
@@ -226,6 +238,7 @@ function locateEvidenceCursor(input: GoalEvidenceContext): {
     );
   }
   const indexByUuid = new Map<string, number>();
+  const executionOutputCallIdsByTurn = new Map<string, Set<string>>();
   for (let index = 0; index < input.records.length; index += 1) {
     const uuid = input.records[index]!.uuid;
     if (indexByUuid.has(uuid)) {
@@ -235,6 +248,32 @@ function locateEvidenceCursor(input: GoalEvidenceContext): {
       );
     }
     indexByUuid.set(uuid, index);
+    const record = input.records[index]!;
+    if (record.type !== 'assistant' || record.subtype !== undefined) continue;
+    const context = parseGoalContext(record.goalContext);
+    if (
+      !context ||
+      context.goalId !== input.goal.goalId ||
+      context.revision !== input.goal.revision
+    )
+      continue;
+    for (const part of record.message?.parts ?? []) {
+      const call = part.functionCall;
+      if (
+        !call?.id ||
+        !call.name ||
+        goalToolResultProvenance({
+          name: call.name,
+          args: call.args,
+          goalContext: context,
+        })?.provenance !== 'execution_output'
+      )
+        continue;
+      const calls =
+        executionOutputCallIdsByTurn.get(context.turnId) ?? new Set<string>();
+      calls.add(call.id);
+      executionOutputCallIdsByTurn.set(context.turnId, calls);
+    }
   }
   const cursorIndex = indexByUuid.get(cursorId);
   if (cursorIndex === undefined) {
@@ -243,13 +282,15 @@ function locateEvidenceCursor(input: GoalEvidenceContext): {
       `The Goal evidence cursor ${cursorId} is not in the active transcript chain.`,
     );
   }
-  return { cursorIndex, indexByUuid };
+  return { cursorIndex, executionOutputCallIdsByTurn };
 }
 
 function coherentEvidenceProvenance(
   record: GoalEvidenceRecord,
 ): GoalEvidenceProvenance | undefined {
   if (record.type === 'system') return undefined;
+  // Never the person's words, though its record has a typed prompt's shape.
+  if (record.provenance === 'mod_prompt') return undefined;
   const provenance = record.provenance ?? legacySafeProvenance(record);
   if (provenance === 'real_user') {
     return record.type === 'user' &&
@@ -263,8 +304,10 @@ function coherentEvidenceProvenance(
       ? provenance
       : undefined;
   }
-  if (provenance === 'tool_result') {
-    return record.type === 'tool_result' && record.subtype === undefined
+  if (provenance === 'tool_result' || provenance === 'execution_output') {
+    return record.type === 'tool_result' &&
+      (record.subtype === undefined ||
+        record.subtype === 'code_mode_tool_result')
       ? provenance
       : undefined;
   }
@@ -364,7 +407,10 @@ function evidenceContent(
     if (part.thought !== true && typeof part.text === 'string') {
       content.push(part.text);
     }
-    if (provenance === 'tool_result' && part.functionResponse) {
+    if (
+      (provenance === 'tool_result' || provenance === 'execution_output') &&
+      part.functionResponse
+    ) {
       const rendered = renderToolResponse(part.functionResponse);
       if (rendered) content.push(rendered);
     }
@@ -390,10 +436,28 @@ function renderToolResponse(functionResponse: {
 }
 
 function proofKindOf(
+  record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
+  executionOutputCallIds: ReadonlySet<string> | undefined,
 ): GoalEvidenceProofKind {
   if (provenance === 'real_user') return 'user_input';
   if (provenance === 'assistant_output') return 'delivered_output';
+  if (
+    provenance === 'execution_output' ||
+    // Older transcripts have no script/wrapper-specific provenance stamp.
+    record.message?.parts?.some(
+      (part) =>
+        (part.functionResponse?.name !== undefined &&
+          goalToolResultProvenance({
+            name: part.functionResponse.name,
+            goalContext: parseGoalContext(record.goalContext),
+          })?.provenance === 'execution_output') ||
+        (part.functionResponse?.id !== undefined &&
+          executionOutputCallIds?.has(part.functionResponse.id)),
+    )
+  ) {
+    return 'execution_output';
+  }
   return 'external_fact';
 }
 

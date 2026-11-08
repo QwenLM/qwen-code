@@ -50,7 +50,7 @@ export class CerebrasOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
 
     return {
       ...baseRequest,
-      messages: baseRequest.messages.map(stripReasoningContent),
+      messages: baseRequest.messages.flatMap(stripReasoningContent),
     };
   }
 }

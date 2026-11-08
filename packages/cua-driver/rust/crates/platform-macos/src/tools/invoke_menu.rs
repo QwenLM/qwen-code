@@ -77,9 +77,17 @@ unsafe fn semantic_children(parent: AXUIElementRef) -> Vec<AXUIElementRef> {
     out
 }
 
-unsafe fn resolve_exact_prefix(
+pub(super) unsafe fn resolve_exact_prefix(
     menu_bar: AXUIElementRef,
     prefix: &[String],
+) -> Result<AXUIElementRef, String> {
+    resolve_exact_prefix_matching(menu_bar, prefix, |_| true)
+}
+
+pub(super) unsafe fn resolve_exact_prefix_matching(
+    menu_bar: AXUIElementRef,
+    prefix: &[String],
+    matches_leaf: impl Fn(AXUIElementRef) -> bool,
 ) -> Result<AXUIElementRef, String> {
     let mut current = menu_bar;
     let mut owns_current = false;
@@ -93,7 +101,7 @@ unsafe fn resolve_exact_prefix(
         let mut matches = Vec::new();
         for child in children {
             let title = copy_string_attr(child, "AXTitle").unwrap_or_default();
-            if title.trim() == segment {
+            if title.trim() == segment && (depth + 1 < prefix.len() || matches_leaf(child)) {
                 matches.push(child);
             } else {
                 CFRelease(child as CFTypeRef);

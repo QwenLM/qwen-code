@@ -14,6 +14,10 @@ import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../ui/commands/subscription-commands.js';
 import { authCommand } from '../ui/commands/authCommand.js';
 import { branchCommand } from '../ui/commands/branchCommand.js';
 import { peersCommand } from '../ui/commands/peers-command.js';
@@ -21,6 +25,7 @@ import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { cdCommand } from '../ui/commands/cdCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
+import { commitCommand } from '../ui/commands/commit-command.js';
 import { configCommand } from '../ui/commands/config-command.js';
 import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
@@ -101,7 +106,18 @@ export class BuiltinCommandLoader implements ICommandLoader {
     // prevent ALL built-in commands from loading.
     let resolvedIdeCommand: SlashCommand | null = null;
     try {
-      resolvedIdeCommand = await ideCommand();
+      // `/ide` is interactive-only, and building it walks the process tree
+      // with one `ps` per ancestor; headless and ACP runs would filter it out
+      // after paying for that on the way to their first request. This saves
+      // nothing when `ideMode` is on — `connectIdeForStartup` performs the
+      // same walk earlier, on the awaited startup path.
+      if (
+        !this.config?.getExecutionEnvironment?.() &&
+        !this.config?.getShellExecutionSandbox?.() &&
+        this.config?.isInteractive?.() !== false
+      ) {
+        resolvedIdeCommand = await ideCommand();
+      }
     } catch (error) {
       builtinDebugLogger.warn(
         'Failed to load IDE command:',
@@ -114,15 +130,15 @@ export class BuiltinCommandLoader implements ICommandLoader {
       advisorCommand,
       agentsCommand,
       tasksCommand,
-      // Gated behind isWorkflowsEnabled — feature flag honors
-      // tools.workflowsEnabled, QWEN_CODE_ENABLE_WORKFLOWS (opt-in), and
-      // QWEN_CODE_DISABLE_WORKFLOWS (kill switch). When the flag is off the
-      // command vanishes entirely from typeahead and help, matching the
-      // established convention for experimental builtins.
-      this.config?.isWorkflowsEnabled() ? workflowsCommand : null,
+      this.config?.isWorkflowsEnabled() ||
+      this.config?.isWorkflowModeSupported?.()
+        ? workflowsCommand
+        : null,
       arenaCommand,
       approvalModeCommand,
       authCommand,
+      upgradeCommand,
+      logoutCommand,
       branchCommand,
       peersCommand,
       btwCommand,
@@ -130,6 +146,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       bugCommand,
       cdCommand,
       clearCommand,
+      commitCommand,
       compressCommand,
       compressFastCommand,
       configCommand,

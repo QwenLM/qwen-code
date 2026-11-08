@@ -5,6 +5,8 @@
  */
 
 import * as vscode from 'vscode';
+import { DaemonClient } from '@qwen-code/sdk/daemon';
+import { runNativeSubscriptionAction } from '../handlers/native-subscription-auth.js';
 import { execFile } from 'child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -44,6 +46,7 @@ import {
   type QwenDaemonListenerHandle,
 } from '../../services/qwenDaemonProcess.js';
 import { isLoopbackHostname } from '../../services/daemonIdeConnection.js';
+import { probePreAuthHostGateRejection } from './preAuthHostGateProbe.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -132,6 +135,22 @@ export class WebViewProvider {
   private agentManager: QwenAgentManager;
   private conversationStore: ConversationStore;
   private daemonProcess: QwenDaemonProcess;
+  private subscriptionRuntime?: {
+    client: DaemonClient;
+    workspaceCwd: string;
+    sessionId?: string;
+  };
+  private subscriptionAuth?: AbortController;
+  private subscriptionModelKey?: string;
+  private sidebarSubscription?: {
+    id: string;
+    owner: NonNullable<WebViewProvider['subscriptionRuntime']>;
+    controller: AbortController;
+    activating?: boolean;
+  };
+  private readonly subscriptionRuntimeWaiters = new Set<
+    (error?: Error) => void
+  >();
   /** Daemon subscriptions held by the most recent successful bootstrap. */
   private daemonListenerHandles: QwenDaemonListenerHandle[] = [];
   /**
@@ -192,6 +211,9 @@ export class WebViewProvider {
           this.webShellPermissionOwners.delete(webview);
         }
       }
+      this.subscriptionAuth?.abort();
+      this.subscriptionRuntime = undefined;
+      this.settleSubscriptionRuntime(new Error('Qwen Code view closed.'));
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
@@ -201,6 +223,10 @@ export class WebViewProvider {
       this.conversationStore,
       null,
       (message) => this.sendMessageToWebView(message),
+    );
+
+    this.messageHandler.setSubscriptionAuthHandler((action) =>
+      this.handleSubscriptionAuth(action),
     );
 
     // Set auth interactive handler — interactive auth flow (QuickPick → InputBox → write settings → reconnect)
@@ -697,6 +723,9 @@ export class WebViewProvider {
 
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
+      this.subscriptionAuth?.abort();
+      this.subscriptionRuntime = undefined;
+      this.settleSubscriptionRuntime(new Error('Qwen Code view closed.'));
       this.webShellPermissionOwners.delete(webview);
       this.attachedWebview = null;
       // Disconnect the ACP agent process to prevent orphan processes
@@ -889,6 +918,7 @@ export class WebViewProvider {
    * doInitializeAgentConnection's deferred timeout, it is cancelled first.
    */
   async startInteractiveAuth(): Promise<void> {
+    this.sidebarSubscription?.controller.abort();
     // Cancel any pending auto-auth from doInitializeAgentConnection so we
     // don't end up with two overlapping auth flows.
     if (this.autoAuthTimer) {
@@ -900,9 +930,125 @@ export class WebViewProvider {
     }
     this.authFlowActive = true;
     try {
-      await this.messageHandler.route({ type: 'auth' });
+      await this.messageHandler.route({
+        type: 'auth',
+        data: {
+          subscriptionEnabled: true,
+        },
+      });
     } finally {
       this.authFlowActive = false;
+    }
+  }
+
+  private settleSubscriptionRuntime(error?: Error): void {
+    for (const complete of [...this.subscriptionRuntimeWaiters])
+      complete(error);
+  }
+
+  async startSubscriptionAction(action: 'logout' | 'upgrade'): Promise<void> {
+    if (this.autoAuthTimer) {
+      clearTimeout(this.autoAuthTimer);
+      this.autoAuthTimer = null;
+    }
+    if (!this.subscriptionRuntime) {
+      await new Promise<void>((resolve, reject) => {
+        const complete = (error?: Error) => {
+          clearTimeout(timeout);
+          this.subscriptionRuntimeWaiters.delete(complete);
+          if (error) reject(error);
+          else resolve();
+        };
+        const timeout = setTimeout(
+          () =>
+            complete(
+              new Error(
+                'Qwen Code did not finish starting. Reload the window and retry.',
+              ),
+            ),
+          30000,
+        );
+        this.subscriptionRuntimeWaiters.add(complete);
+      });
+    }
+    await this.handleSubscriptionAuth(action);
+  }
+
+  private async handleSubscriptionAuth(
+    action?: 'logout' | 'upgrade',
+  ): Promise<void> {
+    const owner = this.subscriptionRuntime;
+    if (!owner)
+      throw new Error('Open a folder and wait for Qwen Code to connect.');
+    if (this.subscriptionAuth && !this.subscriptionAuth.signal.aborted) {
+      void vscode.window.showInformationMessage(
+        'A Qwen account operation is still running. Try again when it finishes.',
+      );
+      return;
+    }
+    const controller = new AbortController();
+    this.subscriptionAuth = controller;
+    if (!action) {
+      const id = randomUUID();
+      this.sidebarSubscription = { id, owner, controller };
+      controller.signal.addEventListener(
+        'abort',
+        () => {
+          if (this.sidebarSubscription?.id === id)
+            this.sidebarSubscription = undefined;
+          if (this.subscriptionAuth === controller)
+            this.subscriptionAuth = undefined;
+          this.sendMessageToWebView({
+            type: 'qwenSubscriptionClosed',
+            data: { flowId: id },
+          });
+        },
+        { once: true },
+      );
+      this.sendMessageToWebView({
+        type: 'qwenSubscriptionAuth',
+        data: { flowId: id },
+      });
+      return;
+    }
+    const assertOwner = () => {
+      controller.signal.throwIfAborted();
+      if (this.subscriptionRuntime !== owner)
+        throw new Error('Workspace or session changed.');
+    };
+    try {
+      const result = await runNativeSubscriptionAction({
+        transport: owner.client,
+        action,
+        signal: controller.signal,
+        isSubscriptionModel: async () => {
+          const authType = owner.sessionId
+            ? (
+                await owner.client.sessionContext(
+                  owner.sessionId,
+                  this.daemonClientId,
+                )
+              ).state._meta?.['authType']
+            : (
+                await owner.client
+                  .workspaceByCwd(owner.workspaceCwd)
+                  .workspaceProviders()
+              ).current?.authType;
+          assertOwner();
+          return authType === 'qwen-subscription';
+        },
+      });
+      assertOwner();
+      if (result.kind === 'signed-out') {
+        this.sendMessageToWebView({ type: 'authSignedOut' });
+      } else {
+        this.sendMessageToWebView({ type: 'authCancelled' });
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      if (this.subscriptionAuth === controller)
+        this.subscriptionAuth = undefined;
     }
   }
 
@@ -1118,9 +1264,16 @@ export class WebViewProvider {
             this.autoAuthTimer = null;
             if (!this.authFlowActive) {
               this.authFlowActive = true;
-              void this.messageHandler.route({ type: 'auth' }).finally(() => {
-                this.authFlowActive = false;
-              });
+              void this.messageHandler
+                .route({
+                  type: 'auth',
+                  data: {
+                    subscriptionEnabled: true,
+                  },
+                })
+                .finally(() => {
+                  this.authFlowActive = false;
+                });
             }
           }, 100);
           return;
@@ -1178,6 +1331,7 @@ export class WebViewProvider {
     providerConfig: import('@qwen-code/qwen-code-core').ProviderConfig,
     inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
   ): Promise<void> {
+    this.sidebarSubscription?.controller.abort();
     if (!inputs.apiKey) {
       this.sendMessageToWebView({
         type: 'authError',
@@ -1596,6 +1750,7 @@ export class WebViewProvider {
         break;
       case 'agentConnectionError':
       case 'authError':
+      case 'authSignedOut':
         this.authState = false;
         break;
       case 'authCancelled':
@@ -1765,6 +1920,147 @@ export class WebViewProvider {
     message: { type: string; data?: unknown },
     webview: vscode.Webview,
   ): Promise<boolean> {
+    if (message.type === 'auth') this.sidebarSubscription?.controller.abort();
+    if (message.type.startsWith('qwenSubscription')) {
+      const data = message.data as
+        | {
+            flowId?: string;
+            requestId?: string;
+            message?: string;
+          }
+        | undefined;
+      const flow = this.sidebarSubscription;
+      if (!flow || flow.id !== data?.flowId) return true;
+      if (message.type === 'qwenSubscriptionActivate') {
+        if (typeof data.requestId !== 'string' || flow.activating) return true;
+        flow.activating = true;
+        const { owner, controller } = flow;
+        const signal = controller.signal;
+        const assertOwner = () => {
+          signal.throwIfAborted();
+          if (this.subscriptionRuntime !== owner)
+            throw new Error('Workspace or session changed.');
+        };
+        try {
+          assertOwner();
+          const result = await owner.client
+            .workspaceByCwd(owner.workspaceCwd)
+            .activateSubscription({
+              signal,
+            });
+          assertOwner();
+          if (result.runtimeSync.status === 'failed')
+            throw new Error('Subscription runtime activation failed.');
+          let modelId = result.modelId;
+          if (owner.sessionId) {
+            await owner.client.setSessionModel(
+              owner.sessionId,
+              `${result.modelId}(qwen-subscription)`,
+            );
+            assertOwner();
+          } else {
+            const providers = await owner.client
+              .workspaceByCwd(owner.workspaceCwd)
+              .workspaceProviders();
+            assertOwner();
+            if (!providers.initialized) {
+              throw new Error('Subscription runtime activation failed.');
+            }
+            const current = providers.providers
+              .find((provider) => provider.current)
+              ?.models.find((model) => model.isCurrent);
+            modelId = current?.baseModelId ?? modelId;
+          }
+          this.sendMessageToWebView({
+            type: 'qwenSubscriptionActivationResult',
+            data: {
+              flowId: flow.id,
+              requestId: data.requestId,
+              modelId,
+            },
+          });
+        } catch (error) {
+          if (!signal.aborted && this.subscriptionRuntime === owner) {
+            const body = (
+              error as {
+                status?: number;
+                body?: {
+                  code?: string;
+                  message?: string;
+                  errorStage?: string;
+                  errorStatus?: number;
+                  retryAfterMs?: number;
+                };
+              } | null
+            )?.body;
+            if (
+              body?.code === 'subscription_models_unavailable' ||
+              body?.code === 'subscription_model_unavailable'
+            ) {
+              controller.abort();
+              this.sendMessageToWebView({
+                type: 'authState',
+                data: { authenticated: true },
+              });
+              return true;
+            }
+            this.sendMessageToWebView({
+              type: 'qwenSubscriptionActivationResult',
+              data: {
+                flowId: flow.id,
+                requestId: data.requestId,
+                error: true,
+                body: body
+                  ? {
+                      code: body.code,
+                      message: body.message,
+                      errorStage: body.errorStage,
+                      errorStatus:
+                        body.errorStatus ??
+                        (error as { status?: number }).status,
+                      retryAfterMs: body.retryAfterMs,
+                    }
+                  : undefined,
+              },
+            });
+          }
+        } finally {
+          flow.activating = false;
+        }
+      } else if (message.type === 'qwenSubscriptionComplete') {
+        flow.controller.abort();
+        this.sendMessageToWebView({
+          type: 'authSuccess',
+          data: { message: data.message },
+        });
+      } else if (message.type === 'qwenSubscriptionError') {
+        flow.controller.abort();
+        this.sendMessageToWebView({
+          type: 'authError',
+          data: {
+            message:
+              typeof data.message === 'string'
+                ? data.message
+                : 'Qwen sign-in failed.',
+          },
+        });
+      } else if (message.type === 'qwenSubscriptionSignedOut') {
+        flow.controller.abort();
+        this.sendMessageToWebView({ type: 'authSignedOut' });
+      } else if (
+        message.type === 'qwenSubscriptionCancel' ||
+        message.type === 'qwenSubscriptionOtherProviders'
+      ) {
+        flow.controller.abort();
+        this.sendMessageToWebView({ type: 'authCancelled' });
+        if (message.type === 'qwenSubscriptionOtherProviders')
+          await this.messageHandler.route({
+            type: 'auth',
+            data: { subscriptionEnabled: true },
+          });
+      }
+      return true;
+    }
     if (message.type === 'webShellPermissionState') {
       const data = message.data as
         | { pending?: unknown; requestId?: unknown }
@@ -1773,6 +2069,19 @@ export class WebViewProvider {
         this.webShellPermissionOwners.set(webview, data.requestId);
       } else {
         this.webShellPermissionOwners.delete(webview);
+      }
+      return true;
+    }
+    if (message.type === 'webShellModelChanged') {
+      const data = message.data as
+        | { workspaceCwd?: unknown; modelId?: unknown; authType?: unknown }
+        | undefined;
+      if (data?.workspaceCwd !== this.subscriptionRuntime?.workspaceCwd)
+        return true;
+      const key = JSON.stringify([data?.modelId, data?.authType]);
+      if (key !== this.subscriptionModelKey) {
+        this.subscriptionModelKey = key;
+        if (!this.sidebarSubscription) this.subscriptionAuth?.abort();
       }
       return true;
     }
@@ -1786,6 +2095,18 @@ export class WebViewProvider {
         | undefined;
       const sessionId = getRestorableDaemonSessionId(data?.sessionId) ?? null;
       this.messageHandler.setCurrentConversationId(sessionId);
+      const currentRuntime = this.subscriptionRuntime;
+      if (
+        currentRuntime &&
+        currentRuntime.workspaceCwd === data?.workspaceCwd &&
+        currentRuntime.sessionId !== (sessionId ?? undefined)
+      ) {
+        this.subscriptionAuth?.abort();
+        this.subscriptionRuntime = {
+          ...currentRuntime,
+          sessionId: sessionId ?? undefined,
+        };
+      }
       if (this.isViewHost && typeof data?.workspaceCwd === 'string') {
         await this.context.workspaceState.update(
           webShellSessionStateKey(data.workspaceCwd),
@@ -1802,7 +2123,12 @@ export class WebViewProvider {
               vscode.window.activeTextEditor.document.uri,
             )?.uri.fsPath
           : undefined) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      this.subscriptionAuth?.abort();
+      this.subscriptionRuntime = undefined;
       if (!workspaceCwd) {
+        this.settleSubscriptionRuntime(
+          new Error('Open a folder to use Qwen Code.'),
+        );
         await webview.postMessage({
           type: 'webShellBootstrapError',
           data: { message: 'Open a folder to use Qwen Code.' },
@@ -1901,12 +2227,48 @@ export class WebViewProvider {
         const webviewBaseUrl = await this.resolveWebviewDaemonBaseUrl(
           runtime.baseUrl,
         );
+        // A remote window whose client-side forwarded port differs from the
+        // daemon's bound port gets a pre-auth 403 from the Host gate on every
+        // daemon call — bootstrapping would hand the shell a baseUrl whose
+        // every request fails opaquely. That is deterministic config
+        // breakage, so fail fast with guidance instead. The gate sits ahead
+        // of the CORS middleware (DNS-rebinding defense), so the webview's
+        // browser can never read the 403; the extension host can, and the
+        // probe never rejects.
+        if (
+          vscode.env.remoteName &&
+          (await probePreAuthHostGateRejection(
+            runtime.baseUrl,
+            new URL(webviewBaseUrl).host,
+          ))
+        ) {
+          this.settleSubscriptionRuntime(
+            new Error(
+              'The daemon rejected the forwarded connection. Check the remote connection settings.',
+            ),
+          );
+          await webview.postMessage({
+            type: 'webShellBootstrapError',
+            data: { reason: 'daemonPreAuthHostGate' },
+          });
+          return true;
+        }
+        this.subscriptionRuntime = {
+          client: new DaemonClient({
+            ...runtime,
+            subscriptionPaywallScene: 'plugin',
+          }),
+          workspaceCwd: canonicalWorkspaceCwd,
+          sessionId: restoredSessionId,
+        };
+        this.settleSubscriptionRuntime();
         await webview.postMessage({
           type: 'webShellBootstrap',
           data: {
             ...runtime,
             baseUrl: webviewBaseUrl,
             clientId: this.daemonClientId,
+            subscriptionEnabled: true,
             workspaceCwd: canonicalWorkspaceCwd,
             // The daemon matches workspaces by canonical path, but every
             // `activeEditorChanged` sender posts VS Code's raw
@@ -1929,6 +2291,9 @@ export class WebViewProvider {
         // subscription: a single overwritable slot only ever reached the
         // last webview that bootstrapped.
         const postDaemonFailure = (message: string) => {
+          this.subscriptionAuth?.abort();
+          this.subscriptionRuntime = undefined;
+          this.settleSubscriptionRuntime(new Error(message));
           void webview.postMessage({
             type: 'webShellBootstrapError',
             data: { message },
@@ -1965,6 +2330,9 @@ export class WebViewProvider {
           });
         }
       } catch (error) {
+        this.settleSubscriptionRuntime(
+          new Error('Qwen Code could not start. Reload the window and retry.'),
+        );
         logger.error(
           '[WebViewProvider] Failed to start WebShell daemon:',
           error,
@@ -2588,6 +2956,9 @@ export class WebViewProvider {
    * Dispose the WebView provider and clean up resources
    */
   dispose(): void {
+    this.subscriptionAuth?.abort();
+    this.subscriptionRuntime = undefined;
+    this.settleSubscriptionRuntime(new Error('Qwen Code view closed.'));
     if (WebViewProvider.lastContextMenuProvider === this) {
       WebViewProvider.lastContextMenuProvider = null;
     }

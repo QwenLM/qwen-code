@@ -15,29 +15,32 @@ vi.mock('./channel-control-timeouts.js', () => ({
   MAX_DAEMON_WORKSPACES: 256,
 }));
 
-describe('child count admission', () => {
-  it('uses the unchanged six-slot model on a 7265 MiB host', () => {
-    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
-    const policy = createChildHeapPolicy({ budget, mode: 'admit' });
-    expect(policy.snapshot()).toMatchObject({
-      maxConcurrentChildren: 6,
-      perChildCeilingMb: 544,
+describe.each(['admit', 'enforce'] as const)(
+  'child count admission: %s',
+  (mode) => {
+    it('uses the unchanged six-slot model on a 7265 MiB host', () => {
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
+      const policy = createChildHeapPolicy({ budget, mode });
+      expect(policy.snapshot()).toMatchObject({
+        maxConcurrentChildren: 6,
+        perChildCeilingMb: 544,
+      });
+      expect(policy.decide(6)).toEqual({ refuse: false });
+      expect(policy.decide(7)).toEqual({ refuse: true });
+      expect(policy.snapshot().refusals).toBe(1);
     });
-    expect(policy.decide(6)).toEqual({ refuse: false });
-    expect(policy.decide(7)).toEqual({ refuse: true });
-    expect(policy.snapshot().refusals).toBe(1);
-  });
-  it('rejects an admitting configuration that cannot model a child', () => {
-    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 512 });
-    expect(() => createChildHeapPolicy({ budget, mode: 'admit' })).toThrow(
-      'at least one child',
-    );
-    expect(
-      createChildHeapPolicy({ budget, mode: 'observe' }).snapshot()
-        .maxConcurrentChildren,
-    ).toBe(0);
-  });
-});
+    it('rejects an admitting configuration that cannot model a child', () => {
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 512 });
+      expect(() => createChildHeapPolicy({ budget, mode })).toThrow(
+        'at least one child',
+      );
+      expect(
+        createChildHeapPolicy({ budget, mode: 'observe' }).snapshot()
+          .maxConcurrentChildren,
+      ).toBe(0);
+    });
+  },
+);
 
 describe('createChildHeapPolicy', () => {
   it.each([2_048, 8_192, 32_768, 262_144])(

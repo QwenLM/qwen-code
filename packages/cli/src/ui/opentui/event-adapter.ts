@@ -20,28 +20,65 @@
  * this slice may only touch opentui/**).
  */
 
+import {
+  isAdvisorDisplay,
+  formatAdvisorDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { GoalSnapshotLike } from '../utils/goal-card-view.js';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import { t } from '../../i18n/index.js';
 import type {
   AnsiToken,
   ChatCompressionInfo,
   GoalStateCause,
+  GoalSnapshotV2,
   RetryInfo,
   ServerGeminiStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { ArenaAgentCardData, CompressionProps } from '../types.js';
+import type {
+  ArenaAgentCardData,
+  CompressionProps,
+  HistoryItemInfo,
+  HistoryItemBase,
+  HistoryItem,
+} from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
+import { AGENT_TOOL_NAMES } from '../utils/agent-tool-names.js';
+import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
+import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
+import { formatInteractiveLoopDetectedMessage } from '../../utils/loop-detected-message.js';
+import type { LoopStop } from '../../utils/loop-detected-message.js';
 
 /**
  * Neutral-model union extension: tool detail events the backend folds into
  * tool cards (args preview, result content, approval state), plus turn
  * segmentation and inline images.
  */
-export type OpenTuiStreamEvent =
-  | StreamEvent
+type OpenTuiStreamEventData =
+  | Exclude<StreamEvent, { type: 'text' | 'user' }>
+  | { type: 'history-expanded' }
+  | {
+      type: 'tool-history';
+      item: Extract<HistoryItem, { type: 'tool_group' }>;
+      pending: boolean;
+    }
+  | { type: 'canonical-history' }
+  | {
+      type: 'canonical-history-replace';
+      item: HistoryItem;
+      events: OpenTuiStreamEvent[];
+    }
+  | (Extract<StreamEvent, { type: 'user' }> & {
+      recallText?: string;
+    })
+  /** Widened over the neutral `text` event: a replayed assistant record
+   * carries its own recorded time, which ink stamps on the first display run
+   * of that record. Live deltas leave it unset and fold as "now". */
+  | { type: 'text'; delta: string; timestamp?: number }
   | { type: 'tool-args'; id: string; args: string }
   /** Real invocation description (live sessions only): the scheduler's
    * tracked call carries the invocation object, so the card title is the
@@ -53,6 +90,7 @@ export type OpenTuiStreamEvent =
       type: 'tool-result';
       id: string;
       display: string;
+      detailedDisplay?: string;
       /** Structured FileDiff payload: rendered as colored diff lines in the
        * tool card instead of the flattened `display` text (ink
        * DiffResultRenderer parity). */
@@ -68,6 +106,9 @@ export type OpenTuiStreamEvent =
         totalLines?: number;
         totalBytes?: number;
       };
+      /** Structured subagent summary: rendered as ink's three coloured runs
+       * (SubagentScrollbackSummary parity) instead of the flattened text. */
+      subagentSummary?: SubagentSummary;
       /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
        * under the result): tells the user their image/prompt left the
        * machine via the vision model. */
@@ -94,7 +135,12 @@ export type OpenTuiStreamEvent =
   | { type: 'compaction'; compression: CompressionProps }
   /** Info notice row (ink `addItem({type: INFO})` → InfoMessage): `●` prefix
    * + primary-colored text, e.g. the auto-compact `chat_compressed` notice. */
-  | { type: 'info'; text: string }
+  | {
+      type: 'info';
+      text: string;
+      historyIsSynthetic?: false;
+      presentation?: HistoryItemInfo['presentation'];
+    }
   /** Error notice row (ink `type: 'error'` → ErrorMessage): `✕` prefix +
    * error-colored text with an optional inline hint. */
   | { type: 'error'; text: string; hint?: string }
@@ -168,11 +214,18 @@ export type OpenTuiStreamEvent =
   /** Inline image from model content (`inlineData` part). */
   | { type: 'image'; mimeType: string; data: string };
 
+export type OpenTuiStreamEvent = OpenTuiStreamEventData & {
+  historyId?: number;
+  canonicalHistoryItem?: HistoryItem;
+  historyDisplay?: HistoryItemBase['display'];
+};
+
 /**
  * Optional runtime context for notices that need config-derived values.
  * All fields are optional so the mapper stays usable without a Config
  * (scripted streams, tests).
  */
+
 export interface EventMapperContext {
   /**
    * Formats an `error` event payload for display (ink parity:
@@ -279,6 +332,9 @@ export function extractAnsiOutput(
 
 /** Stringifies a ToolResultDisplay (string | FileDiff | structured) losslessly. */
 export function renderResultDisplay(display: unknown): string {
+  const quota = formatSubscriptionQuotaDisplay(display, t);
+  if (quota) return quota;
+  if (isAdvisorDisplay(display)) return formatAdvisorDisplay(display);
   if (display == null) return '';
   if (typeof display === 'string') return display;
   if (typeof display === 'object') {
@@ -297,7 +353,8 @@ export function renderResultDisplay(display: unknown): string {
         .join('\n');
     }
     if (
-      o['type'] === 'ask_user_question_answers' &&
+      (o['type'] === 'ask_user_question_answers' ||
+        o['type'] === 'shell_result') &&
       typeof o['text'] === 'string'
     ) {
       return o['text'];
@@ -335,18 +392,13 @@ export function renderResultDisplay(display: unknown): string {
       const notice = typeof o['notice'] === 'string' ? o['notice'] : '';
       return [summary, notice].filter(Boolean).join('\n');
     }
-    // task_execution: status line + termination reason and result — the raw
-    // JSON fallback would dump toolCalls[].responseParts (multi-MB base64);
-    // core strips those exact fields in toolResultDisplayCompaction.
+    // task_execution: ink renders exactly one summary line once the subagent
+    // reaches a terminal state, and nothing at all while it runs (the running
+    // phase belongs to the bottom-of-screen roster). The raw `result` field is
+    // the child's whole answer, so inlining it under the parent's tool card
+    // dumps an entire sub-transcript into the parent's scrollback.
     if (o['type'] === 'task_execution') {
-      const subagent =
-        typeof o['subagentName'] === 'string' ? o['subagentName'] : '';
-      const status = typeof o['status'] === 'string' ? o['status'] : '';
-      const reason =
-        typeof o['terminateReason'] === 'string' ? o['terminateReason'] : '';
-      const result = typeof o['result'] === 'string' ? o['result'] : '';
-      const header = [subagent, status].filter(Boolean).join(': ');
-      return [header, reason, result].filter(Boolean).join('\n');
+      return subagentSummaryLine(o);
     }
     // findings_list: count + optional severity summary; the raw fallback
     // dumps every finding object.
@@ -374,6 +426,100 @@ export function renderResultDisplay(display: unknown): string {
 }
 
 /**
+ * ink's SubagentScrollbackSummary row as its three coloured runs: the status
+ * glyph, the bold `name: ` prefix, and the secondary description/tail/reason.
+ */
+export interface SubagentSummary {
+  glyph: string;
+  /** ink's glyph colour: success / error / warning by terminal status. */
+  tone: 'success' | 'error' | 'warning';
+  prefix: string;
+  rest: string;
+}
+
+/**
+ * One summary per subagent that has reached a terminal state, `null` while it
+ * still runs.
+ */
+export function extractSubagentSummary(
+  display: unknown,
+): SubagentSummary | null {
+  if (typeof display !== 'object' || display === null) return null;
+  const o = display as Record<string, unknown>;
+  if (o['type'] !== 'task_execution') return null;
+  const status = typeof o['status'] === 'string' ? o['status'] : '';
+  if (status !== 'completed' && status !== 'failed' && status !== 'cancelled') {
+    return null;
+  }
+  const summary =
+    typeof o['executionSummary'] === 'object' && o['executionSummary'] !== null
+      ? (o['executionSummary'] as Record<string, unknown>)
+      : {};
+  const parts: string[] = [];
+  const totalToolCalls = summary['totalToolCalls'];
+  if (typeof totalToolCalls === 'number') {
+    parts.push(`${totalToolCalls} tool${totalToolCalls === 1 ? '' : 's'}`);
+  }
+  // Direct children this agent spawned = its successful AgentTool calls.
+  // Tool-usage stats key on the raw request name, so every alias counts.
+  const toolUsage = Array.isArray(summary['toolUsage'])
+    ? (summary['toolUsage'] as Array<Record<string, unknown>>)
+    : [];
+  const spawns = toolUsage
+    .filter(
+      (tu) =>
+        typeof tu['name'] === 'string' && AGENT_TOOL_NAMES.has(tu['name']),
+    )
+    .reduce(
+      (sum, tu) =>
+        sum + (typeof tu['success'] === 'number' ? tu['success'] : 0),
+      0,
+    );
+  if (spawns > 0) {
+    parts.push(`${spawns} sub-agent${spawns === 1 ? '' : 's'}`);
+  }
+  const totalDurationMs = summary['totalDurationMs'];
+  if (typeof totalDurationMs === 'number') {
+    parts.push(formatDuration(totalDurationMs, { hideTrailingZeros: true }));
+  }
+  const outputTokens = summary['outputTokens'];
+  if (typeof outputTokens === 'number' && outputTokens > 0) {
+    parts.push(`${formatTokenCount(outputTokens)} tokens`);
+  }
+  const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  const subagent =
+    typeof o['subagentName'] === 'string' ? o['subagentName'] : '';
+  const description =
+    typeof o['taskDescription'] === 'string' ? o['taskDescription'] : '';
+  const terminateReason =
+    typeof o['terminateReason'] === 'string' ? o['terminateReason'] : '';
+  const reason =
+    status !== 'completed' && terminateReason ? ` · ${terminateReason}` : '';
+  return {
+    glyph: status === 'completed' ? '✔' : '✖',
+    tone:
+      status === 'completed'
+        ? 'success'
+        : status === 'failed'
+          ? 'error'
+          : 'warning',
+    prefix: subagent ? `${subagent}: ` : '',
+    rest: `${description}${tail}${reason}`,
+  };
+}
+
+/**
+ * The same row as plain text, for the consumers that keep the flattened
+ * display. Derived from the segments so the two forms cannot drift.
+ */
+function subagentSummaryLine(o: Record<string, unknown>): string {
+  const summary = extractSubagentSummary(o);
+  // The leading space is ink's own: its summary sits in a box that adds one
+  // column of padding on top of the card body's indent.
+  return summary ? ` ${summary.glyph} ${summary.prefix}${summary.rest}` : '';
+}
+
+/**
  * The structured payload a result display carries, if any. The tool card has an
  * ink-parity renderer for each of a file diff, a todo list and an ANSI grid,
  * and `renderResultDisplay` would reduce any of them to text — a todo list to
@@ -386,7 +532,7 @@ export function extractStructuredResult(
 ): Partial<
   Pick<
     Extract<OpenTuiStreamEvent, { type: 'tool-result' }>,
-    'diff' | 'todos' | 'ansi'
+    'diff' | 'todos' | 'ansi' | 'subagentSummary'
   >
 > | null {
   const diff = extractFileDiff(display);
@@ -395,6 +541,8 @@ export function extractStructuredResult(
   if (todos) return { todos };
   const ansi = extractAnsiOutput(display);
   if (ansi) return { ansi };
+  const subagentSummary = extractSubagentSummary(display);
+  if (subagentSummary) return { subagentSummary };
   return null;
 }
 
@@ -663,9 +811,9 @@ export function createEventMapper(
         // which ink adds as `{type: 'info'}`).
         out.push({
           type: 'info',
-          text:
-            'A potential loop was detected. This can happen due to repetitive ' +
-            'tool calls or other model behavior. The request has been halted.',
+          text: formatInteractiveLoopDetectedMessage(
+            ev.value as LoopStop | undefined,
+          ),
         });
         break;
       }
@@ -739,6 +887,12 @@ export function createEventMapper(
           // ink redacts the echoed prompt (HistoryItemDisplay): sensitive
           // patterns masked and the text capped at 200 chars.
           text: formatUserPromptSubmitBlocked(v.reason, v.originalPrompt),
+          canonicalHistoryItem: {
+            id: allocateCanonicalHistoryId(),
+            type: 'user_prompt_submit_blocked',
+            reason: v.reason,
+            originalPrompt: v.originalPrompt,
+          },
         });
         break;
       }
@@ -746,20 +900,28 @@ export function createEventMapper(
         closeThought();
         // ink parity: the stop_hook_loop item renders via InfoMessage.
         const v = ev.value as {
+          iterationCount: number;
           reasons: string[];
           stopHookCount: number;
         };
         out.push({
           type: 'info',
           text: formatStopHookLoopText(v.stopHookCount, v.reasons),
+          canonicalHistoryItem: {
+            id: allocateCanonicalHistoryId(),
+            type: 'stop_hook_loop',
+            iterationCount: v.iterationCount,
+            reasons: v.reasons,
+            stopHookCount: v.stopHookCount,
+          },
         });
         break;
       }
       case 'goal_state': {
         closeThought();
         const v = ev as {
-          value: GoalSnapshotLike;
-          cause?: string;
+          value: GoalSnapshotV2;
+          cause?: GoalStateCause;
         };
         // ink gates on `event.cause && shouldDisplayGoalStateCause(cause)`;
         // the shared predicate keeps the exhaustive-switch guard.
@@ -769,7 +931,17 @@ export function createEventMapper(
         }
         // ink parity: addItem({type: 'goal_state', snapshot, cause}) renders
         // via GoalStatusMessage (GoalStateCard).
-        out.push({ type: 'goal', snapshot: v.value, cause });
+        out.push({
+          type: 'goal',
+          snapshot: v.value,
+          cause,
+          canonicalHistoryItem: {
+            id: allocateCanonicalHistoryId(),
+            type: 'goal_state',
+            snapshot: v.value,
+            cause,
+          },
+        });
         break;
       }
       case 'finished': {
@@ -781,8 +953,16 @@ export function createEventMapper(
         out.push({ type: 'retry-countdown-clear' });
         // ink parity: handleFinishedEvent adds `{type: 'info'}` for
         // non-STOP finish reasons.
-        const reason = (ev.value as { reason?: string } | undefined)?.reason;
-        const message = reason ? FINISH_REASON_NOTICES[reason] : undefined;
+        const value = ev.value as
+          | { reason?: string; finishMessage?: string }
+          | undefined;
+        const reason = value?.reason;
+        // `finishMessage` is provider-authored free text; only the safety path
+        // curates it (Anthropic refusal details), so other reasons keep their
+        // maintained notice even if a provider fills the field (#9005).
+        const message =
+          (reason === 'SAFETY' ? value?.finishMessage : undefined) ??
+          (reason ? FINISH_REASON_NOTICES[reason] : undefined);
         if (message) out.push({ type: 'info', text: `⚠  ${message}` });
         // Segment marker only — the turn settles when the live generator
         // returns (backend emits `done`), NOT here: `finished` arrives

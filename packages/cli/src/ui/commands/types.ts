@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
@@ -12,6 +13,7 @@ import type {
   GoalStateCause,
   Logger,
   SessionListItem,
+  ToolArtifact,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
@@ -57,6 +59,8 @@ export interface CommandContext {
     name: string;
     /** The arguments string that follows the command name. */
     args: string;
+    /** The visible user history item owned by this invocation. */
+    historyItemId?: number;
   };
   // Core services and configuration
   services: {
@@ -108,8 +112,9 @@ export interface CommandContext {
      * Loads a new set of history items, replacing the current history.
      *
      * @param history The array of history items to load.
+     * @param mode Expand existing rows without discarding live-only history.
      */
-    loadHistory: UseHistoryManagerReturn['loadHistory'];
+    loadHistory: (history: HistoryItem[], mode?: 'expand') => void;
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
@@ -141,6 +146,7 @@ export interface ToolActionReturn {
   type: 'tool';
   toolName: string;
   toolArgs: Record<string, unknown>;
+  restoreResponseBinding?: RestoreToolResponseBinding;
 }
 
 /** The return type for a command action that results in the app quitting. */
@@ -157,6 +163,8 @@ export interface MessageActionReturn {
   type: 'message';
   messageType: 'info' | 'warning' | 'error';
   content: string;
+  /** Files already written by the command; advisory metadata for ACP clients. */
+  artifacts?: ToolArtifact[];
 }
 
 export type GoalCommandOperation =
@@ -235,6 +243,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'advisor-model'
     | 'voice-model'
     | 'vision-model'
     | 'compaction-model'
@@ -425,6 +434,9 @@ export interface SlashCommand {
    * a model turn or mutate conversation state owned by the active turn.
    */
   canRunDuringStreaming?: boolean;
+
+  /** Whether Esc may abandon a running action. Defaults to true. */
+  canCancel?: boolean;
 
   // ── Phase 1: visibility ────────────────────────────────────────────────
   /**

@@ -32,6 +32,15 @@ async function diffAction(
     };
   }
 
+  if (config.getShellExecutionSandbox?.()) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Diff preview unavailable in tool sandbox. Run git diff through the Shell tool.',
+    };
+  }
+
   // Interactive mode: open the per-turn diff dialog. Non-interactive / ACP
   // paths keep the plain-text "working tree vs HEAD" summary so pipes, logs,
   // and remote transports that don't speak Ink still get legible output.

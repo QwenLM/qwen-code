@@ -23,14 +23,17 @@ import type { Config } from '../config/config.js';
 import type { ResumedSessionData } from '../services/sessionService.js';
 import { SessionStartSource } from '../hooks/types.js';
 import type { LlmChat } from './llm-chat.js';
+import { userText } from '../test-utils/model-fixtures.js';
 
 const SESSION_A = 'session-A';
 const SESSION_B = 'session-B';
 
+const T0 = '2026-08-24T00:00:00.000Z';
+
 function storedApiEvent(tokens: number, id = `resp-${tokens}`): UiEvent {
   return {
     'event.name': EVENT_API_RESPONSE,
-    'event.timestamp': '2026-08-24T00:00:00.000Z',
+    'event.timestamp': T0,
     response_id: id,
     model: 'test-model',
     duration_ms: 10,
@@ -43,32 +46,27 @@ function storedApiEvent(tokens: number, id = `resp-${tokens}`): UiEvent {
   } as UiEvent;
 }
 
+/** A stored transcript: a user turn plus one API-response telemetry record. */
 function conversationWith(tokens: number, sessionId = SESSION_A) {
+  const common = {
+    parentUuid: null,
+    sessionId,
+    timestamp: T0,
+    cwd: '/',
+    version: 'test',
+  };
   return {
     sessionId,
     projectHash: 'project-1',
-    startTime: '2026-08-24T00:00:00.000Z',
-    lastUpdated: '2026-08-24T00:00:00.000Z',
+    startTime: T0,
+    lastUpdated: T0,
     messages: [
-      {
-        uuid: 'u-1',
-        parentUuid: null,
-        sessionId,
-        type: 'user',
-        timestamp: '2026-08-24T00:00:00.000Z',
-        cwd: '/',
-        version: 'test',
-        message: { role: 'user', parts: [{ text: 'hello' }] },
-      },
+      { uuid: 'u-1', ...common, type: 'user', message: userText('hello') },
       {
         uuid: `t-${tokens}`,
-        parentUuid: null,
-        sessionId,
+        ...common,
         type: 'system',
         subtype: 'ui_telemetry',
-        timestamp: '2026-08-24T00:00:00.000Z',
-        cwd: '/',
-        version: 'test',
         systemPayload: { uiEvent: storedApiEvent(tokens) },
       },
     ],
@@ -82,6 +80,9 @@ function totalRequests(): number {
   );
 }
 
+const modelsOf = (id: string) =>
+  uiTelemetryService.getMetricsForSession(id).models;
+
 function makeEnv() {
   let sessionId = SESSION_A;
   let resumedData: ResumedSessionData | undefined;
@@ -89,15 +90,11 @@ function makeEnv() {
   const config: any = {
     getSessionId: () => sessionId,
     getResumedSessionData: () => resumedData,
+    getToolRegistry: () => ({ getTool: () => undefined }),
     swap(id: string, data?: ResumedSessionData) {
       sessionId = id;
       resumedData = data;
     },
-    // `initialize()` calls restoreLoadedSkillsFromHistory, which resolves the
-    // SKILL tool through the registry; this mock only exercises the telemetry
-    // swap, so return an empty registry (no SKILL tool → the restore is a
-    // no-op) rather than let the call throw `getToolRegistry is not a function`.
-    getToolRegistry: () => ({ getTool: () => undefined }),
   };
   const client = new LlmClient(config as Config);
   const fakeChat = {
@@ -112,7 +109,30 @@ function makeEnv() {
       (this as any).chat = fakeChat;
       return fakeChat;
     });
-  return { config, client, startChat };
+  /** Points the config at `id`, resuming its one-request transcript. */
+  const resume = (id: string) =>
+    config.swap(id, { conversation: conversationWith(100, id) });
+  const enter = (id: string) => {
+    resume(id);
+    return client.initialize();
+  };
+  return { client, startChat, resume, enter };
+}
+
+/** Live usage on A: a request and, optionally, a skill invocation. */
+function addLiveUsage(skill = true) {
+  uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
+  if (skill) {
+    uiTelemetryService.recordSkillInvocation('test-skill', true, SESSION_A);
+  }
+}
+
+/** A's replay plus live usage, with A's bucket complete. */
+function expectLiveA() {
+  expect(totalRequests()).toBe(2);
+  const bucketA = uiTelemetryService.getMetricsForSession(SESSION_A);
+  expect(bucketA.models['test-model']?.api.totalRequests).toBe(2);
+  expect(bucketA.skills?.totalCalls).toBe(1);
 }
 
 describe('LlmClient telemetry swap transaction (#9833)', () => {
@@ -122,17 +142,16 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
   });
 
   it('a replay outside a transaction arms no undo (startup path)', async () => {
-    const { config, client } = makeEnv();
+    const { client, enter } = makeEnv();
 
     // Process-startup resume: no transaction is open, so the replay must be
     // permanent — nothing may later "undo" the process start and wipe the
     // usage accrued since.
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
+    await enter(SESSION_A);
     expect(totalRequests()).toBe(1);
 
     // Live usage after startup.
-    uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
+    addLiveUsage(false);
     expect(totalRequests()).toBe(2);
 
     // An abort with no armed undo changes nothing.
@@ -141,26 +160,20 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
   });
 
   it('abort restores the pre-swap state and forgets the abandoned session', async () => {
-    const { config, client } = makeEnv();
+    const { client, enter } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
-    uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
+    await enter(SESSION_A);
+    addLiveUsage(false);
     expect(totalRequests()).toBe(2);
 
     // Failed swap to B: forward initialize replays B, then the swap aborts.
     client.beginTelemetrySwap();
-    config.swap(SESSION_B, {
-      conversation: conversationWith(100, SESSION_B),
-    });
-    await client.initialize();
+    await enter(SESSION_B);
     expect(totalRequests()).toBe(3);
 
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(2);
-    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
-      {},
-    );
+    expect(modelsOf(SESSION_B)).toEqual({});
 
     // Trap (1): abort must forget initializedSessionId — retrying the same
     // swap replays again instead of early-returning into an under-counted
@@ -168,24 +181,17 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
     client.beginTelemetrySwap();
     await client.initialize();
     expect(totalRequests()).toBe(3);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_B).models['test-model']
-        ?.api.totalRequests,
-    ).toBe(1);
+    expect(modelsOf(SESSION_B)['test-model']?.api.totalRequests).toBe(1);
     client.commitTelemetrySwap();
   });
 
   it('commit drops the undo: the replay stays and a later abort cannot reach it', async () => {
-    const { config, client } = makeEnv();
+    const { client, enter } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
+    await enter(SESSION_A);
 
     client.beginTelemetrySwap();
-    config.swap(SESSION_B, {
-      conversation: conversationWith(100, SESSION_B),
-    });
-    await client.initialize();
+    await enter(SESSION_B);
     client.commitTelemetrySwap();
 
     expect(totalRequests()).toBe(2);
@@ -196,38 +202,29 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
   });
 
   it('the rollback re-initialize does not re-arm: restore lands on top of it', async () => {
-    const { config, client } = makeEnv();
+    const { client, enter } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
-    uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
-    // In-memory-only state on A's bucket: never persisted to transcripts, so
-    // only the snapshot can carry it across a rollback's re-initialize.
-    uiTelemetryService.recordSkillInvocation('test-skill', true, SESSION_A);
+    await enter(SESSION_A);
+    // A's skill invocation is never persisted to transcripts, so only the
+    // snapshot can carry it across a rollback's re-initialize.
+    addLiveUsage();
 
     // /branch shape: forward replay of the fork, then the rollback's own
     // re-initialize of the parent, then the abort.
     client.beginTelemetrySwap();
-    config.swap(SESSION_B, {
-      conversation: conversationWith(100, SESSION_B),
-    });
-    await client.initialize();
+    await enter(SESSION_B);
     expect(totalRequests()).toBe(3);
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize(); // rollback re-replays A on top
+    await enter(SESSION_A); // rollback re-replays A on top
     expect(totalRequests()).toBe(4);
 
     expect(client.abortTelemetrySwap()).toBe(true);
-    expect(totalRequests()).toBe(2);
     // initializedSessionId names the parent (the rollback re-initialized it)
     // — abort must keep it so the parent stays initialized.
     expect(client.isInitialized()).toBe(true);
     // A's live bucket — including the skill invocation the transcript can
     // never restore — came back with the snapshot.
-    const bucketA = uiTelemetryService.getMetricsForSession(SESSION_A);
-    expect(bucketA.models['test-model']?.api.totalRequests).toBe(2);
-    expect(bucketA.skills?.totalCalls).toBe(1);
+    expectLiveA();
 
     // The kept initializedSessionId is the load-bearing part of the fix:
     // a follow-up same-session initialize — the /resume rollback shape
@@ -236,21 +233,13 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
     // the live aggregate (a double count) and wiping A's never-persisted
     // state via resetSession.
     await client.initialize();
-    expect(totalRequests()).toBe(2);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
-        ?.api.totalRequests,
-    ).toBe(2);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_A).skills?.totalCalls,
-    ).toBe(1);
+    expectLiveA();
   });
 
   it('same-session initialize early-returns and arms nothing', async () => {
-    const { config, client } = makeEnv();
+    const { client, enter } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
+    await enter(SESSION_A);
     expect(totalRequests()).toBe(1);
 
     // Same-session "resume": initializedSessionId already matches, so no
@@ -278,10 +267,9 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
   });
 
   it('a second begin while a transaction is open is rejected (serialization latch)', async () => {
-    const { config, client } = makeEnv();
+    const { client, enter } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
+    await enter(SESSION_A);
 
     // The slot doubles as the session-switch latch (#9844): the session
     // picker fires swaps fire-and-forget and no input gate covers them, so
@@ -294,10 +282,7 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
 
     // The rejection leaves the first transaction untouched: it still
     // settles its own replay.
-    config.swap(SESSION_B, {
-      conversation: conversationWith(100, SESSION_B),
-    });
-    await client.initialize();
+    await enter(SESSION_B);
     expect(totalRequests()).toBe(2);
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(1);
@@ -314,43 +299,35 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
     // armed on the cleared field would snapshot no outgoing bucket — so the
     // rollback's re-initialize would wipe the live session's
     // never-persisted state (live events, skill invocations) for good.
-    const { config, client } = makeEnv();
+    const { client, resume, enter } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
-    uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
-    uiTelemetryService.recordSkillInvocation('test-skill', true, SESSION_A);
+    await enter(SESSION_A);
+    addLiveUsage();
 
     // First swap to B fails after its forward replay; abort restores the
     // pre-swap state and forgets initializedSessionId (it names B).
     expect(client.beginTelemetrySwap()).toBe(true);
-    config.swap(SESSION_B, { conversation: conversationWith(100, SESSION_B) });
-    await client.initialize();
+    await enter(SESSION_B);
     expect(totalRequests()).toBe(3);
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(2);
 
     // The hook rollback puts core back on A.
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    resume(SESSION_A);
 
     // Second swap attempt: initializedSessionId is undefined now, so the
     // outgoing session can only come from the begin-time hint.
     expect(client.beginTelemetrySwap()).toBe(true);
-    config.swap(SESSION_B, { conversation: conversationWith(100, SESSION_B) });
-    await client.initialize();
+    await enter(SESSION_B);
     expect(totalRequests()).toBe(3);
 
     // /branch-shaped rollback: re-initialize the parent (its resetSession
     // wipes A's live bucket), then abort puts the snapshot back.
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
+    await enter(SESSION_A);
     expect(client.abortTelemetrySwap()).toBe(true);
 
-    expect(totalRequests()).toBe(2);
     // A's bucket came back complete — including what is never persisted.
-    const bucketA = uiTelemetryService.getMetricsForSession(SESSION_A);
-    expect(bucketA.models['test-model']?.api.totalRequests).toBe(2);
-    expect(bucketA.skills?.totalCalls).toBe(1);
+    expectLiveA();
   });
 
   it('abort keeps the live parent initialized when the rollback re-initialize armed the undo', async () => {
@@ -364,12 +341,10 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
     // would skip the early return and re-replay its stored telemetry on
     // top of the live aggregate — a permanent double count, plus the loss
     // of the bucket's never-persisted state (#9844 review).
-    const { config, client, startChat } = makeEnv();
+    const { client, startChat, resume, enter } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
-    uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
-    uiTelemetryService.recordSkillInvocation('test-skill', true, SESSION_A);
+    await enter(SESSION_A);
+    addLiveUsage();
     expect(totalRequests()).toBe(2);
 
     // Step 1: /resume B fails AFTER its forward replay, and the rollback's
@@ -380,10 +355,9 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
     // SUCCEEDS sets initializedSessionId back to A, which abort then keeps
     // — see 'the rollback re-initialize does not re-arm'.)
     expect(client.beginTelemetrySwap()).toBe(true);
-    config.swap(SESSION_B, { conversation: conversationWith(100, SESSION_B) });
-    await client.initialize();
+    await enter(SESSION_B);
     expect(totalRequests()).toBe(3);
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    resume(SESSION_A);
     startChat.mockRejectedValueOnce(new Error('rollback re-init failed'));
     await expect(client.initialize()).rejects.toThrow(
       'rollback re-init failed',
@@ -395,49 +369,33 @@ describe('LlmClient telemetry swap transaction (#9833)', () => {
     // the fork, then the failure lands BEFORE the forward initialize. The
     // catch rolls back: startNewSession(parent) + re-initialize, and that
     // re-initialize arms the undo itself.
-    const FORK = 'fork-of-A';
     expect(client.beginTelemetrySwap()).toBe(true);
-    config.swap(FORK, { conversation: conversationWith(100, FORK) });
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
-    await client.initialize();
+    resume('fork-of-A');
+    await enter(SESSION_A);
     expect(client.abortTelemetrySwap()).toBe(true);
 
     // The restore itself is exact...
-    expect(totalRequests()).toBe(2);
-    const bucketA = uiTelemetryService.getMetricsForSession(SESSION_A);
-    expect(bucketA.models['test-model']?.api.totalRequests).toBe(2);
-    expect(bucketA.skills?.totalCalls).toBe(1);
+    expectLiveA();
 
     // ...and the abort kept the live parent as the initialized session:
     // the next same-session initialize early-returns instead of re-replaying
     // on top of the live aggregate (pre-fix: totalRequests 2 -> 3 and A's
     // bucket lost its never-persisted skill state).
     await client.initialize();
-    expect(totalRequests()).toBe(2);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
-        ?.api.totalRequests,
-    ).toBe(2);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_A).skills?.totalCalls,
-    ).toBe(1);
+    expectLiveA();
   });
 
   it('initialize with a SessionStartSource still honors the transaction', async () => {
-    const { config, client } = makeEnv();
+    const { client, resume } = makeEnv();
 
-    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    resume(SESSION_A);
     await client.initialize(SessionStartSource.Startup);
 
     client.beginTelemetrySwap();
-    config.swap(SESSION_B, {
-      conversation: conversationWith(100, SESSION_B),
-    });
+    resume(SESSION_B);
     await client.initialize(SessionStartSource.Branch);
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(1);
-    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
-      {},
-    );
+    expect(modelsOf(SESSION_B)).toEqual({});
   });
 });

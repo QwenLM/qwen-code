@@ -18,7 +18,10 @@ import {
   providerMatchesCredentials,
   customProvider,
   generateCustomEnvKey,
+  type ModelSpec,
   type ProviderConfig,
+  type ProviderModelConfig,
+  type ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
 import {
   TOKEN_PLAN_CHINA_BASE_URL,
@@ -40,6 +43,39 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   };
 }
 
+/** makeConfig for a custom-style provider: no fixed models, no name prefix. */
+const customLike = (overrides: Partial<ProviderConfig> = {}) =>
+  makeConfig({ models: undefined, modelNamePrefix: '', ...overrides });
+const TEST_URL = 'https://api.test.com/v1';
+const testInputs = (
+  modelIds = ['model-a'],
+  extra: Partial<ProviderSetupInputs> = {},
+): ProviderSetupInputs => ({
+  baseUrl: TEST_URL,
+  apiKey: 'sk-test',
+  modelIds,
+  ...extra,
+});
+const customInputs = (
+  modelIds: string[],
+  extra: Partial<ProviderSetupInputs> = {},
+): ProviderSetupInputs => ({
+  baseUrl: 'https://custom.com/v1',
+  apiKey: 'sk-custom',
+  modelIds,
+  ...extra,
+});
+const modelsOf = <M>(plan: { modelProviders?: Array<{ models: M[] }> }) =>
+  plan.modelProviders![0]!.models;
+/** buildInstallPlan (dist) and return the models of its provider patch. */
+const installModels = (config: ProviderConfig, inputs: ProviderSetupInputs) =>
+  modelsOf(buildInstallPlan(config, inputs));
+const abUrls = () => [
+  { id: 'a', label: 'A', url: 'https://a.com' },
+  { id: 'b', label: 'B', url: 'https://b.com' },
+];
+const RETIRED_VERSION = { 'providerMetadata.test': { version: undefined } };
+
 describe('buildInstallPlan', () => {
   it.each([false, true])(
     'preserves each preset API and its selected route (same-id siblings: %s)',
@@ -47,17 +83,13 @@ describe('buildInstallPlan', () => {
       const config = makeConfig({
         models: [{ id: 'model-a', enableThinking: true }, { id: 'model-b' }],
       });
-      const inputs = {
-        baseUrl: 'https://api.test.com/v1',
+      const inputs = testInputs(['model-a', 'model-b'], {
         apiKey: 'test-only-new',
-        modelIds: ['model-a', 'model-b'],
-      };
-      const chat = buildInstallPlanSrc(config, inputs).modelProviders![0]!
-        .models;
-      const responses = buildInstallPlanSrc(config, {
-        ...inputs,
-        wireApi: 'responses',
-      }).modelProviders![0]!.models;
+      });
+      const chat = modelsOf(buildInstallPlanSrc(config, inputs));
+      const responses = modelsOf(
+        buildInstallPlanSrc(config, { ...inputs, wireApi: 'responses' }),
+      );
       const existing = [
         chat[0]!,
         ...(siblings ? [responses[0]!] : []),
@@ -71,27 +103,20 @@ describe('buildInstallPlan', () => {
       });
       expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
       expect(plan.modelSelection).toMatchObject({ modelId: 'model-b' });
-      expect(plan.modelProviders![0]!.models).toEqual(existing);
-      expect(plan.providerState).toEqual({
-        'providerMetadata.test': { version: undefined },
-      });
+      expect(modelsOf(plan)).toEqual(existing);
+      expect(plan.providerState).toEqual(RETIRED_VERSION);
       expect(existing).toEqual(before);
       const explicit = buildInstallPlanSrc(
         config,
-        {
-          ...inputs,
-          wireApi: 'chat-completions',
-        },
+        { ...inputs, wireApi: 'chat-completions' },
         existing,
-        {
-          id: 'model-b',
-          authType: AuthType.USE_OPENAI_RESPONSES,
-        },
+        { id: 'model-b', authType: AuthType.USE_OPENAI_RESPONSES },
       );
       expect(explicit.authType).toBe(AuthType.USE_OPENAI);
-      expect(
-        explicit.modelProviders![0]!.models.map((model) => model.wireApi),
-      ).toEqual(['chat-completions', 'chat-completions']);
+      expect(modelsOf(explicit).map((model) => model.wireApi)).toEqual([
+        'chat-completions',
+        'chat-completions',
+      ]);
     },
   );
 
@@ -115,9 +140,8 @@ describe('buildInstallPlan', () => {
       existing,
     );
     expect(
-      plan.modelProviders![0]!.models.find(
-        (model) => model.id === 'omni-realtime',
-      )?.realtimeOnly,
+      modelsOf(plan).find((model) => model.id === 'omni-realtime')
+        ?.realtimeOnly,
     ).toBe(true);
     expect(plan.modelSelection).toMatchObject({ modelId: 'chat' });
   });
@@ -185,16 +209,17 @@ describe('buildInstallPlan', () => {
         apiKey: 'new-key',
         modelIds: ['custom-model'],
       };
-      const initial = buildInstallPlanSrc(customProvider, {
-        ...inputs,
-        advancedConfig: {
-          enableThinking: true,
-          multimodal: { image: true, audio: true },
-          contextWindowSize: 131072,
-          maxTokens: 8192,
-        },
-      });
-      const existing = initial.modelProviders![0]!.models;
+      const existing = modelsOf(
+        buildInstallPlanSrc(customProvider, {
+          ...inputs,
+          advancedConfig: {
+            enableThinking: true,
+            multimodal: { image: true, audio: true },
+            contextWindowSize: 131072,
+            maxTokens: 8192,
+          },
+        }),
+      );
       existing[0]!.generationConfig = {
         ...existing[0]!.generationConfig,
         extra_body: {
@@ -206,50 +231,40 @@ describe('buildInstallPlan', () => {
         timeout: 12345,
       };
       const before = structuredClone(existing);
+      /** Reinstall over `existing` with these advanced controls submitted. */
+      const reinstall = (
+        advancedConfig: NonNullable<ProviderSetupInputs['advancedConfig']>,
+      ) =>
+        modelsOf(
+          buildInstallPlanSrc(
+            customProvider,
+            { ...inputs, advancedConfig },
+            existing,
+          ),
+        )[0]!;
       expect(
-        buildInstallPlanSrc(customProvider, inputs, existing)
-          .modelProviders![0]!.models,
+        modelsOf(buildInstallPlanSrc(customProvider, inputs, existing)),
       ).toEqual(existing);
       for (const advancedConfig of [{}, { contextWindowSize: 65536 }]) {
-        const partial = buildInstallPlanSrc(
-          customProvider,
-          { ...inputs, advancedConfig },
-          existing,
-        ).modelProviders![0]!.models[0]!;
-        expect(partial.generationConfig).toEqual({
+        expect(reinstall(advancedConfig).generationConfig).toEqual({
           ...existing[0]!.generationConfig,
           ...(advancedConfig.contextWindowSize
             ? { contextWindowSize: 65536 }
             : {}),
         });
       }
-      const disabled = buildInstallPlanSrc(
-        customProvider,
-        { ...inputs, advancedConfig: { enableThinking: false } },
-        existing,
-      ).modelProviders![0]!.models[0]!;
+      const disabled = reinstall({ enableThinking: false });
       const expectedDisabled = structuredClone(existing[0]!.generationConfig!);
       delete expectedDisabled.extra_body!['enable_thinking'];
       if (wireApi === 'responses') delete expectedDisabled.reasoning;
       expect(disabled.generationConfig).toEqual(expectedDisabled);
-      const withoutModalities = buildInstallPlanSrc(
-        customProvider,
-        { ...inputs, advancedConfig: { multimodal: {} } },
-        existing,
-      ).modelProviders![0]!.models[0]!;
+      const withoutModalities = reinstall({ multimodal: {} });
       const expectedModalities = structuredClone(
         existing[0]!.generationConfig!,
       );
       delete expectedModalities.modalities;
       expect(withoutModalities.generationConfig).toEqual(expectedModalities);
-      const cleared = buildInstallPlanSrc(
-        customProvider,
-        {
-          ...inputs,
-          advancedConfig: { replaceExisting: true },
-        },
-        existing,
-      ).modelProviders![0]!.models[0]!;
+      const cleared = reinstall({ replaceExisting: true });
       expect(cleared.generationConfig).toEqual({
         extra_body: { custom_flag: 'retained' },
         samplingParams: { temperature: 0.2 },
@@ -257,31 +272,17 @@ describe('buildInstallPlan', () => {
         timeout: 12345,
       });
       expect(cleared.envKey).toBe(existing[0]!.envKey);
-      const enabled = buildInstallPlanSrc(
-        customProvider,
-        {
-          ...inputs,
-          advancedConfig: { enableThinking: true },
-        },
-        existing,
-      ).modelProviders![0]!.models[0]!;
+      const enabled = reinstall({ enableThinking: true });
       expect(enabled.generationConfig?.extra_body).toEqual({
         custom_flag: 'retained',
         ...(wireApi === 'chat-completions' ? { enable_thinking: true } : {}),
       });
       expect(enabled.generationConfig).toEqual(existing[0]!.generationConfig);
-      const replaced = buildInstallPlanSrc(
-        customProvider,
-        {
-          ...inputs,
-          advancedConfig: {
-            replaceExisting: true,
-            contextWindowSize: 32768,
-            maxTokens: 4096,
-          },
-        },
-        existing,
-      ).modelProviders![0]!.models[0]!;
+      const replaced = reinstall({
+        replaceExisting: true,
+        contextWindowSize: 32768,
+        maxTokens: 4096,
+      });
       expect(replaced.generationConfig).toEqual({
         ...cleared.generationConfig,
         contextWindowSize: 32768,
@@ -292,18 +293,12 @@ describe('buildInstallPlan', () => {
   );
 
   it('builds a plan with fixed models (not editable)', () => {
-    const config = makeConfig();
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-    });
-
+    const plan = buildInstallPlan(makeConfig(), testInputs());
     expect(plan.providerId).toBe('test');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ TEST_API_KEY: 'sk-test' });
     expect(plan.modelSelection).toEqual({ modelId: 'model-a' });
-    expect(plan.modelProviders?.[0]?.models[0]).toMatchObject({
+    expect(modelsOf(plan)[0]).toMatchObject({
       id: 'model-a',
       name: '[Test] model-a',
       generationConfig: {
@@ -321,103 +316,73 @@ describe('buildInstallPlan', () => {
         { id: 'model-b' },
       ],
     });
-    const plan = buildInstallPlanSrc(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a', 'unknown-model'],
-    });
-
-    const models = plan.modelProviders?.[0]?.models;
+    const plan = buildInstallPlanSrc(
+      config,
+      testInputs(['model-a', 'unknown-model']),
+    );
+    const models = modelsOf(plan);
     expect(models).toHaveLength(2);
-    expect(models?.[0]?.generationConfig).toBeDefined();
-    expect(models?.[1]).toMatchObject({
+    expect(models[0]?.generationConfig).toBeDefined();
+    expect(models[1]).toMatchObject({
       id: 'unknown-model',
       name: '[Test] unknown-model',
     });
-    expect(models?.[1]?.generationConfig).toBeUndefined();
+    expect(models[1]?.generationConfig).toBeUndefined();
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
-      computeModelListVersion(models ?? []),
+      computeModelListVersion(models),
     );
   });
 
   it('retires version metadata when the install stamps an explicit API', () => {
     const config = makeConfig();
-    const responsesPlan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-      wireApi: 'responses',
-    });
-    // A version hashed from an `wireApi`-stamped model list can never match the
+    const planWith = (wireApi?: ProviderSetupInputs['wireApi']) =>
+      buildInstallPlan(
+        config,
+        testInputs(['model-a'], wireApi ? { wireApi } : {}),
+      );
+    // A version hashed from a `wireApi`-stamped model list can never match the
     // drift check's template rebuild (no `wireApi`, and the default route's
     // generationConfig shape), so the provider would prompt an "update" on
-    // every launch — and accepting it would duplicate every model. The install
+    // every launch, and accepting it would duplicate every model. The install
     // records no version and retires one an earlier default-route install left
-    // behind (adapters treat `undefined` as unset).
-    expect(responsesPlan.providerState).toEqual({
-      'providerMetadata.test': { version: undefined },
-    });
-
-    // The same holds for an explicit `wireApi: 'chat-completions'` on a preset
-    // whose own protocol already is USE_OPENAI — the stamp alone makes the
-    // recorded hash irreproducible by buildProviderTemplate.
-    const chatStampedPlan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-      wireApi: 'chat-completions',
-    });
-    expect(chatStampedPlan.providerState).toEqual({
-      'providerMetadata.test': { version: undefined },
-    });
-
-    const chatPlan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-    });
-    expect(chatPlan.providerState?.['providerMetadata.test']?.['version']).toBe(
-      computeModelListVersion(
-        buildProviderTemplate(config, 'https://api.test.com/v1'),
-      ),
-    );
+    // behind (adapters treat `undefined` as unset). The same holds for an
+    // explicit `chat-completions` on a preset whose own protocol already is
+    // USE_OPENAI: the stamp alone makes the hash irreproducible by
+    // buildProviderTemplate.
+    expect(planWith('responses').providerState).toEqual(RETIRED_VERSION);
+    expect(planWith('chat-completions').providerState).toEqual(RETIRED_VERSION);
+    expect(
+      planWith().providerState?.['providerMetadata.test']?.['version'],
+    ).toBe(computeModelListVersion(buildProviderTemplate(config, TEST_URL)));
   });
 
   it('keeps an edited window when reconnecting a model with a preset default', () => {
     const config = makeConfig();
-    const inputs = {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'test',
-      modelIds: ['model-a'],
-    };
+    const inputs = testInputs(['model-a'], { apiKey: 'test' });
     const initial = buildInstallPlan(config, inputs);
-    const original = initial.modelProviders![0]!.models;
+    const original = modelsOf(initial);
     original[0]!.generationConfig = { contextWindowSize: 65536 };
     const reconnected = buildInstallPlan(config, inputs, original);
     expect(reconnected.providerState).toEqual(initial.providerState);
-    expect(
-      reconnected.modelProviders![0]!.models[0]!.generationConfig
-        ?.contextWindowSize,
-    ).toBe(65536);
+    expect(modelsOf(reconnected)[0]!.generationConfig?.contextWindowSize).toBe(
+      65536,
+    );
   });
 
   it('applies advancedConfig to editable unknown model IDs only', () => {
-    const config = makeConfig({ modelsEditable: true });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a', 'unknown-model'],
-      advancedConfig: {
-        contextWindowSize: 1000000,
-        multimodal: { image: true, video: true },
-      },
-    });
-
-    const models = plan.modelProviders?.[0]?.models;
-    expect(models?.[0]?.generationConfig).toMatchObject({
+    const models = installModels(
+      makeConfig({ modelsEditable: true }),
+      testInputs(['model-a', 'unknown-model'], {
+        advancedConfig: {
+          contextWindowSize: 1000000,
+          multimodal: { image: true, video: true },
+        },
+      }),
+    );
+    expect(models[0]?.generationConfig).toMatchObject({
       contextWindowSize: 8192,
     });
-    expect(models?.[1]).toMatchObject({
+    expect(models[1]).toMatchObject({
       id: 'unknown-model',
       name: '[Test] unknown-model',
       generationConfig: {
@@ -428,90 +393,53 @@ describe('buildInstallPlan', () => {
   });
 
   it('builds a plan with no predefined models (custom provider path)', () => {
-    const config = makeConfig({
-      models: undefined,
-      modelNamePrefix: '',
-    });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://custom.com/v1',
-      apiKey: 'sk-custom',
-      modelIds: ['my-model'],
-    });
-
-    const models = plan.modelProviders?.[0]?.models;
-    expect(models?.[0]).toMatchObject({
-      id: 'my-model',
-      name: 'my-model',
-    });
-    expect(models?.[0]?.generationConfig).toBeUndefined();
+    const models = installModels(customLike(), customInputs(['my-model']));
+    expect(models[0]).toMatchObject({ id: 'my-model', name: 'my-model' });
+    expect(models[0]?.generationConfig).toBeUndefined();
   });
 
   it('builds custom model configs with advancedConfig', () => {
-    const config = makeConfig({ models: undefined, modelNamePrefix: 'C' });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://custom.com/v1',
-      apiKey: 'sk-custom',
-      modelIds: ['m1', 'm2'],
-      advancedConfig: {
-        enableThinking: true,
-        multimodal: { image: true, video: false, audio: false },
-        maxTokens: 4096,
-      },
-    });
-
-    const models = plan.modelProviders?.[0]?.models;
+    const models = installModels(
+      customLike({ modelNamePrefix: 'C' }),
+      customInputs(['m1', 'm2'], {
+        advancedConfig: {
+          enableThinking: true,
+          multimodal: { image: true, video: false, audio: false },
+          maxTokens: 4096,
+        },
+      }),
+    );
+    const gc = models[0]?.generationConfig;
     expect(models).toHaveLength(2);
-    expect(models?.[0]?.generationConfig?.extra_body).toEqual({
-      enable_thinking: true,
-    });
-    expect(models?.[0]?.generationConfig?.modalities).toEqual({
-      image: true,
-      video: false,
-      audio: false,
-    });
-    expect(models?.[0]?.generationConfig?.samplingParams).toEqual({
-      max_tokens: 4096,
-    });
+    expect(gc?.extra_body).toEqual({ enable_thinking: true });
+    expect(gc?.modalities).toEqual({ image: true, video: false, audio: false });
+    expect(gc?.samplingParams).toEqual({ max_tokens: 4096 });
   });
 
   it('routes advancedConfig.enableThinking through reasoning.effort for the Responses protocol', () => {
-    const config = makeConfig({
-      models: undefined,
-      modelNamePrefix: 'C',
-    });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://custom.com/v1',
-      apiKey: 'sk-custom',
-      modelIds: ['m1'],
-      wireApi: 'responses',
-      advancedConfig: { enableThinking: true },
-    });
-
-    const models = plan.modelProviders?.[0]?.models;
-    expect(models?.[0]?.generationConfig).toEqual({
-      reasoning: { effort: 'medium' },
-    });
-    expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
+    const gc = installModels(
+      customLike({ modelNamePrefix: 'C' }),
+      customInputs(['m1'], {
+        wireApi: 'responses',
+        advancedConfig: { enableThinking: true },
+      }),
+    )[0]?.generationConfig;
+    expect(gc).toEqual({ reasoning: { effort: 'medium' } });
+    expect(gc?.extra_body).toBeUndefined();
   });
 
   it('keeps omitted custom wireApi on Chat when the same model has a Responses entry', () => {
-    const config = makeConfig({
-      models: undefined,
-      protocolOptions: [AuthType.USE_OPENAI],
-    });
     const plan = buildInstallPlan(
-      config,
-      {
-        baseUrl: 'https://api.test.com/v1',
+      makeConfig({ models: undefined, protocolOptions: [AuthType.USE_OPENAI] }),
+      testInputs(['same'], {
         apiKey: 'key',
-        modelIds: ['same'],
         advancedConfig: { enableThinking: true },
-      },
+      }),
       [
         {
           id: 'same',
           name: '[Test] same',
-          baseUrl: 'https://api.test.com/v1',
+          baseUrl: TEST_URL,
           envKey: 'TEST_API_KEY',
           wireApi: 'responses',
           generationConfig: { reasoning: { effort: 'high' } },
@@ -519,21 +447,18 @@ describe('buildInstallPlan', () => {
       ],
     );
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
-    expect(plan.modelProviders![0]!.models[0]!.wireApi).toBeUndefined();
-    expect(plan.modelProviders![0]!.models[0]!.generationConfig).toEqual({
+    expect(modelsOf(plan)[0]!.wireApi).toBeUndefined();
+    expect(modelsOf(plan)[0]!.generationConfig).toEqual({
       extra_body: { enable_thinking: true },
     });
   });
 
   it('uses the explicit model API for thinking and rejects incompatible setup inputs', () => {
     const config = makeConfig({ models: undefined });
-    const inputs = {
-      baseUrl: 'https://custom.com/v1',
-      apiKey: 'sk-custom',
-      modelIds: ['m1'],
-      wireApi: 'responses' as const,
+    const inputs = customInputs(['m1'], {
+      wireApi: 'responses',
       advancedConfig: { enableThinking: true },
-    };
+    });
     const plan = buildInstallPlan(config, inputs);
     expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
     expect(plan.modelProviders?.[0]).toMatchObject({
@@ -558,167 +483,116 @@ describe('buildInstallPlan', () => {
   });
 
   it('produces independent generationConfig objects per custom model', () => {
-    const config = makeConfig({ models: undefined, modelNamePrefix: '' });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://custom.com/v1',
-      apiKey: 'sk-custom',
-      modelIds: ['m1', 'm2'],
-      advancedConfig: { enableThinking: true },
-    });
-
-    const models = plan.modelProviders?.[0]?.models;
-    expect(models?.[0]?.generationConfig).not.toBe(
-      models?.[1]?.generationConfig,
+    const models = installModels(
+      customLike(),
+      customInputs(['m1', 'm2'], { advancedConfig: { enableThinking: true } }),
     );
+    expect(models[0]?.generationConfig).not.toBe(models[1]?.generationConfig);
   });
 
   it('uses prebuiltModels when provided', () => {
-    const config = makeConfig();
     const prebuilt = [{ id: 'pre-1', baseUrl: 'https://x.com', envKey: 'X' }];
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: [],
-      prebuiltModels: prebuilt,
-    });
-
-    expect(plan.modelProviders?.[0]?.models).toBe(prebuilt);
+    const plan = buildInstallPlan(
+      makeConfig(),
+      testInputs([], { prebuiltModels: prebuilt }),
+    );
+    expect(modelsOf(plan)).toBe(prebuilt);
     expect(plan.modelSelection).toEqual({ modelId: 'pre-1' });
   });
 
   it('throws when models list is empty', () => {
-    const config = makeConfig({ models: undefined, modelNamePrefix: '' });
-    expect(() =>
-      buildInstallPlan(config, {
-        baseUrl: 'https://custom.com/v1',
-        apiKey: 'sk-custom',
-        modelIds: [],
-      }),
-    ).toThrow(/No models configured for provider/);
+    expect(() => buildInstallPlan(customLike(), customInputs([]))).toThrow(
+      /No models configured for provider/,
+    );
   });
 
   it('resolves envKey from function', () => {
-    const config = makeConfig({
+    const config = customLike({
       envKey: (protocol, baseUrl) =>
         `CUSTOM_${protocol}_${baseUrl.replace(/\W+/g, '_')}`,
-      models: undefined,
-      modelNamePrefix: '',
     });
     const plan = buildInstallPlan(config, {
       baseUrl: 'https://x.com',
       apiKey: 'sk-x',
       modelIds: ['m1'],
     });
-
     const envKeys = Object.keys(plan.env ?? {});
     expect(envKeys[0]).toContain('CUSTOM_');
     expect(envKeys[0]).toContain('openai');
   });
 
   it('uses protocol override from inputs', () => {
-    const config = makeConfig({
-      models: undefined,
-      modelNamePrefix: '',
-    });
-    const plan = buildInstallPlan(config, {
+    const plan = buildInstallPlan(customLike(), {
       protocol: AuthType.USE_ANTHROPIC,
       baseUrl: 'https://custom.com',
       apiKey: 'sk-c',
       modelIds: ['m1'],
     });
-
     expect(plan.authType).toBe(AuthType.USE_ANTHROPIC);
     expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_ANTHROPIC);
   });
 });
 
 describe('specToModelConfig (via buildProviderTemplate)', () => {
+  const templateFor = (spec: ModelSpec) =>
+    buildProviderTemplate(makeConfig({ models: [spec] }))[0];
+
   it('omits generationConfig when spec has no thinking or context window', () => {
-    const config = makeConfig({
-      models: [{ id: 'plain-model' }],
-    });
-    const template = buildProviderTemplate(config);
-    expect(template[0]?.generationConfig).toBeUndefined();
+    expect(
+      templateFor({ id: 'plain-model' })?.generationConfig,
+    ).toBeUndefined();
   });
 
   it('includes generationConfig only when spec has values', () => {
-    const config = makeConfig({
-      models: [{ id: 'm', contextWindowSize: 4096 }],
-    });
-    const template = buildProviderTemplate(config);
-    expect(template[0]?.generationConfig).toEqual({
-      contextWindowSize: 4096,
-    });
+    expect(
+      templateFor({ id: 'm', contextWindowSize: 4096 })?.generationConfig,
+    ).toEqual({ contextWindowSize: 4096 });
   });
 
   it('includes description when spec has one', () => {
-    const config = makeConfig({
-      models: [{ id: 'm', description: 'A model' }],
-    });
-    const template = buildProviderTemplate(config);
-    expect(template[0]?.description).toBe('A model');
+    expect(templateFor({ id: 'm', description: 'A model' })?.description).toBe(
+      'A model',
+    );
   });
 
   it('preserves image-only model metadata in the provider template', () => {
-    const config = makeConfig({
-      models: [{ id: 'image-model', imageOnly: true }],
-    });
-
-    expect(buildProviderTemplate(config)[0]?.imageOnly).toBe(true);
+    expect(templateFor({ id: 'image-model', imageOnly: true })?.imageOnly).toBe(
+      true,
+    );
   });
 
   it('preserves image generation capability in the provider template', () => {
-    const config = makeConfig({
-      models: [{ id: 'dual-role-model', supportsImageGeneration: true }],
-    });
-
-    expect(buildProviderTemplate(config)[0]?.supportsImageGeneration).toBe(
-      true,
-    );
+    expect(
+      templateFor({ id: 'dual-role-model', supportsImageGeneration: true })
+        ?.supportsImageGeneration,
+    ).toBe(true);
   });
 });
 
 describe('resolveOwnsModel (via buildInstallPlan)', () => {
-  it('auto-derives ownership from string envKey + prefix', () => {
-    const config = makeConfig({ modelNamePrefix: 'Pfx' });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-    });
+  const ownsModelFor = (config: ProviderConfig) =>
+    buildInstallPlan(config, testInputs()).modelProviders?.[0]?.ownsModel;
 
-    const ownsModel = plan.modelProviders?.[0]?.ownsModel;
+  it('auto-derives ownership from string envKey + prefix', () => {
+    const ownsModel = ownsModelFor(makeConfig({ modelNamePrefix: 'Pfx' }));
     expect(ownsModel).toBeDefined();
-    expect(
-      ownsModel?.({ id: 'x', envKey: 'TEST_API_KEY', name: '[Pfx] x' }),
-    ).toBe(true);
-    expect(ownsModel?.({ id: 'x', envKey: 'OTHER_KEY', name: '[Pfx] x' })).toBe(
-      false,
-    );
-    expect(
-      ownsModel?.({ id: 'x', envKey: 'TEST_API_KEY', name: 'no prefix' }),
-    ).toBe(false);
+    for (const [envKey, name, owns] of [
+      ['TEST_API_KEY', '[Pfx] x', true],
+      ['OTHER_KEY', '[Pfx] x', false],
+      ['TEST_API_KEY', 'no prefix', false],
+    ] as const) {
+      expect(ownsModel?.({ id: 'x', envKey, name })).toBe(owns);
+    }
   });
 
   it('auto-derives ownership from envKey only when prefix is empty', () => {
-    const config = makeConfig({ modelNamePrefix: '' });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-    });
-
-    const ownsModel = plan.modelProviders?.[0]?.ownsModel;
+    const ownsModel = ownsModelFor(makeConfig({ modelNamePrefix: '' }));
     expect(ownsModel?.({ id: 'x', envKey: 'TEST_API_KEY' })).toBe(true);
     expect(ownsModel?.({ id: 'x', envKey: 'OTHER' })).toBe(false);
   });
 
   it('throws when envKey is a function and models list is empty', () => {
-    const config = makeConfig({
-      envKey: () => 'DYNAMIC',
-      models: undefined,
-      modelNamePrefix: '',
-    });
+    const config = customLike({ envKey: () => 'DYNAMIC' });
     expect(() =>
       buildInstallPlan(config, {
         baseUrl: 'https://x.com',
@@ -730,14 +604,9 @@ describe('resolveOwnsModel (via buildInstallPlan)', () => {
 
   it('uses custom ownsModel when provided', () => {
     const customOwns = (model: { id: string }) => model.id === 'special';
-    const config = makeConfig({ ownsModel: customOwns });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-    });
-
-    expect(plan.modelProviders?.[0]?.ownsModel).toBe(customOwns);
+    expect(ownsModelFor(makeConfig({ ownsModel: customOwns }))).toBe(
+      customOwns,
+    );
   });
 });
 
@@ -751,22 +620,12 @@ describe('resolveBaseUrl', () => {
   });
 
   it('matches selected URL from BaseUrlOption array', () => {
-    const config = makeConfig({
-      baseUrl: [
-        { id: 'a', label: 'A', url: 'https://a.com' },
-        { id: 'b', label: 'B', url: 'https://b.com' },
-      ],
-    });
+    const config = makeConfig({ baseUrl: abUrls() });
     expect(resolveBaseUrl(config, 'https://b.com')).toBe('https://b.com');
   });
 
   it('falls back to first option when no match', () => {
-    const config = makeConfig({
-      baseUrl: [
-        { id: 'a', label: 'A', url: 'https://a.com' },
-        { id: 'b', label: 'B', url: 'https://b.com' },
-      ],
-    });
+    const config = makeConfig({ baseUrl: abUrls() });
     expect(resolveBaseUrl(config, 'https://unknown.com')).toBe('https://a.com');
   });
 
@@ -781,51 +640,44 @@ describe('resolveBaseUrl', () => {
 
 describe('getDefaultModelIds', () => {
   it('returns model IDs from config', () => {
-    const config = makeConfig({
-      models: [{ id: 'a' }, { id: 'b' }],
-    });
+    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
     expect(getDefaultModelIds(config)).toEqual(['a', 'b']);
   });
 
   it('returns empty array when no models', () => {
-    const config = makeConfig({ models: undefined });
-    expect(getDefaultModelIds(config)).toEqual([]);
+    expect(getDefaultModelIds(makeConfig({ models: undefined }))).toEqual([]);
   });
 });
 
 describe('findExistingProviderModels', () => {
   const config = makeConfig({ modelNamePrefix: '', envKey: 'TEST_API_KEY' });
+  /** A saved model under the provider's own env key. */
+  const owned = (id: string, extra: Partial<ProviderModelConfig> = {}) => ({
+    id,
+    envKey: 'TEST_API_KEY',
+    ...extra,
+  });
 
   it('returns the user-saved models owned by the provider', () => {
     const result = findExistingProviderModels(config, {
       [AuthType.USE_OPENAI]: [
-        { id: 'custom-model', envKey: 'TEST_API_KEY' },
-        { id: 'default-model', envKey: 'TEST_API_KEY' },
+        owned('custom-model'),
+        owned('default-model'),
         { id: 'other-provider-model', envKey: 'OTHER_API_KEY' },
       ],
     });
     expect(result).toEqual({
       protocol: AuthType.USE_OPENAI,
-      models: [
-        { id: 'custom-model', envKey: 'TEST_API_KEY' },
-        { id: 'default-model', envKey: 'TEST_API_KEY' },
-      ],
+      models: [owned('custom-model'), owned('default-model')],
     });
   });
 
   it.each(['openai'])(
     'finds saved Responses models in the %s bucket',
     (bucket) => {
-      const model = {
-        id: 'responses-model',
-        wireApi: 'responses',
-        envKey: 'TEST_API_KEY',
-      };
+      const model = owned('responses-model', { wireApi: 'responses' });
       expect(findExistingProviderModels(config, { [bucket]: [model] })).toEqual(
-        {
-          protocol: AuthType.USE_OPENAI_RESPONSES,
-          models: [model],
-        },
+        { protocol: AuthType.USE_OPENAI_RESPONSES, models: [model] },
       );
     },
   );
@@ -859,50 +711,28 @@ describe('findExistingProviderModels', () => {
     // A wire switch preserves the old route's entry and prepends the new one,
     // so the canonical bucket holds both; the answer must come from the most
     // recently installed entry, not a hard-coded chat-first preference.
-    const responses = {
-      id: 'same',
-      baseUrl: 'https://proxy.example/v1',
-      wireApi: 'responses' as const,
-      envKey: 'TEST_API_KEY',
-    };
-    const chat = {
-      id: 'same',
-      baseUrl: 'https://proxy.example/v1',
-      envKey: 'TEST_API_KEY',
-    };
+    const baseUrl = 'https://proxy.example/v1';
+    const responses = owned('same', { baseUrl, wireApi: 'responses' });
+    const chat = owned('same', { baseUrl });
     expect(
       findExistingProviderModels(config, {
         [AuthType.USE_OPENAI]: [responses, chat],
       }),
-    ).toEqual({
-      protocol: AuthType.USE_OPENAI_RESPONSES,
-      models: [responses],
-    });
+    ).toEqual({ protocol: AuthType.USE_OPENAI_RESPONSES, models: [responses] });
   });
 
   it('skips entries whose api cannot be resolved instead of throwing', () => {
     expect(
       findExistingProviderModels(config, {
         [AuthType.USE_OPENAI]: [
-          {
-            id: 'broken',
-            wireApi: 'Responses' as 'responses',
-            envKey: 'TEST_API_KEY',
-          },
-          { id: 'good', envKey: 'TEST_API_KEY' },
+          owned('broken', { wireApi: 'Responses' as 'responses' }),
+          owned('good'),
         ],
         [AuthType.USE_GEMINI]: [
-          {
-            id: 'wrong-family',
-            wireApi: 'responses' as const,
-            envKey: 'TEST_API_KEY',
-          },
+          owned('wrong-family', { wireApi: 'responses' }),
         ],
       }),
-    ).toEqual({
-      protocol: AuthType.USE_OPENAI,
-      models: [{ id: 'good', envKey: 'TEST_API_KEY' }],
-    });
+    ).toEqual({ protocol: AuthType.USE_OPENAI, models: [owned('good')] });
   });
 
   it('scans protocolOptions in order and picks the first with owned models', () => {
@@ -912,10 +742,8 @@ describe('findExistingProviderModels', () => {
       protocolOptions: [AuthType.USE_ANTHROPIC, AuthType.USE_OPENAI],
     });
     const result = findExistingProviderModels(multiProtocol, {
-      [AuthType.USE_OPENAI]: [{ id: 'openai-model', envKey: 'TEST_API_KEY' }],
-      [AuthType.USE_ANTHROPIC]: [
-        { id: 'anthropic-model', envKey: 'TEST_API_KEY' },
-      ],
+      [AuthType.USE_OPENAI]: [owned('openai-model')],
+      [AuthType.USE_ANTHROPIC]: [owned('anthropic-model')],
     });
     expect(result?.protocol).toBe(AuthType.USE_ANTHROPIC);
     expect(result?.models.map((m) => m.id)).toEqual(['anthropic-model']);
@@ -923,58 +751,45 @@ describe('findExistingProviderModels', () => {
 });
 
 describe('shouldShowStep', () => {
+  const show = (
+    step: Parameters<typeof shouldShowStep>[1],
+    overrides?: Partial<ProviderConfig>,
+  ) => shouldShowStep(makeConfig(overrides), step);
+
   it('shows protocol step only when multiple options', () => {
-    const single = makeConfig({
-      protocolOptions: [AuthType.USE_OPENAI],
-    });
-    const multi = makeConfig({
-      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
-    });
-    expect(shouldShowStep(single, 'protocol')).toBe(false);
-    expect(shouldShowStep(multi, 'protocol')).toBe(true);
+    expect(show('protocol', { protocolOptions: [AuthType.USE_OPENAI] })).toBe(
+      false,
+    );
+    expect(
+      show('protocol', {
+        protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+      }),
+    ).toBe(true);
   });
 
   it('shows baseUrl step when undefined or array', () => {
-    expect(shouldShowStep(makeConfig({ baseUrl: undefined }), 'baseUrl')).toBe(
-      true,
-    );
+    expect(show('baseUrl', { baseUrl: undefined })).toBe(true);
     expect(
-      shouldShowStep(
-        makeConfig({
-          baseUrl: [{ id: 'a', label: 'A', url: 'https://a.com' }],
-        }),
-        'baseUrl',
-      ),
+      show('baseUrl', {
+        baseUrl: [{ id: 'a', label: 'A', url: 'https://a.com' }],
+      }),
     ).toBe(true);
-    expect(
-      shouldShowStep(makeConfig({ baseUrl: 'https://fixed.com' }), 'baseUrl'),
-    ).toBe(false);
+    expect(show('baseUrl', { baseUrl: 'https://fixed.com' })).toBe(false);
   });
 
   it('always shows the apiKey step', () => {
-    expect(shouldShowStep(makeConfig(), 'apiKey')).toBe(true);
+    expect(show('apiKey')).toBe(true);
   });
 
   it('shows models step only when editable or undefined', () => {
-    expect(shouldShowStep(makeConfig({ models: undefined }), 'models')).toBe(
-      true,
-    );
-    expect(shouldShowStep(makeConfig({ modelsEditable: true }), 'models')).toBe(
-      true,
-    );
-    expect(
-      shouldShowStep(makeConfig({ modelsEditable: false }), 'models'),
-    ).toBe(false);
+    expect(show('models', { models: undefined })).toBe(true);
+    expect(show('models', { modelsEditable: true })).toBe(true);
+    expect(show('models', { modelsEditable: false })).toBe(false);
   });
 
   it('shows advancedConfig step only when enabled', () => {
-    expect(
-      shouldShowStep(
-        makeConfig({ showAdvancedConfig: true }),
-        'advancedConfig',
-      ),
-    ).toBe(true);
-    expect(shouldShowStep(makeConfig(), 'advancedConfig')).toBe(false);
+    expect(show('advancedConfig', { showAdvancedConfig: true })).toBe(true);
+    expect(show('advancedConfig')).toBe(false);
   });
 });
 
@@ -997,38 +812,23 @@ describe('providerMatchesCredentials', () => {
     },
   );
 
-  it('matches by string envKey and string baseUrl', () => {
-    const config = makeConfig();
-    expect(
-      providerMatchesCredentials(
-        config,
-        'https://api.test.com/v1',
-        'TEST_API_KEY',
-      ),
-    ).toBe(true);
-  });
-
-  it('rejects mismatched envKey', () => {
-    const config = makeConfig();
-    expect(
-      providerMatchesCredentials(config, 'https://api.test.com/v1', 'OTHER'),
-    ).toBe(false);
-  });
-
-  it('rejects mismatched baseUrl', () => {
-    const config = makeConfig();
-    expect(
-      providerMatchesCredentials(config, 'https://other.com', 'TEST_API_KEY'),
-    ).toBe(false);
+  it.each([
+    [
+      'matches by string envKey and string baseUrl',
+      TEST_URL,
+      'TEST_API_KEY',
+      true,
+    ],
+    ['rejects mismatched envKey', TEST_URL, 'OTHER', false],
+    ['rejects mismatched baseUrl', 'https://other.com', 'TEST_API_KEY', false],
+  ])('%s', (_title, baseUrl, envKey, expected) => {
+    expect(providerMatchesCredentials(makeConfig(), baseUrl, envKey)).toBe(
+      expected,
+    );
   });
 
   it('matches against BaseUrlOption array', () => {
-    const config = makeConfig({
-      baseUrl: [
-        { id: 'a', label: 'A', url: 'https://a.com' },
-        { id: 'b', label: 'B', url: 'https://b.com' },
-      ],
-    });
+    const config = makeConfig({ baseUrl: abUrls() });
     expect(
       providerMatchesCredentials(config, 'https://b.com', 'TEST_API_KEY'),
     ).toBe(true);
@@ -1038,21 +838,16 @@ describe('providerMatchesCredentials', () => {
   });
 
   it('matches when function-typed envKey derives a matching key', () => {
-    // Previously asserted toBe(false) when envKey was non-string. The
-    // provider matcher now resolves function-typed envKey so custom
-    // providers stay visible to /doctor and AppHeader. Uses the relative
-    // source import (declared with the other dist-bypass aliases below)
-    // so the new behaviour is exercised before dist/ is rebuilt; see the
-    // 'providerMatchesCredentials with function envKey' suite below for
-    // protocol-iteration coverage.
+    // Previously asserted toBe(false) for a non-string envKey; the matcher now
+    // resolves function-typed envKey so custom providers stay visible to
+    // /doctor and AppHeader. Uses the relative source import (the dist-bypass
+    // aliases below) so the behaviour is exercised before dist/ is rebuilt;
+    // the 'providerMatchesCredentials with function envKey' suite below
+    // covers protocol iteration.
     const config = makeConfig({ envKey: () => 'DYNAMIC' });
-    expect(
-      providerMatchesCredentialsSrc(
-        config,
-        'https://api.test.com/v1',
-        'DYNAMIC',
-      ),
-    ).toBe(true);
+    expect(providerMatchesCredentialsSrc(config, TEST_URL, 'DYNAMIC')).toBe(
+      true,
+    );
   });
 });
 
@@ -1060,8 +855,7 @@ describe('computeModelListVersion', () => {
   it('produces consistent hashes', () => {
     const models = [{ id: 'a' }, { id: 'b' }];
     const v1 = computeModelListVersion(models);
-    const v2 = computeModelListVersion(models);
-    expect(v1).toBe(v2);
+    expect(v1).toBe(computeModelListVersion(models));
     expect(v1).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -1074,11 +868,12 @@ describe('computeModelListVersion', () => {
 
 describe('buildProviderTemplate', () => {
   it('uses resolved baseUrl and default model IDs', () => {
-    const config = makeConfig({
-      baseUrl: 'https://fixed.com',
-      models: [{ id: 'x' }, { id: 'y' }],
-    });
-    const template = buildProviderTemplate(config);
+    const template = buildProviderTemplate(
+      makeConfig({
+        baseUrl: 'https://fixed.com',
+        models: [{ id: 'x' }, { id: 'y' }],
+      }),
+    );
     expect(template).toHaveLength(2);
     expect(template[0]?.baseUrl).toBe('https://fixed.com');
     expect(template[0]?.envKey).toBe('TEST_API_KEY');
@@ -1098,11 +893,10 @@ describe('buildProviderTemplate', () => {
 
 describe('findProviderByCredentials', () => {
   it('finds a preset by its env key + base URL', () => {
-    const found = findProviderByCredentials(
-      'https://api.deepseek.com',
-      'DEEPSEEK_API_KEY',
-    );
-    expect(found?.id).toBe('deepseek');
+    expect(
+      findProviderByCredentials('https://api.deepseek.com', 'DEEPSEEK_API_KEY')
+        ?.id,
+    ).toBe('deepseek');
   });
 
   it('returns undefined for an unknown env key', () => {
@@ -1122,29 +916,22 @@ describe('findProviderByCredentials', () => {
 
   it('matches a multi-baseUrl preset against any of its registered URLs', () => {
     // coding-plan ships both China and Singapore endpoints under the same env key.
-    const china = findProviderByCredentials(
+    for (const url of [
       'https://coding.dashscope.aliyuncs.com/v1',
-      'BAILIAN_CODING_PLAN_API_KEY',
-    );
-    const intl = findProviderByCredentials(
       'https://coding-intl.dashscope.aliyuncs.com/v1',
-      'BAILIAN_CODING_PLAN_API_KEY',
-    );
-    expect(china?.id).toBe('coding-plan');
-    expect(intl?.id).toBe('coding-plan');
+    ]) {
+      expect(
+        findProviderByCredentials(url, 'BAILIAN_CODING_PLAN_API_KEY')?.id,
+      ).toBe('coding-plan');
+    }
   });
 
   it('matches Token Plan credentials against both registered region URLs', () => {
-    const china = findProviderByCredentialsSrc(
-      TOKEN_PLAN_CHINA_BASE_URL,
-      TOKEN_PLAN_ENV_KEY,
-    );
-    const intl = findProviderByCredentialsSrc(
-      TOKEN_PLAN_GLOBAL_BASE_URL,
-      TOKEN_PLAN_ENV_KEY,
-    );
-    expect(china?.id).toBe('token-plan');
-    expect(intl?.id).toBe('token-plan');
+    for (const url of [TOKEN_PLAN_CHINA_BASE_URL, TOKEN_PLAN_GLOBAL_BASE_URL]) {
+      expect(findProviderByCredentialsSrc(url, TOKEN_PLAN_ENV_KEY)?.id).toBe(
+        'token-plan',
+      );
+    }
   });
 });
 
@@ -1199,15 +986,13 @@ describe('resolveBaseUrl edge cases', () => {
         { id: 'c', label: 'C', url: 'https://c.com/v1/' },
       ],
     });
-    expect(resolveBaseUrlSrc(config, 'https://b.com/v1/')).toBe(
-      'https://b.com/v1',
-    );
-    expect(resolveBaseUrlSrc(config, 'https://a.com/v1///')).toBe(
-      'https://a.com/v1',
-    );
-    expect(resolveBaseUrlSrc(config, 'https://c.com/v1')).toBe(
-      'https://c.com/v1/',
-    );
+    for (const [selected, resolved] of [
+      ['https://b.com/v1/', 'https://b.com/v1'],
+      ['https://a.com/v1///', 'https://a.com/v1'],
+      ['https://c.com/v1', 'https://c.com/v1/'],
+    ]) {
+      expect(resolveBaseUrlSrc(config, selected)).toBe(resolved);
+    }
   });
 });
 
@@ -1215,103 +1000,72 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
   // Custom provider derives envKey from (protocol, baseUrl) via a function.
   // Treating non-string envKey as "no match" made custom providers invisible
   // to findProviderByCredentials → /doctor and system-info diagnostics.
+  const url = 'https://api.example.com/v1';
+  /** A custom-like config with a user-picked baseUrl and derived envKey. */
+  const derivedConfig = (
+    envKey: ProviderConfig['envKey'],
+    extra: Partial<ProviderConfig> = {},
+  ) => makeConfig({ id: 'custom-like', envKey, baseUrl: undefined, ...extra });
+
   it('matches a custom-style provider whose envKey is a function deriving from baseUrl', () => {
     const derivedFor = (_protocol: AuthType, baseUrl: string) =>
       `QWEN_CUSTOM_${Buffer.from(baseUrl).toString('hex').slice(0, 8)}`;
-    const config = makeConfig({
-      id: 'custom-like',
-      envKey: derivedFor,
-      baseUrl: undefined, // user-picked
-      protocol: AuthType.USE_OPENAI,
-    });
-
-    const url = 'https://api.example.com/v1';
+    const config = derivedConfig(derivedFor);
     const expectedKey = derivedFor(AuthType.USE_OPENAI, url);
     expect(providerMatchesCredentialsSrc(config, url, expectedKey)).toBe(true);
   });
 
   it('does not match when the derived key differs from the supplied envKey', () => {
-    const derivedFor = (_protocol: AuthType, baseUrl: string) =>
-      `QWEN_CUSTOM_${baseUrl.length}`;
-    const config = makeConfig({
-      id: 'custom-like',
-      envKey: derivedFor,
-      baseUrl: undefined,
-      protocol: AuthType.USE_OPENAI,
-    });
-    expect(
-      providerMatchesCredentialsSrc(
-        config,
-        'https://api.example.com/v1',
-        'WRONG_ENV_KEY',
-      ),
-    ).toBe(false);
+    const config = derivedConfig(
+      (_protocol, baseUrl) => `QWEN_CUSTOM_${baseUrl.length}`,
+    );
+    expect(providerMatchesCredentialsSrc(config, url, 'WRONG_ENV_KEY')).toBe(
+      false,
+    );
   });
 
   it('returns false (not crash) when the function envKey itself throws', () => {
-    const config = makeConfig({
-      id: 'custom-like',
-      envKey: () => {
-        throw new Error('boom');
-      },
-      baseUrl: undefined,
+    const config = derivedConfig(() => {
+      throw new Error('boom');
     });
-    expect(
-      providerMatchesCredentialsSrc(
-        config,
-        'https://api.example.com/v1',
-        'ANY',
-      ),
-    ).toBe(false);
+    expect(providerMatchesCredentialsSrc(config, url, 'ANY')).toBe(false);
   });
 
   it('iterates protocolOptions and matches when any one derives the env key', () => {
     // buildInstallPlan derives the persisted env key from inputs.protocol
-    // (which may be USE_ANTHROPIC or USE_GEMINI for a custom provider), not
-    // from config.protocol. The matcher must try every protocolOption so a
-    // custom provider configured under Anthropic/Gemini still gets matched
-    // back from the on-disk envKey.
+    // (possibly USE_ANTHROPIC or USE_GEMINI for a custom provider), not from
+    // config.protocol (default USE_OPENAI). The matcher must try every
+    // protocolOption so such a provider is matched back from the on-disk
+    // envKey.
     const derivedFor = (protocol: AuthType, baseUrl: string) =>
       `QWEN_CUSTOM_${protocol.toUpperCase()}_${baseUrl.length}`;
-    const config = makeConfig({
-      id: 'custom-like',
-      envKey: derivedFor,
-      baseUrl: undefined,
-      protocol: AuthType.USE_OPENAI, // default
+    const config = derivedConfig(derivedFor, {
       protocolOptions: [
         AuthType.USE_OPENAI,
         AuthType.USE_ANTHROPIC,
         AuthType.USE_GEMINI,
       ],
     });
-
-    const url = 'https://api.example.com/v1';
-    // User picked Anthropic at install time, so the persisted key derives
-    // from USE_ANTHROPIC, not the default USE_OPENAI.
-    const anthropicKey = derivedFor(AuthType.USE_ANTHROPIC, url);
-    expect(providerMatchesCredentialsSrc(config, url, anthropicKey)).toBe(true);
-
-    // Gemini path also matches.
-    const geminiKey = derivedFor(AuthType.USE_GEMINI, url);
-    expect(providerMatchesCredentialsSrc(config, url, geminiKey)).toBe(true);
+    // User picked Anthropic at install time; the Gemini path also matches.
+    for (const protocol of [AuthType.USE_ANTHROPIC, AuthType.USE_GEMINI]) {
+      expect(
+        providerMatchesCredentialsSrc(config, url, derivedFor(protocol, url)),
+      ).toBe(true);
+    }
   });
 });
 
 describe('customHeaders in ProviderConfig', () => {
-  it('merges customHeaders into generationConfig for fixed models', () => {
-    const config = makeConfig({
-      customHeaders: {
-        'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
-        'X-Title': 'Qwen Code',
-      },
-    });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-    });
+  const headersOf = (config: ProviderConfig, inputs: ProviderSetupInputs) =>
+    installModels(config, inputs)[0]?.generationConfig?.customHeaders;
 
-    const gc = plan.modelProviders?.[0]?.models[0]?.generationConfig;
+  it('merges customHeaders into generationConfig for fixed models', () => {
+    const customHeaders = {
+      'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+      'X-Title': 'Qwen Code',
+    };
+    const gc = installModels(makeConfig({ customHeaders }), testInputs())[0]
+      ?.generationConfig;
     expect(gc?.customHeaders).toEqual({
       'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
       'X-Title': 'Qwen Code',
@@ -1326,45 +1080,26 @@ describe('customHeaders in ProviderConfig', () => {
       modelsEditable: true,
       customHeaders: { 'X-Custom': 'val' },
     });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['unknown-model'],
+    expect(headersOf(config, testInputs(['unknown-model']))).toEqual({
+      'X-Custom': 'val',
     });
-
-    expect(
-      plan.modelProviders?.[0]?.models[0]?.generationConfig?.customHeaders,
-    ).toEqual({ 'X-Custom': 'val' });
   });
 
   it('merges customHeaders for custom-provider models (no predefined list)', () => {
-    const config = makeConfig({
-      models: undefined,
-      modelNamePrefix: '',
+    const config = customLike({
       customHeaders: { Authorization: 'Bearer test' },
     });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://custom.com/v1',
-      apiKey: 'sk-custom',
-      modelIds: ['my-model'],
+    expect(headersOf(config, customInputs(['my-model']))).toEqual({
+      Authorization: 'Bearer test',
     });
-
-    expect(
-      plan.modelProviders?.[0]?.models[0]?.generationConfig?.customHeaders,
-    ).toEqual({ Authorization: 'Bearer test' });
   });
 
   it('does not add generationConfig when customHeaders is absent', () => {
-    const config = makeConfig({ models: [{ id: 'plain' }] });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['plain'],
-    });
-
-    expect(
-      plan.modelProviders?.[0]?.models[0]?.generationConfig,
-    ).toBeUndefined();
+    const models = installModels(
+      makeConfig({ models: [{ id: 'plain' }] }),
+      testInputs(['plain']),
+    );
+    expect(models[0]?.generationConfig).toBeUndefined();
   });
 
   it('applies customHeaders to every model in the list', () => {
@@ -1372,20 +1107,13 @@ describe('customHeaders in ProviderConfig', () => {
       models: [{ id: 'a' }, { id: 'b' }],
       customHeaders: { 'X-Test': 'yes' },
     });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['a', 'b'],
-    });
-
-    const models = plan.modelProviders?.[0]?.models;
+    const models = installModels(config, testInputs(['a', 'b']));
     expect(models).toHaveLength(2);
-    expect(models?.[0]?.generationConfig?.customHeaders).toEqual({
-      'X-Test': 'yes',
-    });
-    expect(models?.[1]?.generationConfig?.customHeaders).toEqual({
-      'X-Test': 'yes',
-    });
+    for (const model of models) {
+      expect(model.generationConfig?.customHeaders).toEqual({
+        'X-Test': 'yes',
+      });
+    }
   });
 
   it('includes customHeaders in buildProviderTemplate', () => {
@@ -1393,10 +1121,9 @@ describe('customHeaders in ProviderConfig', () => {
       models: [{ id: 'x' }],
       customHeaders: { 'X-Template': 'val' },
     });
-    const template = buildProviderTemplate(config);
-    expect(template[0]?.generationConfig?.customHeaders).toEqual({
-      'X-Template': 'val',
-    });
+    expect(
+      buildProviderTemplate(config)[0]?.generationConfig?.customHeaders,
+    ).toEqual({ 'X-Template': 'val' });
   });
 });
 

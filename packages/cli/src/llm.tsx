@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getRelaunchEnvProvenance } from './config/environment.js';
+import {
+  getRelaunchEnvProvenance,
+  hasLoadedEnvironmentValues,
+} from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
+import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
   AuthType,
   type ChatRecord,
@@ -25,6 +30,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+  resolveUsageStatisticsEnabled,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -41,7 +47,10 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
+import {
+  processBootLoaderEnv,
+  scrubAndReportInheritedLoaderEnv,
+} from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -55,6 +64,7 @@ import {
   ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
+  getOperatorTrustSettings,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -71,6 +81,7 @@ import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
+  WorktreeOwnershipConflictError,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
 import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
@@ -94,6 +105,7 @@ import {
   recordAcpConfigStartupEvent,
 } from './utils/acp-startup-profiler.js';
 import {
+  exitWhenSupervisorExits,
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -103,6 +115,12 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import {
+  getProjectHooksApprovalState,
+  getProjectHooksForApproval,
+  getProjectHooksHeadlessWarning,
+  getSeparatedHookSettings,
+} from './config/hook-approvals.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -111,8 +129,12 @@ import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
   UPDATE_COMPLETE_EXIT_CODE,
+  superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { isInteractiveInvocation } from './utils/interactive-mode.js';
+import { selectNpmBunHandoff } from './utils/npm-runtime.js';
+import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -423,6 +445,7 @@ export async function main() {
   // that never completes — reach no other scrub, so it happens here for
   // all of them. A session that does bind one re-exports its own pair.
   clearInheritedPeerMessagingEnv();
+  exitWhenSupervisorExits();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -486,6 +509,20 @@ export async function main() {
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
     conversationsRuntimeMarkerSeen;
+  // Only the daemon that spawns a Managed host can drive its sessions, and
+  // the Conversations runtime is never paired. A repeated option arrives as
+  // an array, which is refused too.
+  if (
+    argv.acpExecutionEngine !== undefined &&
+    (argv.acpExecutionEngine !== 'managed' ||
+      !isAcpMode ||
+      privateAcpParentCapability === undefined ||
+      conversationsRuntimeProvenance)
+  ) {
+    throw new Error(
+      '--acp-execution-engine is reserved for hosts spawned by qwen serve.',
+    );
+  }
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
@@ -530,6 +567,23 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings.merged,
+    argv,
+  );
+  if (
+    executionSandboxSettings &&
+    (argv.acp ||
+      argv.experimentalAcp ||
+      argv.worktree !== undefined ||
+      argv.experimentalLsp ||
+      argv.mcpConfig ||
+      argv.extensions?.length)
+  ) {
+    throw new Error(
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP or extensions.',
+    );
+  }
   // A user-level .env or settings reload may have reintroduced the marker;
   // the accepted value already lives in immutable local state.
   delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
@@ -540,7 +594,7 @@ export async function main() {
     process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
     process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
   }
-  await cleanupCheckpoints();
+  if (!executionSandboxSettings) await cleanupCheckpoints();
   // Performance checkpoint
   profileCheckpoint('after_load_settings');
 
@@ -555,7 +609,7 @@ export async function main() {
   // check corruptedPath directly to keep stderr visible in relaunch.
   if (settings.corruptedPath) {
     writeStderrLine(
-      'Warning: Settings file had invalid JSON and was reset. ' +
+      'Warning: Workspace settings had invalid JSON. ' +
         'A copy of the corrupted file has been saved at: ' +
         settings.corruptedPath,
     );
@@ -599,13 +653,27 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
-  } else {
+  } else if (
+    process.stdout.isTTY &&
+    // A TTY-attached run can still be non-interactive by output format
+    // (config.ts Priority 2: json/stream-json together with a query or
+    // prompt, unless `-i` forces interactive per Priority 1). Such a run
+    // renders no theme colors either, so it must not pay for the probe.
+    !(
+      !argv.promptInteractive &&
+      (argv.outputFormat === 'json' || argv.outputFormat === 'stream-json') &&
+      !!(argv.query || argv.prompt)
+    )
+  ) {
     // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
     // so non-interactive runs and any pre-render UI (e.g. the --resume
     // session picker) already have a sensible theme. The interactive
     // startup block refines this with an OSC 11 probe later on, which is
     // intentionally deferred to run inside the early-capture window so
     // terminal response bytes cannot leak into the TUI input.
+    // Piped output (headless automation, `--output-format json`) renders no
+    // theme colors, so it keeps the default theme instead of blocking the
+    // event loop on the macOS `defaults read` probe.
     themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 
@@ -628,12 +696,27 @@ export async function main() {
       return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
     };
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
+    const npmBunHandoff = selectNpmBunHandoff({
+      interactive:
+        isInteractiveInvocation(argv) && Boolean(process.stdout.isTTY),
+      screenReader:
+        argv.screenReader ??
+        settings.merged.ui?.accessibility?.screenReader ??
+        false,
+      protocolMode: Boolean(
+        isAcpMode ||
+          argv.inputFormat === InputFormat.STREAM_JSON ||
+          (argv.inputFile ?? settings.merged.dualOutput?.inputFile) ||
+          argv.jsonFd !== undefined,
+      ),
+      sandbox: Boolean(sandboxConfig),
+    });
     const customSandboxImage =
       argv.sandboxImage ??
       process.env['QWEN_SANDBOX_IMAGE'] ??
       settings.merged.tools?.sandboxImage;
     // Only the container backends run an image with its own in-process updater;
-    // `sandbox-exec` and `bwrap` confine this process in place, so neither the
+    // `sandbox-exec` confines this process in place, so neither the
     // image handoff nor the host-update relaunch marker applies to them.
     // Narrowed to the config (not a boolean) so `.image` stays type-safe below.
     const containerSandbox =
@@ -667,16 +750,22 @@ export async function main() {
         undefined,
         [],
         // Pass separated hooks for proper source attribution
-        {
-          systemHooks: settings.getSystemHooks(),
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
+        getSeparatedHookSettings(settings),
         buildDisabledSkillNamesProvider(settings),
         undefined,
         undefined,
         undefined,
-        undefined,
+        {
+          lspDisabled: true,
+          ...(privateAcpParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : {}),
+        },
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -773,6 +862,18 @@ export async function main() {
       // provenance travels in `privateAcpChildEnv`, which is spread last.
       delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
+      // The container mounts only the user settings dir and builds its env
+      // passthrough from `process.env`, so a System-scope opt-out would never
+      // reach the sandboxed CLI and it would fetch models.dev.
+      if (
+        settings.merged.model?.catalogRefresh === false ||
+        resolveUsageStatisticsEnabled(
+          settings.merged.privacy?.usageStatisticsEnabled,
+        ) === false
+      ) {
+        process.env[MODEL_CATALOG_REFRESH_ENV] = 'off';
+      }
+
       await relaunchOnExitCode(
         () =>
           start_sandbox(
@@ -787,13 +888,41 @@ export async function main() {
         },
       );
       process.exit(0);
+    } else if (
+      !npmBunHandoff &&
+      memoryArgs.length === 0 &&
+      !hasLoadedEnvironmentValues() &&
+      !isAcpMode &&
+      argv.inputFormat !== InputFormat.STREAM_JSON &&
+      !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+      argv.jsonFd === undefined &&
+      typeof process.execve === 'function' &&
+      !['win32', 'os400'].includes(process.platform)
+    ) {
+      // Nothing to add to this process's flags, and no env-file values that
+      // already-loaded modules missed, so a relaunch would only load the whole
+      // CLI a second time. Restarts re-exec in place instead.
+      superviseInProcess(onUpdateRelaunch);
     } else {
-      // Relaunch app so we always have a child process that can be internally
-      // restarted if needed.
+      // Interactive and streaming modes keep a supervisor for in-session
+      // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
+        interpreter: npmBunHandoff?.interpreter,
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
+        childEnv: {
+          ...privateAcpChildEnv,
+          ...getRelaunchEnvProvenance(),
+          ...npmBunHandoff?.childEnv,
+        },
+        environmentChangedSinceBoot: hasLoadedEnvironmentValues(),
         onUpdateRelaunch,
+        replaceProcess:
+          !isAcpMode &&
+          argv.inputFormat !== InputFormat.STREAM_JSON &&
+          !argv.promptInteractive &&
+          !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+          argv.jsonFd === undefined &&
+          Boolean(argv.prompt),
       });
     }
   }
@@ -812,7 +941,12 @@ export async function main() {
     // respawn this process with process.env and still need the loader to
     // boot, and the respawned child re-runs this scrub itself. Only the
     // final process (no relaunch) reaches here.
-    scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
+    scrubAndReportInheritedLoaderEnv(
+      process.env,
+      'qwen',
+      'ACP child',
+      processBootLoaderEnv,
+    );
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve
@@ -975,20 +1109,35 @@ export async function main() {
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution
-      {
-        systemHooks: settings.getSystemHooks(),
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
+      getSeparatedHookSettings(settings),
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
       undefined,
-      undefined,
+      privateAcpParentCapability === undefined
+        ? {
+            workflowAncestorTrustProvider:
+              createLocalWorkflowAncestorTrustProvider(
+                getOperatorTrustSettings(settings),
+              ),
+          }
+        : undefined,
       buildEnabledSkillNamesProvider(settings),
+      // Close over the live LoadedSettings: the YOLO-exit re-gate must see
+      // blocks a `/hooks` reload replaced, not the startup snapshot.
+      () => getProjectHooksForApproval(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    // The interactive UI segments text through Intl.Segmenter; on an ICU-less
+    // Node the first segmentation segfaults the process (#11747). Probe here,
+    // where interactivity is known, so headless and ACP runs (which never
+    // segment) are untouched by the gate.
+    if (config.isInteractive() && !config.getExperimentalZedIntegration()) {
+      const { assertFullIcuAvailable } = await import('./startup/icu-check.js');
+      assertFullIcuAvailable();
+    }
 
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()
@@ -1003,7 +1152,14 @@ export async function main() {
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
-    if (settingsWatcher) {
+    if (settingsWatcher && !config.getShellExecutionSandbox?.()) {
+      registerCleanup(
+        settingsWatcher.addChangeListener(() => {
+          config.setWorkflowKeywordTriggerEnabled(
+            settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+          );
+        }),
+      );
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,
@@ -1027,7 +1183,9 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
-      isBareMode(argv.bare) || config.isSafeMode()
+      isBareMode(argv.bare) ||
+      config.isSafeMode() ||
+      config.getShellExecutionSandbox?.()
         ? undefined
         : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
     extensionFileWatcher?.startWatching();
@@ -1086,6 +1244,7 @@ export async function main() {
           ),
         );
       } catch (error) {
+        if (error instanceof WorktreeOwnershipConflictError) throw error;
         debugLogger.warn(
           `--worktree sidecar persist failed (non-fatal, notice preserved): ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -1210,12 +1369,20 @@ export async function main() {
       markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       markAcpStartup('acpImportEnd');
+      // A Managed host runs its sessions' tools in Runtime workers.
+      const managedRuntimeEnvironment =
+        argv.acpExecutionEngine === 'managed'
+          ? (await import('./serve/managed-runtime-session-worker.js'))
+              .createManagedRuntimeEnvironment
+          : undefined;
       try {
         await runAcpAgent(config, settings, argv, {
           privateParentCapability: isAcpMode
             ? privateAcpParentCapability
             : undefined,
           conversationsRuntimeProvenance,
+          executionEngine: argv.acpExecutionEngine,
+          managedRuntimeEnvironment,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
@@ -1275,6 +1442,9 @@ export async function main() {
 
     if (config.isInteractive()) {
       // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      if (initializationResult.authNotice) {
+        startupWarnings.push(initializationResult.authNotice);
+      }
       const interruptedWorkflowsNotice =
         await getInterruptedWorkflowRunsNotice(config);
       if (interruptedWorkflowsNotice) {
@@ -1310,6 +1480,12 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      if (settings.merged.experimental?.mods) {
+        const { createInteractiveModSession } = await import(
+          './services/interactive-mod-session.js'
+        );
+        createInteractiveModSession(config, settings);
+      }
       // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
       // selects the experimental backend only on a runtime that can drive it;
       // every other case — including a failed load or boot of the entry —
@@ -1320,7 +1496,12 @@ export async function main() {
       const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      const selection = selectTuiRenderer();
+      const selection = selectTuiRenderer(
+        undefined,
+        undefined,
+        process.env,
+        config.getScreenReader(),
+      );
       if (selection.renderer === 'opentui') {
         try {
           const { startOpenTuiUI } = await import(
@@ -1413,6 +1594,13 @@ export async function main() {
     if (!config.isInteractive()) {
       const yoloWarning = getHeadlessYoloSafetyWarning(config);
       if (yoloWarning) writeStderrLine(yoloWarning);
+      if (config.isProjectHooksPendingApproval()) {
+        writeStderrLine(
+          getProjectHooksHeadlessWarning(
+            getProjectHooksApprovalState(getProjectHooksForApproval(settings)),
+          ),
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers
@@ -1492,6 +1680,35 @@ export async function main() {
       config,
       settings,
     );
+
+    // The TUI shows a startup warning when the trust gate withholds project
+    // hooks; a headless run gets one stderr line so the failure is not silent.
+    // Mirror the TUI predicate: raw workspace hooks non-empty, trust absent,
+    // and no mode/switch that withholds hooks for a different reason. The
+    // Config accessor cannot see the feature-on case (the settings layer
+    // already dropped the workspace scope), so read the raw file like the
+    // TUI does.
+    const rawWorkspaceHooks = settings.workspace?.settings?.hooks;
+    if (
+      !nonInteractiveConfig.isInteractive?.() &&
+      // The approval-gate warning above already covers a pending/rejected
+      // block; this line is only for the trust-withheld case it cannot see.
+      !nonInteractiveConfig.isProjectHooksPendingApproval?.() &&
+      // Same guard as the TUI warning: an approved (or trust-authorized)
+      // block the execution accessor actually serves is not "not loaded".
+      nonInteractiveConfig.getProjectHooks?.() === undefined &&
+      !nonInteractiveConfig.isExplicitlyTrustedFolder?.() &&
+      !nonInteractiveConfig.getBareMode?.() &&
+      !nonInteractiveConfig.isSafeMode?.() &&
+      !nonInteractiveConfig.getDisableAllHooks?.() &&
+      rawWorkspaceHooks &&
+      typeof rawWorkspaceHooks === 'object' &&
+      Object.keys(rawWorkspaceHooks).length > 0
+    ) {
+      writeStderrLine(
+        'Project hooks in .qwen/settings.json were not loaded: the folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+      );
+    }
 
     const prompt_id = createNonInteractivePromptId(
       config.getSessionId(),
