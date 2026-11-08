@@ -132,6 +132,12 @@ function validate(c) {
   }
 }
 
+export function backoffDelay(failures, isRateLimited) {
+  const base = isRateLimited ? 30000 : 10000;
+  const max = isRateLimited ? 300000 : 60000;
+  return Math.min(base * 2 ** Math.min(failures - 1, 5), max);
+}
+
 export function createManager(config, dependencies = {}) {
   validate(config);
   const runnerName = (slot) =>
@@ -612,18 +618,24 @@ export function createManager(config, dependencies = {}) {
       await Promise.all(
         Array.from({ length: config.slots }, async (_, i) => {
           const slot = i + 1;
+          let consecutiveFailures = 0;
           while (!stopping) {
             try {
               const result = await cycle(slot);
+              consecutiveFailures = 0;
               if (result?.earlyExit && !stopping) {
                 log(`slot ${slot}: backing off 60 s before replenishing`);
                 await wait(60000);
               }
             } catch (error) {
+              consecutiveFailures += 1;
+              const isRateLimited =
+                error.status === 403 || error.status === 429;
+              const delay = backoffDelay(consecutiveFailures, isRateLimited);
               log(
-                `slot ${slot}: ${error.message}; retrying without replenishing`,
+                `slot ${slot}: ${error.message}; retrying in ${Math.round(delay / 1000)}s`,
               );
-              await wait(10000);
+              await wait(delay);
             }
           }
         }),

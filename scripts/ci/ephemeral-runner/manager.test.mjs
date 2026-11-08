@@ -11,7 +11,11 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { command as runCommand, createManager } from './manager.mjs';
+import {
+  backoffDelay,
+  command as runCommand,
+  createManager,
+} from './manager.mjs';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'runner-manager-'));
@@ -655,6 +659,23 @@ test('network cleanup failure prevents new runner and is reconciled on the next 
       .length,
     2,
   );
+});
+
+test('backoffDelay escalates exponentially and caps at the maximum', () => {
+  // Rate-limited: 30s base, 300s cap
+  assert.equal(backoffDelay(1, true), 30000);
+  assert.equal(backoffDelay(2, true), 60000);
+  assert.equal(backoffDelay(3, true), 120000);
+  assert.equal(backoffDelay(4, true), 240000);
+  assert.equal(backoffDelay(5, true), 300000);
+  assert.equal(backoffDelay(6, true), 300000);
+  assert.equal(backoffDelay(100, true), 300000);
+  // Non-rate-limited: 10s base, 60s cap
+  assert.equal(backoffDelay(1, false), 10000);
+  assert.equal(backoffDelay(2, false), 20000);
+  assert.equal(backoffDelay(3, false), 40000);
+  assert.equal(backoffDelay(4, false), 60000);
+  assert.equal(backoffDelay(5, false), 60000);
 });
 
 test('a lost network create response is recovered using labels', async (t) => {
