@@ -2476,6 +2476,7 @@ describe('package scripts', () => {
       'packages/channels/dws',
       'packages/channels/feishu',
       'packages/channels/github',
+      'packages/channels/msteams',
       'packages/channels/qqbot',
       'packages/channels/telegram',
       'packages/channels/wecom',

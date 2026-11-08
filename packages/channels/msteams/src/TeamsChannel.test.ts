@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Activity } from '@microsoft/agents-activity';
 import type {
   Request,
@@ -6,6 +8,7 @@ import type {
 } from '@microsoft/agents-hosting';
 import type { ChannelAgentBridge, Envelope } from '@qwen-code/channel-base';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MAX_BODY_BYTES } from './ingress.js';
 import type {
   TeamsConfig,
   TeamsHost,
@@ -135,6 +138,51 @@ function setup(hostOverride: Partial<TeamsHost> = {}) {
     referenceStore: references,
   });
   return { channel, host, references };
+}
+
+function standalone(
+  configOverride: Partial<TeamsConfig & Record<string, unknown>> = {},
+) {
+  const references: TeamsReferenceStore = {
+    get: vi.fn(async () => undefined),
+    set: vi.fn(async () => {}),
+  };
+  const channel = new TeamsChannel(
+    'teams',
+    { ...config, webhookPort: 0, ...configOverride },
+    {} as ChannelAgentBridge,
+    { referenceStore: references },
+  );
+  return { channel, references };
+}
+
+function boundPort(channel: TeamsChannel): number {
+  const address = (
+    channel as unknown as {
+      server?: { address(): AddressInfo | string | null };
+    }
+  ).server?.address();
+  if (!address || typeof address === 'string')
+    throw new Error('Teams listener is not bound.');
+  return address.port;
+}
+
+function complete(
+  channel: TeamsChannel,
+  chatId: string,
+  text: string,
+  segment?: unknown,
+): Promise<void> {
+  return (
+    channel as unknown as {
+      onResponseComplete: (
+        chatId: string,
+        text: string,
+        sessionId: string,
+        segment?: unknown,
+      ) => Promise<void>;
+    }
+  ).onResponseComplete(chatId, text, 'session-1', segment);
 }
 
 beforeEach(() => {
@@ -628,6 +676,183 @@ describe('Teams host contract', () => {
     expect(() => splitTeamsText('x'.repeat(65 * 1024))).toThrow(
       TeamsDeliveryError,
     );
+  });
+
+  it('correlates the final answer with the accepted event', async () => {
+    const { channel, host } = setup();
+    await channel.connect();
+    const accepted = event();
+    mocks.inbound.mockImplementation(async function (this: TeamsChannel) {
+      await complete(this, accepted.target.chatId, 'final text', {
+        messageId: accepted.eventId,
+      });
+    });
+    await channel.dispatchPersisted(accepted);
+    expect(host.beforeSend).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'final text', kind: 'response' }),
+    );
+    expect(mocks.send).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a completed answer whose event or chat does not match', async () => {
+    const { channel } = setup();
+    await channel.connect();
+    const accepted = event();
+    mocks.inbound.mockImplementation(async function (this: TeamsChannel) {
+      await expect(
+        complete(this, accepted.target.chatId, 'final text', {
+          messageId: 'other-event',
+        }),
+      ).rejects.toMatchObject({ state: 'known_failed' });
+      await expect(
+        complete(this, 'msteams:tenant-a:other-chat', 'final text', {
+          messageId: accepted.eventId,
+        }),
+      ).rejects.toMatchObject({ state: 'known_failed' });
+    });
+    await channel.dispatchPersisted(accepted);
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it('repeats the source label on every independently visible chunk', async () => {
+    const { channel, host } = setup();
+    await channel.connect();
+    const accepted = event();
+    mocks.inbound.mockImplementation(async function (this: TeamsChannel) {
+      await complete(this, accepted.target.chatId, 'x'.repeat(13 * 1024), {
+        messageId: accepted.eventId,
+        sourceLabel: 'Writer',
+      });
+    });
+    await channel.dispatchPersisted(accepted);
+    const texts = vi
+      .mocked(host.beforeSend)
+      .mock.calls.map(([context]) => context.text);
+    expect(texts).toHaveLength(2);
+    expect(texts.every((text) => text.startsWith('Writer '))).toBe(true);
+    expect(
+      texts.every((text) => Buffer.byteLength(text, 'utf8') <= 12 * 1024),
+    ).toBe(true);
+  });
+
+  it('repeats the source label on system delivery chunks', async () => {
+    const { channel, host, references } = setup();
+    vi.mocked(references.get).mockResolvedValue(event().target);
+    await channel.connect();
+    const sender = channel as unknown as {
+      sendThreadMessage(
+        chatId: string,
+        threadId: string | undefined,
+        text: string,
+        sourceLabel?: string,
+      ): Promise<void>;
+    };
+    await sender.sendThreadMessage(
+      event().target.chatId,
+      undefined,
+      'x'.repeat(13 * 1024),
+      'Writer',
+    );
+    const texts = vi
+      .mocked(host.beforeSend)
+      .mock.calls.map(([context]) => context.text);
+    expect(texts).toHaveLength(2);
+    expect(texts.every((text) => text.startsWith('Writer '))).toBe(true);
+    expect(
+      texts.every((text) => Buffer.byteLength(text, 'utf8') <= 12 * 1024),
+    ).toBe(true);
+  });
+
+  it('delivers a reply at the 64 KiB cap when a source label is present', async () => {
+    const { channel } = setup();
+    await channel.connect();
+    const accepted = event();
+    mocks.inbound.mockImplementation(async function (this: TeamsChannel) {
+      await complete(this, accepted.target.chatId, 'x'.repeat(64 * 1024), {
+        messageId: accepted.eventId,
+        sourceLabel: 'Writer',
+      });
+    });
+    await expect(channel.dispatchPersisted(accepted)).resolves.toBeUndefined();
+    expect(mocks.send).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe('Teams standalone webhook listener', () => {
+  it('clears a server that never listened so a failed connect is disconnectable', async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve) =>
+      blocker.listen(0, '127.0.0.1', resolve),
+    );
+    const address = blocker.address() as AddressInfo;
+    const { channel } = standalone({ webhookPort: address.port });
+    try {
+      await expect(channel.connect()).rejects.toThrow(/EADDRINUSE/);
+      await expect(channel.disconnect()).resolves.toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+
+  it('frames standalone requests like the hosted ingress', async () => {
+    const { channel } = standalone();
+    await channel.connect();
+    const url = `http://127.0.0.1:${boundPort(channel)}/api/messages`;
+    try {
+      expect(
+        (
+          await fetch(`${url}?validationToken=1`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body()),
+          })
+        ).status,
+      ).toBe(200);
+      expect((await fetch(url, { method: 'GET' })).status).toBe(404);
+      expect(
+        (await fetch(`${url}/wrong`, { method: 'POST', body: '{}' })).status,
+      ).toBe(404);
+      expect((await fetch(url, { method: 'POST', body: '{' })).status).toBe(
+        400,
+      );
+      expect((await fetch(url, { method: 'POST', body: '[]' })).status).toBe(
+        400,
+      );
+      expect(
+        (
+          await fetch(url, {
+            method: 'POST',
+            body: 'x'.repeat(MAX_BODY_BYTES + 1),
+          })
+        ).status,
+      ).toBe(413);
+    } finally {
+      await channel.disconnect();
+    }
+  });
+
+  it('deduplicates repeated standalone callbacks', async () => {
+    const { channel, references } = standalone();
+    await channel.connect();
+    try {
+      expect(
+        (await channel.handleWebhook({ headers: {}, body: body() })).status,
+      ).toBe(200);
+      await vi.waitFor(() => expect(mocks.inbound).toHaveBeenCalledTimes(1));
+      const setsAfterFirst = vi.mocked(references.set).mock.calls.length;
+      expect(
+        (await channel.handleWebhook({ headers: {}, body: body() })).status,
+      ).toBe(200);
+      expect(mocks.inbound).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(references.set).mock.calls).toHaveLength(setsAfterFirst);
+      expect(
+        (await channel.handleWebhook({ headers: {}, body: body('message-2') }))
+          .status,
+      ).toBe(200);
+      await vi.waitFor(() => expect(mocks.inbound).toHaveBeenCalledTimes(2));
+    } finally {
+      await channel.disconnect();
+    }
   });
 });
 

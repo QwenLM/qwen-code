@@ -8,14 +8,15 @@ cards, national clouds, and scheduled or proactive tasks are outside this releas
 
 ## Supported channel-base versions
 
-Use one host-provided copy of `@qwen-code/channel-base`. The peer dependency is
-limited to the verified versions below; 0.24.x and 0.25.x are not claimed as
-compatible.
+Use one host-provided copy of `@qwen-code/channel-base`. The peer dependency
+accepts exactly two versions: the legacy `0.23.0` peer and the exact
+channel-base release this package declares in `peerDependencies`, which follows
+each repository release. 0.24.x and 0.25.x are not claimed as compatible.
 
-| Version  | Supported mode       | Access-control contract                                                                                                                           |
-| -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0.26.1` | Standalone or hosted | Standalone uses `privatePolicy` and explicit `operators`; hosted callers also authorize controls before dispatch.                                 |
-| `0.23.0` | Hosted only          | Configure the legacy `senderPolicy` and `dmPolicy`; the host authorizes every control before dispatch. This version does not enforce `operators`. |
+| Version                                      | Supported mode       | Access-control contract                                                                                                                           |
+| -------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Exact release declared in `peerDependencies` | Standalone or hosted | Standalone uses `privatePolicy` and explicit `operators`; hosted callers also authorize controls before dispatch.                                 |
+| `0.23.0`                                     | Hosted only          | Configure the legacy `senderPolicy` and `dmPolicy`; the host authorizes every control before dispatch. This version does not enforce `operators`. |
 
 Construction without a host fails on the older base because it lacks the lifecycle
 guard needed to stop queued standalone turns. Do not install a second newer base
@@ -139,8 +140,9 @@ queues ordinary prompts. Do not change the shared `operators` list for individua
 messages.
 
 When the host has durable receipts for a consecutive sent prefix, it can call
-`sendEventText(event, fullText, kind, { startChunkIndex })` to resume from the first
-unsent chunk. Pass the unchanged full text and original event. Guards and receipts
+`sendEventText(event, fullText, kind, { startChunkIndex, sourceLabel })` to resume
+from the first unsent chunk. Pass the unchanged full text, the original event and
+the captured source label when the reply was attributed. Guards and receipts
 retain the original chunk indexes, total chunk count and full text. The index must
 be a nonnegative integer identifying an existing chunk; empty text permits only
 zero. Out-of-range values fail before sending. The host decides whether recovery
@@ -148,7 +150,9 @@ is safe and never advances past an uncertain send. This option does not add an
 automatic retry or deduplicate messages by itself.
 
 Replies are capped at 64 KiB and split into at most 12 KiB plain-text chunks.
-Blank or oversized completed prompt results become a short completion notice
+An attributed reply repeats its source label on every chunk, and the label is
+included in each chunk's 12 KiB budget. Blank or oversized completed prompt
+results become a short completion notice
 through the normal response path, so cancellation and send guards still apply.
 `onPromptSettled` receives the original result text. Direct `sendEventText` calls
 with oversized replies fail before sending. Ingress JSON is capped at 1 MiB and normalized

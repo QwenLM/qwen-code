@@ -143,14 +143,16 @@ shutdown and a cancellation while a long prompt runs. The host-contract suite
 uses a real local HTTP listener and the SDK where possible; mocked Microsoft
 delivery is labelled as such and is not evidence of real Teams delivery.
 
-The validated peer versions are exactly 0.23.0 and 0.26.1. Version 0.23.0 is
-hosted-only: the host must authorize every control before dispatch. It lacks
-the current shared-session operators and queued-stop guard, so standalone
-construction fails explicitly. Version 0.26.1 supports both modes. Intermediate
-versions are not declared compatible. The plugin uses the host's single base
-instance through a peer dependency.
+The peer dependency accepts exactly two versions: the legacy 0.23.0 and the
+exact channel-base release declared in `packages/channels/msteams/package.json`,
+which follows each repository release. Version 0.23.0 is hosted-only: the host
+must authorize every control before dispatch. It lacks the current
+shared-session operators and queued-stop guard, so standalone construction
+fails explicitly. The current exact release supports both modes. Intermediate
+versions (0.24.x, 0.25.x) are not declared compatible. The plugin uses the
+host's single base instance through a peer dependency.
 
-The plugin has 51 passing focused unit tests. Independent compiled-artifact
+The plugin's focused unit suite passes. Independent compiled-artifact
 checks passed 18 applicable channel cases on 0.26.1 and 16 hosted channel cases
 on 0.23.0, using real
 Fastify and Microsoft SDK JWT processing with temporary RSA/JWKS fixtures and
@@ -176,10 +178,10 @@ later turn still completes normally.
 
 Validate the current ChannelBase and the host's pinned version separately.
 Only change shared interfaces if a contract test establishes a concrete gap.
-The E2E plans in `.qwen/e2e-tests/teams-channel.md` and
-`.qwen/e2e-tests/teams-minimal-ingress-v4.md` record baseline, commands and
-remaining tenant-dependent checks. Feature submission follows the upstream
-proposal and review process; local implementation does not imply approval.
+Tenant-dependent E2E checks remain open below; working E2E notes are kept in
+the git-ignored `.qwen/` scratch area and are not part of this repository.
+Feature submission follows the upstream proposal and review process; local
+implementation does not imply approval.
 
 ## Open verification points
 

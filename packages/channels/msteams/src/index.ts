@@ -24,6 +24,7 @@ export type {
 export const plugin: ChannelPlugin = {
   channelType: 'msteams',
   displayName: 'Microsoft Teams',
+  defaultSessionScope: 'chat_thread',
   requiredConfigFields: ['appId', 'appPassword', 'tenantId', 'approvalMode'],
   createChannel: (name, config, bridge, options) =>
     new TeamsChannel(

@@ -4,6 +4,7 @@ import {
   normalizeActivity,
   teamsServiceUrls,
   validateTarget,
+  TeamsActivityError,
 } from './activity.js';
 
 export const config = { appId: 'bot-app', tenantId: 'tenant-a' };
@@ -109,6 +110,41 @@ describe('Teams Activity normalization', () => {
     expect(() => validateTarget(config, first.target)).not.toThrow();
   });
 
+  it('rejects reply targets whose route or bot identity disagrees', () => {
+    const first = normalizeActivity('teams', config, activity())!;
+    const target = first.target;
+    const reference = target.reference;
+    for (const variant of [
+      { ...target, chatId: 'msteams:another-tenant:chat-1' },
+      { ...target, reference: { ...reference, channelId: 'slack' } },
+      {
+        ...target,
+        reference: {
+          ...reference,
+          agent: { ...reference.agent, id: '28:another-bot' },
+        },
+      },
+      {
+        ...target,
+        reference: {
+          ...reference,
+          serviceUrl: 'https://untrusted.example/',
+        },
+      },
+      {
+        ...target,
+        reference: {
+          ...reference,
+          conversation: {
+            ...reference.conversation,
+            id: 'chat-1;messageid=other',
+          },
+        },
+      },
+    ])
+      expect(() => validateTarget(config, variant)).toThrow(TeamsActivityError);
+  });
+
   it('uses the conversation thread suffix when replyToId quotes a different message', () => {
     // The Teams channel-conversations documentation shows these values can differ.
     const result = normalizeActivity(
@@ -186,6 +222,28 @@ describe('Teams Activity normalization', () => {
         'teams',
         config,
         activity({ from: { id: '28:bot-app', aadObjectId: 'bot' } }),
+      ),
+    ).toBeUndefined();
+    expect(
+      normalizeActivity(
+        'teams',
+        config,
+        activity({
+          from: {
+            id: '28:other-bot',
+            aadObjectId: 'other-bot-user',
+            role: 'bot',
+          },
+          conversation: {
+            id: 'channel-1;messageid=root-1',
+            conversationType: 'channel',
+          },
+          channelData: {
+            tenant: { id: 'tenant-a' },
+            channel: { id: 'channel-1' },
+          },
+          entities: [mention],
+        }),
       ),
     ).toBeUndefined();
     expect(

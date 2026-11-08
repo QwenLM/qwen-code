@@ -114,12 +114,14 @@ workspace 声明与 lockfile。协议代码只存在于该包，依赖 ChannelAg
 停止及长 prompt 中取消。宿主契约尽可能使用真实本地 HTTP 监听器和 SDK；
 模拟的 Microsoft 发送明确标注，不能作为真实 Teams 送达证据。
 
-已验证的 peer 版本仅为 0.23.0 与 0.26.1。0.23.0 只支持宿主模式，宿主必须在
-dispatch 前授权所有控制命令；旧版缺少共享会话 operators 与停止后的排队门禁，
-因此插件明确拒绝独立启动。0.26.1 支持两种模式。不声明中间版本兼容。
-插件使用 peer dependency，始终复用宿主的单份 ChannelBase。
+peer dependency 只接受两个版本：旧版 0.23.0，以及
+`packages/channels/msteams/package.json` 声明的当前精确 channel-base 版本；
+该精确版本随每次发布更新。0.23.0 只支持宿主模式，宿主必须在 dispatch 前
+授权所有控制命令；旧版缺少共享会话 operators 与停止后的排队门禁，因此
+插件明确拒绝独立启动。当前精确版本支持两种模式。不声明 0.24.x、0.25.x
+等中间版本兼容。插件使用 peer dependency，始终复用宿主的单份 ChannelBase。
 
-51 个插件单测通过；编译产物在 0.26.1 的 18 个适用 channel 用例及 0.23.0
+插件聚焦单测通过；编译产物在 0.26.1 的 18 个适用 channel 用例及 0.23.0
 宿主模式的 16 个 channel 用例通过。独立验证采用真实 Fastify、Microsoft SDK JWT 处理、临时
 RSA/JWKS 和云端发送记录器。consumer 类型检查与单份 base 实例验证通过；
 严格检查第三方声明时，ACP SDK 诊断与只导入 base 的基线相同。
@@ -138,9 +140,9 @@ channel、bridge 或 router；覆盖真实 SDK JWT 验证、宿主 connection �
 仍可正常完成。
 
 分别验证当前 ChannelBase 与宿主锁定版本。只在契约测试证明实际缺口时
-修改共享接口。`.qwen/e2e-tests/teams-channel.md` 与
-`.qwen/e2e-tests/teams-minimal-ingress-v4.md` 记录基线、命令与依赖租户的待验项。
-功能贡献遵循上游提案和评审流程，本地实现不代表获得批准。
+修改共享接口。依赖租户的端到端检查仍列在下方待验证点；E2E 工作记录保存在
+被 git 忽略的 `.qwen/` 临时目录，不属于本仓库提交内容。功能贡献遵循上游
+提案和评审流程，本地实现不代表获得批准。
 
 ## 待验证点
 

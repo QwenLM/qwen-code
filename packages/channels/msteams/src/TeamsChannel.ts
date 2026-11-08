@@ -43,16 +43,18 @@ export class TeamsDeliveryError extends Error {
   }
 }
 
-export function splitTeamsText(text: string): string[] {
+export function splitTeamsText(text: string, sourceLabel?: string): string[] {
   if (Buffer.byteLength(text, 'utf8') > MAX_REPLY_BYTES) {
     throw new TeamsDeliveryError('known_failed');
   }
+  const prefix = sourceLabel ? `${sourceLabel} ` : '';
+  const limit = CHUNK_BYTES - Buffer.byteLength(prefix, 'utf8');
   const chunks: string[] = [];
   let current = '';
   let size = 0;
   for (const point of text) {
     const bytes = Buffer.byteLength(point, 'utf8');
-    if (size + bytes > CHUNK_BYTES) {
+    if (size + bytes > limit) {
       chunks.push(current);
       current = '';
       size = 0;
@@ -61,7 +63,7 @@ export function splitTeamsText(text: string): string[] {
     size += bytes;
   }
   if (current) chunks.push(current);
-  return chunks;
+  return prefix ? chunks.map((chunk) => `${prefix}${chunk}`) : chunks;
 }
 
 function wrapPromptBridge(
@@ -291,6 +293,7 @@ export class TeamsChannel extends ChannelBase {
         );
       });
     } catch (error) {
+      this.server = undefined;
       this.connected = false;
       throw error;
     }
@@ -413,12 +416,7 @@ export class TeamsChannel extends ChannelBase {
       event?.target ??
       (await this.references.get(referenceKey({ chatId, threadId })));
     if (!target) throw new TeamsDeliveryError('known_failed');
-    await this.deliver(
-      target,
-      this.formatAttributedText(text, sourceLabel),
-      'system',
-      event,
-    );
+    await this.deliver(target, text, 'system', event, 0, sourceLabel);
   }
 
   protected override async onResponseComplete(
@@ -432,13 +430,9 @@ export class TeamsChannel extends ChannelBase {
     const event = messageId ? this.activeEvents.get(messageId) : undefined;
     if (!event || event.target.chatId !== chatId)
       throw new TeamsDeliveryError('known_failed');
-    await this.sendEventText(
-      event,
-      segment?.sourceLabel
-        ? this.formatAttributedText(text, segment.sourceLabel)
-        : text,
-      'response',
-    );
+    await this.sendEventText(event, text, 'response', {
+      sourceLabel: segment?.sourceLabel,
+    });
   }
 
   /** System guidance and recovered final text use the original accepted event's target. */
@@ -446,7 +440,7 @@ export class TeamsChannel extends ChannelBase {
     event: TeamsInboundEvent,
     text: string,
     kind: 'response' | 'system' = 'system',
-    options: { startChunkIndex?: number } = {},
+    options: { startChunkIndex?: number; sourceLabel?: string } = {},
   ): Promise<void> {
     const snapshot = freeze(structuredClone(event));
     await this.deliver(
@@ -455,6 +449,7 @@ export class TeamsChannel extends ChannelBase {
       kind,
       snapshot,
       options.startChunkIndex,
+      options.sourceLabel,
     );
   }
 
@@ -464,9 +459,10 @@ export class TeamsChannel extends ChannelBase {
     kind: 'response' | 'system',
     event?: TeamsInboundEvent,
     startChunkIndex = 0,
+    sourceLabel?: string,
   ): Promise<void> {
     validateTarget(this.teamsConfig, target);
-    const chunks = splitTeamsText(text);
+    const chunks = splitTeamsText(text, sourceLabel);
     if (
       !Number.isInteger(startChunkIndex) ||
       startChunkIndex < 0 ||
