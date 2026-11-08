@@ -7,7 +7,10 @@
 import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import type { GenerateTextResult } from '../core/baseLlmClient.js';
+import {
+  isMainRouteSelector,
+  type GenerateTextResult,
+} from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { LlmChat } from '../core/llm-chat.js';
 import {
@@ -20,7 +23,7 @@ import { getCompressionPrompt } from '../core/prompts.js';
 import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { movePromptContextAheadOfUserText } from '../core/prompt-context-order.js';
-import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
+import { resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -762,24 +765,10 @@ export class ChatCompressionService {
     // side-query (issue #7960). Left unset when the side-query runs on the
     // main model, whose window `budgetWindow` then comes from below.
     let compactionModelWindow: number | undefined;
-    // Which route a selector is actually sent on: `runSideQuery` forwards it
-    // to the send layer, where `resolveForModel` hands back the main content
-    // generator on exactly these terms (baseLlmClient.ts:861-871) — the
-    // resolved model is the main one, a spelled authType is the main one, and
-    // the `\0` endpoint pin matches the main base URL. That normalization is
-    // the only thing that makes `openai:test-model` and `test-model` one
-    // route; comparing route keys never would, because
-    // `resolvedModelIdentity` passes the model half through verbatim.
-    const onMainRoute = (selector: string) => {
-      const [model, pin] = selector.split('\0');
-      const resolved = resolveModelId(model, buildModelIdContext(config));
-      return (
-        (resolved?.modelId ?? model) === config.getModel() &&
-        (!resolved?.authType ||
-          resolved.authType === contentGeneratorConfig.authType) &&
-        (pin === undefined || pin === contentGeneratorConfig.baseUrl)
-      );
-    };
+    // Which route a selector is actually sent on — the same predicate
+    // `resolveForModel`'s early return applies on the send layer.
+    const onMainRoute = (selector: string) =>
+      isMainRouteSelector(selector, config);
     // Only check the window when the side-query is not on the main route —
     // warning about the main model being "too small" is confusing when no
     // compaction model was explicitly configured, and an equivalent

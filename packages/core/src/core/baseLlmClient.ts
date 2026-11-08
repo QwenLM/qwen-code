@@ -70,6 +70,28 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
 }
 
 /**
+ * Whether a model/compaction selector routes to the main content generator:
+ * the resolved model is the main one, a spelled authType is the main one, and
+ * the `\0` endpoint pin matches the main base URL. That normalization is the
+ * only thing that makes `openai:test-model` and `test-model` one route;
+ * comparing route keys never would. Shared by `resolveForModel`'s early
+ * return and the compression service's route gate; a caller that resolves
+ * the selector itself keeps its own unresolvable-selector fallback
+ * (`resolveForModel` falls back to the main generator, the compression side
+ * to the cold path).
+ */
+export function isMainRouteSelector(selector: string, config: Config): boolean {
+  const { model, baseUrl: pin } = splitModelBaseUrl(selector);
+  const main = config.getContentGeneratorConfig();
+  const resolved = resolveModelId(model, buildModelIdContext(config));
+  return (
+    (resolved?.modelId ?? model) === config.getModel() &&
+    (!resolved?.authType || resolved.authType === main?.authType) &&
+    (pin === undefined || pin === main?.baseUrl)
+  );
+}
+
+/**
  * Estimate the tokens a `systemInstruction` occupies on the wire. It travels
  * with the request but is not part of `contents`, so a room term that measures
  * only `contents` over-budgets by exactly this much (#13208). Callers pass a
@@ -850,19 +872,12 @@ export class BaseLlmClient {
     const selector = this.resolveModelSelector(requested.model);
     const requestModel =
       selector?.modelId ?? this.config.getModel() ?? requested.model;
-    const mainModel = this.config.getModel() ?? requested.model;
     const mainGeneratorConfig = this.config.getContentGeneratorConfig();
     const mainAuthType = mainGeneratorConfig?.authType;
-    const mainBaseUrl = mainGeneratorConfig?.baseUrl;
     const mainRetryErrorCodes = mainGeneratorConfig?.retryErrorCodes;
-    const matchesMainBaseUrl =
-      requested.baseUrl === undefined || requested.baseUrl === mainBaseUrl;
-
-    if (
-      requestModel === mainModel &&
-      (!selector?.authType || selector.authType === mainAuthType) &&
-      matchesMainBaseUrl
-    ) {
+    // An unresolvable selector falls back to the main generator; otherwise
+    // the shared predicate decides whether the request rides the main route.
+    if (selector === undefined || isMainRouteSelector(model, this.config)) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
         contentGeneratorConfig: mainGeneratorConfig,
