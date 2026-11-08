@@ -50,11 +50,12 @@
 十个槽位，hz4 部署目前维持十个槽位。不接 webhook、不自行调度 PR、不引入 Kubernetes 或数据库。
 GitHub 根据 runner 标签分配任务。每台 ECS 各运行一个管理程序，只连接本机
 Docker socket，使用独立的 `poolId` 和按主机配置的 `slots`。各主机共用调度
-标签，无需中央管理器。显示名称使用 `ecs-qwen-<poolId>-<slot>`，槽位补齐两位，
-例如 `ecs-qwen-hz4-ephemeral-01`。补建时先清理上一个 runner，再复用显示名称；
-每个 job 的 GitHub runner ID、容器和内部 UUID 都重新创建。状态和诊断文件名
-保留 UUID。`ecs-qwen-` 前缀兼容 CI 并发上限和超时；恢复时仍接受之前带 UUID
-的 runner 名称，包括旧的 `qwen-` 身份。
+标签，无需中央管理器。显示名称使用 `ecs-qwen-<poolId>-<slot>-<suffix>`，槽位
+补齐两位并附八位十六进制后缀，例如 `ecs-qwen-hz4-ephemeral-01-1a2b3c4d`。
+每次注册都换新后缀，因此仍占用旧名称的残留注册不会以 HTTP 422 拒绝新注册；
+每个 job 的 GitHub runner ID、容器和内部 UUID 也都重新创建。状态和诊断文件名
+保留 UUID。`ecs-qwen-` 前缀兼容 CI 并发上限和超时；恢复时仍接受带后缀的名称、
+之前带 UUID 的 runner 名称，以及旧的 `qwen-` 身份。
 
 启用 systemd 服务后开机启动，意外退出时十秒后重启（`Restart=always`）；
 显式停止服务后保持停止。它监督进程退出，不检测进程存活但卡住的情况。

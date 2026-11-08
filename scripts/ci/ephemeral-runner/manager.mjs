@@ -138,6 +138,13 @@ export function createManager(config, dependencies = {}) {
   validate(config);
   const runnerName = (slot) =>
     `ecs-qwen-${config.poolId}-${String(slot).padStart(2, '0')}`;
+  // The GitHub registration name must be unique per registration. Reusing the
+  // bare display name would collide with any leftover registration that still
+  // owns it, and GitHub rejects a duplicate name with HTTP 422 while the
+  // leftover is busy, wedging the slot. A short suffix keeps every
+  // registration distinct; the `ecs-qwen-` prefix still carries the pool caps.
+  const uniqueRunnerName = (slot) =>
+    `${runnerName(slot)}-${randomUUID().slice(0, 8)}`;
   const execute = dependencies.command || command;
   const run = (program, args, options = {}) => {
     if (program !== 'docker') return execute(program, args, options);
@@ -205,7 +212,7 @@ export function createManager(config, dependencies = {}) {
         !name.startsWith(prefix) ||
         !/^[0-9a-f-]{36}$/.test(name.slice(prefix.length)) ||
         (state.runnerName !== undefined &&
-          state.runnerName !== runnerName(slot)) ||
+          !state.runnerName.startsWith(`${runnerName(slot)}-`)) ||
         typeof state.uncertain !== 'boolean' ||
         (!state.uncertain &&
           (!Number.isSafeInteger(state.runnerId) || state.runnerId < 1)) ||
@@ -459,7 +466,7 @@ export function createManager(config, dependencies = {}) {
       );
     state = {
       name: `ecs-qwen-${config.poolId}-${slot}-${randomUUID()}`,
-      runnerName: runnerName(slot),
+      runnerName: uniqueRunnerName(slot),
       createdAt: new Date().toISOString(),
       uncertain: true,
     };

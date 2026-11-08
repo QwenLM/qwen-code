@@ -212,8 +212,11 @@ test('creates a new runner and container per job and keeps GitHub token out of D
       '/repos/owner/repo/actions/runners/2',
     ],
   );
-  assert.equal(JSON.parse(requests[0].options.input).name, 'ecs-qwen-trial-01');
-  assert.equal(JSON.parse(requests[1].options.input).name, 'ecs-qwen-trial-01');
+  const registeredNames = requests.map((c) => JSON.parse(c.options.input).name);
+  assert.ok(
+    registeredNames.every((name) => /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name)),
+  );
+  assert.notEqual(registeredNames[0], registeredNames[1]);
   assert.notEqual(
     creates[0].args.find((arg) => arg.startsWith('qwen.instance=')),
     creates[1].args.find((arg) => arg.startsWith('qwen.instance=')),
@@ -448,7 +451,7 @@ test('rejects same-name runner with a different ID without deleting it', async (
   const f = await fixture(t);
   const state = {
     name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
-    runnerName: 'ecs-qwen-trial-01',
+    runnerName: 'ecs-qwen-trial-01-deadbeef',
     runnerId: 42,
     uncertain: false,
   };
@@ -1021,7 +1024,7 @@ test('a rejected runner deletion keeps slot state so the next cycle retries it',
 
 test('a rejected JIT request reconciles a leftover registration instead of orphaning it', async (t) => {
   const f = await fixture(t);
-  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01' });
+  let rejectedName;
   let rejected = false;
   const command = (program, args, options) => {
     if (
@@ -1030,6 +1033,8 @@ test('a rejected JIT request reconciles a leftover registration instead of orpha
       !rejected
     ) {
       rejected = true;
+      rejectedName = JSON.parse(options.input).name;
+      f.setRunner({ id: 77, name: rejectedName });
       const error = new Error('gh failed (exit 1, HTTP 422)');
       error.status = 422;
       return Promise.reject(error);
@@ -1048,6 +1053,41 @@ test('a rejected JIT request reconciles a leftover registration instead of orpha
     'deletes the registration that would reject every later request',
   );
   await manager.cycle(1);
+});
+
+test('a registration retry uses a fresh unique name untouched by a leftover', async (t) => {
+  const f = await fixture(t);
+  const names = [];
+  let rejections = 0;
+  const command = (program, args, options) => {
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      const name = JSON.parse(options.input).name;
+      names.push(name);
+      if (rejections === 0) {
+        rejections += 1;
+        // A leftover registration still owns the previous display name; the
+        // rejected request cannot delete it, so it stays on GitHub.
+        f.setRunner({ id: 77, name });
+        const error = new Error('gh failed (exit 1, HTTP 422)');
+        error.status = 422;
+        return Promise.reject(error);
+      }
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, { command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 422);
+  await manager.cycle(1);
+  assert.equal(names.length, 2);
+  assert.ok(names.every((name) => /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name)));
+  assert.notEqual(
+    names[0],
+    names[1],
+    'retry must not reuse the name a leftover registration still owns',
+  );
 });
 
 test('repeated identical failures raise a stall alert and a recovery resets it', async (t) => {
