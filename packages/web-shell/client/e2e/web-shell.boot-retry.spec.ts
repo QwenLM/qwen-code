@@ -59,3 +59,35 @@ test('an entry module that never loads stops after the reload budget @smoke', as
   });
   expect(entryRequests).toBe(3);
 });
+
+// The budget is per boot, not per page: a boot that completes must hand it
+// back, or the next aborted navigation in the same tab finds nothing left.
+test('a completed boot keeps the reload budget for later navigations @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  let entryRequests = 0;
+  await page.route('**/main.tsx', async (route) => {
+    entryRequests += 1;
+    if (entryRequests % 2 === 1) {
+      await route.abort('failed');
+      return;
+    }
+    await route.fallback();
+  });
+
+  for (const navigation of [1, 2, 3]) {
+    await page.goto(
+      `/session/${scenario.sessionId}?theme=light&language=en&navigation=${navigation}`,
+    );
+    await expect(
+      page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+    ).toBeVisible();
+  }
+
+  expect(entryRequests).toBe(6);
+});
