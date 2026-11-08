@@ -102,8 +102,8 @@ function validate(c) {
     !(c.shutdownGraceSeconds >= 0) ||
     !Number.isSafeInteger(c.minDiskBytes) ||
     c.minDiskBytes < 0 ||
-    (c.stallAlertRetries !== undefined &&
-      (!Number.isInteger(c.stallAlertRetries) || c.stallAlertRetries < 1))
+    (c.stallAlertSeconds !== undefined &&
+      (!Number.isFinite(c.stallAlertSeconds) || c.stallAlertSeconds <= 0))
   )
     throw new Error('Invalid manager configuration');
   if (c.proxy !== undefined) {
@@ -137,7 +137,10 @@ function validate(c) {
 export function backoffDelay(failures, isRateLimited) {
   const base = isRateLimited ? 30000 : 10000;
   const max = isRateLimited ? 300000 : 60000;
-  return Math.min(base * 2 ** Math.min(failures - 1, 5), max);
+  const delay = Math.min(base * 2 ** Math.min(failures - 1, 5), max);
+  // Equal jitter: without it every slot that entered the storm together
+  // wakes together and keeps hammering the API at the same instant.
+  return Math.round(delay / 2 + Math.random() * (delay / 2));
 }
 
 export function createManager(config, dependencies = {}) {
@@ -178,7 +181,23 @@ export function createManager(config, dependencies = {}) {
   const lockPath = join(stateDir, 'manager.lock');
   const slotPath = (slot) => join(stateDir, `slot-${slot}.json`);
   const log = (message) => console.log(`[${config.poolId}] ${message}`);
-  const stallAlertRetries = config.stallAlertRetries ?? 30;
+  // Time-based, not retry-count-based: with exponential backoff a count no
+  // longer maps to a fixed wall-clock SLA (30 retries span ~27 minutes, or
+  // hours under rate limiting). Default 300 s preserves the documented
+  // roughly-five-minutes alert.
+  const stallAlertMs = (config.stallAlertSeconds ?? 300) * 1000;
+  // A backoff sleep must stay interruptible: the service gives the manager
+  // TimeoutStopSec to exit, and an unsliced five-minute sleep would have
+  // systemd SIGKILL it mid-cycle. Wake at least once a second and cut the
+  // sleep short once stop() sets the shutdown deadline.
+  const interruptibleWait = async (ms) => {
+    let remaining = ms;
+    while (!stopping && remaining > 0 && Date.now() < stopAt) {
+      const chunk = Math.min(1000, remaining);
+      await wait(chunk);
+      remaining -= chunk;
+    }
+  };
   function parseJson(text) {
     try {
       return JSON.parse(text);
@@ -717,21 +736,29 @@ export function createManager(config, dependencies = {}) {
           let failures = 0;
           let lastMessage;
           let consecutiveFailures = 0;
+          let stalledSince;
+          let stallAlerted = false;
           while (!stopping) {
             try {
               const result = await cycle(slot);
               failures = 0;
               lastMessage = undefined;
               consecutiveFailures = 0;
+              stalledSince = undefined;
+              stallAlerted = false;
               if (result?.earlyExit && !stopping) {
                 log(`slot ${slot}: backing off 60 s before replenishing`);
-                await wait(60000);
+                await interruptibleWait(60000);
               }
             } catch (error) {
               failures = error.message === lastMessage ? failures + 1 : 1;
+              if (failures === 1) {
+                stalledSince = Date.now();
+                stallAlerted = false;
+              }
               lastMessage = error.message;
               // Two counters, two jobs: `failures` counts consecutive
-              // identical messages and times the stall alert, while
+              // identical messages and anchors the stall clock, while
               // `consecutiveFailures` counts every consecutive failure and
               // sizes the backoff, so a slot whose error text keeps changing
               // still escalates instead of restarting from the base delay.
@@ -739,16 +766,17 @@ export function createManager(config, dependencies = {}) {
               const isRateLimited =
                 error.status === 403 || error.status === 429;
               const delay = backoffDelay(consecutiveFailures, isRateLimited);
-              if (failures % stallAlertRetries === 0)
+              if (!stallAlerted && Date.now() - stalledSince >= stallAlertMs) {
+                stallAlerted = true;
                 log(
-                  `STALL ALERT slot ${slot}: no runner replenished after ${failures} consecutive identical failures ` +
+                  `STALL ALERT slot ${slot}: no runner replenished for ${Math.round((Date.now() - stalledSince) / 1000)}s across ${failures} consecutive identical failures ` +
                     `(${error.message}); this slot serves no jobs until it is reconciled`,
                 );
-              else
+              } else
                 log(
                   `slot ${slot}: ${error.message}; retrying in ${Math.round(delay / 1000)}s without replenishing`,
                 );
-              await wait(delay);
+              await interruptibleWait(delay);
             }
           }
         }),

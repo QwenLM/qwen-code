@@ -118,10 +118,16 @@ output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 
-`stallAlertRetries` (default 30, roughly five minutes at the ten-second retry
-interval) sets how many consecutive identical failures a slot may accumulate
-before the manager logs `STALL ALERT` instead of the ordinary retry line. The
-counter resets whenever a cycle succeeds or the failure changes. A stall alert
+Failed cycles retry with jittered exponential backoff: 10 s doubling to a
+60 s cap, or 30 s doubling to a 300 s cap while GitHub answers HTTP 403/429,
+so a rate-limited pool stops sustaining its own rate limit. The backoff
+sleep stays interruptible and a shutdown cuts it short.
+
+`stallAlertSeconds` (default 300, roughly five minutes) sets how long a slot
+may repeat the same failure before the manager logs `STALL ALERT` instead of
+the ordinary retry line. The threshold is wall-clock, so it holds under any
+retry cadence. The clock resets whenever a cycle succeeds or the failure
+changes, and each stall episode alerts once. A stall alert
 means the slot is serving no jobs and needs reconciliation; the manager keeps
 retrying and never exits on its own, so systemd does not restart it. Alert on
 that journal marker rather than on service state.

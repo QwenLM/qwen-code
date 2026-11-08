@@ -689,21 +689,33 @@ test('network cleanup failure prevents new runner and is reconciled on the next 
   );
 });
 
-test('backoffDelay escalates exponentially and caps at the maximum', () => {
+test('backoffDelay escalates exponentially within jittered bounds', (t) => {
+  const assertBounds = (failures, isRateLimited, ceiling) => {
+    const delay = backoffDelay(failures, isRateLimited);
+    assert.ok(
+      delay >= ceiling / 2 && delay <= ceiling,
+      `${delay} outside [${ceiling / 2}, ${ceiling}]`,
+    );
+  };
   // Rate-limited: 30s base, 300s cap
-  assert.equal(backoffDelay(1, true), 30000);
-  assert.equal(backoffDelay(2, true), 60000);
-  assert.equal(backoffDelay(3, true), 120000);
-  assert.equal(backoffDelay(4, true), 240000);
-  assert.equal(backoffDelay(5, true), 300000);
-  assert.equal(backoffDelay(6, true), 300000);
-  assert.equal(backoffDelay(100, true), 300000);
+  assertBounds(1, true, 30000);
+  assertBounds(2, true, 60000);
+  assertBounds(3, true, 120000);
+  assertBounds(4, true, 240000);
+  assertBounds(5, true, 300000);
+  assertBounds(6, true, 300000);
+  assertBounds(100, true, 300000);
   // Non-rate-limited: 10s base, 60s cap
-  assert.equal(backoffDelay(1, false), 10000);
-  assert.equal(backoffDelay(2, false), 20000);
-  assert.equal(backoffDelay(3, false), 40000);
-  assert.equal(backoffDelay(4, false), 60000);
-  assert.equal(backoffDelay(5, false), 60000);
+  assertBounds(1, false, 10000);
+  assertBounds(2, false, 20000);
+  assertBounds(3, false, 40000);
+  assertBounds(4, false, 60000);
+  assertBounds(5, false, 60000);
+  // Jitter spreads simultaneous sleepers instead of waking them in lockstep.
+  t.mock.method(Math, 'random', () => 0);
+  assert.equal(backoffDelay(1, true), 15000);
+  t.mock.method(Math, 'random', () => 0.999999);
+  assert.ok(backoffDelay(1, true) > 29990);
 });
 
 test('a lost network create response is recovered using labels', async (t) => {
@@ -981,10 +993,11 @@ test('backs off before the next JIT request after a failed container', async (t)
     },
   });
   await manager.start();
-  // The 1 s poll that races `docker wait` also goes through the injected sleep;
-  // the replenishment backoff is the 60 s entry.
-  assert.equal(sleeps.filter((ms) => ms === 60000).length, 1);
-  assert.equal(sleeps.at(-1), 60000);
+  // The 1 s poll that races `docker wait` also goes through the injected
+  // sleep; the replenishment backoff is a run of sixty 1 s slices ending
+  // the log, and it must stay sliced so stop() can interrupt it.
+  assert.equal(sleeps.filter((ms) => ms === 60000).length, 0);
+  assert.deepEqual(sleeps.slice(-60), Array(60).fill(1000));
   assert.equal(jitRequests, 2);
 });
 
@@ -1199,7 +1212,7 @@ test('a registration retry uses a fresh unique name untouched by a leftover', as
   );
 });
 
-test('repeated identical failures raise a stall alert and a recovery resets it', async (t) => {
+test('identical failures past the time threshold raise one stall alert; recovery resets it', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
     mode: 0o755,
@@ -1215,35 +1228,146 @@ test('repeated identical failures raise a stall alert and a recovery resets it',
   t.after(() => {
     console.log = previousLog;
   });
+  // The threshold is wall-clock, so drive the clock through the injected
+  // sleep. Jitter is pinned to its floor: delays 5+10+20+40 s carry the
+  // fifth identical failure past a 60 s threshold, and the alert fires
+  // when that failure is observed.
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
   let failures = 0;
+  let recovered = false;
   const command = (program, args, options) => {
-    if (program === 'docker' && args[0] === 'info' && failures < 3) {
+    if (program === 'docker' && args[0] === 'info' && failures < 5) {
       failures += 1;
       return Promise.reject(new Error('docker unavailable'));
+    }
+    // The recovery cycle's own 1 s polls also advance the mock clock; stop
+    // once it is actually replenishing so the run cannot loop forever.
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      if (recovered) manager.stop();
+      recovered = true;
     }
     return f.command(program, args, options);
   };
   const manager = createManager(
-    { ...f.config, stallAlertRetries: 3 },
+    { ...f.config, stallAlertSeconds: 60 },
     {
       command,
-      sleep: async () => {
-        if (failures >= 3) manager.stop();
+      sleep: async (ms) => {
+        now += ms;
       },
     },
   );
   await manager.start();
   const alerts = messages.filter((message) => message.includes('STALL ALERT'));
+  // The episode alerts once; the recovery cycle then resets the clock (a
+  // later identical stall would be a new episode with its own alert).
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0], /slot 1: .*3 consecutive identical failures/);
+  assert.match(
+    alerts[0],
+    /slot 1: .*for \d+s across 5 consecutive identical failures/,
+  );
   assert.match(alerts[0], /docker unavailable/);
+  assert.ok(
+    messages.some(
+      (message) =>
+        message.includes('started runner') &&
+        messages.indexOf(message) >
+          messages.findIndex((m) => m.includes('STALL ALERT')),
+    ),
+    'the slot recovers after the alert',
+  );
+});
+
+test('a changing error restarts the stall clock instead of alerting early', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0.5);
+  let failures = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info' && failures < 6) {
+      failures += 1;
+      return Promise.reject(new Error(`docker unavailable ${failures}`));
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 25 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+        if (failures >= 6) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  assert.equal(
+    messages.filter((message) => message.includes('STALL ALERT')).length,
+    0,
+    'no identical failure ever reached the threshold',
+  );
+});
+
+test('stop() interrupts a long backoff sleep instead of waiting it out', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  t.mock.method(Math, 'random', () => 0.999999);
+  const sleeps = [];
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      const error = new Error('gh failed (exit 1, HTTP 403)');
+      error.status = 403;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      manager.stop();
+    },
+  });
+  await manager.start();
+  assert.ok(sleeps.length >= 1);
+  assert.ok(
+    sleeps.every((ms) => ms <= 1000),
+    `backoff slept in unsliced chunks: ${sleeps.join(', ')}`,
+  );
 });
 
 test('rejects an invalid stall alert threshold', async (t) => {
   const f = await fixture(t);
-  for (const stallAlertRetries of [0, -1, 1.5, '3'])
+  for (const stallAlertSeconds of [0, -1, '3'])
     assert.throws(
-      () => createManager({ ...f.config, stallAlertRetries }),
+      () => createManager({ ...f.config, stallAlertSeconds }),
       /Invalid manager configuration/,
     );
 });
