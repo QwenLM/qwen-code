@@ -60,6 +60,13 @@ describe('blocksAllMemoryWrites', () => {
     expect(blocksAllMemoryWrites(['write_file(broken', 'edit(src/**)'])).toBe(
       false,
     );
+    // Two malformed rules with no specifier: without the `rule.invalid`
+    // guard each parses to a bare tool name and the pair reads as a blanket
+    // deny. One malformed rule beside a specifier rule cannot distinguish
+    // that, because the specifier rule already fails `every()` on its own.
+    expect(blocksAllMemoryWrites(['write_file(**/.env', 'edit(**/.env'])).toBe(
+      false,
+    );
     expect(
       blocksAllMemoryWrites(['mcp__srv__write_file', 'edit(src/**)']),
     ).toBe(false);
