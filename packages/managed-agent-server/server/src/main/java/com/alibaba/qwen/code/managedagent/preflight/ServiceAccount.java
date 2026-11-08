@@ -159,13 +159,10 @@ final class ServiceAccount {
         return allows(Files.readAttributes(current, PosixFileAttributes.class), read);
     }
 
-    // As the kernel does: root may, and for any other account the owner bits
-    // apply to the owner alone, then the group bits to any member, then the
-    // others bits.
-    boolean allows(PosixFileAttributes attributes, boolean read) {
-        if (superuser()) {
-            return true;
-        }
+    // As the kernel does for an account other than root, which can() lets
+    // through first: the owner bits apply to the owner alone, then the group
+    // bits to any member, then the others bits.
+    private boolean allows(PosixFileAttributes attributes, boolean read) {
         Set<PosixFilePermission> permissions = attributes.permissions();
         if (attributes.owner().getName().equals(name)) {
             return permissions.contains(read ? PosixFilePermission.OWNER_READ : PosixFilePermission.OWNER_EXECUTE);

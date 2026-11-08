@@ -597,11 +597,21 @@ final class ServerEnvironment {
                 }
                 Path declaring = file(resource(tracked.getOrigin(key)));
                 if (declaring != null) {
+                    // Spring reads a directory a location names as a file,
+                    // such as one called application.properties, with its
+                    // listing as keys. Only the root has no parent, and only
+                    // an extension hint, as in file:/[.properties], names it,
+                    // so an entry of / called spring.config.import reaches
+                    // here as an import key. The config row then says the
+                    // check cannot tell which other files the server reads,
+                    // and why.
                     Path directory = Objects.requireNonNull(declaring.getParent(),
-                            "a configuration file has a parent");
-                    String base = looked.contains(declaring) || directory.getParent() == null
+                            () -> "Spring reads the directory " + declaring + " as a file ("
+                                    + tracked.getName() + ")");
+                    Path above = directory.getParent();
+                    String base = looked.contains(declaring) || above == null
                             ? directory.toUri().toString()
-                            : directory.getParent().toUri() + "*/";
+                            : above.toUri() + "*/";
                     // Spring resolves a placeholder in it as in any value.
                     for (String value : environment.resolvePlaceholders(
                             String.valueOf(entry.getValue())).split(",")) {
