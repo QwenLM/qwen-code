@@ -206,6 +206,16 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       await page.route(
         (url) => url.pathname.startsWith('/session/'),
         async (route) => {
+          const request = route.request();
+          // The session id is also a route prefix for the app's own API
+          // (`/session/:id/load`); only the navigation carries the document.
+          if (
+            request.resourceType() !== 'document' ||
+            !request.isNavigationRequest()
+          ) {
+            await route.fallback();
+            return;
+          }
           const response = await route.fetch();
           const body = await response.text();
           await route.fulfill({
