@@ -115,6 +115,11 @@ export class StreamJsonOutputAdapter
         this.finalizeAssistantMessage();
       }
       this.emitDiscardedAttemptToolResults(discardedToolCalls);
+      // The base only trims the discarded tool blocks; closing the frame above
+      // leaves `finalized` set, so the replacement attempt's first text would
+      // be dropped. Start the successor's frame here, keeping the text that was
+      // already delivered counted as this turn's answer.
+      this.startAssistantMessageInternal(this.mainAgentMessageState);
       super.restartAttempt(true, discardedToolCalls);
       return;
     }
