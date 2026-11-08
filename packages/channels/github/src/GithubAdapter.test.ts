@@ -14175,6 +14175,62 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(prompt).toContain('Role: verify');
       expect(prompt).not.toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
     });
+
+    it('refreshes the role when a deferred delivery retries onto a re-roled binding', async () => {
+      // Same session, new role. Revalidation returns the same sessionId, so
+      // comparing session ids alone keeps the frozen `fix` role and hands a
+      // now-verifier session the fixer's guidance — the very defect this
+      // change exists to remove, reintroduced through the retry path.
+      const bound = (role: 'fix' | 'verify') => ({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role,
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue(bound('fix'));
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const deferred = readInboundTasks();
+      expect(deferred).toHaveLength(1);
+      expect(deferred[0]!['delivery']).toEqual({
+        kind: 'bound-session',
+        sessionId: 'bound-session',
+        role: 'fix',
+      });
+
+      // The binding is re-roled while the task waits for the retry.
+      boundSessions.listPrBindings.mockResolvedValue(bound('verify'));
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[1] as [
+        string,
+        string,
+      ];
+      expect(sessionId).toBe('bound-session');
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(prompt).not.toContain('Role: fix');
+      expect(prompt).not.toContain(DEFAULT_BOUND_ROLE_GUIDANCE.fix);
+    });
   });
 
   describe('review-round regressions (durable fan-out, delivery ring, role loss, partial guard, lane class)', () => {

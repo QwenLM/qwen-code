@@ -176,6 +176,21 @@ the same hazard the action-templates design already named for role-aware
 delivery ("must not keep injecting the obsolete role's instruction into the
 frozen session"); legacy routing now gets the equivalent protection.
 
+### A retry must refresh the role, not just the session
+
+Delivery-time re-validation compared only `current.sessionId !== delivery.sessionId`
+before replacing the frozen target. Once the role travels with the target, that
+is half an identity: a delivery deferred by a full queue, whose binding is
+re-roled from `fix` to `verify` before the retry, revalidates to the SAME session
+and kept the frozen `fix` role — so the prompt still said `Role: fix` and carried
+the fixer's guidance into a session that is now a verifier. That is the reported
+defect reintroduced through the retry path.
+
+The comparison now covers the role as well. Role-aware targets are re-resolved
+within their own role group, so `current.role` always equals `delivery.role`
+there and the added half is inert; only legacy routing, which re-resolves the
+winner outright, can observe a role change.
+
 ### Factual watch summaries
 
 | Type                    | Before                                                                                                          | After                                                |

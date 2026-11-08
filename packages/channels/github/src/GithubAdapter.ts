@@ -5966,7 +5966,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.boundEventClass(envelope),
         this.boundLaneClass(task.dedupe),
       );
-      if (current && current.sessionId !== delivery.sessionId) {
+      // The ROLE is part of the target, not just the session: a deferred
+      // legacy delivery whose binding was re-roled in the meantime must not
+      // build its prompt from the frozen role, or a session that is now a
+      // verifier still receives the fixer's guidance. Role-aware targets are
+      // re-resolved within their own role group, so the role half is inert
+      // there.
+      if (
+        current &&
+        (current.sessionId !== delivery.sessionId ||
+          current.role !== delivery.role)
+      ) {
         this.transitionInboundTask(task.id, 'running', { delivery: current });
         task.delivery = current;
         delivery = current;
