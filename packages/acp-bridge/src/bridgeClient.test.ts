@@ -5867,7 +5867,7 @@ describe('persisted last user prompt metadata', () => {
     const args: ConstructorParameters<typeof BridgeClient> = [
       (id) => (id === sessionId ? entry : undefined),
       () => undefined,
-      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      { request: vi.fn(), cancelForPrompt: vi.fn(), vote: vi.fn() },
       0,
       Infinity,
     ];
