@@ -12,5 +12,10 @@
   "shutdownGraceSeconds": 60,
   "minDiskBytes": 10737418240,
   "stateDir": "/var/lib/qwen-ephemeral-runner",
-  "logDir": "/var/log/qwen-ephemeral-runner"
+  "logDir": "/var/log/qwen-ephemeral-runner",
+  "proxy": {
+    "http": "http://172.27.32.1:7890",
+    "https": "http://172.27.32.1:7890",
+    "noProxy": "localhost,127.0.0.1,100.100.100.200"
+  }
 }

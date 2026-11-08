@@ -104,6 +104,17 @@ function validate(c) {
     c.minDiskBytes < 0
   )
     throw new Error('Invalid manager configuration');
+  if (c.proxy !== undefined) {
+    if (typeof c.proxy !== 'object' || c.proxy === null)
+      throw new Error('Invalid proxy configuration');
+    const { http, https, noProxy } = c.proxy;
+    if (http !== undefined && typeof http !== 'string')
+      throw new Error('Invalid proxy.http');
+    if (https !== undefined && typeof https !== 'string')
+      throw new Error('Invalid proxy.https');
+    if (noProxy !== undefined && typeof noProxy !== 'string')
+      throw new Error('Invalid proxy.noProxy');
+  }
 }
 
 export function createManager(config, dependencies = {}) {
@@ -465,6 +476,9 @@ export function createManager(config, dependencies = {}) {
             'max-file=3',
             '--env',
             'RUNNER_JIT_CONFIG',
+            ...(config.proxy?.http ? ['--env', `HTTP_PROXY=${config.proxy.http}`] : []),
+            ...(config.proxy?.https ? ['--env', `HTTPS_PROXY=${config.proxy.https}`] : []),
+            ...(config.proxy?.noProxy ? ['--env', `NO_PROXY=${config.proxy.noProxy}`] : []),
             config.image,
           ],
           { env },

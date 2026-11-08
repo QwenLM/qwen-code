@@ -228,6 +228,39 @@ test('creates a new runner and container per job and keeps GitHub token out of D
   );
 });
 
+test('passes proxy configuration to container environment', async (t) => {
+  const f = await fixture(t);
+  f.config.proxy = {
+    http: 'http://172.27.32.1:7890',
+    https: 'http://172.27.32.1:7890',
+    noProxy: 'localhost,127.0.0.1,100.100.100.200',
+  };
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const creates = f.calls.filter(
+    (c) => c.program === 'docker' && c.args[0] === 'create',
+  );
+  assert.equal(creates.length, 1);
+  const args = creates[0].args;
+  assert.ok(args.includes('HTTP_PROXY=http://172.27.32.1:7890'));
+  assert.ok(args.includes('HTTPS_PROXY=http://172.27.32.1:7890'));
+  assert.ok(args.includes('NO_PROXY=localhost,127.0.0.1,100.100.100.200'));
+});
+
+test('rejects invalid proxy configuration', async (t) => {
+  const f = await fixture(t);
+  f.config.proxy = { http: 123 };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = 'not-an-object';
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy configuration/,
+  );
+});
+
 test('failed cleanup blocks replacement until recovery cleans the old container', async (t) => {
   const f = await fixture(t);
   const manager = createManager(f.config, { command: f.command });

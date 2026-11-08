@@ -85,6 +85,21 @@ example runs one slot; hz4 currently maintains ten fixed slots. Keep that
 capacity until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
 
+If the host requires an HTTP proxy for external access (GitHub, npm, etc.),
+add a `proxy` object to the config:
+
+```json
+"proxy": {
+  "http": "http://172.27.32.1:7890",
+  "https": "http://172.27.32.1:7890",
+  "noProxy": "localhost,127.0.0.1,100.100.100.200"
+}
+```
+
+Use the host's private IP (not `127.0.0.1`) so containers can reach it.
+`noProxy` should include the cloud metadata endpoint to avoid leaking
+credentials through the proxy.
+
 The `ttlSeconds` limit starts when the container starts, including idle time.
 A job assigned near the deadline can be interrupted. The manager removes and
 replaces the container; GitHub remains authoritative for job status. The
