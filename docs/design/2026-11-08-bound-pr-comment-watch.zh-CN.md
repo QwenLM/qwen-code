@@ -4,7 +4,7 @@
 
 状态：proposed（2026-11-08）。扩展 [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md)；不改动四个 PR 状态 watch 事件，也不改动通知驱动的评论 lane。
 
-修订 2026-11-08（评审）：watch 仅在把评论投递给至少一个绑定会话时才消费它——其较窄的 `comment` 类无法路由的评论保持未消费（不写共享去重键），好让通知 lane 仍按线程自身的 reason 投递；评论游标不会越过投递意图未被持久化认领的评论（`dispatchEnvelope` 返回 false 时保留 `commentSince` 以便重试）；两个评论抓取沿用状态 watch 的限流快速退出重试判断，并把共享凭据/限流错误交给本轮中止逻辑；归因要求写标志与评论集合同处一个管道段（链尾的 `stat -f` 或引号内的 `grep 'gh pr comment'` 属读取）、对显式 GET（即便带字段参数）一票否决、剥离引号片段、给 transcript 扫描缓存设上限、且只在有候选时才查询；每轮候选上限用于排出停机积压而不丢尾部。watch 记录 `dispatchedCommentTimes` 使其去重键可被逐出；仅评论的 channel（`prWatchEvents` 为空）跳过每轮 `pulls.get`。`prCommentWatch` 不带 `deliverToBoundSessions` 依赖校验，因为编辑器会为每个 channel 提交它的默认值。归因只读活跃 transcript（归档会话自己发的评论是已点名的尽力而为残余）。watch 将自身限定于同账号评论——即通知 lane 看不到的缺口；异账号评论仍由通知 lane 处理，因为若以 watch 较窄的 `comment` 类消费它们，可能只触达已配置角色的一个子集而饿死其余角色。作者排除先于每轮批次上限执行，避免一连串自己发的评论占满批次位、卡住游标。归因还识别纯数字的创建结果（`--jq '.id'`）与标志在 URL 之前的 curl 写入、否决带引号的 GET 方法值、并把换行视为命令边界。
+修订 2026-11-08（评审）：watch 仅在把评论投递给至少一个绑定会话时才消费它——其较窄的 `comment` 类无法路由的评论保持未消费（不写共享去重键），好让通知 lane 仍按线程自身的 reason 投递；评论游标不会越过投递意图未被持久化认领的评论（`dispatchEnvelope` 返回 false 时保留 `commentSince` 以便重试）；两个评论抓取沿用状态 watch 的限流快速退出重试判断，并把共享凭据/限流错误交给本轮中止逻辑；归因要求写标志与评论集合同处一个管道段（链尾的 `stat -f` 或引号内的 `grep 'gh pr comment'` 属读取）、对显式 GET（即便带字段参数）一票否决、剥离引号片段、给 transcript 扫描缓存设上限、且只在有候选时才查询；每轮候选上限用于排出停机积压而不丢尾部。watch 记录 `dispatchedCommentTimes` 使其去重键可被逐出；仅评论的 channel（`prWatchEvents` 为空）跳过每轮 `pulls.get`。`prCommentWatch` 不带 `deliverToBoundSessions` 依赖校验，因为编辑器会为每个 channel 提交它的默认值。归因读活跃 transcript 及该会话的 subagent transcript（归档会话自己发的评论是已点名的尽力而为残余）。watch 将自身限定于同账号评论——即通知 lane 看不到的缺口；异账号评论仍由通知 lane 处理，因为若以 watch 较窄的 `comment` 类消费它们，可能只触达已配置角色的一个子集而饿死其余角色。作者排除先于每轮批次上限执行，避免一连串自己发的评论占满批次位、卡住游标。归因还识别纯数字的创建结果（`--jq '.id'`）与标志在 URL 之前的 curl 写入、否决带引号的 GET 方法值、并把换行视为命令边界。
 
 ## 问题
 
@@ -63,7 +63,7 @@
 - 增量：按会话以 transcript 水位（size/mtime + 已扫描偏移）为键缓存，受 FIFO 扫描缓存上限约束；只重扫追加的行。transcript 不可读/缺失时返回空集（对投递 fail-open：宁可投递也不静默丢弃），绝不成为剪枝绑定的理由。查询以非 200 或请求异常失败时，worker 记一条节流诊断，使由此产生的自投递回环可与「安静的 PR」区分。
 - 给 `ChannelBoundSessions` 增加 `postedCommentIds(sessionId): Promise<ReadonlySet<string>>`；daemon worker 通过新路由实现。standalone 模式缺失 → 不抑制（今天的行为）。
 
-所有权：该路由从调用方声明的 `workspaceCwd` 解析会话所属 workspace runtime，像兄弟路由 `/sessions/pr-bindings` 一样以项目成员闸门（`sessionPrSidecarBelongsToCurrentProject`）门禁读取，使调用方无法扫描外来项目的 transcript，只读活跃 transcript，并像其他会话路由一样鉴权。它只读，不新增写面。
+所有权：该路由从调用方声明的 `workspaceCwd` 解析会话所属 workspace runtime，像兄弟路由 `/sessions/pr-bindings` 一样以项目成员闸门（`sessionPrSidecarBelongsToCurrentProject`）门禁读取，使调用方无法扫描外来项目的 transcript，并像其他会话路由一样鉴权。它经 core 的规范访问器 `getSessionTranscriptPath` 读活跃 transcript（而非重新推导 sidecar 兄弟路径），并扫描该会话的 subagent transcript（`<projectDir>/subagents/<sessionId>/agent-*.jsonl`，按数量设上限）——委托给 subagent 发布的评论仍是该会话自己的评论，否则会回灌。它只读，不新增写面。
 
 ### 3. 投递 —— channel
 

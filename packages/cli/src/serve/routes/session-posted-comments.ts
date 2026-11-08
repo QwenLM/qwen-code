@@ -5,10 +5,16 @@
  */
 
 import type { Application } from 'express';
-import { dirname, join } from 'node:path';
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { getSubagentSessionDir } from '@qwen-code/qwen-code-core/agents/agent-transcript.js';
 import { isValidSessionId } from '../../config/session-id.js';
 import { postedCommentIdsForTranscript } from '../server/posted-comment-attribution.js';
-import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
+import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from '../workspace-runtime-storage.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
@@ -16,6 +22,9 @@ export interface SessionPostedCommentsRouteDeps {
   workspaceRegistry: WorkspaceRegistry;
   sendBridgeError: SendBridgeError;
 }
+
+/** Bounds how many of a session's subagent transcripts one lookup scans. */
+const MAX_SUBAGENT_TRANSCRIPTS_PER_SESSION = 64;
 
 /**
  * Process-global, read-only authorship lookup for the bound PR comment watch
@@ -72,12 +81,36 @@ export function registerSessionPostedCommentsRoutes(
         res.status(200).json({ ids: [] });
         return;
       }
-      const prPath = sessionService.getPrSessionPathForArchiveState(
-        sessionId,
-        'active',
-      );
-      const transcriptPath = join(dirname(prPath), `${sessionId}.jsonl`);
-      const ids = await postedCommentIdsForTranscript(transcriptPath);
+      // Use core's canonical accessor rather than re-deriving the transcript
+      // as a sibling of the PR sidecar, so a layout change cannot silently
+      // disable attribution.
+      const transcriptPath = sessionService.getSessionTranscriptPath(sessionId);
+      const ids = new Set(await postedCommentIdsForTranscript(transcriptPath));
+      // A post delegated to a subagent is still this session's own comment:
+      // the subagent's tool results land in separate transcripts under
+      // <projectDir>/subagents/<sessionId>/. Attribute those too (bounded), or
+      // the watch echoes the session's delegated comment back to it. Best
+      // effort: the session's own transcript ids stand even if the subagent
+      // tree cannot be read.
+      try {
+        const projectDir = runWithWorkspaceRuntimeStorage(runtime, () =>
+          new Storage(runtime.workspaceCwd).getProjectDir(),
+        );
+        const subagentDir = getSubagentSessionDir(projectDir, sessionId);
+        const names = await readdir(subagentDir).catch(() => [] as string[]);
+        let scanned = 0;
+        for (const name of names) {
+          if (!name.startsWith('agent-') || !name.endsWith('.jsonl')) continue;
+          if (scanned >= MAX_SUBAGENT_TRANSCRIPTS_PER_SESSION) break;
+          scanned += 1;
+          const subIds = await postedCommentIdsForTranscript(
+            join(subagentDir, name),
+          );
+          for (const id of subIds) ids.add(id);
+        }
+      } catch {
+        // Fail-open: subagent attribution is additive evidence.
+      }
       res.status(200).json({ ids: [...ids] });
     } catch (err) {
       deps.sendBridgeError(res, err, { route });
