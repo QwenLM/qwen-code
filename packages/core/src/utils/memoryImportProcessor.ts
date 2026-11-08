@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { isSubpath } from './paths.js';
 import { marked, type Token } from 'marked';
@@ -490,7 +491,32 @@ export function validateImportPath(
 
   const resolvedPath = path.resolve(basePath, importPath);
 
-  return allowedDirectories.some((allowedDir) =>
-    isSubpath(allowedDir, resolvedPath),
-  );
+  return allowedDirectories.some((allowedDir) => {
+    if (!isSubpath(allowedDir, resolvedPath)) return false;
+
+    // A lexical containment check is not sufficient for imports: reading a
+    // symlink dereferences it, so a link whose name is inside the project can
+    // still expose a file outside it. Resolve existing targets canonically;
+    // preserve the old behavior for ordinary missing imports, which are left
+    // in the source for the caller to report as unresolved.
+    let targetExists = false;
+    try {
+      targetExists =
+        fsSync.lstatSync(resolvedPath).isSymbolicLink() ||
+        fsSync.existsSync(resolvedPath);
+    } catch {
+      targetExists = false;
+    }
+    if (!targetExists) return true;
+
+    try {
+      return isSubpath(
+        fsSync.realpathSync(allowedDir),
+        fsSync.realpathSync(resolvedPath),
+      );
+    } catch {
+      // Includes dangling symlinks: never allow a path we cannot resolve.
+      return false;
+    }
+  });
 }
