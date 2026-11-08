@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import {
   applySessionStartupConfig,
   parseSessionStartupConfig,
@@ -5062,6 +5063,11 @@ export function createSessionControlPlane(
           .catch(() => undefined);
       },
       opts.onWorkflowAncestorTrust,
+      async (entry, timestamp) => {
+        await new SessionService(entry.workspaceCwd, {
+          runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
+        }).setLastUserPromptAt(entry.sessionId, timestamp);
+      },
     );
     const connection = harness.createConnection(client, channel);
     // Add to `aliveChannels` + register the `channel.exited` handler
@@ -7610,6 +7616,9 @@ export function createSessionControlPlane(
       entry.prepareArtifactWorkspace = () =>
         prepareStandaloneArtifactWorkspace(entry);
     }
+    void new SessionService(entry.workspaceCwd, {
+      runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
+    }).setLastUserPromptAt(entry.sessionId, undefined);
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
     // A legitimate owner supersedes any abandoned-restore fence on this id.
