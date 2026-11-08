@@ -1043,7 +1043,11 @@ import {
   selectVisibleHistoryRecords,
   createManagedExternalToolGuard,
 } from './acpAgent.js';
-import type { Config, GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  GoalSnapshotV2,
+  SessionWriterLease,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
@@ -17112,8 +17116,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     releaseBarrier();
     await transcriptPromise;
     expect(readPage).toHaveBeenCalledOnce();
-    const barrierResult = await recording.runWithWriteBarrier.mock.results[0]!
-      .value;
+    const barrierResult =
+      await recording.runWithWriteBarrier.mock.results[0]!.value;
     expect(barrierResult).toEqual(
       expect.objectContaining({ sessionId: VALID_SESSION_ID }),
     );
@@ -17353,18 +17357,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('falls back after a real recorder beginClose and refuses a latched writeFailure', async () => {
     const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
-    const recorder = new ChatRecordingService(
-      {
-        getSessionId: () => VALID_SESSION_ID,
-        getProjectRoot: () => '/tmp',
-        getCliVersion: () => '1.0.0',
-        getResumedSessionData: () => undefined,
-        storage: { getProjectDir: () => '/tmp' },
-      } as unknown as Config,
-      undefined,
-      false,
-    );
+    const recorderConfig = {
+      getSessionId: () => VALID_SESSION_ID,
+      getProjectRoot: () => '/tmp',
+      getCliVersion: () => '1.0.0',
+      getResumedSessionData: () => undefined,
+      storage: { getProjectDir: () => '/tmp' },
+    } as unknown as Config;
+    const recorder = new ChatRecordingService(recorderConfig, undefined, false);
     innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recorder);
+    const flushDuringClose = vi.spyOn(recorder, 'flush');
     const readPage = vi.fn().mockResolvedValue({
       sessionId: VALID_SESSION_ID,
       records: [],
@@ -17391,31 +17393,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).resolves.toMatchObject({ hasMore: false });
     expect(readPage).toHaveBeenCalledOnce();
+    expect(flushDuringClose).toHaveBeenCalledOnce();
 
     const { SessionWriterUnavailableError: RealWriterUnavailable } =
       await vi.importActual<typeof import('@qwen-code/qwen-code-core')>(
         '@qwen-code/qwen-code-core',
       );
+    // Current runWithWriteBarrier latches a barrier failure only when the
+    // recorder is bound or writerLeaseRequired. An unbound, non-lease
+    // recorder rethrows without writeFailure and would take the lifecycle
+    // fallback instead of refusing the latest page.
     const failedRecorder = new ChatRecordingService(
-      {
-        getSessionId: () => VALID_SESSION_ID,
-        getProjectRoot: () => '/tmp',
-        getCliVersion: () => '1.0.0',
-        getResumedSessionData: () => undefined,
-        storage: { getProjectDir: () => '/tmp' },
-      } as unknown as Config,
+      recorderConfig,
       undefined,
-      false,
+      true,
     );
+    failedRecorder.activate({
+      sessionId: VALID_SESSION_ID,
+      assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SessionWriterLease);
     await expect(
       failedRecorder.runWithWriteBarrier(async () => {
         throw new RealWriterUnavailable();
       }),
     ).rejects.toBeInstanceOf(RealWriterUnavailable);
+    await expect(
+      failedRecorder.runWithWriteBarrier(async () => 'must not run'),
+    ).rejects.toBeInstanceOf(RealWriterUnavailable);
     innerConfig.getChatRecordingService = vi
       .fn()
       .mockReturnValue(failedRecorder);
     readPage.mockClear();
+    const flushAfterLatch = vi.spyOn(failedRecorder, 'flush');
 
     await expect(
       agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
@@ -17428,6 +17437,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       data: { errorKind: 'session_writer_unavailable' },
     });
     expect(readPage).not.toHaveBeenCalled();
+    expect(flushAfterLatch).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
