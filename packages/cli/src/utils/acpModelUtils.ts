@@ -265,11 +265,40 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
   const slash = baseUrl.indexOf('/', authorityStart);
   const query = baseUrl.indexOf('?', authorityStart);
   const hash = baseUrl.indexOf('#', authorityStart);
+  const whitespace = findAuthorityEndingWhitespace(baseUrl, authorityStart);
   let end = baseUrl.length;
   if (slash !== -1) end = Math.min(end, slash);
   if (query !== -1) end = Math.min(end, query);
   if (hash !== -1) end = Math.min(end, hash);
+  if (whitespace !== -1) end = Math.min(end, whitespace);
   return end;
+}
+
+/**
+ * Whitespace cannot appear in a URL, so the first one ends the authority.
+ * Without that, a pathless URL inside a sentence claims the rest of the line
+ * and a later `@` — a contact address in error prose, say — is read as its
+ * userinfo.
+ *
+ * The one exception is a password that holds a raw space, which users do paste
+ * into a `baseUrl`. A space before the authority's only `@`, with the userinfo
+ * colon already behind it, sits inside that password rather than after the
+ * authority.
+ */
+function findAuthorityEndingWhitespace(
+  baseUrl: string,
+  authorityStart: number,
+): number {
+  const space = baseUrl.slice(authorityStart).search(/\s/);
+  if (space === -1) {
+    return -1;
+  }
+  const index = authorityStart + space;
+  const colon = baseUrl.indexOf(':', authorityStart);
+  const at = baseUrl.indexOf('@', authorityStart);
+  const insideUserinfo =
+    colon !== -1 && colon < index && (at === -1 || at > index);
+  return insideUserinfo ? -1 : index;
 }
 
 /**
