@@ -1135,6 +1135,12 @@ function findOperatorBoundaries(
       if (command.substring(i, i + op.length) !== op) {
         continue;
       }
+      // `>|` is bash's noclobber redirection operator, not a pipeline.  The
+      // redirection extractor handles it inside the simple command, so do not
+      // split the command at its `|` character here.
+      if (op === '|' && i > 0 && command[i - 1] === '>') {
+        continue;
+      }
       // A bare `&` bounds a command only when it is the async operator; its
       // other spellings belong to a redirection or to arithmetic, and stay in
       // the segment.

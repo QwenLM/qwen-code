@@ -166,14 +166,29 @@ function pushToken(
     if (token === '{' || token === '}') return;
     const normalized = trimShellSyntax(token, bare);
     if (!normalized) return;
+    // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
+    const start = /^\(*/.exec(token)![0].length;
+    const normBare = bare.slice(start, start + normalized.length);
+
+    // Redirection operators may be glued to the preceding word (for example
+    // `cd .qwen>/protected/file`).  Split those operators before the existing
+    // descriptor handling so the redirect extractor sees the same token shape
+    // as it would for a whitespace-separated operator.  Quoted and escaped
+    // operators remain part of the filename.
+    const redirectParts = splitTokenAtRedirects(normalized, normBare);
+    if (redirectParts.length > 1) {
+      for (const part of redirectParts) {
+        pushToken(tokens, part.token, part.bare, fdRedirects, fdCloses);
+      }
+      return;
+    }
+
     if (!fdRedirects) {
       tokens.push(normalized);
       return;
     }
-    // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
-    const start = /^\(*/.exec(token)![0].length;
-    const normBare = bare.slice(start, start + normalized.length);
-    const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
+
+    const op = /^(?:\d*>&|<&)/.exec(normalized)?.[0];
     if (!op || normBare.slice(op.length - 2, op.length) !== '11') {
       tokens.push(normalized);
       return;
@@ -194,6 +209,118 @@ function pushToken(
     token = normalized.slice(close + 1);
     bare = normBare.slice(close + 1);
   }
+}
+
+interface TokenPart {
+  token: string;
+  bare: string;
+}
+
+/**
+ * Split unquoted shell redirection operators out of a token.  A numeric file
+ * descriptor is part of the operator only when it starts the original token;
+ * in `>3>file`, for example, the `3` is the first redirect's target rather
+ * than the descriptor for the second redirect.
+ */
+function splitTokenAtRedirects(token: string, bare: string): TokenPart[] {
+  // Descriptor redirects (especially the `>&-` chaining handled below) must
+  // remain one token so pushToken can apply its existing descriptor semantics.
+  const numericPrefix = /^(\d+)/.exec(token)?.[1];
+  const numericFdIndex = numericPrefix?.length ?? -1;
+  const startsNumericFdRedirect =
+    numericFdIndex >= 0 &&
+    token[numericFdIndex] === '>' &&
+    bare[numericFdIndex] === '1' &&
+    token[numericFdIndex + 1] === '&' &&
+    bare[numericFdIndex + 1] === '1';
+  if (
+    (token[0] === '<' &&
+      token[1] === '&' &&
+      bare[0] === '1' &&
+      bare[1] === '1') ||
+    (token[0] === '>' &&
+      token[1] === '&' &&
+      bare[0] === '1' &&
+      bare[1] === '1') ||
+    startsNumericFdRedirect
+  ) {
+    return [{ token, bare }];
+  }
+  const parts: TokenPart[] = [];
+  let segmentStart = 0;
+  let scan = 0;
+  let sawRedirect = false;
+
+  while (scan < token.length) {
+    if (bare[scan] !== '1') {
+      scan++;
+      continue;
+    }
+
+    let operatorLength = 0;
+    if (
+      token[scan] === '&' &&
+      token[scan + 1] === '>' &&
+      bare[scan + 1] === '1'
+    ) {
+      operatorLength =
+        token[scan + 2] === '>' && bare[scan + 2] === '1' ? 3 : 2;
+    } else if (token[scan] === '>' || token[scan] === '<') {
+      operatorLength = 1;
+      if (
+        token[scan] === '>' &&
+        token[scan + 1] === '&' &&
+        bare[scan + 1] === '1'
+      ) {
+        operatorLength = 2;
+      } else if (token[scan + 1] === token[scan] && bare[scan + 1] === '1') {
+        operatorLength = 2;
+        if (
+          token[scan] === '<' &&
+          token[scan + 2] === '-' &&
+          bare[scan + 2] === '1'
+        ) {
+          operatorLength = 3;
+        }
+      } else if (
+        token[scan] === '>' &&
+        token[scan + 1] === '|' &&
+        bare[scan + 1] === '1'
+      ) {
+        operatorLength = 2;
+      }
+    }
+
+    if (!operatorLength) {
+      scan++;
+      continue;
+    }
+
+    let operatorStart = scan;
+    if (!sawRedirect && scan > segmentStart) {
+      const prefix = token.slice(segmentStart, scan);
+      if (/^\d+$/.test(prefix)) operatorStart = segmentStart;
+    }
+
+    if (operatorStart > segmentStart) {
+      parts.push({
+        token: token.slice(segmentStart, operatorStart),
+        bare: bare.slice(segmentStart, operatorStart),
+      });
+    }
+    segmentStart = operatorStart;
+    sawRedirect = true;
+    scan += operatorLength;
+  }
+
+  if (!sawRedirect) return [{ token, bare }];
+  if (segmentStart < token.length) {
+    parts.push({
+      token: token.slice(segmentStart),
+      bare: bare.slice(segmentStart),
+    });
+  }
+  return parts;
 }
 
 function trimShellSyntax(token: string, bare: string): string {
@@ -308,6 +435,22 @@ function fdRedirectFile(word: string): string | undefined {
   return undefined;
 }
 
+function isIgnoredRedirectTarget(target: string): boolean {
+  return target === '/dev/null' || isNetworkPseudoDevice(target);
+}
+
+interface RedirectPrefix {
+  operator: string;
+  target: string;
+}
+
+function parseRedirectPrefix(token: string): RedirectPrefix | undefined {
+  const match = token.match(/^(?:(\d+)?(>>|>\||>|<<-?|<)|&(>>|>))([\s\S]+)$/);
+  if (!match) return undefined;
+  const operator = match[3] ? `&${match[3]}` : `${match[1] ?? ''}${match[2]}`;
+  return { operator, target: match[4]! };
+}
+
 /**
  * Extract I/O redirections from a token array.
  *
@@ -338,7 +481,7 @@ function extractRedirects(
 
     // ── `>&word`, `N>&word`, `<&word` with an unquoted `>&`/`<&` ─────────
     const fdOp = fdRedirects.has(i)
-      ? /^(?:[12]?>&|<&)/.exec(tok)?.[0]
+      ? /^(?:\d*>&|<&)/.exec(tok)?.[0]
       : undefined;
     if (fdOp) {
       toRemove.add(i);
@@ -357,52 +500,22 @@ function extractRedirects(
     }
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (tok === '>' || tok === '1>') {
+    const separate = tok.match(/^(?:(\d+)?(>>|>\||>|<<-?|<)|&(>>|>))$/);
+    if (separate) {
+      const operator = separate[3]
+        ? `&${separate[3]}`
+        : `${separate[1] ?? ''}${separate[2]}`;
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
+      if (operator.endsWith('<<') || operator.endsWith('<<-')) {
         toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '>>' || tok === '1>>') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
+        if (target) {
+          toRemove.add(i + 1);
+          i++;
         }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '<<' || tok === '<<-') {
-      toRemove.add(i);
-      if (tokens[i + 1]) {
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '<') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') {
-      // stderr / combined redirect — consume target
-      const target = tokens[i + 1];
-      if (target) {
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          writeFiles.push(resolvePath(target, cwd));
+      } else if (target && looksLikePath(target)) {
+        if (!isIgnoredRedirectTarget(target)) {
+          const isRead = operator.endsWith('<');
+          (isRead ? readFiles : writeFiles).push(resolvePath(target, cwd));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -411,24 +524,16 @@ function extractRedirects(
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
-      if (m) {
-        const op = m[1]!;
-        const target = m[2]!;
-        if (op.startsWith('<<')) {
+      const redirect = parseRedirectPrefix(tok);
+      if (redirect) {
+        const { operator, target } = redirect;
+        if (operator.endsWith('<<') || operator.endsWith('<<-')) {
           toRemove.add(i);
           continue;
         }
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          if (op === '<') {
-            readFiles.push(resolvePath(target, cwd));
-          } else {
-            writeFiles.push(resolvePath(target, cwd));
-          }
+        if (looksLikePath(target) && !isIgnoredRedirectTarget(target)) {
+          const isRead = operator.endsWith('<');
+          (isRead ? readFiles : writeFiles).push(resolvePath(target, cwd));
         }
         toRemove.add(i);
       }

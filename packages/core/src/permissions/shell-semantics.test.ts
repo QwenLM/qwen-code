@@ -607,6 +607,12 @@ describe('extractShellOperations', () => {
     expect(ops('echo hi > out.txt')).toContainEqual(write(`${CWD}/out.txt`));
     expect(ops('sort < in.txt')).toContainEqual(read(`${CWD}/in.txt`));
   });
+
+  it('ignores /dev/null for a separate stdout redirect', () => {
+    expect(ops('echo hi > /dev/null')).not.toContainEqual(
+      expect.objectContaining({ filePath: '/dev/null' }),
+    );
+  });
 });
 
 // Shared compound shell analysis for permission rules and AUTO review.
@@ -717,6 +723,21 @@ describe('extractShellOperationsAcrossCommand', () => {
       'reports a redirect on a static cd segment from the starting cwd',
       "cd .qwen > settings.json && echo '{}' > settings.local.json",
       [write('/repo/settings.json'), write('/repo/.qwen/settings.local.json')],
+    ],
+    [
+      'reports a redirect glued to a cd target',
+      'cd .qwen>/protected/out.txt',
+      [write('/protected/out.txt')],
+    ],
+    [
+      'reports a redirect on an arbitrary file descriptor',
+      'cd .qwen 3>/protected/out.txt',
+      [write('/protected/out.txt')],
+    ],
+    [
+      'reports a noclobber redirect',
+      'cd .qwen >|/protected/out.txt',
+      [write('/protected/out.txt')],
     ],
     [
       'reports a redirect on a dynamic cd segment from the current cwd',
