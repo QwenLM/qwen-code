@@ -1,6 +1,7 @@
+import { pierreResources } from './pierre-build';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
+import type { Connect, PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
@@ -77,10 +78,11 @@ function developmentCsp(requestUrl: string): string {
   const queryStart = requestUrl.indexOf('?');
   const raw = new URLSearchParams(
     queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
-  ).get('daemon');
-  const origin = getAllowedDaemonOrigin(raw || '');
+  );
   const connectOrigins: string[] = [];
-  if (origin) {
+  for (const value of [raw.get('daemon'), ...raw.getAll('fanout')]) {
+    const origin = getAllowedDaemonOrigin(value || '');
+    if (!origin || connectOrigins.includes(origin)) continue;
     const websocket = new URL(origin);
     websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
     connectOrigins.push(origin, websocket.origin);
@@ -107,10 +109,8 @@ function developmentCsp(requestUrl: string): string {
   ].join('; ');
 }
 
-function configureDevelopmentMiddleware(
-  server: ViteDevServer | PreviewServer,
-): void {
-  server.middlewares.use((req, res, next) => {
+export function createDevelopmentMiddleware(): Connect.NextHandleFunction {
+  return (req, res, next) => {
     res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
     // Vite resolves the extensionless settings page to settings.ts before SPA fallback.
     if (
@@ -121,12 +121,30 @@ function configureDevelopmentMiddleware(
       req.url = '/index.html';
     }
     next();
-  });
+  };
+}
+
+function configureDevelopmentMiddleware(
+  server: ViteDevServer | PreviewServer,
+): void {
+  server.middlewares.use(createDevelopmentMiddleware());
 }
 
 export default defineConfig(({ command }) => ({
   root: 'client',
+  // Worker-only imports otherwise trigger a dev-page reload on first preview.
+  optimizeDeps: {
+    exclude: ['@pierre/diffs', 'shiki/wasm'],
+    include: [
+      'exceljs',
+      'ssf',
+      'shiki-files/core',
+      'shiki-files/engine/javascript',
+      'shiki-files/engine/oniguruma',
+    ],
+  },
   plugins: [
+    pierreResources(),
     react(),
     tailwindcss(),
     {
@@ -221,6 +239,7 @@ export default defineConfig(({ command }) => ({
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/remote-access': daemonProxy,
       '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
@@ -248,6 +267,10 @@ export default defineConfig(({ command }) => ({
       // Goals page (`GET /goals`). Without it the SPA fallback returns
       // index.html in dev and the page fails JSON parsing on open.
       '/goals': daemonProxy,
+      // PR watches page (`GET /autofix-pr/watches`). Same reason as the routes
+      // above. The workspace-qualified form is already reached by the
+      // `/workspace` prefix; only the primary's unqualified route needs this.
+      '/autofix-pr': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.

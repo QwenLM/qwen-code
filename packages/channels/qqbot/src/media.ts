@@ -7,6 +7,8 @@
 
 export const QQ_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 export const QQ_VIDEO_MAX_BYTES = 20 * 1024 * 1024;
+export const QQ_FILE_MAX_BYTES = 20 * 1024 * 1024;
+export const QQ_VOICE_MAX_BYTES = 20 * 1024 * 1024;
 export const QQ_MAX_ATTACHMENTS = 5;
 
 /**
@@ -16,7 +18,7 @@ export const QQ_MAX_ATTACHMENTS = 5;
  */
 const ALLOWED_HOST_SUFFIXES = ['.qq.com', '.qq.com.cn'];
 
-export type QQAttachmentKind = 'image' | 'video';
+export type QQAttachmentKind = 'image' | 'video' | 'file' | 'voice';
 
 export interface QQDownloadedAttachment {
   buffer: Buffer;
@@ -33,6 +35,10 @@ export function classifyQQAttachment(
       return 'image';
     case 'video/mp4':
       return 'video';
+    case 'file':
+      return 'file';
+    case 'voice':
+      return 'voice';
     default:
       return undefined;
   }

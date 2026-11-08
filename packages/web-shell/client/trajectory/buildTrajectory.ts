@@ -179,6 +179,9 @@ export function buildTrajectory(
       timing: span,
       ...(recordId !== undefined ? { recordId } : {}),
       ...(timing.model !== undefined ? { model: timing.model } : {}),
+      ...(timing.executionId !== undefined
+        ? { executionId: timing.executionId }
+        : {}),
       ...(timing.responseId !== undefined
         ? { responseId: timing.responseId }
         : {}),

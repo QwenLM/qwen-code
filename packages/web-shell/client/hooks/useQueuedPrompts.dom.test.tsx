@@ -87,6 +87,8 @@ function mount(
   // `null` = the workspace has not resolved yet (an explicit `undefined`
   // argument would take the default).
   workspaceCwd: string | null = '/workspace',
+  canQueryPendingPrompts = true,
+  getPromptDispatchError?: (text: string) => string | undefined,
 ) {
   const editor = {
     getText: vi.fn(() => ''),
@@ -117,6 +119,7 @@ function mount(
     stopped: boolean;
   }) {
     latest = useQueuedPrompts({
+      getPromptDispatchError,
       connected,
       writeBlocked: blocked || stopped,
       runtimeStopped: stopped,
@@ -126,6 +129,7 @@ function mount(
       canMutateMidTurn,
       // This suite pins the legacy local-fallback lifecycle.
       canQueryMidTurn: false,
+      canQueryPendingPrompts,
       canInjectMidTurnMedia: false,
       streamingState: state,
       holdQueuedPromptsLocally: hold,
@@ -187,6 +191,8 @@ function createActions() {
       removePendingPrompt: vi.fn(),
       getPendingPrompts: vi.fn().mockResolvedValue({ pendingPrompts: [] }),
       submitPrompt: vi.fn(() => pendingSubmit.promise),
+      sendPrompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+      sendMidTurnMessagesNow: vi.fn(),
     } as unknown as DaemonSessionActions,
     pendingSubmit,
   };
@@ -208,6 +214,156 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
+  it('reports a streaming fallback policy block without restoring the message', async () => {
+    const { actions } = createActions();
+    const policy = { error: undefined as string | undefined };
+    vi.mocked(actions.sendPrompt).mockImplementation(async (_text, options) => {
+      options?.beforeDispatch?.();
+      return { stopReason: 'end_turn' };
+    });
+    const { render, editor, reportError } = mount(
+      'responding',
+      actions,
+      false,
+      true,
+      false,
+      false,
+      '/workspace',
+      false,
+      () => policy.error,
+    );
+    act(() => latest.enqueuePrompt('queued before policy changed'));
+    expect(latest.queuedTexts).toEqual(['queued before policy changed']);
+    policy.error = 'Sending is now disabled by host policy';
+    await act(async () => render('idle'));
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: policy.error }),
+      t('queue.queueFailed'),
+    );
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
+    await act(async () => render('idle'));
+    expect(actions.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not resurrect a cancelled streaming fallback message or report an error', async () => {
+    const { actions } = createActions();
+    const preflight = deferred<void>();
+    vi.mocked(actions.sendPrompt).mockImplementation(async (_text, options) => {
+      await preflight.promise;
+      options?.beforeDispatch?.();
+      return { stopReason: 'end_turn' };
+    });
+    const { render, editor, reportError } = mount(
+      'responding',
+      actions,
+      false,
+      true,
+      false,
+      false,
+      '/workspace',
+      false,
+    );
+    act(() => latest.enqueuePrompt('cancel this queued message'));
+    await act(async () => render('idle'));
+    expect(actions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(latest.queuedPrompts[0]?.serverState).toBe('submitting');
+    await act(async () => latest.removeQueuedPrompt(1));
+    expect(latest.queuedPrompts).toEqual([]);
+    await act(async () => {
+      preflight.resolve();
+      await preflight.promise;
+    });
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
+    await act(async () => render('idle'));
+    expect(actions.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the local queue usable without requesting unsupported native queue routes', async () => {
+    const { actions } = createActions();
+    const { render } = mount(
+      'responding',
+      actions,
+      false,
+      true,
+      false,
+      false,
+      '/workspace',
+      false,
+    );
+    await act(async () => {});
+    expect(actions.getPendingPrompts).not.toHaveBeenCalled();
+
+    act(() => latest.enqueuePrompt('follow-up question'));
+    expect(actions.sendPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedTexts).toEqual(['follow-up question']);
+    await act(async () => render('idle'));
+    expect(actions.sendPrompt).toHaveBeenCalledWith(
+      'follow-up question',
+      expect.objectContaining({ beforeDispatch: expect.any(Function) }),
+    );
+    expect(actions.getPendingPrompts).not.toHaveBeenCalled();
+  });
+
+  it('waits for a local streaming turn to finish before sending the next queued message', async () => {
+    const { actions } = createActions();
+    const first = deferred<{ stopReason: string }>();
+    vi.mocked(actions.sendPrompt).mockReturnValueOnce(first.promise as never);
+    const { render } = mount(
+      'responding',
+      actions,
+      false,
+      true,
+      false,
+      false,
+      '/workspace',
+      false,
+    );
+    act(() => {
+      latest.enqueuePrompt('first');
+      latest.enqueuePrompt('second');
+    });
+    await act(async () => render('idle'));
+    expect(actions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(actions.sendPrompt).mock.calls[0]?.[0]).toBe('first');
+    await act(async () => {
+      first.resolve({ stopReason: 'end_turn' });
+      await first.promise;
+    });
+    expect(
+      vi.mocked(actions.sendPrompt).mock.calls.map(([text]) => text),
+    ).toEqual(['first', 'second']);
+    expect(latest.queuedTexts).toEqual([]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(actions.getPendingPrompts).not.toHaveBeenCalled();
+  });
+
+  it('restores a locally queued message after a send fails before dispatch without replaying it', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.sendPrompt).mockRejectedValueOnce(
+      new Error('offline before dispatch'),
+    );
+    const { render, editor, reportError } = mount(
+      'responding',
+      actions,
+      false,
+      true,
+      false,
+      false,
+      '/workspace',
+      false,
+    );
+    act(() => {
+      latest.enqueuePrompt('retry manually');
+    });
+    await act(async () => render('idle'));
+    expect(editor.setText).toHaveBeenCalledWith('retry manually');
+    expect(reportError).toHaveBeenCalled();
+    await act(async () => render('idle'));
+    expect(actions.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it.each([undefined, ' original question\n'])(
     'keeps an optional original submission separate from the queued payload: %s',
     async (submittedPrompt) => {
@@ -276,6 +432,104 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
         midTurnMessageId: 'inserted-1',
       },
     ]);
+  });
+
+  it('sends a daemon-owned mid-turn row now and reports a failure', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'inserted-1',
+    });
+    const sendMidTurnMessagesNow = vi.mocked(actions.sendMidTurnMessagesNow);
+    sendMidTurnMessagesNow
+      .mockResolvedValueOnce({ requested: true })
+      .mockRejectedValueOnce(new Error('daemon 500'))
+      .mockResolvedValue({ requested: true });
+    const { reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+    act(() => latest.enqueuePrompt('send this now'));
+
+    // Still held locally: nothing the daemon could deliver yet.
+    await act(async () => latest.sendQueuedPromptNow(1));
+    expect(sendMidTurnMessagesNow).not.toHaveBeenCalled();
+
+    await act(async () => latest.insertQueuedPrompt(1));
+    // Inserting only queues it; sending now is the user's separate choice.
+    expect(sendMidTurnMessagesNow).not.toHaveBeenCalled();
+    await act(async () => latest.sendQueuedPromptNow(1));
+    expect(sendMidTurnMessagesNow).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+    });
+    expect(reportError).not.toHaveBeenCalled();
+
+    await act(async () => latest.sendQueuedPromptNow(1));
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      t('queue.sendNowFailed'),
+    );
+    // A failed request does not block the next click.
+    await act(async () => latest.sendQueuedPromptNow(1));
+    expect(sendMidTurnMessagesNow).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not query the mid-turn queue after send-now without that capability', async () => {
+    const { actions } = createActions();
+    const getMidTurnMessages = vi.fn();
+    Object.assign(actions, { getMidTurnMessages });
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'inserted-1',
+    });
+    vi.mocked(actions.sendMidTurnMessagesNow).mockResolvedValue({
+      requested: false,
+    });
+    const { reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+    act(() => latest.enqueuePrompt('send this now'));
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    await act(async () => latest.sendQueuedPromptNow(1));
+    expect(actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+    expect(getMidTurnMessages).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('inserts a message typed during a turn without asking to send it now', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+    });
+    mount('responding', actions);
+
+    await act(async () => {
+      latest.enqueuePrompt('steer later');
+    });
+
+    expect(actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+      'steer later',
+      expect.anything(),
+    );
+    expect(actions.sendMidTurnMessagesNow).not.toHaveBeenCalled();
+    // An older daemon answered without a message id: nothing to send now.
+    expect(latest.queuedPrompts).toMatchObject([
+      { midTurnState: 'queued', midTurnMessageId: undefined },
+    ]);
+    await act(async () =>
+      latest.sendQueuedPromptNow(latest.queuedPrompts[0]!.id),
+    );
+    expect(actions.sendMidTurnMessagesNow).not.toHaveBeenCalled();
   });
 
   it('does not insert a held prompt between turns', async () => {
@@ -2410,4 +2664,55 @@ it('runtime stop fences the live queue stashed while the workspace cwd is unreso
   });
   expect(actions.submitPrompt).not.toHaveBeenCalled();
   expect(editor.setText).toHaveBeenCalledWith('queued before cwd resolved');
+});
+
+describe('upstream streaming-only transport reproduction', () => {
+  it('does not probe an unsupported native pending endpoint', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.getPendingPrompts).mockRejectedValue(
+      new Error('native pending prompts unsupported'),
+    );
+    mount(
+      'responding',
+      actions,
+      false,
+      true,
+      false,
+      false,
+      '/workspace',
+      false,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(actions.getPendingPrompts).not.toHaveBeenCalled();
+  });
+
+  it('releases a local message through the supported streaming prompt action', async () => {
+    const { actions } = createActions();
+    actions.sendPrompt = vi.fn().mockResolvedValue({ stopReason: 'end_turn' });
+    vi.mocked(actions.submitPrompt).mockRejectedValue(
+      new DaemonHttpError(404, {}, 'native queue unsupported'),
+    );
+    const { render } = mount(
+      'responding',
+      actions,
+      false,
+      true,
+      false,
+      true,
+      '/workspace',
+      false,
+    );
+    act(() => latest.enqueuePrompt('queued question'));
+    await act(async () => {
+      render('idle', 'session-1', false, false, false);
+      await Promise.resolve();
+    });
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(actions.sendPrompt).toHaveBeenCalledWith(
+      'queued question',
+      expect.anything(),
+    );
+  });
 });

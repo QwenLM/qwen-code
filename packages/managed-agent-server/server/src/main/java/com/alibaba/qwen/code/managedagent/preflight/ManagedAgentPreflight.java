@@ -1,0 +1,2443 @@
+package com.alibaba.qwen.code.managedagent.preflight;
+
+import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.harness.HarnessNegotiation;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilities;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilityFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapacityFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessTransportFailure;
+import com.alibaba.qwen.code.managedagent.preflight.ServerEnvironment.Format;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
+import org.flywaydb.core.api.FlywayException;
+import org.flywaydb.core.api.MigrationVersion;
+import org.springframework.boot.ApplicationContextFactory;
+import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.env.PropertiesPropertySourceLoader;
+import org.springframework.boot.env.PropertySourceLoader;
+import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.EnumerablePropertySource;
+import org.springframework.core.env.PropertySource;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
+import org.yaml.snakeyaml.nodes.MappingNode;
+import org.yaml.snakeyaml.nodes.Node;
+import org.yaml.snakeyaml.nodes.NodeTuple;
+import org.yaml.snakeyaml.nodes.ScalarNode;
+import org.yaml.snakeyaml.nodes.SequenceNode;
+import org.yaml.snakeyaml.nodes.Tag;
+import org.yaml.snakeyaml.reader.UnicodeReader;
+
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.net.UnknownHostException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
+import java.sql.Statement;
+import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.function.BiPredicate;
+import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+/**
+ * Read-only deployment preflight for the reference distribution.
+ *
+ * <p>It binds the configuration the server reads, prepared as
+ * {@link ServerEnvironment} prepares it, so files at Spring Boot's default
+ * locations count, read in the working directory; run it with the server
+ * unit's working directory. It checks the inputs that otherwise fail during
+ * startup or on the first Turn, and never opens the web server, a scheduler
+ * or a worker.
+ */
+public final class ManagedAgentPreflight {
+    static final String ONLINE_ARG = "--online";
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String WORKER_ARG = "managed-runtime-worker";
+    // The kernel appends this to /proc/<pid>/cwd once the directory is removed.
+    private static final String DELETED_SUFFIX = " (deleted)";
+    private static final String SHELL_MCP_FEATURE = "workspace-shell-mcp/1";
+    private static final Pattern QWEN_CODE_VERSION = Pattern.compile("[0-9A-Za-z.+-]{1,64}");
+    private static final Pattern DIGEST =
+            Pattern.compile("sha256:[0-9a-f]{64}");
+    private static final int TIMEOUT_MILLIS = 5_000;
+    private static final int KEY_BYTES = 32;
+    private static final int MIN_JAVA_FEATURE = 21;
+    private static final int DEFAULT_SERVER_PORT = 8080;
+    // A property whose last word is one of these holds a secret, in the
+    // configuration reference's terms; credential-key-id and the paths to
+    // files that hold one end otherwise.
+    private static final List<String> SECRET_SUFFIXES =
+            List.of("password", "token", "key", "keys", "secret");
+    // An XML comment, which cannot nest or hold "--".
+    private static final Pattern XML_COMMENT = Pattern.compile("<!--(.*?)-->", Pattern.DOTALL);
+    // The markers and white space that start a comment, as "# " or "#!".
+    private static final Pattern COMMENT_START = Pattern.compile("^[#!\\s]+");
+    // A comment marker .properties reads though it is escaped, with a
+    // backslash or as a Unicode escape.
+    private static final Pattern ESCAPED_MARKER = Pattern.compile("^\\\\(?:[#!]|u00(?:23|21))");
+    // White space at the start of a line, which .properties skips.
+    private static final Pattern INDENT = Pattern.compile("^\\s+");
+    // A setting as YAML and .properties both write one: an optional list
+    // marker, a key, quoted or not, then ':' or '=' and the value.
+    private static final Pattern WRITTEN_SETTING = Pattern.compile(
+            "(?:-\\s+)?[\"']?([^\\s:=\"'#!]+)[\"']?\\s*[:=](.*)");
+    // An entry of an XML properties file, which a comment may hold unclosed.
+    private static final Pattern XML_ENTRY = Pattern.compile(
+            "<entry\\s+key\\s*=\\s*[\"']([^\"']*)[\"']\\s*>([^<]*)");
+    private static final String XML_PROPERTIES = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">";
+    // A parameter of a value, such as a JDBC URL's ?password=, and the
+    // password of a URL's user information, as in https://user:secret@host.
+    private static final Pattern VALUE_PARAMETER = Pattern.compile("[?&;]([^=?&;#\\s]+)=");
+    private static final Pattern URL_PASSWORD = Pattern.compile("//[^/?#@\\s:]*:[^/?#@\\s]++@");
+
+    private ManagedAgentPreflight() {
+    }
+
+    /**
+     * Runs the checks and returns a process exit code: 0 unless a check fails.
+     */
+    public static int run(String[] args) {
+        List<Check> checks = checks(args);
+        print(checks);
+        return checks.stream().anyMatch(check ->
+                check.status() == Status.FAIL) ? 1 : 0;
+    }
+
+    // --online, --online=true like the server's other --key=value arguments,
+    // or --online=false to check offline; any other value fails, and the
+    // remaining rows still run offline.
+    static boolean online(String[] args, List<Check> checks) {
+        boolean online = false;
+        for (String arg : args) {
+            if (arg.equals(ONLINE_ARG)) {
+                online = true;
+            } else if (arg.startsWith(ONLINE_ARG + "=")) {
+                String value = arg.substring(ONLINE_ARG.length() + 1);
+                if ("true".equalsIgnoreCase(value)) {
+                    online = true;
+                } else if ("false".equalsIgnoreCase(value)) {
+                    online = false;
+                } else {
+                    checks.add(new Check("online", Status.FAIL,
+                            arg + " is not true or false",
+                            "pass --online, or leave it out while the service is stopped"));
+                }
+            }
+        }
+        return online;
+    }
+
+    static List<Check> checks(String[] args) {
+        return checks(args, ApplicationContextFactory.DEFAULT
+                .createEnvironment(WebApplicationType.SERVLET));
+    }
+
+    /**
+     * The checks against {@code base}, prepared as the server prepares its
+     * environment; a test may replace its process variables.
+     */
+    static List<Check> checks(String[] args, ConfigurableEnvironment base) {
+        List<Check> checks = new ArrayList<>();
+        // While the server runs it holds its ports and its Runtime workers.
+        boolean online = online(args, checks);
+        Prepared prepared = prepare(args, base, checks);
+        ConfigurableEnvironment environment = prepared.environment();
+        ManagedAgentProperties properties = bind(environment, checks);
+        checks.add(javaCheck());
+        String runner = System.getProperty("user.name", "");
+        AccessCheck access = serviceUserCheck(properties.getServiceUser(), runner,
+                ServiceAccount::lookup);
+        checks.add(access.check());
+        checks.addAll(configChecks(prepared, access.account(), runner));
+        checks.add(startupValidationCheck(properties));
+        checks.add(keyRingCheck(properties));
+        checks.add(row("auth", () -> authCheck(environment, properties)));
+        checks.add(harnessCheck(properties, distributionQwenCodeVersion()));
+        checks.add(credentialsFileCheck(properties, access.account()));
+        checks.add(sessionStoreCheck(properties));
+        checks.add(toolPathCheck(properties));
+        checks.addAll(brokerChecks(properties));
+        checks.add(workspaceCheck(properties));
+        checks.add(row("server-port", () -> {
+            String serverAddress = environment.getProperty("server.address", "127.0.0.1");
+            int serverPort = environment.getProperty("server.port", Integer.class,
+                    DEFAULT_SERVER_PORT);
+            return online ? listeningCheck("server", serverAddress, serverPort)
+                    : portCheck("server", serverAddress, serverPort);
+        }));
+        if (properties.getRuntimeBroker().isEnabled()) {
+            ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
+            checks.add(online ? listeningCheck("broker", broker.getHost(), broker.getPort())
+                    : portCheck("broker", broker.getHost(), broker.getPort()));
+        }
+        checks.add(workersCheck(properties, () -> ProcessHandle.allProcesses()
+                .collect(Collectors.toList()), online));
+        Check database = row("database", () -> databaseCheck(environment));
+        checks.add(database);
+        checks.add(database.status() == Status.PASS
+                ? row("capacity", () -> capacityCheck(environment))
+                : new Check("capacity", Status.SKIP,
+                        "database check did not pass; capacity not measured",
+                        null));
+        return checks;
+    }
+
+    /**
+     * A row that reads the environment, which fails as Spring would where a
+     * setting does not resolve, such as a placeholder with no value and no
+     * default, rather than stop the check before it prints a row.
+     */
+    private static Check row(String name, Supplier<Check> check) {
+        try {
+            return check.get();
+        } catch (RuntimeException error) {
+            return new Check(name, Status.FAIL, rootMessage(error),
+                    "correct the configured value");
+        }
+    }
+
+    /**
+     * The environment the checks read, and either the configuration files it
+     * holds from the file system, with the property each config tree value
+     * file holds, those of them Spring also reads as configuration files and
+     * the directories this process cannot look in for more, or why Spring
+     * would refuse to start.
+     */
+    record Prepared(ConfigurableEnvironment environment, List<Path> files,
+            Map<Path, String> values, Map<Path, Set<Format>> configurations,
+            List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure,
+            String unlisted) {
+        Prepared(ConfigurableEnvironment environment, List<Path> files,
+                Map<Path, String> values, Map<Path, Set<Format>> configurations,
+                List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure) {
+            this(environment, files, values, configurations, hidden, failure, null);
+        }
+    }
+
+    /**
+     * The environment as the server prepares it. When Spring would refuse to
+     * start, as for a named location that does not exist or a file it cannot
+     * read, the failure is kept for the config row, which names an account
+     * once the service-user row has found it, and the other rows read the
+     * arguments, the process environment and the packaged defaults. Where
+     * Spring prepared it but the files it read cannot be told apart, as for
+     * a location value this check cannot resolve, why is kept instead.
+     */
+    static Prepared prepare(String[] args, ConfigurableEnvironment base,
+            List<Check> checks) {
+        ConfigurableEnvironment environment;
+        try {
+            environment = ServerEnvironment.prepare(args, base);
+        } catch (RuntimeException error) {
+            ServerEnvironment.Failure failure = ServerEnvironment.failure(error, base);
+            // Spring adds the files' sources once it has read them all, so
+            // base holds what the arguments and the process environment set.
+            loadDefaults(base, checks);
+            return new Prepared(base, List.of(), Map.of(), Map.of(), List.of(), failure);
+        }
+        try {
+            return new Prepared(environment, ServerEnvironment.files(environment),
+                    ServerEnvironment.valueFiles(environment),
+                    ServerEnvironment.configurationFiles(environment),
+                    ServerEnvironment.hidden(environment), null);
+        } catch (RuntimeException unlisted) {
+            // The server would start; only this check's account of its files
+            // failed, so it keeps the files the property sources name.
+            return new Prepared(environment, ServerEnvironment.sourceFiles(environment),
+                    ServerEnvironment.valueFiles(environment),
+                    ServerEnvironment.sourceConfigurations(environment), List.of(), null,
+                    rootMessage(unlisted));
+        }
+    }
+
+    /**
+     * The config rows: why the server would not start with its
+     * configuration, or one row for each file it reads and for each
+     * directory it may read one in that this process cannot look in.
+     */
+    static List<Check> configChecks(Prepared prepared, ServiceAccount account,
+            String runner) {
+        if (prepared.failure() != null) {
+            return List.of(configFailureCheck(prepared.failure(), account, runner));
+        }
+        if (prepared.unlisted() != null) {
+            List<Check> checks = new ArrayList<>();
+            if (!prepared.files().isEmpty()) {
+                checks.addAll(configFileChecks(prepared.files(), account, prepared.values(),
+                        prepared.configurations()));
+            }
+            checks.add(new Check("config", Status.WARN,
+                    "cannot tell which other files the server reads: " + prepared.unlisted(),
+                    "check the configuration files by hand, and the location values"
+                            + " that name them"));
+            return checks;
+        }
+        List<Check> hidden = new ArrayList<>();
+        for (ServerEnvironment.Hidden directory : prepared.hidden()) {
+            Check check = hiddenCheck(directory, account, runner);
+            if (check != null) {
+                hidden.add(check);
+            }
+        }
+        List<Check> checks = new ArrayList<>();
+        // A directory it cannot look in is no sign that the server reads no file.
+        if (!prepared.files().isEmpty() || hidden.isEmpty()) {
+            checks.addAll(configFileChecks(prepared.files(), account, prepared.values(),
+                    prepared.configurations()));
+        }
+        checks.addAll(hidden);
+        return checks;
+    }
+
+    /**
+     * The row for a directory the server looks in for a configuration file
+     * that this process cannot look in, which then cannot check what the
+     * server reads; or null where the service account cannot either, as
+     * Spring then reads nothing there, and without one, as this process then
+     * stands in for it.
+     */
+    static Check hiddenCheck(ServerEnvironment.Hidden hidden, ServiceAccount account,
+            String runner) {
+        if (account == null) {
+            return null;
+        }
+        Path directory = hidden.directory();
+        try {
+            if (!account.canEnter(directory)
+                    || hidden.listed() && !account.canRead(directory)) {
+                return null;
+            }
+        } catch (IOException | UnsupportedOperationException error) {
+            // This process cannot look along the path; the account may.
+        }
+        return new Check("config", Status.FAIL,
+                directory + " cannot be " + (hidden.listed() ? "listed" : "entered") + " by "
+                        + runner + ", which runs this check, and the server may read a"
+                        + " configuration file in it",
+                runAs(account));
+    }
+
+    // The account the check sees the server's files as.
+    private static String runAs(ServiceAccount account) {
+        return "run --check as " + account.name()
+                + (account.superuser() ? "" : " or as root");
+    }
+
+    /**
+     * The row for a configuration Spring refused. A file this process cannot
+     * read is named with the account that must read it: the service account,
+     * when that cannot read it either, and otherwise this process, which
+     * then cannot check what the server reads.
+     */
+    static Check configFailureCheck(ServerEnvironment.Failure failure,
+            ServiceAccount account, String runner) {
+        Path file = failure.unreadable();
+        if (file == null || account == null) {
+            return new Check("config", Status.FAIL, failure.detail(), failure.fix());
+        }
+        String path = file.toString();
+        boolean serverReads;
+        try {
+            serverReads = account.canRead(file);
+        } catch (IOException | UnsupportedOperationException error) {
+            // This process cannot look along the path; the account may.
+            serverReads = true;
+        }
+        return serverReads
+                ? new Check("config", Status.FAIL,
+                        path + " is not readable by " + runner + ", which runs this check",
+                        runAs(account))
+                : new Check("config", Status.FAIL,
+                        path + " is not readable by " + account.name(),
+                        unreadableFix(account.name(), path));
+    }
+
+    /** Adds the packaged defaults, below what the environment holds. */
+    static void loadDefaults(ConfigurableEnvironment environment,
+            List<Check> checks) {
+        addYaml(new YamlPropertySourceLoader(), environment,
+                new ClassPathResource("application.yml"), "defaults", checks);
+    }
+
+    private static void addYaml(
+            YamlPropertySourceLoader loader,
+            ConfigurableEnvironment environment, Resource resource, String name,
+            List<Check> checks) {
+        try {
+            for (PropertySource<?> source : loader.load(name, resource)) {
+                environment.getPropertySources().addLast(source);
+            }
+        } catch (IOException error) {
+            checks.add(new Check("config", Status.FAIL,
+                    "cannot read " + resource.getDescription() + ": "
+                            + error.getMessage(),
+                    "fix the YAML syntax"));
+        }
+    }
+
+    static ManagedAgentProperties bind(
+            ConfigurableEnvironment environment, List<Check> checks) {
+        try {
+            ManagedAgentProperties properties = Binder.get(environment)
+                    .bind("qwen.managed-agent",
+                            Bindable.of(ManagedAgentProperties.class))
+                    .orElseGet(ManagedAgentProperties::new);
+            properties.setEnvironment(environment);
+            return properties;
+        } catch (RuntimeException error) {
+            checks.add(new Check("config", Status.FAIL,
+                    "binding failed: " + rootMessage(error),
+                    "correct the configured value"));
+            return new ManagedAgentProperties();
+        }
+    }
+
+    static Check startupValidationCheck(ManagedAgentProperties properties) {
+        try {
+            properties.validateForPreflight();
+            return new Check("validation", Status.PASS,
+                    "startup properties accepted", null);
+        } catch (RuntimeException error) {
+            return new Check("validation", Status.FAIL, rootMessage(error),
+                    "correct the startup configuration");
+        }
+    }
+
+    static Check javaCheck() {
+        Runtime.Version version = Runtime.version();
+        return version.feature() >= MIN_JAVA_FEATURE
+                ? new Check("java", Status.PASS, version.toString(), null)
+                : new Check("java", Status.FAIL, version.toString(),
+                        "install JDK 21 or later");
+    }
+
+    /** The account file rows check access for, or null for this process. */
+    record AccessCheck(Check check, ServiceAccount account) {
+    }
+
+    interface AccountLookup {
+        Optional<ServiceAccount> find(String name) throws IOException;
+    }
+
+    static AccessCheck serviceUserCheck(String name, String runner,
+            AccountLookup lookup) {
+        if (StringUtils.isBlank(name)) {
+            return new AccessCheck(new Check("service-user", Status.SKIP,
+                    "not set; file rows check access as " + runner, null), null);
+        }
+        if (name.equals(runner)) {
+            return new AccessCheck(new Check("service-user", Status.PASS,
+                    name + " (this process)", null), null);
+        }
+        Optional<ServiceAccount> account;
+        try {
+            account = lookup.find(name);
+        } catch (IOException error) {
+            return new AccessCheck(new Check("service-user", Status.WARN,
+                    "cannot look up " + name + "; file rows check access as "
+                            + runner, null), null);
+        }
+        if (account.isEmpty()) {
+            return new AccessCheck(new Check("service-user", Status.FAIL,
+                    name + " does not exist",
+                    "create the account, or correct"
+                            + " QWEN_MANAGED_AGENT_SERVICE_USER"), null);
+        }
+        return new AccessCheck(new Check("service-user", Status.PASS,
+                name + " (groups " + String.join(", ",
+                        new TreeSet<>(account.get().groups())) + ")",
+                null), account.get());
+    }
+
+    // The server reads these files as its service account, which may not be
+    // the account running preflight.
+    private static boolean readable(Path file, ServiceAccount account) {
+        if (account == null) {
+            return Files.isReadable(file);
+        }
+        try {
+            return account.canRead(file);
+        } catch (UnsupportedOperationException error) {
+            return Files.isReadable(file);
+        } catch (IOException error) {
+            return false;
+        }
+    }
+
+    /**
+     * One row for each configuration file the server reads, which Spring
+     * found at a location named or at one of its defaults, such as
+     * ./config/application.yml in the working directory.
+     */
+    static List<Check> configFileChecks(List<Path> files,
+            ServiceAccount account) {
+        Map<Path, Set<Format>> configurations = new HashMap<>();
+        for (Path file : files) {
+            configurations.put(file, Format.named(String.valueOf(file.getFileName())));
+        }
+        return configFileChecks(files, account, Map.of(), configurations);
+    }
+
+    /**
+     * As above, with the property each config tree value file holds, and the
+     * files Spring reads as configuration files, which a value file may be,
+     * each with the formats Spring reads it in.
+     */
+    static List<Check> configFileChecks(List<Path> files, ServiceAccount account,
+            Map<Path, String> values, Map<Path, Set<Format>> configurations) {
+        if (files.isEmpty()) {
+            return List.of(new Check("config", Status.WARN,
+                    "no configuration file; packaged defaults and the"
+                            + " environment only",
+                    "create a configuration file at a location Spring reads, such as"
+                            + " config/application.yml, for the credential key ring"));
+        }
+        List<Check> checks = new ArrayList<>();
+        for (Path file : files) {
+            checks.add(configFileCheck(file, account, values.get(file),
+                    configurations.getOrDefault(file, Set.of())));
+        }
+        return checks;
+    }
+
+    static Check configFileCheck(Path file, ServiceAccount account) {
+        return configFileCheck(file, account, null);
+    }
+
+    /** As above, for a config tree value file that holds this property's value. */
+    static Check configFileCheck(Path file, ServiceAccount account, String property) {
+        return configFileCheck(file, account, property, property != null ? Set.of()
+                : Format.named(String.valueOf(file.getFileName())));
+    }
+
+    /**
+     * As above, for a config tree value file that holds this property's
+     * value, or null for none, and the formats Spring reads the file in as a
+     * configuration file, none where it reads it as none. One path can be
+     * both, as application.yml is under a config tree imported over config/;
+     * and the format is the one a location names, as
+     * file:app.yml[.properties] names .properties.
+     */
+    static Check configFileCheck(Path file, ServiceAccount account, String property,
+            Set<Format> formats) {
+        String path = file.toString();
+        if (!readable(file, account)) {
+            return account == null
+                    ? new Check("config", Status.FAIL,
+                            path + " is not readable", "chmod 600 " + path)
+                    : new Check("config", Status.FAIL,
+                            path + " is not readable by " + account.name(),
+                            unreadableFix(account.name(), path));
+        }
+        boolean secrets;
+        if (property != null && secretProperty(property)) {
+            // The property's name tells; its value need not be read.
+            secrets = true;
+        } else {
+            try {
+                secrets = holdsSecret(Files.readAllBytes(file), formats,
+                        String.valueOf(file.getFileName()));
+            } catch (IOException error) {
+                return new Check("config", Status.WARN,
+                        path + ": cannot inspect permissions", null);
+            }
+        }
+        return secrets ? sharedSecretFileCheck("config", file, path)
+                : new Check("config", Status.PASS, path, null);
+    }
+
+    /**
+     * Whether a file holds a secret, by secretProperty's one rule, as Spring
+     * reads it in each of these formats: a value holds one anywhere in it,
+     * as a JDBC URL's ?password= or a URL's user information does; a key it
+     * declares names one, or a value it declares holds one, in any of its
+     * documents, which a profile may leave inactive; or a comment would,
+     * uncommented. Read as its name says too, where a hint named another
+     * loader: what Spring does not bind is still in the file. A config tree
+     * value file Spring reads as no configuration file holds a value alone,
+     * whatever its name.
+     */
+    private static boolean holdsSecret(byte[] bytes, Set<Format> formats, String name) {
+        if (formats.isEmpty()) {
+            return valueSecret(new String(bytes, utf16(bytes) ? StandardCharsets.UTF_16
+                    : StandardCharsets.ISO_8859_1));
+        }
+        for (Format format : formats) {
+            if (holdsSecret(bytes, format)) {
+                return true;
+            }
+        }
+        for (Format named : Format.named(name)) {
+            if (!formats.contains(named) && holdsSecret(bytes, named)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** As above, in one format. */
+    private static boolean holdsSecret(byte[] bytes, Format format) {
+        String content = text(bytes, format);
+        if (valueSecret(content) || (format == Format.YAML ? yamlSecret(content, false)
+                : declaresSecret(format, bytes))) {
+            return true;
+        }
+        for (String comment : comments(content, format)) {
+            if (commentSecret(format, comment)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether text, read as Spring reads a file in this format, declares a
+     * key that names a secret or a value that holds one, in any document:
+     * .properties or XML, as YAML is by yamlSecret.
+     */
+    private static boolean declaresSecret(Format format, byte[] bytes) {
+        return declaresSecret(format, bytes, (key, value) -> true);
+    }
+
+    /** As above, of the keys this admits with their values. */
+    private static boolean declaresSecret(Format format, byte[] bytes,
+            BiPredicate<String, String> admitted) {
+        PropertySourceLoader loader = new PropertiesPropertySourceLoader();
+        // That loader reads a resource whose name ends in .xml as XML.
+        Resource resource = new ByteArrayResource(bytes) {
+            @Override
+            public String getFilename() {
+                return format == Format.XML ? "read.xml" : null;
+            }
+        };
+        try {
+            for (PropertySource<?> source : loader.load("read", resource)) {
+                if (source instanceof EnumerablePropertySource<?> declared) {
+                    for (String key : declared.getPropertyNames()) {
+                        Object held = declared.getProperty(key);
+                        if (admitted.test(key, String.valueOf(held)) && secretProperty(key)
+                                || held != null && valueSecret(held.toString())) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException error) {
+            // What does not parse declares no key; its comments still tell.
+        }
+        return false;
+    }
+
+    /**
+     * Whether a comment would set a secret uncommented: read in the file's
+     * format, its entries one by one in XML, where a comment need be no
+     * document; or, in YAML and .properties, as the key and value line both
+     * write, as "# spring.datasource.password=x" is in YAML. Prose is no
+     * setting: a key with white space in it in YAML, as "Database password:"
+     * is, and in .properties, which takes white space as a separator, a key
+     * white space ends but for one with a dot in it and a one-word value,
+     * as "# spring.datasource.password hunter2" has and
+     * "# Password rotation is yearly" has not.
+     */
+    private static boolean commentSecret(Format format, String comment) {
+        if (format == Format.XML) {
+            if (declaresSecret(format, (XML_PROPERTIES + "<properties>" + comment
+                    + "</properties>").getBytes(StandardCharsets.UTF_8))) {
+                return true;
+            }
+            Matcher entry = XML_ENTRY.matcher(comment);
+            while (entry.find()) {
+                if (secretProperty(entry.group(1)) || valueSecret(entry.group(2))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (format == Format.YAML ? yamlSecret(comment, true)
+                : declaresSecret(format, comment.getBytes(StandardCharsets.ISO_8859_1),
+                        (key, value) -> key.contains(".") && !value.isBlank()
+                                && value.strip().chars().noneMatch(Character::isWhitespace))) {
+            return true;
+        }
+        Matcher setting = WRITTEN_SETTING.matcher(comment);
+        return setting.matches()
+                && (secretProperty(setting.group(1)) || valueSecret(setting.group(2)));
+    }
+
+    /**
+     * Whether YAML names a secret, by its keys and values, in any document;
+     * in prose, but a key with white space in it. It is read as Spring's
+     * loader reads it, its nodes composed and walked rather than built.
+     */
+    private static boolean yamlSecret(String text, boolean prose) {
+        try {
+            for (Node node : ServerEnvironment.yaml(false).composeAll(new StringReader(text))) {
+                if (new YamlWalk(prose).secret(node)) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException unreadable) {
+            // YAML that does not parse declares nothing.
+        }
+        return false;
+    }
+
+    /**
+     * One walk over a document's nodes, which aliases share. A key is judged
+     * wherever a map holds it, a set's members and pairs' keys among them,
+     * which Spring binds as values, and the keys a merge adds where the map
+     * they come from is: a superset of the names Spring binds. Each node is
+     * walked once, with a stack rather than by recursion. Which nodes lead to
+     * a secret's name is found once for the document, and a node found to
+     * bind nothing is kept, while a value found to bind ends the walk, as its
+     * key named a secret; so neither a chain of aliases nor one that holds
+     * itself, nor many keys or values sharing one, costs more than its nodes
+     * a few times.
+     */
+    private static final class YamlWalk {
+        private final boolean prose;
+        private final Set<Node> seen = identities();
+        private final Set<Node> unbound = identities();
+        private Node root;
+        private Set<Node> naming;
+
+        YamlWalk(boolean prose) {
+            this.prose = prose;
+        }
+
+        boolean secret(Node root) {
+            this.root = root;
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(root);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (!seen.add(node)) {
+                    continue;
+                }
+                if (node instanceof ScalarNode scalar) {
+                    if (valueSecret(scalar.getValue())) {
+                        return true;
+                    }
+                } else if (node instanceof SequenceNode sequence) {
+                    sequence.getValue().forEach(pending::push);
+                } else if (node instanceof MappingNode mapping) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        pending.push(tuple.getKeyNode());
+                        pending.push(tuple.getValueNode());
+                        if (names(tuple.getKeyNode()) && binds(tuple.getValueNode())) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Whether a key names a secret: a string, or anything in a collection
+         * Spring writes into the property's name; in prose, not one with
+         * white space in it. A merge key names nothing, being no string.
+         */
+        private boolean names(Node key) {
+            if (key instanceof ScalarNode scalar) {
+                return name(scalar);
+            }
+            if (naming == null) {
+                naming = naming();
+            }
+            return naming.contains(key);
+        }
+
+        /**
+         * The document's nodes a secret's name can be reached from: the
+         * names, then each node that holds one, as a parent of one found.
+         */
+        private Set<Node> naming() {
+            Map<Node, List<Node>> parents = new IdentityHashMap<>();
+            Set<Node> found = identities();
+            Set<Node> visited = identities();
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(root);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (!visited.add(node)) {
+                    continue;
+                }
+                List<Node> children = new ArrayList<>();
+                if (node instanceof ScalarNode scalar) {
+                    if (name(scalar)) {
+                        found.add(scalar);
+                    }
+                } else if (node instanceof SequenceNode sequence) {
+                    children.addAll(sequence.getValue());
+                } else if (node instanceof MappingNode mapping) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        children.add(tuple.getKeyNode());
+                        children.add(tuple.getValueNode());
+                    }
+                }
+                for (Node child : children) {
+                    parents.computeIfAbsent(child, each -> new ArrayList<>()).add(node);
+                    pending.push(child);
+                }
+            }
+            Deque<Node> spread = new ArrayDeque<>(found);
+            while (!spread.isEmpty()) {
+                for (Node parent : parents.getOrDefault(spread.pop(), List.of())) {
+                    if (found.add(parent)) {
+                        spread.push(parent);
+                    }
+                }
+            }
+            return found;
+        }
+
+        private boolean name(ScalarNode scalar) {
+            return Tag.STR.equals(scalar.getTag())
+                    && !(prose && scalar.getValue().chars().anyMatch(Character::isWhitespace))
+                    && secretProperty(scalar.getValue());
+        }
+
+        /**
+         * Whether a value binds a property, as Spring flattens it: a scalar,
+         * an empty list, a set or pairs do; a map or list does where something
+         * in it does, so {} and [{}] bind nothing, nor does a merge of nothing.
+         */
+        private boolean binds(Node value) {
+            Set<Node> visited = identities();
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(value);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (unbound.contains(node) || !visited.add(node)) {
+                    continue;
+                }
+                if (node instanceof MappingNode mapping && !Tag.SET.equals(mapping.getTag())) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        // A merge adds the entries of what it names, not a value of its own.
+                        if (Tag.MERGE.equals(tuple.getKeyNode().getTag())
+                                && tuple.getValueNode() instanceof SequenceNode sources) {
+                            sources.getValue().forEach(pending::push);
+                        } else {
+                            pending.push(tuple.getValueNode());
+                        }
+                    }
+                } else if (node instanceof SequenceNode sequence && !sequence.getValue().isEmpty()
+                        && !Tag.PAIRS.equals(sequence.getTag())) {
+                    sequence.getValue().forEach(pending::push);
+                } else {
+                    return true;
+                }
+            }
+            unbound.addAll(visited);
+            return false;
+        }
+    }
+
+    private static Set<Node> identities() {
+        return Collections.newSetFromMap(new IdentityHashMap<>());
+    }
+
+    /**
+     * The comments of a text as its format reads them, each without its
+     * markers: in YAML, from a # at a line's start or after white space to
+     * the next, which a quoted or block scalar may also hold, which only adds
+     * text to judge; in .properties, a line that starts with # or !, or with
+     * one escaped, which Spring reads as one too, but one that a value
+     * continues onto;
+     * and the line after one that ends in a backslash, which Spring may read
+     * into it; in XML, what lies between <!-- and -->.
+     */
+    private static List<String> comments(String text, Format format) {
+        List<String> comments = new ArrayList<>();
+        if (format == Format.XML) {
+            Matcher comment = XML_COMMENT.matcher(text);
+            while (comment.find()) {
+                comments.add(comment.group(1));
+            }
+            return comments;
+        }
+        if (format == Format.YAML) {
+            for (String line : text.split("\\R")) {
+                int from = -1;
+                for (int at = line.indexOf('#'); at >= 0; at = line.indexOf('#', at + 1)) {
+                    if (at == 0 || Character.isWhitespace(line.charAt(at - 1))) {
+                        if (from >= 0) {
+                            comments.add(COMMENT_START.matcher(line.substring(from, at))
+                                    .replaceFirst(""));
+                        }
+                        from = at;
+                    }
+                }
+                if (from >= 0) {
+                    comments.add(COMMENT_START.matcher(line.substring(from)).replaceFirst(""));
+                }
+            }
+            return comments;
+        }
+        boolean continued = false;
+        boolean swallowed = false;
+        for (String line : text.split("\r\n|\r|\n", -1)) {
+            String start = INDENT.matcher(line).replaceFirst("");
+            start = ESCAPED_MARKER.matcher(start).replaceFirst("#");
+            // An odd run of backslashes at the end escapes the line break.
+            int backslashes = 0;
+            while (backslashes < line.length()
+                    && line.charAt(line.length() - 1 - backslashes) == '\\') {
+                backslashes++;
+            }
+            boolean odd = backslashes % 2 == 1;
+            if (swallowed || !continued && (start.startsWith("#") || start.startsWith("!"))) {
+                comments.add(COMMENT_START.matcher(start).replaceFirst(""));
+                swallowed = odd;
+                continued = false;
+                continue;
+            }
+            // A backslash alone where a key would start escapes the break
+            // before any value, so the next line starts afresh.
+            continued = odd && (continued || !start.equals("\\"));
+        }
+        return comments;
+    }
+
+    /**
+     * Whether a value holds a secret: a parameter named as a secret
+     * property, or the password of a URL's user information.
+     */
+    private static boolean valueSecret(String value) {
+        if (URL_PASSWORD.matcher(value).find()) {
+            return true;
+        }
+        Matcher parameter = VALUE_PARAMETER.matcher(value);
+        while (parameter.find()) {
+            if (secretProperty(parameter.group(1))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a property holds a secret, as the configuration reference
+     * marks them: a password, token or key, or one of a map of keys, such as
+     * previous-credential-keys.<id>. A path to a file that holds one, such as
+     * kubernetes-token-file, and credential-key-id hold none.
+     */
+    static boolean secretProperty(String property) {
+        for (String element : property.split("[./\\[\\]]+")) {
+            // Spring matches names ignoring case, dashes and underscores, so
+            // credential-key, credentialKey, credential_key and credentialkey
+            // are one name, and each ends in key.
+            String lower = element.toLowerCase(Locale.ROOT);
+            if (SECRET_SUFFIXES.stream().anyMatch(lower::endsWith)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // As Spring decodes a file: YAML as UTF-8, or as its byte order mark
+    // says, with SnakeYAML's own reader; .properties as ISO-8859-1; XML as
+    // its declaration says, whose comment markers are ASCII in all but
+    // UTF-16. Bytes YAML cannot decode Spring would not read, nor start on.
+    // A .properties file an editor marked, Spring reads as ISO-8859-1
+    // anyway: a UTF-8 mark into its first key, UTF-16 throughout. Its
+    // comments are found as the editor wrote them.
+    private static String text(byte[] bytes, Format format) {
+        if (format == Format.YAML) {
+            StringWriter text = new StringWriter();
+            try (Reader reader = new UnicodeReader(new ByteArrayInputStream(bytes))) {
+                reader.transferTo(text);
+                return text.toString();
+            } catch (IOException | RuntimeException undecodable) {
+                return new String(bytes, StandardCharsets.ISO_8859_1);
+            }
+        }
+        boolean utf16 = utf16(bytes);
+        int start = format == Format.PROPERTIES && !utf16 && bytes.length >= 3
+                && (bytes[0] & 0xff) == 0xef && (bytes[1] & 0xff) == 0xbb
+                && (bytes[2] & 0xff) == 0xbf ? 3 : 0;
+        return new String(bytes, start, bytes.length - start,
+                utf16 ? StandardCharsets.UTF_16 : StandardCharsets.ISO_8859_1);
+    }
+
+    private static boolean utf16(byte[] bytes) {
+        return bytes.length >= 2 && ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff
+                || (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe);
+    }
+
+    static String unreadableFix(String account, String path) {
+        return "chown " + account + " " + path + ", chmod 600 " + path
+                + ", and let " + account
+                + " enter every directory on its path, following symbolic links";
+    }
+
+    // One policy for every file that holds a secret: WARN, not FAIL, when
+    // anyone but its owner can read it, so the operator sees the chmod.
+    private static Check sharedSecretFileCheck(String row, Path file,
+            String path) {
+        try {
+            Set<PosixFilePermission> permissions =
+                    Files.getPosixFilePermissions(file);
+            if (permissions.contains(PosixFilePermission.GROUP_READ)
+                    || permissions.contains(PosixFilePermission.OTHERS_READ)) {
+                return new Check(row, Status.WARN,
+                        path + " is group- or world-readable",
+                        "chmod 600 " + path);
+            }
+        } catch (IOException | UnsupportedOperationException error) {
+            return new Check(row, Status.WARN,
+                    path + ": cannot inspect permissions", null);
+        }
+        return new Check(row, Status.PASS, path, null);
+    }
+
+    private static Check keyRingCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
+        String active = broker.getCredentialKeyId();
+        Set<String> previous = broker.getPreviousCredentialKeys().keySet();
+        if (StringUtils.isBlank(active)) {
+            return previous.isEmpty()
+                    ? new Check("key-ring", Status.SKIP,
+                            "no Runtime credential key configured", null)
+                    : new Check("key-ring", Status.FAIL,
+                            "previous keys without an active key",
+                            "set runtime-broker.credential-key-id");
+        }
+        String detail = "active=" + active
+                + (previous.isEmpty() ? ""
+                        : " previous=" + String.join(",", previous));
+        return new Check("key-ring", Status.PASS, detail, null);
+    }
+
+    static Check authCheck(
+            ConfigurableEnvironment environment,
+            ManagedAgentProperties properties) {
+        String address = environment.getProperty("server.address",
+                "127.0.0.1");
+        try {
+            ServerProperties server = Binder.get(environment)
+                    .bind("server", Bindable.of(ServerProperties.class))
+                    .orElseGet(ServerProperties::new);
+            WebMvcProperties mvc = Binder.get(environment)
+                    .bind("spring.mvc", Bindable.of(WebMvcProperties.class))
+                    .orElseGet(WebMvcProperties::new);
+            new BrokerSecurity(properties, server, mvc);
+        } catch (IllegalStateException error) {
+            return new Check("auth", Status.FAIL, error.getMessage(),
+                    "correct the auth or bind configuration");
+        } catch (RuntimeException error) {
+            return new Check("auth", Status.FAIL,
+                    "cannot bind server configuration: " + rootMessage(error),
+                    "correct the server or spring.mvc settings");
+        }
+        if (properties.getAuth().isAllowInsecureBind()) {
+            return new Check("auth", Status.WARN,
+                    "allow-insecure-bind publishes without authentication",
+                    "remove QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND");
+        }
+        return new Check("auth", Status.PASS,
+                "address=" + address + " mode="
+                        + String.valueOf(properties.getAuth().getMode()),
+                null);
+    }
+
+    // Reads the values after the startup validation applied its defaults.
+    static Check sessionStoreCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.SessionStore store =
+                properties.getSessionStore();
+        if (!properties.getHarness().isEnabled() || !store.isEnabled()) {
+            return new Check("session-store", Status.SKIP, "disabled", null);
+        }
+        if (StringUtils.isBlank(store.getBaseUrl())) {
+            return new Check("session-store", Status.FAIL,
+                    "base URL is empty",
+                    "set QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL to the"
+                            + " listener the Harness reaches");
+        }
+        if (StringUtils.isBlank(store.getWorkspaceId())) {
+            return new Check("session-store", Status.FAIL,
+                    "workspace ID is empty",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_CWD or"
+                            + " QWEN_MANAGED_AGENT_WORKSPACE_ID");
+        }
+        return new Check("session-store", Status.PASS,
+                store.getBaseUrl() + ", workspace "
+                        + store.getWorkspaceId(),
+                null);
+    }
+
+    static Check credentialsFileCheck(ManagedAgentProperties properties) {
+        return credentialsFileCheck(properties, null);
+    }
+
+    static Check credentialsFileCheck(ManagedAgentProperties properties,
+            ServiceAccount account) {
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        if (!harness.isEnabled()) {
+            return new Check("credentials", Status.SKIP, "disabled", null);
+        }
+        String file = harness.getCredentialsFile();
+        if (StringUtils.isBlank(file)) {
+            return new Check("credentials", Status.SKIP,
+                    StringUtils.isBlank(harness.getToken())
+                            ? "no Harness credentials configured"
+                            : "Harness credentials configured directly",
+                    null);
+        }
+        Path path;
+        try {
+            path = Path.of(file);
+        } catch (RuntimeException error) {
+            return new Check("credentials", Status.WARN,
+                    file + ": cannot inspect permissions", null);
+        }
+        // The server reads the file as its service account at startup.
+        if (!readable(path, account)) {
+            return account == null
+                    ? new Check("credentials", Status.FAIL,
+                            file + " is not readable",
+                            "chown it to the service account, then chmod 600 "
+                                    + file)
+                    : new Check("credentials", Status.FAIL,
+                            file + " is not readable by " + account.name(),
+                            unreadableFix(account.name(), file));
+        }
+        return sharedSecretFileCheck("credentials", path, file);
+    }
+
+    /**
+     * Probes the Harness, then negotiates with it as the first Session does,
+     * and compares its Qwen Code version with the distribution's manifest.
+     */
+    static Check harnessCheck(ManagedAgentProperties properties,
+            String expectedQwenCodeVersion) {
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        if (!harness.isEnabled()) {
+            return new Check("harness", Status.SKIP, "disabled", null);
+        }
+        String file = harness.getCredentialsFile();
+        // Probing with whatever startup left bound would test credentials
+        // it just refused.
+        if (StringUtils.isNotBlank(file)
+                && !properties.harnessCredentialsApplied()) {
+            return new Check("harness", Status.SKIP,
+                    "credentials were not read from " + file
+                            + "; see the validation row",
+                    null);
+        }
+        String tokenSetting = StringUtils.isBlank(file)
+                ? "QWEN_MANAGED_AGENT_HARNESS_TOKEN"
+                : "QWEN_SERVER_TOKEN in " + file;
+        if (StringUtils.isBlank(harness.getToken())) {
+            return new Check("harness", Status.FAIL, "token is empty",
+                    "set " + tokenSetting);
+        }
+        // The shipped templates' placeholder works as a token, but anyone
+        // can read it in the distribution.
+        if (harness.getToken().startsWith("replace-")) {
+            return new Check("harness", Status.FAIL,
+                    "token is still the shipped template placeholder",
+                    "set " + tokenSetting);
+        }
+        String digestSetting = StringUtils.isBlank(file)
+                ? "QWEN_MANAGED_AGENT_CAPABILITY_DIGEST"
+                : "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in " + file;
+        if (!isDigest(harness.getCapabilityDigest())) {
+            return new Check("harness", Status.FAIL,
+                    "capability digest is not sha256:<64 lowercase hex>",
+                    "set " + digestSetting);
+        }
+        if (harness.getPool().isEnabled()) {
+            if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
+                return new Check("harness", Status.FAIL, "pool Session Store or binding key is missing", "enable session-store with a binding key");
+            }
+            return new Check("harness", Status.SKIP, "pool endpoints negotiate identity and TLS through the configured discovery source",
+                    "verify individual Harness pool readiness after startup");
+        }
+        String baseUrl = harness.getBaseUrl();
+        if (StringUtils.isBlank(baseUrl)) {
+            return new Check("harness", Status.FAIL, "base URL is empty",
+                    "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL");
+        }
+        // A URL the probe cannot use fails on its setting alone: the parser's
+        // own message quotes the value, credentials included. The server parses
+        // this property untrimmed, so a padded value has to fail here too.
+        URI origin = harnessOrigin(baseUrl);
+        if (origin == null) {
+            return unusableHarnessUrl();
+        }
+        String url = trimTrailingSlash(baseUrl) + "/capabilities";
+        try {
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofMillis(TIMEOUT_MILLIS))
+                    .build();
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                    .timeout(Duration.ofMillis(TIMEOUT_MILLIS))
+                    .header("Accept", "application/json")
+                    .header("Authorization", "Bearer " + harness.getToken())
+                    .GET()
+                    .build();
+            HttpResponse<String> response = client.send(request,
+                    HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 401 || response.statusCode() == 403) {
+                return new Check("harness", Status.FAIL,
+                        url + " rejected the configured token ("
+                                + response.statusCode() + ")",
+                        "set " + tokenSetting + " to the token the"
+                                + " Harness accepts");
+            }
+            if (response.statusCode() != 200) {
+                return new Check("harness", Status.FAIL,
+                        url + " answered " + response.statusCode(),
+                        "start a compatible Hosted Harness");
+            }
+            return compatibilityCheck(url, origin, response.body(), properties,
+                    tokenSetting, StringUtils.isBlank(file), digestSetting,
+                    expectedQwenCodeVersion);
+        } catch (IOException | RuntimeException error) {
+            return new Check("harness", Status.FAIL,
+                    url + " is unreachable: " + printable(rootMessage(error)),
+                    "start `qwen serve --profile hosted-harness`");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return new Check("harness", Status.FAIL,
+                    url + " probe was interrupted", null);
+        }
+    }
+
+    private static Check compatibilityCheck(String url, URI origin, String body,
+            ManagedAgentProperties properties, String tokenSetting,
+            boolean environmentDigest, String digestSetting,
+            String expectedQwenCodeVersion) {
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        String install = expectedQwenCodeVersion == null
+                ? "install the Qwen Code version the distribution manifest names"
+                : "install Qwen Code " + expectedQwenCodeVersion;
+        String retry = "check that the Harness is reachable, then run --check again";
+        HarnessCapabilities capabilities;
+        // The same client and rules the first Session uses.
+        try (HarnessNegotiation negotiation = new HarnessNegotiation(origin, harness.getToken(),
+                harness.getCapabilityDigest(), Duration.ofMillis(TIMEOUT_MILLIS))) {
+            capabilities = negotiation.capabilities();
+        } catch (HarnessCapabilityFailure mismatch) {
+            // Without the credentials file, each process has its own variable.
+            return new Check("harness", Status.FAIL,
+                    url + " advertises another capability digest",
+                    environmentDigest
+                            ? "give the Harness's QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"
+                                    + " and the control plane's " + digestSetting
+                                    + " the same value"
+                            : "give the Harness and the control plane the same "
+                                    + digestSetting);
+        } catch (HarnessTransportFailure | HarnessCapacityFailure unanswered) {
+            return new Check("harness", Status.FAIL,
+                    url + " did not answer the compatibility request: "
+                            + printable(rootMessage(unanswered)), retry);
+        } catch (HarnessHttpFailure refused) {
+            int status = refused.getStatusCode();
+            // The status alone: the response body is the Harness's text.
+            return status == 401 || status == 403
+                    ? new Check("harness", Status.FAIL,
+                            url + " rejected the configured token on the"
+                                    + " compatibility request (" + status + ")",
+                            "set " + tokenSetting + " to the token the Harness accepts")
+                    : new Check("harness", Status.FAIL,
+                            url + " answered the compatibility request with HTTP " + status,
+                            retry);
+        } catch (HarnessFailure incompatible) {
+            return new Check("harness", Status.FAIL,
+                    url + " is not a compatible Hosted Harness: "
+                            + printable(rootMessage(incompatible)), install);
+        } catch (IllegalArgumentException unusable) {
+            return new Check("harness", Status.FAIL,
+                    "the Harness base URL is not usable: "
+                            + printable(rootMessage(unusable)),
+                    "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL to the Harness http(s)"
+                            + " origin, without credentials, a query or a fragment");
+        }
+        Check lifecycle = lifecycleCheck(url, properties, capabilities, install);
+        if (lifecycle != null) {
+            return lifecycle;
+        }
+        String version = qwenCodeVersion(body);
+        String detail = url + " compatible: Hosted Harness protocol "
+                + capabilities.getCurrentProtocolVersion()
+                + ", capability digest matches"
+                + (version == null ? "" : ", Qwen Code " + version);
+        List<String> warnings = new ArrayList<>();
+        List<String> fixes = new ArrayList<>();
+        if (expectedQwenCodeVersion != null && version == null) {
+            warnings.add("it does not advertise a readable Qwen Code version, so"
+                    + " it was not compared with " + expectedQwenCodeVersion);
+            fixes.add(install);
+        } else if (expectedQwenCodeVersion != null
+                && !version.equals(expectedQwenCodeVersion)) {
+            warnings.add("this distribution was built for " + expectedQwenCodeVersion);
+            fixes.add(install);
+        }
+        // The connector refuses a Shell Session that pins MCP servers without it.
+        if (harness.isWorkspaceShellEnabled()
+                && !capabilities.getFeatures().contains(SHELL_MCP_FEATURE)) {
+            warnings.add("it does not offer " + SHELL_MCP_FEATURE
+                    + ", so Shell Sessions whose agent pins MCP servers fail");
+            fixes.add("upgrade the Harness to a build that offers " + SHELL_MCP_FEATURE
+                    + ", or disable Shell for agents that pin MCP servers");
+        }
+        return warnings.isEmpty()
+                ? new Check("harness", Status.PASS, detail, null)
+                : new Check("harness", Status.WARN,
+                        detail + ", but " + String.join("; ", warnings),
+                        String.join("; ", fixes));
+    }
+
+    // Each Workspace profile the deployment may admit needs its lifecycle, by
+    // the rule the connector applies (WorkspaceToolProfiles.lifecycleProtocol).
+    private static Check lifecycleCheck(String url, ManagedAgentProperties properties,
+            HarnessCapabilities capabilities, String install) {
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        Set<String> profiles = new LinkedHashSet<>();
+        if (harness.isWorkspaceFilesEnabled()) {
+            profiles.add(WorkspaceToolProfiles.FILES);
+            profiles.addAll(properties.getDefinitionToolProfiles());
+        }
+        if (harness.isWorkspaceShellEnabled()) {
+            profiles.add(WorkspaceToolProfiles.SHELL);
+        }
+        // The Harness takes its list whole, so name every profile to keep.
+        Set<String> v2Profiles = new LinkedHashSet<>();
+        for (String advertised : capabilities.getLifecycleV2Profiles()) {
+            if (WorkspaceToolProfiles.lifecycleProtocol(advertised) == 2) {
+                v2Profiles.add(advertised);
+            }
+        }
+        for (String profile : profiles) {
+            if (WorkspaceToolProfiles.lifecycleProtocol(profile) == 2) {
+                v2Profiles.add(profile);
+            }
+        }
+        for (String profile : profiles) {
+            int protocol = WorkspaceToolProfiles.lifecycleProtocol(profile);
+            if (protocol == 1 && capabilities.getLifecycleProtocolVersion() != 1) {
+                return new Check("harness", Status.FAIL,
+                        url + " does not support Workspace files", install);
+            }
+            if (protocol == 2 && !capabilities.getLifecycleV2Profiles().contains(profile)) {
+                return new Check("harness", Status.FAIL,
+                        url + " does not offer " + profile,
+                        "add " + profile + " to QWEN_HOSTED_LIFECYCLE_V2_PROFILES in the"
+                                + " Harness environment; an explicit value replaces the"
+                                + " whole list, so set it to "
+                                + String.join(",", v2Profiles));
+            }
+        }
+        return null;
+    }
+
+    // A Harness string reaches a root-run report, so only a version's shape.
+    private static String qwenCodeVersion(String body) {
+        try {
+            JsonNode version = JSON.readTree(body)
+                    .path("qwenCodeVersion");
+            return version.isTextual()
+                    && QWEN_CODE_VERSION.matcher(version.asText()).matches()
+                    ? version.asText() : null;
+        } catch (IOException | RuntimeException error) {
+            return null;
+        }
+    }
+
+    /**
+     * The Qwen Code version the reference distribution was built for, from the
+     * manifest.json the database row also reads.
+     */
+    static String distributionQwenCodeVersion() {
+        Path manifest = manifestPath();
+        return manifest == null ? null : manifestQwenCodeVersion(manifest);
+    }
+
+    static String manifestQwenCodeVersion(Path manifest) {
+        try {
+            JsonNode version = JSON.readTree(manifest.toFile())
+                    .path("compatibility").path("qwenCodeVersion");
+            return version.isTextual() ? version.asText() : null;
+        } catch (IOException | RuntimeException error) {
+            return null;
+        }
+    }
+
+    // KillMode=process leaves Runtime workers running after the server stops,
+    // and a following start races them for the state directory and Workspace.
+    // Workers run with the state directory as their working directory.
+    static Check workersCheck(ManagedAgentProperties properties,
+            Supplier<List<ProcessHandle>> processes, boolean online) {
+        ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
+        if (!broker.isEnabled() || !"local-process".equals(broker.getProvisioner())
+                || StringUtils.isBlank(broker.getStateDirectory())) {
+            return new Check("workers", Status.SKIP,
+                    "no local-process Runtime configured", null);
+        }
+        if (!Files.isDirectory(Path.of("/proc"))) {
+            return new Check("workers", Status.SKIP,
+                    "not checked without /proc", null);
+        }
+        Path state;
+        try {
+            state = Path.of(broker.getStateDirectory()).toRealPath();
+        } catch (NoSuchFileException missing) {
+            return new Check("workers", Status.SKIP,
+                    "state directory does not exist yet", null);
+        } catch (IOException | RuntimeException unreadable) {
+            return new Check("workers", Status.WARN,
+                    broker.getStateDirectory() + " cannot be resolved ("
+                            + rootMessage(unreadable) + "), so workers there"
+                            + " were not checked",
+                    "run --check as root or as the service account");
+        }
+        // A durable Broker adopts the workers that outlive a restart.
+        boolean durable = broker.isDurableLocalProcess();
+        if (online && durable) {
+            return new Check("workers", Status.SKIP,
+                    "online: the running durable Broker adopts surviving workers,"
+                            + " so they cannot be told apart from leftovers", null);
+        }
+        long self = ProcessHandle.current().pid();
+        List<Long> alive = new ArrayList<>();
+        long uninspected = 0;
+        for (ProcessHandle process : processes.get()) {
+            WorkerMatch match = workerMatch(process, state, self,
+                    broker.getNodeExecutable());
+            if (match == WorkerMatch.UNREADABLE) {
+                uninspected++;
+            } else if (match == WorkerMatch.MATCH
+                    // The running server's own workers are its children.
+                    && (!online || isOrphan(process))) {
+                alive.add(process.pid());
+            }
+        }
+        alive.sort(Long::compare);
+        if (!alive.isEmpty()) {
+            String fix;
+            if (durable) {
+                fix = "a durable Broker adopts them when the server starts; to"
+                        + " start clean, as an upgrade does, stop them first:"
+                        + " systemctl kill --kill-whom=all -s TERM"
+                        + " qwen-managed-agent-server";
+            } else if (online) {
+                fix = "online: to reap them without stopping the service, kill"
+                        + " those pids; systemctl kill --kill-whom=all -s TERM"
+                        + " qwen-managed-agent-server would also stop the running"
+                        + " server";
+            } else {
+                fix = "stop them before starting the server: systemctl kill"
+                        + " --kill-whom=all -s TERM qwen-managed-agent-server,"
+                        + " or kill those pids";
+            }
+            String detail = alive.size()
+                    + " Runtime worker(s) of an earlier run are alive (pid "
+                    + alive.stream().map(String::valueOf)
+                            .collect(Collectors.joining(", "))
+                    + ")";
+            // The list is not complete when a matching process was not read.
+            if (uninspected > 0) {
+                detail += "; " + uninspected + " more matching process(es) could"
+                        + " not be inspected, so leftover workers were not ruled"
+                        + " out";
+                fix += "; run --check as root or as the service account";
+            }
+            return new Check("workers", Status.WARN, detail, fix);
+        }
+        // Another account's workers look exactly like this: argv readable,
+        // /proc/<pid>/exe and cwd not.
+        if (uninspected > 0) {
+            return new Check("workers", Status.WARN, uninspected
+                    + " process(s) matching the Runtime worker command line could"
+                    + " not be inspected, so leftover workers were not ruled out",
+                    "run --check as root or as the service account");
+        }
+        return new Check("workers", Status.PASS, online
+                ? "online: no Runtime worker outlived an earlier run"
+                : "no Runtime worker of an earlier run is alive", null);
+    }
+
+    enum WorkerMatch {
+        MATCH, UNREADABLE, OTHER
+    }
+
+    static WorkerMatch workerMatch(ProcessHandle process, Path state, long self,
+            String nodeExecutable) {
+        ProcessHandle.Info info = process.info();
+        if (process.pid() == self || info.arguments().isEmpty()) {
+            return WorkerMatch.OTHER;
+        }
+        if (info.command().isEmpty()) {
+            return isWorkerArguments(info.arguments().get())
+                    ? WorkerMatch.UNREADABLE : WorkerMatch.OTHER;
+        }
+        if (!isWorkerCommand(info.command().get(), info.arguments().get(),
+                nodeExecutable)) {
+            return WorkerMatch.OTHER;
+        }
+        try {
+            String cwd = Files.readSymbolicLink(Path.of("/proc",
+                    Long.toString(process.pid()), "cwd")).toString();
+            if (cwd.endsWith(DELETED_SUFFIX)) {
+                cwd = cwd.substring(0, cwd.length() - DELETED_SUFFIX.length());
+            }
+            return Path.of(cwd).equals(state)
+                    ? WorkerMatch.MATCH : WorkerMatch.OTHER;
+        } catch (IOException | RuntimeException unreadable) {
+            return WorkerMatch.UNREADABLE;
+        }
+    }
+
+    // A worker runs `node <entry> managed-runtime-worker`. The command is
+    // the executable's real path, and the arguments leave out argv[0], so the
+    // marker follows the entry's absolute path. The Broker spawns whatever
+    // node-executable names, so a renamed build counts too; an earlier run's
+    // worker may still be a `node*` binary.
+    static boolean isWorkerCommand(String command, String[] arguments,
+            String nodeExecutable) {
+        return isWorkerArguments(arguments)
+                && (Path.of(command).getFileName().toString().startsWith("node")
+                        || samePath(command, nodeExecutable));
+    }
+
+    // The configured path may be a symlink while /proc/<pid>/exe names the
+    // target, so compare the files rather than how their paths are spelled.
+    private static boolean samePath(String command, String configured) {
+        if (configured == null || configured.isBlank()) {
+            return false;
+        }
+        try {
+            return Files.isSameFile(Path.of(command), Path.of(configured));
+        } catch (IOException | RuntimeException unreadable) {
+            return Path.of(command).toAbsolutePath().normalize()
+                    .equals(Path.of(configured).toAbsolutePath().normalize());
+        }
+    }
+
+    private static boolean isWorkerArguments(String[] arguments) {
+        int last = arguments.length - 1;
+        return last >= 1 && WORKER_ARG.equals(arguments[last])
+                && arguments[last - 1].startsWith("/");
+    }
+
+    // KillMode=process reparents a stopped server's workers to init.
+    private static boolean isOrphan(ProcessHandle process) {
+        return process.parent().map(parent -> !parent.info().command()
+                .map(command -> isServerCommand(
+                        Path.of(command).getFileName().toString()))
+                .orElse(false)).orElse(true);
+    }
+
+    // A replaced JDK binary keeps its inode, and the kernel marks the link.
+    static boolean isServerCommand(String fileName) {
+        String name = fileName.endsWith(DELETED_SUFFIX)
+                ? fileName.substring(0, fileName.length()
+                        - DELETED_SUFFIX.length())
+                : fileName;
+        return name.equals("java");
+    }
+
+    // --online: the running server holds the ports, so check that it
+    // listens there instead of trying to bind them.
+    // A port outside the TCP range would throw out of the row, aborting the
+    // whole report instead of failing this one check.
+    private static Check portRangeCheck(String name, int port) {
+        return new Check(name + "-port", Status.FAIL,
+                port + " is not a TCP port",
+                "set the configured port between 0 and 65535");
+    }
+
+    static Check listeningCheck(String name, String address, int port) {
+        if (port < 0 || port > 65535) {
+            return portRangeCheck(name, port);
+        }
+        String host = address == null || address.isBlank()
+                || "0.0.0.0".equals(address) || "::".equals(address)
+                ? "127.0.0.1" : address;
+        InetSocketAddress endpoint = new InetSocketAddress(host, port);
+        if (endpoint.isUnresolved()) {
+            return new Check(name + "-port", Status.FAIL,
+                    "cannot resolve " + host, "fix the bind address");
+        }
+        try (Socket socket = new Socket()) {
+            socket.connect(endpoint, TIMEOUT_MILLIS);
+            return new Check(name + "-port", Status.PASS,
+                    host + ":" + port + " is listening (online)", null);
+        } catch (IOException | RuntimeException error) {
+            return new Check(name + "-port", Status.FAIL,
+                    "nothing listens on " + host + ":" + port + ": "
+                            + rootMessage(error),
+                    "start the server, or run --check without --online"
+                            + " while it is stopped");
+        }
+    }
+
+    static Check toolPathCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
+        boolean files = harness.isWorkspaceFilesEnabled();
+        boolean shell = harness.isWorkspaceShellEnabled();
+        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell)) {
+            return new Check("tool-path", Status.FAIL,
+                    ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())
+                                    ? "External Workspace Runtime is a storage provisioning prerequisite"
+                                    : "External Runtime supports scratch Sessions only",
+                    "disable managed Workspace files and Shell");
+        }
+        if (broker.getSsh().isEnabled()
+                && (!files || broker.getSsh().getNodes().isEmpty())) {
+            return new Check("tool-path", Status.FAIL,
+                    "SSH Runtime requires Workspace files and configured nodes",
+                    "enable Workspace files and add runtime-broker.ssh.nodes");
+        }
+        if (!StringUtils.isBlank(broker.getWorkspaceCreationRoot()) && !files) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace creation requires Workspace files",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true");
+        }
+        if (shell && !files) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace Shell requires Workspace files",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true");
+        }
+        if (!files) {
+            return new Check("tool-path", Status.SKIP,
+                    "Workspace files disabled", null);
+        }
+        String mode = harness.getApprovalMode() == null
+                ? "" : harness.getApprovalMode().toLowerCase(Locale.ROOT);
+        if (!Set.of("yolo", "default", "auto-edit").contains(mode)) {
+            return new Check("tool-path", Status.FAIL,
+                    "unsupported approval mode " + mode,
+                    "use yolo, default or auto-edit");
+        }
+        if (shell && !Set.of("default", "auto-edit").contains(mode)) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace Shell does not support approval mode " + mode,
+                    "use default or auto-edit");
+        }
+        if (!harness.isEnabled()) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace files require the Hosted Harness",
+                    "set QWEN_MANAGED_AGENT_HARNESS_ENABLED=true");
+        }
+        if (!properties.getSessionStore().isEnabled()) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace files require the Managed Session Store",
+                    "set QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true");
+        }
+        if (!properties.getRuntimeBroker().isEnabled()) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace files require the Runtime Broker",
+                    "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true");
+        }
+        if ("static".equals(broker.getProvisioner())) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace files cannot use the static provisioner",
+                    "use the local-process provisioner");
+        }
+        if ("ssh-process".equals(broker.getProvisioner())) {
+            try {
+                new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry().validateSelected(properties);
+                return new Check("tool-path", Status.PASS, "SSH Workspace files configuration accepted", null);
+            } catch (RuntimeException error) {
+                return new Check("tool-path", Status.FAIL, rootMessage(error), "correct the SSH Runtime configuration");
+            }
+        }
+        if (!"local-process".equals(broker.getProvisioner())) {
+            return new Check("tool-path", Status.WARN,
+                    "not evaluated for provisioner " + broker.getProvisioner(),
+                    null);
+        }
+        if (!WorkspaceExecutionProfile.admitsIsolationClass(
+                broker.getIsolationClass())) {
+            return new Check("tool-path", Status.FAIL,
+                    "unsupported isolation class "
+                            + broker.getIsolationClass(),
+                    "use session isolation");
+        }
+        if (broker.getWorkspaceMounts().isEmpty()
+                && StringUtils.isBlank(broker.getWorkspaceCreationRoot())
+                && broker.getSsh().getNodes().isEmpty()) {
+            return new Check("tool-path", Status.FAIL,
+                    "no Workspace mount, creation root or SSH node",
+                    "add runtime-broker.workspace-mounts to "
+                            + "config/application.yml");
+        }
+        if (!StringUtils.isBlank(broker.getWorkspaceCreationRoot())
+                && (!broker.isDurableLocalProcess()
+                        || !broker.isVerifiedWorkspaceRecoveryEnabled())) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace creation requires durable local-process"
+                            + " execution and verified recovery",
+                    "set verified-workspace-recovery-enabled=true");
+        }
+        return new Check("tool-path", Status.PASS,
+                "Workspace files enabled in mode " + mode, null);
+    }
+
+    static List<Check> brokerChecks(
+            ManagedAgentProperties properties) {
+        List<Check> checks = new ArrayList<>();
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
+        if (!broker.isEnabled()) {
+            checks.add(new Check("broker", Status.SKIP, "disabled", null));
+            return checks;
+        }
+        String file = properties.getHarness().getCredentialsFile();
+        // Startup reads the file only while the Harness is enabled.
+        boolean readsFile = properties.getHarness().isEnabled()
+                && StringUtils.isNotBlank(file);
+        if (StringUtils.isBlank(broker.getToken())) {
+            String fix;
+            if (!readsFile) {
+                fix = "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN";
+            } else if (properties.harnessCredentialsApplied()) {
+                // The Harness takes both from the file, or neither.
+                fix = "set QWEN_MANAGED_RUNTIME_BROKER_URL and"
+                        + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN in " + file;
+            } else {
+                fix = "credentials were not read from " + file
+                        + "; see the validation row";
+            }
+            checks.add(new Check("broker", Status.FAIL, "token is empty",
+                    fix));
+        }
+        Check listen = brokerListenCheck(broker);
+        if (listen != null) {
+            checks.add(listen);
+        }
+        if (readsFile && properties.harnessCredentialsApplied()) {
+            checks.add(harnessBrokerUrlCheck(
+                    properties.harnessBrokerUrl(), broker, file));
+        }
+        if (StringUtils.isBlank(broker.getCredentialKeyId())
+                || StringUtils.isBlank(broker.getCredentialKey())) {
+            checks.add(new Check("broker", Status.FAIL,
+                    "credential key pair is incomplete",
+                    "set runtime-broker.credential-key-id and credential-key"));
+        } else if (!isCredentialKey(broker.getCredentialKey())) {
+            checks.add(new Check("broker", Status.FAIL,
+                    "credential key is not a base64-encoded 32-byte value",
+                    "generate one with `openssl rand -base64 32`"));
+        }
+        for (Map.Entry<String, String> entry
+                : broker.getPreviousCredentialKeys().entrySet()) {
+            if (!isCredentialKey(entry.getValue())) {
+                checks.add(new Check("broker", Status.FAIL,
+                        "previous key " + entry.getKey()
+                                + " is not base64 32 bytes",
+                        "re-enter the recorded key"));
+            }
+        }
+        try {
+            var registry = new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry();
+            registry.validateSelected(properties);
+            for (String kind : com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
+                    .kinds().stream().sorted().toList()) {
+                for (var check : registry.require(kind).preflight(properties)) {
+                    checks.add(new Check(check.name(), Status.valueOf(check.status().name()),
+                            check.detail(), check.remediation()));
+                }
+            }
+        } catch (RuntimeException error) {
+            checks.add(new Check("broker", Status.FAIL, rootMessage(error),
+                    "install the configured Runtime provider JAR and correct its configuration"));
+        }
+        return checks;
+    }
+
+    // The Harness takes its Broker URL from its own environment file, which
+    // nothing else reconciles with the address the Broker binds. The URL is
+    // first read the way the Harness reads it when it starts
+    // (HarnessBrokerUrl); then only a URL that names the Broker's own
+    // plain-HTTP listener can be checked, and one that names another address
+    // may reach it through a proxy.
+    static Check harnessBrokerUrlCheck(String url,
+            ManagedAgentProperties.RuntimeBroker broker, String file) {
+        String host = broker.getHost();
+        // An IPv6 literal needs brackets before the port.
+        String address = (host.contains(":") && !host.startsWith("[")
+                ? "[" + host + "]" : host) + ":" + broker.getPort();
+        if (StringUtils.isBlank(url)) {
+            return new Check("broker-url", Status.WARN,
+                    file + " gives the Hosted Harness no Broker URL",
+                    "set QWEN_MANAGED_RUNTIME_BROKER_URL and"
+                            + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN in " + file
+                            + ", unless the Harness environment or command"
+                            + " line sets them");
+        }
+        String direct = directBrokerUrl(broker);
+        String fix = "point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
+                + " at " + (direct != null ? direct
+                        : "the https URL of the TLS-terminating proxy in front"
+                                + " of " + address);
+        HarnessBrokerUrl.Result read = HarnessBrokerUrl.read(url);
+        String refusal = switch (read.verdict()) {
+            case INVALID -> ", which is not a valid URL";
+            case NOT_ORIGIN -> ", which is not an http or https origin";
+            case PLAIN_OUTSIDE_LOOPBACK -> ", because it uses plain http"
+                    + " outside the loopback interface";
+            case ACCEPTED, UNCLASSIFIED -> null;
+        };
+        if (refusal != null) {
+            return new Check("broker-url", Status.FAIL,
+                    "the Hosted Harness refuses " + url + refusal, fix);
+        }
+        if (read.verdict() == HarnessBrokerUrl.Verdict.UNCLASSIFIED) {
+            // Only FAIL sets the exit code, so a spelling preflight cannot
+            // read never blocks a start.
+            return new Check("broker-url", Status.WARN, "preflight cannot read "
+                    + url + " the way the Hosted Harness does",
+                    "check that the Hosted Harness starts and reaches "
+                            + address);
+        }
+        // The URL names the Broker's own socket, which speaks plain HTTP.
+        Check tls = new Check("broker-url", Status.FAIL, "the Hosted Harness"
+                + " dials " + url + ", but the Broker serves plain HTTP there,"
+                + " so TLS cannot connect", fix);
+        if (read.port() == broker.getPort()
+                && served(read.hostname(), broker.getHost())) {
+            return read.https() ? tls
+                    : new Check("broker-url", Status.PASS, url, null);
+        }
+        if (read.port() == broker.getPort()
+                && servedOnlyDualStack(read.hostname(), broker.getHost())) {
+            // Whether the Broker's socket takes this address depends on a JVM
+            // option preflight cannot see; when it does not, another listener,
+            // such as a TLS proxy, may hold it.
+            if (read.https()) {
+                return new Check("broker-url", Status.WARN, "the Hosted Harness"
+                        + " dials " + url + " over IPv6: a Broker JVM that"
+                        + " listens on both families takes it on the plain-HTTP"
+                        + " socket at " + address + ", where TLS cannot"
+                        + " connect, while under -Djava.net.preferIPv4Stack=true"
+                        + " another listener, such as a TLS proxy, may hold it",
+                        fix + ", unless a proxy forwards " + url + " there");
+            }
+            return new Check("broker-url", Status.WARN,
+                    "the Hosted Harness dials " + url + " over IPv6, but the"
+                            + " Broker binds " + broker.getHost() + ", which"
+                            + " takes IPv6 only when its JVM listens on both"
+                            + " families, unlike under"
+                            + " -Djava.net.preferIPv4Stack=true", fix);
+        }
+        return new Check("broker-url", Status.WARN, "the Hosted Harness dials "
+                + url + ", not the Broker's listener at " + address
+                + "; a proxy may forward it, which preflight cannot verify",
+                direct != null
+                        ? fix + ", unless a proxy forwards " + url + " there"
+                        : "check that a proxy forwards " + url + " to "
+                                + address);
+    }
+
+    // The URL that reaches the Broker's listener directly, which the Harness
+    // accepts only on the loopback interface; null for a non-loopback bind,
+    // which the Harness reaches through a TLS-terminating proxy. It is built
+    // from the bound address, which the Harness reads the same way whatever
+    // the configured spelling.
+    private static String directBrokerUrl(
+            ManagedAgentProperties.RuntimeBroker broker) {
+        InetAddress bind = new InetSocketAddress(broker.getHost(), 0)
+                .getAddress();
+        if (bind == null
+                || (!bind.isAnyLocalAddress() && !bind.isLoopbackAddress())) {
+            return null;
+        }
+        String host;
+        if (bind instanceof Inet6Address) {
+            // ::1 is the only IPv6 loopback address.
+            host = "[::1]";
+        } else {
+            host = bind.isAnyLocalAddress() ? "127.0.0.1"
+                    : bind.getHostAddress();
+        }
+        return "http://" + host + ":" + broker.getPort();
+    }
+
+    // The Broker refuses a non-loopback listen address unless told it sits
+    // behind a TLS-terminating layer (RuntimeBrokerHttpServer).
+    static Check brokerListenCheck(ManagedAgentProperties.RuntimeBroker broker) {
+        InetAddress bind = new InetSocketAddress(broker.getHost(), 0)
+                .getAddress();
+        if (broker.isAllowNonLoopback()
+                || (bind != null && bind.isLoopbackAddress())) {
+            return null;
+        }
+        return new Check("broker", Status.FAIL, "the Broker refuses to listen"
+                + " on " + broker.getHost() + " without"
+                + " runtime-broker.allow-non-loopback",
+                "bind 127.0.0.1, or set"
+                        + " QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true"
+                        + " behind a TLS-terminating proxy");
+    }
+
+    // Whether the Broker's socket accepts connections to this host: a
+    // specific bind serves only its own address, and a wildcard bind every
+    // address of this machine in its family. The JDK binds :: only on a
+    // dual-stack socket, which takes IPv4 as well, but binds 0.0.0.0 to IPv4
+    // alone under -Djava.net.preferIPv4Stack=true, a JVM option the server
+    // may get from an environment preflight does not share.
+    private static boolean served(String host, String bindHost) {
+        return servedBy(host, bindHost, false);
+    }
+
+    // Whether only a dual-stack listener would serve this host: an IPv6
+    // address of this machine against the IPv4 wildcard.
+    private static boolean servedOnlyDualStack(String host, String bindHost) {
+        return !served(host, bindHost) && servedBy(host, bindHost, true);
+    }
+
+    private static boolean servedBy(String host, String bindHost,
+            boolean dualStack) {
+        try {
+            InetAddress bind = InetAddress.getByName(bindHost);
+            for (InetAddress address : InetAddress.getAllByName(host)) {
+                if (bind.isAnyLocalAddress()
+                        ? isLocal(address) && (dualStack
+                                || bind instanceof Inet6Address
+                                || address instanceof Inet4Address)
+                        : address.equals(bind)) {
+                    return true;
+                }
+            }
+        } catch (UnknownHostException | SecurityException unresolved) {
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean isLocal(InetAddress address) {
+        try {
+            return address.isLoopbackAddress() || address.isAnyLocalAddress()
+                    || NetworkInterface.getByInetAddress(address) != null;
+        } catch (SocketException error) {
+            return false;
+        }
+    }
+
+    private static Check workspaceCheck(ManagedAgentProperties properties) {
+        if (!properties.getRuntimeBroker().isEnabled()) {
+            return new Check("workspace", Status.SKIP, "Runtime Broker disabled", null);
+        }
+        String kind = properties.getRuntimeBroker().getProvisioner();
+        try {
+            if (!new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+                    .require(kind).usesLocalWorkspace()) {
+                return new Check("workspace", Status.SKIP,
+                        "the remote worker owns the mount root; no local directory required", null);
+            }
+        } catch (RuntimeException error) {
+            return new Check("workspace", Status.SKIP, "Runtime provider unavailable; see broker check", null);
+        }
+        String cwd = properties.getRuntimeBroker().getWorkspaceCwd();
+        if (StringUtils.isBlank(cwd)) {
+            return new Check("workspace", Status.SKIP,
+                    "no Workspace cwd configured", null);
+        }
+        Check directory = directoryCheck("workspace", cwd);
+        if (directory.status() != Status.PASS) {
+            return directory;
+        }
+        return new Check("workspace", Status.PASS,
+                cwd + " (mount registration is not checked)", null);
+    }
+
+    private static Check directoryCheck(String name, String path) {
+        if (StringUtils.isBlank(path)) {
+            return new Check(name, Status.FAIL, "not configured",
+                    "set the directory");
+        }
+        Path directory = Path.of(path);
+        if (!Files.isDirectory(directory)) {
+            return new Check(name, Status.FAIL,
+                    path + " is not a directory", "create it");
+        }
+        if (!Files.isWritable(directory)) {
+            return new Check(name, Status.FAIL, path + " is not writable",
+                    "grant write access to the service account");
+        }
+        return new Check(name, Status.PASS, path, null);
+    }
+
+    static Check portCheck(String name, String address, int port) {
+        if (port < 0 || port > 65535) {
+            return portRangeCheck(name, port);
+        }
+        InetSocketAddress endpoint = new InetSocketAddress(address, port);
+        if (endpoint.isUnresolved()) {
+            return new Check(name + "-port", Status.FAIL,
+                    "cannot resolve " + address,
+                    "fix the bind address");
+        }
+        // Keeps the JDK's SO_REUSEADDR, as Tomcat and the Broker's
+        // HttpServer do: a port the stopped server left in TIME_WAIT is free
+        // to them, while a live listener still refuses the bind.
+        try (ServerSocket socket = new ServerSocket()) {
+            socket.bind(endpoint);
+            return new Check(name + "-port", Status.PASS,
+                    address + ":" + port + " is free", null);
+        } catch (IOException error) {
+            return new Check(name + "-port", Status.FAIL,
+                    address + ":" + port + " is unavailable: "
+                            + rootMessage(error),
+                    "stop the process holding it or choose another port; if"
+                            + " the service is meant to be running, run --check --online");
+        }
+    }
+
+    static Check databaseCheck(ConfigurableEnvironment environment) {
+        String url = environment.getProperty("spring.datasource.url");
+        if (StringUtils.isBlank(url)) {
+            return new Check("database", Status.FAIL,
+                    "no datasource URL", "set SPRING_DATASOURCE_URL");
+        }
+        try (Connection connection = databaseConnection(environment)) {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("SELECT 1");
+            }
+            try {
+                requirePerformanceSchemaGrant(connection);
+            } catch (SQLException error) {
+                return new Check("database", Status.FAIL,
+                        "performance_schema grant missing ("
+                                + error.getErrorCode() + ")",
+                        "grant SELECT ON "
+                                + "performance_schema.user_variables_by_thread"
+                                + " to the datasource user");
+            }
+            return schemaCheck(connection, expectedSchemaVersion());
+        } catch (SQLException error) {
+            return new Check("database", Status.FAIL,
+                    url + ": " + error.getMessage(),
+                    "check the datasource settings, grants and that MySQL 8 "
+                            + "is running");
+        }
+    }
+
+    /**
+     * Reports durable counts that are useful for capacity triage. These are
+     * logical SQL records, not physical process or memory measurements. The
+     * report deliberately does not infer idle work or reclaim anything.
+     */
+    static Check capacityCheck(ConfigurableEnvironment environment) {
+        try (Connection connection = databaseConnection(environment)) {
+            return capacityCheck(connection);
+        } catch (SQLException error) {
+            return capacityUnavailable(error);
+        }
+    }
+
+    static Check capacityCheck(Connection connection) {
+        try {
+            Map<String, Long> bindings = stateCounts(connection,
+                    "ma_runtime_binding", "binding_state");
+            Map<String, Long> sessions = stateCounts(connection,
+                    "ma_runtime_session", "session_state");
+            Map<String, Long> operations = stateCounts(connection,
+                    "ma_operation", "state");
+            String detail = "runtime-bindings=" + bindings
+                    + "; runtime-sessions=" + sessions
+                    + "; operations=" + operations
+                    + "; physical-processes=unknown"
+                    + "; memory=unknown; idle-reclamation=not measured";
+            return new Check("capacity", Status.PASS, detail, null);
+        } catch (SQLException error) {
+            return capacityUnavailable(error);
+        }
+    }
+
+    private static Check capacityUnavailable(SQLException error) {
+        if (isTimeout(error)) {
+            return new Check("capacity", Status.WARN,
+                    "durable capacity facts unavailable: observation timed "
+                            + "out before all state counts were read",
+                    "retry when the database is less busy; this observation "
+                            + "reads the full state tables");
+        }
+        return new Check("capacity", Status.WARN,
+                "durable capacity facts unavailable: " + rootMessage(error),
+                "check the datasource grants and managed schema");
+    }
+
+    private static boolean isTimeout(Throwable error) {
+        for (Throwable current = error; current != null;
+                current = current.getCause()) {
+            if (current instanceof SQLTimeoutException
+                    || current instanceof SocketTimeoutException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(Locale.ROOT);
+                if (lower.contains("timeout")
+                        || lower.contains("timed out")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, Long> stateCounts(Connection connection,
+            String table, String stateColumn) throws SQLException {
+        Map<String, Long> counts = new TreeMap<>();
+        String sql = "SELECT " + stateColumn + ", COUNT(*) FROM " + table
+                + " GROUP BY " + stateColumn;
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(sql)) {
+            while (result.next()) {
+                counts.put(result.getString(1), result.getLong(2));
+            }
+        }
+        return counts;
+    }
+
+    private static Connection databaseConnection(
+            ConfigurableEnvironment environment) throws SQLException {
+        String user = environment.getProperty("spring.datasource.username", "");
+        String password =
+                environment.getProperty("spring.datasource.password", "");
+        Properties credentials = new Properties();
+        credentials.setProperty("user", user);
+        credentials.setProperty("password", password);
+        credentials.setProperty("connectTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        credentials.setProperty("socketTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        return DriverManager.getConnection(
+                environment.getRequiredProperty("spring.datasource.url"),
+                credentials);
+    }
+
+    private static void requirePerformanceSchemaGrant(Connection connection)
+            throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(
+                        "SELECT COUNT(*) FROM "
+                                + "performance_schema.user_variables_by_thread")) {
+            result.next();
+        }
+    }
+
+    interface SchemaValidation {
+        void run() throws SQLException;
+    }
+
+    // An older schema is what an upgrade looks like until its first start,
+    // which migrates it forward; only a newer one cannot be served. A schema at
+    // this release's version is held to the same validation the server runs
+    // at startup: until the first formal release, a release may change its
+    // baseline in place.
+    static Check schemaCheck(String schema, String expected,
+            SchemaValidation validation) {
+        if (expected != null && schema != null && !expected.equals(schema)) {
+            int order;
+            try {
+                order = MigrationVersion.fromVersion(schema)
+                        .compareTo(MigrationVersion.fromVersion(expected));
+            } catch (FlywayException error) {
+                order = 1;
+            }
+            if (order > 0) {
+                return new Check("database", Status.FAIL,
+                        "schema=" + schema + " but the manifest expects "
+                                + expected,
+                        "install the distribution that matches the database;"
+                                + " a database downgrade is unsupported");
+            }
+            if (order < 0) {
+                return new Check("database", Status.WARN,
+                        "schema=" + schema + "; the first start migrates it to "
+                                + expected + ", which only a database backup"
+                                + " undoes",
+                        "back up the database before starting this"
+                                + " distribution");
+            }
+        }
+        if (schema != null) {
+            try {
+                validation.run();
+            } catch (SQLException error) {
+                return new Check("database", Status.FAIL,
+                        "schema=" + schema + " does not match this"
+                                + " distribution: " + error.getMessage(),
+                        "start this distribution on a new, empty database, or"
+                                + " keep the release that created this one");
+            }
+        }
+        return new Check("database", Status.PASS,
+                "schema=" + (schema == null ? "not migrated yet" : schema)
+                        + "; performance_schema grant ok",
+                null);
+    }
+
+    /** The database row for a reachable database: its schema, held to the server's validation. */
+    static Check schemaCheck(Connection connection, String expected) {
+        return schemaCheck(schemaVersion(connection), expected,
+                () -> ManagedSchema.validate(connection));
+    }
+
+    private static String schemaVersion(Connection connection) {
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(
+                        "SELECT version FROM flyway_schema_history "
+                                + "ORDER BY installed_rank DESC LIMIT 1")) {
+            return result.next() ? result.getString(1) : null;
+        } catch (SQLException error) {
+            return null;
+        }
+    }
+
+    static String expectedSchemaVersion() {
+        Path manifest = manifestPath();
+        return manifest == null ? null : expectedSchemaVersion(manifest);
+    }
+
+    static String expectedSchemaVersion(Path manifest) {
+        try {
+            JsonNode root = JSON.readTree(manifest.toFile());
+            JsonNode value = root.path("compatibility")
+                    .path("databaseSchema").path("latestMigrationVersion");
+            return value.isTextual() ? value.asText() : null;
+        } catch (IOException error) {
+            return null;
+        }
+    }
+
+    static Path findManifest(String classPath) {
+        if (classPath == null) {
+            return null;
+        }
+        for (String entry : classPath.split(File.pathSeparator)) {
+            Path file = Path.of(entry).toAbsolutePath().normalize();
+            if (!entry.endsWith(".jar") || !Files.isRegularFile(file)) {
+                continue;
+            }
+            Path lib = file.getParent();
+            Path root = lib == null ? null : lib.getParent();
+            if (root == null) {
+                continue;
+            }
+            Path manifest = root.resolve("manifest.json");
+            if (Files.isRegularFile(manifest)) {
+                return manifest;
+            }
+        }
+        return null;
+    }
+
+    private static Path manifestPath() {
+        Path fromClassPath = findManifest(
+                System.getProperty("java.class.path", ""));
+        if (fromClassPath != null) {
+            return fromClassPath;
+        }
+        try {
+            Path code = Path.of(ManagedAgentPreflight.class
+                    .getProtectionDomain().getCodeSource().getLocation()
+                    .toURI());
+            if (!Files.isRegularFile(code)) {
+                return null;
+            }
+            Path lib = code.getParent();
+            Path root = lib == null ? null : lib.getParent();
+            if (root == null) {
+                return null;
+            }
+            Path manifest = root.resolve("manifest.json");
+            return Files.isRegularFile(manifest) ? manifest : null;
+        } catch (Exception error) {
+            return null;
+        }
+    }
+
+    private static void print(List<Check> checks) {
+        // Relative locations, Spring Boot's defaults among them, are read here.
+        System.out.println("Managed Agent preflight in " + Path.of("").toAbsolutePath());
+        System.out.printf("%-6s %-14s %s%n", "STATUS", "CHECK", "DETAIL");
+        for (Check check : checks) {
+            System.out.printf("%-6s %-14s %s%n",
+                    check.status(), check.name(), check.detail());
+            if (check.fix() != null) {
+                System.out.printf("%-6s %-14s fix: %s%n",
+                        "", "", check.fix());
+            }
+        }
+        long failures = checks.stream()
+                .filter(check -> check.status() == Status.FAIL).count();
+        long warnings = checks.stream()
+                .filter(check -> check.status() == Status.WARN).count();
+        System.out.printf("%d check(s), %d warning(s), %d failure(s)%n",
+                checks.size(), warnings, failures);
+    }
+
+    static boolean isLoopback(String address) {
+        return StringUtils.isBlank(address)
+                || "127.0.0.1".equals(address)
+                || "::1".equals(address)
+                || "localhost".equalsIgnoreCase(address);
+    }
+
+    static boolean isDigest(String value) {
+        return value != null && DIGEST.matcher(value).matches();
+    }
+
+    static boolean isCredentialKey(String value) {
+        if (StringUtils.isBlank(value)) {
+            return false;
+        }
+        try {
+            return Base64.getDecoder().decode(value).length == KEY_BYTES;
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
+    }
+
+    private static String trimTrailingSlash(String value) {
+        String trimmed = value;
+        while (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    /**
+     * The verdict the upgrade command takes on the Harness base URL: "skip"
+     * with the Harness disabled, where the server never reads it, as
+     * {@link #harnessCheck} returns before it reads the value; otherwise
+     * whether {@link #harnessOrigin} takes it. The single Harness's connector
+     * refuses to start on any other, even when that row skips or fails for
+     * another reason first. Pooled, the row skips before it reads the value,
+     * but each member's connector checks it by the same rule, and the pool's
+     * refresh drops a member whose connector refuses it, so such a pool
+     * accepts no Session.
+     */
+    static String harnessUrlVerdict(ManagedAgentProperties.Harness harness) {
+        if (!harness.isEnabled()) {
+            return "skip";
+        }
+        String base = harness.getBaseUrl();
+        return String.valueOf(base != null && harnessOrigin(base) != null);
+    }
+
+    // Nothing the URL contains reaches the report, so a typo cannot print
+    // credentials. Null unless it is an HTTP origin without user information,
+    // a query or a fragment; the getUserInfo check is what keeps credentials
+    // out, since every URL that carries them is rejected here.
+    static URI harnessOrigin(String base) {
+        try {
+            URI origin = URI.create(base);
+            String scheme = origin.getScheme();
+            return ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                    && origin.getHost() != null
+                    && origin.getUserInfo() == null
+                    && origin.getQuery() == null
+                    && origin.getFragment() == null
+                    ? origin : null;
+        } catch (IllegalArgumentException unusable) {
+            return null;
+        }
+    }
+
+    private static Check unusableHarnessUrl() {
+        return new Check("harness", Status.FAIL,
+                "the Harness base URL is not usable",
+                "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL to the Harness http(s)"
+                        + " origin, without credentials, a query or a fragment");
+    }
+
+    // Text another process controls, kept to one bounded line.
+    static String printable(String text) {
+        String line = text.codePoints()
+                .map(c -> Character.isISOControl(c) ? '?' : c)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint,
+                        StringBuilder::append)
+                .toString();
+        int points = line.codePointCount(0, line.length());
+        return points > 200
+                ? line.substring(0, line.offsetByCodePoints(0, 200)) + "..."
+                : line;
+    }
+
+    static String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current.getMessage() == null
+                ? current.getClass().getSimpleName()
+                : current.getMessage();
+    }
+
+    enum Status {
+        PASS, WARN, FAIL, SKIP
+    }
+
+    record Check(String name, Status status, String detail, String fix) {
+    }
+}

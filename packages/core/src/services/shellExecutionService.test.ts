@@ -978,7 +978,6 @@ describe('ShellExecutionService', () => {
         'yes | head -c 100000000',
         () => {
           ptyData('1234567890discarded');
-
           // The qwen-bun-pty backend has already killed the tree and closed
           // the fd when it emits this; no onExit follows.
           expect(() => mockPtyProcess.emit('error', limitError)).not.toThrow();
@@ -2792,6 +2791,7 @@ describe('ShellExecutionService child_process fallback', () => {
       );
       expect(result.exitCode).toBe(0);
       expect(result.aborted).toBe(false);
+      // Callers that need the background part's output can tell it was cut.
       expect(result.stdoutHeldAfterExit).toBe(true);
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('before'));
     });

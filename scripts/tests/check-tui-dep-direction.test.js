@@ -27,6 +27,7 @@ import {
   listSourceFiles,
   symlinkedPathComponents,
 } from '../check-tui-dep-direction.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const temporaryDirectories = [];
 
@@ -435,7 +436,7 @@ describe('checkRule', () => {
     expect(otherRule.violations).toEqual([]);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports unlistable directories instead of silently dropping them',
     () => {
       const root = makeTemporaryDirectory();
@@ -709,7 +710,7 @@ describe('end-to-end gate run (main wiring)', () => {
     expect(out).toContain('not found or has no source files');
   }, 40000);
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'fails on an unlistable directory inside the scanned tree',
     () => {
       const base = makeFixtureCheckout();

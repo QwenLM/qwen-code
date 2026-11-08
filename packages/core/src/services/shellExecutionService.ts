@@ -221,14 +221,12 @@ export interface ShellExecutionResult {
    * clean-exit signal of 0 is normalized to null at the service boundary.
    */
   signal: number | null;
-
   /**
    * An error object if the process failed to spawn. Also set when a spawned
    * process was terminated by a pty resource limit (bounded hold / write
    * queue): then exitCode and signal stay null and no native exit is
    * fabricated.
    */
-
   error: Error | null;
   /** A boolean indicating if the command was aborted by the user. */
   aborted: boolean;
@@ -1622,7 +1620,6 @@ export class ShellExecutionService {
         if (rawCapture || streamStdout) {
           // streamStdout reads the stdout end too: the drain reports a
           // stdout still held, not a held stderr.
-
           child.stdout?.on('end', () => {
             stdoutEnded = true;
           });
@@ -2454,7 +2451,6 @@ export class ShellExecutionService {
                 }
               }),
           );
-
           // Observe rejection in the same turn, before exit needs to drain it.
           processingChain = processingChain.catch((error) => {
             try {
@@ -2596,7 +2592,6 @@ export class ShellExecutionService {
         // status on the natural path, or with a structured resource-failure
         // error and NO exit code when the PTY backend terminated the command
         // itself (the exit code is never fabricated).
-
         let settled = false;
         const finalizeResult = async (
           exitCode: number | null,
@@ -3181,7 +3176,6 @@ export class ShellExecutionService {
               // macOS a child killed with output undrained only finishes
               // exiting once the master is read again, so `exited` would
               // never flip. Resume first — a no-op when not paused.
-
               ptyProcess.resume();
             } catch {
               // Best effort: the kill below must still run.

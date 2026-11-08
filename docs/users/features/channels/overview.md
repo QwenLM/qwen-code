@@ -17,7 +17,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 
 ## Quick Start
 
-1. Set up a bot or authenticated workspace account (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [DingTalk Workspace](./dws), [WeCom](./wecom), [Feishu](./feishu), [GitHub](./github), [Email](./email))
+1. Set up a bot or authenticated workspace account (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [DingTalk Workspace](./dws), [WeCom](./wecom), [WeCom Callback](./wecom-callback), [Feishu](./feishu), [GitHub](./github), [Email](./email))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
@@ -49,31 +49,31 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option              | Required         | Description                                                                                                                                                                                                 |
-| ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `feishu`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                  |
-| `token`             | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                                 |
-| `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                |
-| `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                         |
-| `botId`             | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                            |
-| `secret`            | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                            |
-| `model`             | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                    |
-| `privatePolicy`     | No               | Private access: `disabled`, `allowlist`, `pairing`, or `open`; new managed channels default to `pairing`                                                                                                    |
-| `allowedUsers`      | No               | Private user IDs allowed without pairing (used by private `allowlist` and `pairing` policies)                                                                                                               |
-| `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                       |
-| `sessionRotation`   | No               | Start a fresh session after `maxTurns` routed messages or `maxAgeHours` elapsed, whichever comes first. Requires a positive bound and cannot be combined with `multiSession`.                               |
-| `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                          |
-| `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                          |
-| `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                       |
-| `instructions`      | No               | Custom instructions prepended to the first message of each session                                                                                                                                          |
-| `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                   |
-| `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                 |
-| `senderPolicy`      | No               | Deprecated: `allowlist`, `pairing`, or `open`; used only when `privatePolicy` is absent and DM access is enabled                                                                                            |
-| `dmPolicy`          | No               | Deprecated: `open` or `disabled`; used only when `privatePolicy` is absent                                                                                                                                  |
-| `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset or empty grants no shared-session operator permissions. See [Shared-Session Operators](#shared-session-operators)              |
-| `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from senders admitted by the group member policy for the next bot mention/reply. |
-| `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                          |
-| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                              |
+| Option              | Required         | Description                                                                                                                                                                                                                                                                                                                                           |
+| ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `wecom-callback`, `feishu`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                                                          |
+| `token`             | See description  | Required for Telegram (bot token) and WeCom Callback (verification token). Supports `$ENV_VAR` syntax. See [WeCom Callback](./wecom-callback) for application credentials                                                                                                                                                                             |
+| `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                          |
+| `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                   |
+| `botId`             | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                                                                                                                                                      |
+| `secret`            | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                                                                                                                                                      |
+| `model`             | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                                                                                                                                                              |
+| `privatePolicy`     | No               | Private access: `disabled`, `allowlist`, `pairing`, or `open`; new managed channels default to `pairing`                                                                                                                                                                                                                                              |
+| `allowedUsers`      | No               | Private user IDs allowed without pairing (used by private `allowlist` and `pairing` policies)                                                                                                                                                                                                                                                         |
+| `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations. Channel plugins may declare a different default: QQ defaults to `thread`, while Email, GitHub, GitLab, and DingTalk Workspace (`dws`) default to `chat_thread` |
+| `sessionRotation`   | No               | Start a fresh session after `maxTurns` routed messages or `maxAgeHours` elapsed, whichever comes first. Requires a positive bound and cannot be combined with `multiSession`.                                                                                                                                                                         |
+| `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                                                                                                                                                    |
+| `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                                                                                                                                                    |
+| `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                                                                                                                                                 |
+| `instructions`      | No               | Custom instructions prepended to the first message of each session                                                                                                                                                                                                                                                                                    |
+| `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                                                                                                                                                             |
+| `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                                                                                                                                                           |
+| `senderPolicy`      | No               | Deprecated: `allowlist`, `pairing`, or `open`; used only when `privatePolicy` is absent and DM access is enabled                                                                                                                                                                                                                                      |
+| `dmPolicy`          | No               | Deprecated: `open` or `disabled`; used only when `privatePolicy` is absent                                                                                                                                                                                                                                                                            |
+| `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset or empty grants no shared-session operator permissions. See [Shared-Session Operators](#shared-session-operators)                                                                                                                                                        |
+| `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from senders admitted by the group member policy for the next bot mention/reply.                                                                                                                                           |
+| `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                                                                                                                                                    |
+| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                                                                                                                                                        |
 
 ### Message Routes
 
@@ -123,11 +123,13 @@ New managed channels default to `pairing`. The deprecated `senderPolicy` and `dm
 
 ### Shared-Session Operators
 
-In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), session management requires operator privileges: `/approve-always`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+
+An admitted sender may use `/approve` (allow once) or `/deny` for their own pending tool request in their current attended turn, in direct messages and groups. This request-specific authority does not depend on `operators`, even when the list is empty. Another ordinary member cannot answer it, and an attempt from another chat or thread is rejected. Operators may still answer another sender's text permission request in the same chat and thread; native interactive cards retain their existing owner checks.
 
 Set `operators` to the user IDs allowed to manage shared sessions. Omitted or empty `operators` grants nobody this role. Private allowlists, user pairing, group pairing, and group member lists never imply operator permissions. Operators must still pass normal conversation admission.
 
-For example, `groups: { "*": { "senders": "open" } }` with `operators: ["alice"]` lets every admitted group member start a turn, but only Alice can manage its shared session.
+For example, `groups: { "*": { "senders": "open" } }` with `operators: ["alice"]` lets every admitted group member start a turn and approve once or deny their own current request. Only Alice can manage its shared session or answer another sender's text permission request.
 
 A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
@@ -249,6 +251,13 @@ Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
 remember request and an exact entry ID when a natural reference is ambiguous.
 
+A turn a channel sends also runs no
+[auto-memory](../memory#auto-memory-what-qwen-learns-about-you) extraction or
+periodic cleanup (Dream) and gets no
+[follow-up suggestion](../followup-suggestions), including a message delivered
+to a session bound to a pull request. Auto-memory recall still runs, so a reply
+can draw on saved auto-memories.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
@@ -369,7 +378,7 @@ All group settings use field-by-field inheritance: the specific group, then `"*"
 
 On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
-In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. Per-group overrides and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
+In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. On `github`, the editor also shows one row per allowlisted repository for that repository's `senders`, `allowedUsers`, and `requireMention` — see [GitHub](./github.md#editing-from-the-web-shell). Other per-group overrides (`dispatchMode`, `groupHistoryLimit`, and per-group `requireMention` on chat platforms) and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
 ### Group History Backfill
 
@@ -462,13 +471,13 @@ Files work with any model — no multimodal support required.
 
 ### Platform differences
 
-| Feature  | Telegram                                     | WeChat                           | DingTalk                                      | Feishu                                                      | QQ Bot                                             |
-| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- | ----------------------------------------------------------- | -------------------------------------------------- |
-| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET, 50MB limit) | Vision input, also saved to a local path (8MB cap) |
-| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)                    | Not supported — images and videos only             |
-| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored | Message text is kept as the caption                |
+| Feature  | Telegram                                     | WeChat                           | DingTalk                                      | Feishu                                                      | QQ Bot                                              |
+| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------- |
+| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET, 50MB limit) | Vision input, also saved to a local path (8MB cap)  |
+| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)                    | Direct download, saved to a local path (20MB limit) |
+| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored | Message text is kept as the caption                 |
 
-> QQ Bot accepts images and videos. An image is passed to the agent as vision input and is also saved to a temporary local path; a video is saved to a temporary local path and the agent is told that path. Image input requires a model that accepts images — with a text-only model the agent still gets the path. See [QQ Bot](./qqbot#images-and-videos) for details.
+> QQ Bot accepts images, videos, files, and voice messages. An image is passed to the agent as vision input and is also saved to a temporary local path; a video or a file is saved to a temporary local path and the agent is told that path, with a file keeping the sender's extension so the read tool can classify it. A voice message is saved as audio — the platform's SILK-to-WAV conversion is preferred when available — and needs no text to start a turn. Image input requires a model that accepts images — with a text-only model the agent still gets the path. See [QQ Bot](./qqbot#images-videos-and-files) for details.
 >
 > WeCom accepts text, images, mixed text plus images, files, videos, and voice messages (transcribed). Images are passed to the agent as attachments; files and videos are downloaded to temporary local paths. See [WeCom](./wecom#images-and-files) for details.
 
@@ -550,8 +559,12 @@ Channel loops differ from the session-scoped tasks described in
 - They are scoped to the current channel chat or thread. Each target can have up
   to 10 enabled loops, and each prompt is limited to 4,000 characters.
 - They require an adapter and target that support proactive delivery. Telegram,
-  DingTalk, Feishu, and WeCom opt in, subject to platform-specific target
-  restrictions.
+  DingTalk, DingTalk Workspace, Feishu, WeCom, QQ, and Email opt in, subject to
+  platform-specific target restrictions. Email opts in only when
+  `proactiveRecipients` lists the exact target. QQ delivers loop results as
+  active group messages, supports no threaded targets, and requires the chat
+  type to be already learned: a delivery to a group whose type is unknown is
+  rejected.
 - They are unavailable with `sessionScope: "single"` because that scope is not
   tied to one chat target.
 - A saved loop is disabled if its target is no longer authorized when it is due.
@@ -586,6 +599,32 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent. Named-task commands are registered only when the mode is enabled, so `/sessions` remains agent-visible for existing configurations.
 
 Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub). `/cancel` is currently registered only by Telegram, and loop creation requires proactive delivery support for the current adapter and target.
+
+## Channel Events in the Web Shell
+
+The Web Shell's **Channel events** page shows a timeline of what every Channel
+in the current workspace did: the inbound messages it accepted, and the ones it
+skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
+rejection, `github_api_error` when reading or handling a GitHub thread failed;
+a `failed` row with that reason means the thread will be read again), the
+replies it published or suppressed, its inbound task transitions, and how each
+poll went. Pick the workspace whose Channels you want
+to inspect, then filter by Channel and by event type; the page refreshes every
+few seconds while its tab is visible, pauses in a background tab, and has a
+manual refresh.
+
+Use it to answer "why did the bot not reply to that comment?" without reading
+the daemon log. Events never include message text — only routing decisions,
+identifiers, and errors. The page and its route exist wherever Channel
+management is available (`channel_management`), and each Channel keeps its
+journal under `~/.qwen/channels/<workspace>/` with one rotated file, so it
+never grows without bound.
+
+Rows that refer to a concrete session carry an **Open session** button:
+outbound rows open the Channel's own reply session, and GitHub task rows for
+bound-session delivery open the PR-bound session that received the event —
+including when that session lives in another registered workspace. Rows
+without a session (polls, skipped inbound messages) show no button.
 
 ## Running
 

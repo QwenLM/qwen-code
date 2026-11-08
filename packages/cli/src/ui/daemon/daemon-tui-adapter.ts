@@ -428,6 +428,13 @@ function toolUpdateToHistoryItem(
   update: Record<string, unknown>,
   state?: DaemonTuiReducerState,
 ): HistoryItemToolGroup | undefined {
+  const lifecycleMeta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  if (
+    lifecycleMeta?.['toolLifecycle'] !== undefined &&
+    update['status'] === undefined &&
+    update['content'] === undefined
+  )
+    return undefined;
   const toolCallId = getString(update['toolCallId']);
   if (!toolCallId) {
     return undefined;

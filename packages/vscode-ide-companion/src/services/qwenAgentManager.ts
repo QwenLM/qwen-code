@@ -16,6 +16,7 @@ import type {
   SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
+import type { PromptSubmissionOptions } from '../types/connectionTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
 import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
@@ -368,8 +369,11 @@ export class QwenAgentManager {
    *
    * @param message - Message content
    */
-  async sendMessage(message: string | ContentBlock[]): Promise<void> {
-    await this.connection.sendPrompt(message);
+  async sendMessage(
+    message: string | ContentBlock[],
+    options?: PromptSubmissionOptions,
+  ): Promise<void> {
+    await this.connection.sendPrompt(message, options);
   }
 
   async rewindSession(
@@ -555,11 +559,11 @@ export class QwenAgentManager {
    * Falls back to file system scan with equivalent pagination semantics.
    */
   async getSessionListPaged(params?: {
-    cursor?: number;
+    cursor?: number | string;
     size?: number;
   }): Promise<{
     sessions: Array<Record<string, unknown>>;
-    nextCursor?: number;
+    nextCursor?: number | string;
     hasMore: boolean;
   }> {
     const size = params?.size ?? 20;
@@ -586,22 +590,21 @@ export class QwenAgentManager {
         cwd: item.cwd,
       }));
 
-      // SDK returns nextCursor as string; convert to numeric cursor for paging
-      let nextCursorNum: number | undefined;
+      // Keep the daemon's cursor verbatim: the composite "<mtime>|<name>" form
+      // would become NaN under Number() and read as "no more pages".
+      let nextCursorValue: number | string | undefined;
       if (typeof res === 'object' && res !== null && 'nextCursor' in res) {
         const raw = (res as { nextCursor?: unknown }).nextCursor;
         if (typeof raw === 'number') {
-          nextCursorNum = raw;
-        } else if (typeof raw === 'string') {
+          nextCursorValue = raw;
+        } else if (typeof raw === 'string' && raw !== '') {
           const parsed = Number(raw);
-          if (!Number.isNaN(parsed)) {
-            nextCursorNum = parsed;
-          }
+          nextCursorValue = Number.isNaN(parsed) ? raw : parsed;
         }
       }
-      const hasMore = nextCursorNum !== undefined;
+      const hasMore = nextCursorValue !== undefined;
 
-      return { sessions: mapped, nextCursor: nextCursorNum, hasMore };
+      return { sessions: mapped, nextCursor: nextCursorValue, hasMore };
     } catch (error) {
       logger.warn('[QwenAgentManager] Paged ACP session list failed:', error);
       // fall through to file system
@@ -618,10 +621,13 @@ export class QwenAgentManager {
         raw: s,
         mtime: new Date(s.lastUpdated).getTime(),
       }));
-      const filtered =
-        cursor !== undefined
-          ? allWithMtime.filter((x) => x.mtime < cursor)
-          : allWithMtime;
+      // A cursor may arrive in the composite "<mtime>|<name>" form the daemon
+      // emits; only its mtime prefix can filter this file-system listing.
+      const cursorMtime =
+        typeof cursor === 'number' ? cursor : Number(cursor?.split('|')[0]);
+      const filtered = Number.isFinite(cursorMtime)
+        ? allWithMtime.filter((x) => x.mtime < cursorMtime)
+        : allWithMtime;
       const page = filtered.slice(0, size);
       const sessions = page.map((x) => ({
         id: x.raw.sessionId,
@@ -844,6 +850,12 @@ export class QwenAgentManager {
               uiEvent?: Record<string, unknown>;
             }
           ).uiEvent as Record<string, unknown>;
+          if (
+            uiEvent['event.name'] === 'request_lifecycle' ||
+            uiEvent['event.name'] === 'tool_lifecycle'
+          ) {
+            continue;
+          }
           let telemetryText = '';
 
           if (

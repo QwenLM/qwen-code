@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import {
   ChatRecordingService,
   type ChatRecord,
@@ -19,7 +20,10 @@ import type { SessionWriterLease } from './session-writer-lease.js';
 
 const tryGenerateSessionTitleMock = vi.fn();
 
-vi.mock('./sessionTitle.js', () => ({
+vi.mock('./sessionTitle.js', async (importOriginal) => ({
+  modPromptTitleKey: (
+    await importOriginal<typeof import('./sessionTitle.js')>()
+  ).modPromptTitleKey,
   tryGenerateSessionTitle: (...args: unknown[]) =>
     tryGenerateSessionTitleMock(...args),
 }));
@@ -129,6 +133,8 @@ describe('ChatRecordingService - auto-title trigger', () => {
           .mockReturnValue('/test/project/root/.qwen/projects/test-project'),
       },
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAuthType: vi.fn().mockReturnValue(undefined),
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getFastModel: vi.fn(() => fastModelValue),
       isInteractive: vi.fn().mockReturnValue(true),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -395,6 +401,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      new Set(),
     );
   });
 
@@ -450,7 +457,47 @@ describe('ChatRecordingService - auto-title trigger', () => {
       resumedConfig,
       expect.any(AbortSignal),
       ['你好', '再见'],
+      new Set(),
     );
+  });
+
+  it("restores a Mod's prompt in its turn's place without offering it to the title", () => {
+    const record = (
+      uuid: string,
+      parentUuid: string | null,
+      extra: Partial<ChatRecord>,
+    ): ChatRecord => ({
+      uuid,
+      parentUuid,
+      sessionId: 'test-session-id',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      provenance: 'real_user',
+      cwd: '/test/project/root',
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: 'hidden' }] },
+      ...extra,
+    });
+    const { service } = resume({
+      conversation: {
+        messages: [
+          record('user-1', null, {
+            systemPayload: { displayText: '你好', hookContext: '' },
+          }),
+          record('user-2', 'user-1', {
+            provenance: 'mod_prompt',
+            systemPayload: {
+              displayText: 'Run the linter',
+              hookContext: '',
+              mod: 'lint',
+            },
+          }),
+        ],
+      },
+      lastCompletedUuid: 'user-2',
+    });
+    expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', null]);
+    expect([...service.getModPromptKeysForTitle()]).toEqual(['hidden']);
   });
 
   it('retains only display projections relevant to recent title history', () => {

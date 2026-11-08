@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
@@ -16,32 +17,12 @@ import {
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
 
-// channel_route and channel_delivery stay disabled for submission until the
-// slices that ship their producers (H5b/H5c); this suite runs the
-// commit/rebuild path ahead of enablement, like the child_run suite does
-// for the H3 enablement slice.
-const enablement = vi.hoisted(() => ({ route: true, delivery: true }));
-
-vi.mock('./managed-session-records.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('./managed-session-records.js')>();
-  return {
-    ...actual,
-    assertManagedSessionDomainEnabled: (
-      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-    ) => {
-      if (domain === 'channel_route' && enablement.route) return;
-      if (domain === 'channel_delivery' && enablement.delivery) return;
-      actual.assertManagedSessionDomainEnabled(domain);
-    },
-  };
-});
-
+// H5b/H5c enabled both domains for the email adapter: this suite drives the
+// real gates — the adapter named by the route's committed policy, and the
+// delivery's binding to its committed route.
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.route = true;
-  enablement.delivery = true;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -108,7 +89,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       now: () => harness.now,
       resources: harness.store,
@@ -121,6 +105,13 @@ async function withAuthority<T>(
     await lease.release().catch(() => undefined);
   }
 }
+
+const EMAIL_POLICY = {
+  adapter: 'email',
+  senderPolicy: 'allowlist',
+  allowedSenders: ['sender-1'],
+  dispatchMode: 'followup',
+};
 
 interface ChannelRefs {
   readonly policy: ManagedSessionDurableRef;
@@ -135,8 +126,8 @@ interface ChannelRefs {
 async function publishRefs(harness: Harness): Promise<ChannelRefs> {
   return {
     policy: await harness.store.publish(
-      'channel-policy',
-      Buffer.from('{"allowed":["sender-1"]}', 'utf8'),
+      'managed-channel-policy',
+      Buffer.from(JSON.stringify(EMAIL_POLICY), 'utf8'),
     ),
     result: await harness.store.publish(
       'managed-tool-result',
@@ -255,6 +246,18 @@ function command(
 
 const TRUSTED = { class: 'trusted_entry' } as const;
 
+/** Every delivery goes out through a committed route at its revision. */
+async function bindRoute(
+  authority: LocalManagedSessionAuthority,
+  refs: ChannelRefs,
+): Promise<void> {
+  await authority.commitExtensionRecord(
+    command('channel_route', 'route-1:1'),
+    { domain: 'channel_route', record: route(refs) },
+    TRUSTED,
+  );
+}
+
 describe('managed session authority channel records', () => {
   it('chains route revisions including a generation rollover and projects no task', async () => {
     const harness = await createHarness();
@@ -361,6 +364,7 @@ describe('managed session authority channel records', () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     await withAuthority(harness, async (authority) => {
+      await bindRoute(authority, refs);
       await authority.commitExtensionRecord(
         command('channel_delivery', 'delivery-1:1'),
         {
@@ -404,7 +408,13 @@ describe('managed session authority channel records', () => {
         TRUSTED,
       );
       expect(last.revision).toBe(4);
-      expect(authority.taskViews()).toEqual([]);
+      // A delivery is a task of its route Session (#13746 F3).
+      expect(authority.taskViews()).toEqual([
+        expect.objectContaining({
+          kind: 'channel_delivery',
+          state: 'completed',
+        }),
+      ]);
       expect(
         authority.extensionRecord('channel_delivery', 'delivery-1'),
       ).toMatchObject({ revision: 4 });
@@ -415,6 +425,7 @@ describe('managed session authority channel records', () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     await withAuthority(harness, async (authority) => {
+      await bindRoute(authority, refs);
       for (const [index, record] of [
         delivery(refs, [null, null], 'admitted', 'planned'),
         delivery(refs, [RECEIPT_1, null], 'running', 'sending'),
@@ -475,7 +486,12 @@ describe('managed session authority channel records', () => {
         expect(
           authority.extensionRecord('channel_delivery', 'delivery-1'),
         ).toMatchObject({ revision: 1 });
-        expect(authority.taskViews()).toEqual([]);
+        expect(authority.taskViews()).toEqual([
+          expect.objectContaining({
+            kind: 'channel_delivery',
+            state: 'pending',
+          }),
+        ]);
       },
       { create: false },
     );
@@ -524,6 +540,7 @@ describe('managed session authority channel records', () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     await withAuthority(harness, async (authority) => {
+      await bindRoute(authority, refs);
       await authority.commitExtensionRecord(
         command('channel_delivery', 'delivery-1:1'),
         {
@@ -652,29 +669,145 @@ describe('managed session authority channel records', () => {
     });
   });
 
-  it('refuses both domains while they stay disabled', async () => {
-    enablement.route = false;
-    enablement.delivery = false;
+  it('refuses a route whose committed policy names an adapter that is not enabled', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
+    const foreign = {
+      ...refs,
+      policy: await harness.store.publish(
+        'managed-channel-policy',
+        Buffer.from(
+          JSON.stringify({ ...EMAIL_POLICY, adapter: 'telegram' }),
+          'utf8',
+        ),
+      ),
+    };
+    const malformed = {
+      ...refs,
+      policy: await harness.store.publish(
+        'managed-channel-policy',
+        Buffer.from('{"allowed":["sender-1"]}', 'utf8'),
+      ),
+    };
     await withAuthority(harness, async (authority) => {
+      const before = authority.committedSequence;
       await expect(
         authority.commitExtensionRecord(
           command('channel_route', 'route-1:1'),
-          { domain: 'channel_route', record: route(refs) },
+          { domain: 'channel_route', record: route(foreign) },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/adapter telegram is not enabled/);
+      await expect(
+        authority.commitExtensionRecord(
+          command('channel_route', 'route-1:1'),
+          { domain: 'channel_route', record: route(malformed) },
           TRUSTED,
         ),
       ).rejects.toThrow(ManagedSessionRecordError);
+      expect(authority.committedSequence).toBe(before);
+      // The gate runs on every revision: a rollover rebind that rebinds the
+      // policy cannot carry an adapter the enablement list does not admit,
+      // for a chain opened by email or anyone else.
+      await bindRoute(authority, refs);
+      const opened = authority.committedSequence;
+      await expect(
+        authority.commitExtensionRecord(
+          command('channel_route', 'route-1:2'),
+          {
+            domain: 'channel_route',
+            record: route(foreign, {
+              routeRevision: 4,
+              accountGeneration: 8,
+            }),
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/adapter telegram is not enabled/);
+      expect(authority.committedSequence).toBe(opened);
+    });
+  });
+
+  it('refuses a delivery without its committed route at the pinned revision', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const planned = () => delivery(refs, [null, null], 'admitted', 'planned');
+    await withAuthority(harness, async (authority) => {
+      // No route at all.
+      await expect(
+        authority.commitExtensionRecord(
+          command('channel_delivery', 'delivery-1:1'),
+          { domain: 'channel_delivery', record: planned() },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/committed route at the pinned revision/);
+      await bindRoute(authority, refs);
+      // The route exists at revision 3; a plan against 2 is stale.
       await expect(
         authority.commitExtensionRecord(
           command('channel_delivery', 'delivery-1:1'),
           {
             domain: 'channel_delivery',
-            record: delivery(refs, [null, null], 'admitted', 'planned'),
+            record: delivery(refs, [null, null], 'admitted', 'planned', {
+              routeRevision: 2,
+            }),
           },
           TRUSTED,
         ),
-      ).rejects.toThrow(ManagedSessionRecordError);
+      ).rejects.toThrow(/committed route at the pinned revision/);
+      // The pinned revision commits; a later route revision does not undo
+      // a committed plan.
+      await authority.commitExtensionRecord(
+        command('channel_delivery', 'delivery-1:1'),
+        { domain: 'channel_delivery', record: planned() },
+        TRUSTED,
+      );
+      await authority.commitExtensionRecord(
+        command('channel_route', 'route-1:2'),
+        {
+          domain: 'channel_route',
+          record: route(refs, { routeRevision: 4, accountGeneration: 8 }),
+        },
+        TRUSTED,
+      );
+      await authority.commitExtensionRecord(
+        command('channel_delivery', 'delivery-1:2'),
+        {
+          domain: 'channel_delivery',
+          record: delivery(refs, [RECEIPT_1, null], 'running', 'sending'),
+        },
+        TRUSTED,
+      );
+      // A retired route admits no new delivery.
+      await authority.commitExtensionRecord(
+        command('channel_route', 'route-1:3'),
+        {
+          domain: 'channel_route',
+          record: route(
+            refs,
+            { routeRevision: 4, accountGeneration: 8 },
+            { state: 'cancelled' },
+          ),
+        },
+        TRUSTED,
+      );
+      await expect(
+        authority.commitExtensionRecord(
+          command('channel_delivery', 'delivery-2:1'),
+          {
+            domain: 'channel_delivery',
+            record: delivery(
+              refs,
+              [null, null],
+              'admitted',
+              'planned',
+              { deliveryId: 'delivery-2', routeRevision: 4 },
+              { effectId: 'delivery-2', deliveryId: 'delivery-2' },
+            ),
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/committed route at the pinned revision/);
     });
   });
 });

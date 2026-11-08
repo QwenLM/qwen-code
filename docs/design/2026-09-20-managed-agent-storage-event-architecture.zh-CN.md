@@ -26,7 +26,7 @@
 
 集成基线为分支 `feature/managed-agents-p0-p8`、提交 `fc32ab0c9502a0b44020ef1a66c88e9b3a2a1484`。上面说明的 P0/P1 切片已在该基线之后提交到同一分支。下列路径均指这一分支快照。
 
-Java 服务源码根目录为 `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/`。
+Java 服务源码根目录为 `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/`。
 
 | 位置                                                                                               | 当前行为及设计影响                                                                                                 |
 | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -37,7 +37,7 @@ Java 服务源码根目录为 `packages/sdk-java/managed-agent-server/src/main/j
 | `service/ManagedAgentService.java`                                                                 | Transcript 读取最新物化 Snapshot、保留的控制事件和 `coveredSequence` 后的尾部；Snapshot 尚未产生时兼容旧事件分页。 |
 | `harness/HarnessConnector.java`                                                                    | 已有连接器接口，可复用；当前包含提交、SSE、取消和启动代际信息。                                                    |
 | `src/main/resources/db/migration/V1__managed_agent_core.sql` 与 `V2__managed_agent_projection.sql` | V1 包含 Session、Turn、Command、Event；V2 增加 Item、Item Part、Snapshot 和投影进度，批次日志/Outbox 尚未实现。    |
-| `packages/sdk-java/runtime-broker/`                                                                | 已有三个 Repository 接口；Embedded Broker 默认构造仍使用内存实现。                                                 |
+| `packages/managed-agent-server/`                                                                   | 已有三个 Repository 接口；Embedded Broker 默认构造仍使用内存实现。                                                 |
 | `packages/core/src/managed-runtime/managed-session-assembly.ts`                                    | 直接组装本地 Session authority、资源存储和写者租约，尚非可替换的远端持久化实现。                                   |
 
 最新代码已统一公开 Java Session、Harness、JSONL 与 Broker 使用的 Session UUID。`harnessSessionId` 仅为协议别名，不再设计第二套身份映射。租户隔离仍使用 `(tenantId, sessionId)`；`turnId` 与稳定的 `promptId` 各有用途。
@@ -318,6 +318,15 @@ qwen:
 `sql` 表示不启用外部 EventTransport，由批次扫描器驱动物化。内存实现仅用于测试/开发。启动时校验所选适配器支持部署要求的确认、消费恢复和资源校验；缺能力就拒绝启用相应模式。凭证由部署配置注入，不进入公共事件或日志。
 
 运行时不能按一次请求任意切换 MySQL/PG 或 MQ。切换需暂停写入、排空或保存检查点、迁移数据、核对序号与摘要，再切换并恢复；不能通过双跑工具或双写两个数据库模拟无损切换。
+
+### 10.1 P2 EventTransport 首选候选：RocketMQ LiteTopic
+
+设计基线注记（2026-10-10，issue [#13200](https://github.com/QwenLM/qwen-code/issues/13200)）：可选 P2 `EventTransport` 适配器的首选候选定为 **Apache RocketMQ LiteTopic（5.5.0+，RIP-83）**，对上文配置样例中未加限定的 `rocketmq` 条目作出限定。详细的后继设计——信封不变量、LiteTopic 与 Redis Streams 的对比、阶段计划与故障矩阵——见 [EventTransport：Managed Agent 控制面的 MQ 分发](2026-10-04-managed-agent-event-transport.zh-CN.md)。本注记只记录四点基线：
+
+1. **边界。** 事件接受路径不变：Session 序号、Turn 状态与 Harness 游标在单一 SQL 事务中提交，提交后直推 SSE（`ManagedAgentStore.publishAfterCommit`）。LiteTopic 只承载分发副本，不替代单事务原子性、writer fencing 或公开 Session 续传游标。
+2. **命中场景。** P2 多实例 SSE 节点通知；阶段 H4 父子 Session 间 durable messaging（Supervisor–Worker 按 TaskID 建 LiteTopic 的模式与之同构）；阶段 H5 Channels 的 outbox dispatch。经典 Topic 或泛 MQ 适配器不适合按 Session 建通道，LiteTopic 适合。注意 H4 的投递语义（at-least-once 加幂等 apply）不同于 P2 的临时通知扇出，H4 的排序与去重要求由 H4 契约确定而非继承自本基线——不得假定 P2 适配器配置原样适用于 H4。
+3. **前提。** RocketMQ 5.5.0+ 并开启 `enableLmq=true`、`enableMultiDispatch=true`、`storeType=defaultRocksDB`，部署 NameServer、Broker 与 Proxy。沿用第 1 节「不为 SSE 额外部署 MQ」的原则，接入以已有该版本的现成 RocketMQ 平台为条件。P2 门禁开启时，适配器必须在启动时校验这些 broker 能力，不匹配即 fail fast，而不是静默降级为经典 Topic——并入上文所述的启动能力校验。
+4. **明确不做。** 接受路径不引 MQ（P4 MQ-first 仍是第 12 节的远期门禁，需先完成持久化源日志）；P2 门禁开启前不动工；H4 传输选型等 H4 契约。
 
 ## 11. 故障语义
 

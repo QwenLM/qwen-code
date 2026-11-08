@@ -32,6 +32,7 @@ import {
   makeWaitFor,
 } from '../helpers/gated-skill-fixture.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 const HOOK_SCRIPT = 'rewrite-hook.mjs';
 const HITS_LOG = 'hook-hits.jsonl';
@@ -295,8 +296,12 @@ describe('PreToolUse updatedInput', () => {
     ptyProcess.write(prompt);
     await waitFor('the prompt to echo', () => output.includes(prompt));
     ptyProcess.write('\r');
-    await waitFor('the confirmation for the replacement', () =>
-      output.includes('ask-b.txt'),
+    // 'ask-b.txt' already paints with the executing tool row, before the
+    // ask dialog exists; the hook's reason renders only inside the dialog,
+    // so waiting for it is what makes the approval below land.
+    await waitFor(
+      'the confirmation for the replacement',
+      () => output.includes('ask-b.txt') && output.includes('p02b1 review'),
     );
     expect(output).not.toContain('ask-a.txt');
     // The first option approves once.
@@ -313,7 +318,7 @@ describe('PreToolUse updatedInput', () => {
     expect(hookHits()).toHaveLength(1);
     expect(file('ask-a.txt')).toBeUndefined();
     expect(file('ask-b.txt')).toBe('REWRITTEN');
-  });
+  }, 360_000); // CI: 5 waits at the 60s default + 60s setup slack.
 
   it('ACP: asks for and writes the replacement once', async () => {
     const server = await setup(
@@ -336,6 +341,14 @@ describe('PreToolUse updatedInput', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+    // Both authorities: enable the trust feature (the inherited rig trust
+    // store grants this directory) and record the approval an interactive
+    // user would give, so the ACP child loads the fixture's project hooks.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    approveProjectHooks(qwenHome, rig.testDir!);
     const child = spawn(
       'node',
       [

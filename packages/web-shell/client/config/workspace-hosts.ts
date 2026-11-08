@@ -8,7 +8,8 @@ import {
 
 export const WorkspaceHostsEnabled = createContext(false);
 const STORAGE_KEY = 'qwen-workspace-hosts';
-const CHANGE_EVENT = 'qwen-workspace-hosts';
+export const WORKSPACE_HOSTS_CHANGE_EVENT = 'qwen-workspace-hosts';
+const CHANGE_EVENT = WORKSPACE_HOSTS_CHANGE_EVENT;
 export interface WorkspaceHost {
   origin: string;
   workspaces: Pick<DaemonWorkspaceCapability, 'id' | 'cwd' | 'displayName'>[];
@@ -60,6 +61,21 @@ export function rememberWorkspaceHost(
   } else {
     hosts.push(host);
   }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(hosts));
+    window.dispatchEvent(new Event(CHANGE_EVENT));
+  } catch {
+    // Connections remain usable when browser persistence is unavailable.
+  }
+}
+
+/**
+ * Drop a host from the saved workspace catalog, e.g. when its connection is
+ * removed from Settings: the fan-out group must disappear in the same tab,
+ * not just on the next load.
+ */
+export function forgetWorkspaceHost(origin: string): void {
+  const hosts = readWorkspaceHosts().filter((host) => host.origin !== origin);
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(hosts));
     window.dispatchEvent(new Event(CHANGE_EVENT));

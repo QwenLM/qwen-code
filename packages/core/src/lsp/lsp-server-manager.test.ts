@@ -116,6 +116,7 @@ function createTrustedManager(): LspServerManager {
   return new LspServerManager(
     {
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(true),
     } as unknown as CoreConfig,
     {} as WorkspaceContext,
     {} as FileDiscoveryService,
@@ -168,10 +169,15 @@ function stubConnection(manager: LspServerManager, result: object) {
 function crashableProcess(
   overrides: Parameters<typeof createMockProcess>[0] = {},
 ) {
-  const crash: { exit?: (code: number | null) => void } = {};
+  const crash: {
+    exit?: (code: number | null, signal?: string | null) => void;
+  } = {};
   const process = createMockProcess(overrides);
   process.once = vi.fn(
-    (event: string, handler: (code: number | null) => void) => {
+    (
+      event: string,
+      handler: (code: number | null, signal?: string | null) => void,
+    ) => {
       if (event === 'exit') {
         crash.exit = handler;
       }
@@ -721,6 +727,39 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('blocks workspace command probes until explicitly trusted, without blocking extension configs', async () => {
+    const config = {
+      isTrustedFolder: () => true,
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(false),
+    };
+    const manager = new LspServerManager(
+      config as unknown as CoreConfig,
+      {} as WorkspaceContext,
+      {} as FileDiscoveryService,
+      { requireTrustedWorkspace: false, workspaceRoot: '/workspace' },
+    );
+    const probe = openGates(manager);
+    const connection = createMockConnection();
+    stubConnection(manager, { connection, process: createMockProcess() });
+    manager.setServerConfigs([{ ...serverConfig, source: 'workspace' }]);
+
+    await manager.startAll();
+    expect(probe).not.toHaveBeenCalled();
+    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+
+    config.isExplicitlyTrustedFolder.mockReturnValue(true);
+    await manager.startAll();
+    expect(probe).toHaveBeenCalled();
+    await manager.stopAll();
+
+    probe.mockClear();
+    config.isExplicitlyTrustedFolder.mockReturnValue(false);
+    manager.setServerConfigs([{ ...serverConfig, source: 'extension' }]);
+    await manager.startAll();
+    expect(probe).toHaveBeenCalled();
+    await manager.stopAll();
+  });
+
   it('does not probe command existence for unsafe command paths', async () => {
     const manager = createTrustedManager();
     spyPrivate(manager, 'checkWorkspaceTrust').mockResolvedValue(true);
@@ -772,6 +811,67 @@ describe('LspServerManager', () => {
       'clangd',
       { PATH: '/tmp/fake-bin', SAFE_VALUE: '1' },
       '/workspace',
+    );
+  });
+
+  it('records the refusal cause on the handle when the command does not exist', async () => {
+    const manager = createTrustedManager();
+    openGates(manager).mockResolvedValue(false);
+
+    // Seed a stderr tail from an earlier attempt: the refusal must CLEAR it,
+    // or a stale tail is later rendered as this refusal's cause.
+    const seeded = registerHandle(manager);
+    seeded.processDiagnostics = {
+      stderrTail: 'stale tail from an earlier attempt\n',
+    };
+    await manager.startAll();
+
+    // The diagnostics surfaces render `handle.error`; an admission refusal
+    // that leaves it undefined would show a bare `failed` with no cause.
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe('command not found: clangd');
+    expect(handle?.processDiagnostics).toBeUndefined();
+  });
+
+  it('records the refusal cause on the handle when a trust-requiring folder is untrusted', async () => {
+    // The production entrance: folderTrust sets requireTrustedWorkspace and
+    // the folder is untrusted, so the first gate refuses before any stub.
+    const manager = new LspServerManager(
+      {
+        isTrustedFolder: vi.fn().mockReturnValue(false),
+      } as unknown as CoreConfig,
+      {} as WorkspaceContext,
+      {} as FileDiscoveryService,
+      {
+        requireTrustedWorkspace: true,
+        workspaceRoot: '/workspace',
+      },
+    );
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe('server requires a trusted workspace');
+    expect(handle?.processDiagnostics).toBeUndefined();
+  });
+
+  it('records the refusal cause on the handle for an unsafe command path', async () => {
+    const manager = createTrustedManager();
+    spyPrivate(manager, 'checkWorkspaceTrust').mockResolvedValue(true);
+    spyPrivate(manager, 'isPathSafe').mockReturnValue(false);
+
+    manager.setServerConfigs([
+      { ...serverConfig, command: '../../outside/payload' },
+    ]);
+    await manager.startAll();
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe(
+      'command path is unsafe: ../../outside/payload',
     );
   });
 
@@ -837,6 +937,22 @@ describe('LspServerManager', () => {
     expect(createLspConnection).toHaveBeenCalledOnce();
   });
 
+  it('records the exit as the cause when a crash marks the server failed', async () => {
+    const { manager, crash } = crashingManager();
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+    expect(crash.exit).toBeDefined();
+
+    crash.exit?.(null, 'SIGKILL');
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe(
+      'server process exited (code unknown, signal SIGKILL)',
+    );
+  });
+
   it('retries the same config after a crash without restartOnCrash', async () => {
     const { manager, crash, createLspConnection } = crashingManager();
 
@@ -897,6 +1013,9 @@ describe('LspServerManager', () => {
       NODE_OPTIONS: '--require /tmp/hook.js',
       node_options: '--require /tmp/lowercase-hook.js',
       Ld_PreLoad: '/tmp/preload.so',
+      BASH_ENV: '/tmp/bash-env.sh',
+      ENV: '/tmp/env.sh',
+      npm_config_node_options: '--require /tmp/npm-hook.js',
       SAFE_VALUE: '1',
     });
 
@@ -904,6 +1023,9 @@ describe('LspServerManager', () => {
     expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
     expect(env['node_options']).toBeUndefined();
     expect(env['Ld_PreLoad']).toBeUndefined();
+    expect(env['BASH_ENV']).toBeUndefined();
+    expect(env['ENV']).toBeUndefined();
+    expect(env['npm_config_node_options']).toBeUndefined();
     expect(env['SAFE_VALUE']).toBe('1');
   });
 

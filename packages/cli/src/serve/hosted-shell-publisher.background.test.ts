@@ -38,37 +38,9 @@ import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/manag
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 
-// child_run and monitor_run are enabled by the H3 enablement slice; the
-// test drives both background paths ahead of it with the same test-only
-// flip the authority suites use.
-const enablement = vi.hoisted(() => ({ childRun: true, monitorRun: true }));
-
-vi.mock(
-  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
-      >();
-    return {
-      ...actual,
-      assertManagedSessionDomainEnabled: (
-        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-      ) => {
-        if (
-          domain === 'child_run'
-            ? !enablement.childRun
-            : domain === 'monitor_run'
-              ? !enablement.monitorRun
-              : true
-        ) {
-          actual.assertManagedSessionDomainEnabled(domain);
-        }
-      },
-    };
-  },
-);
-
+// child_run's shell kind and monitor_run are enabled by the H3 enablement
+// slice (#13856): this suite drives both background paths through the real
+// gates, with no lift.
 let root: string | undefined;
 let session: ManagedSession | undefined;
 let orchestrator: HostedChildRunSession | undefined;
@@ -431,6 +403,68 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
   ).toHaveLength(0);
 });
 
+it('projects a platform-driven stop as stop_requested, never as an exit', async () => {
+  // #13856 A8: the worker marks a stop it was asked to make, the finalize
+  // carries the marker, and the record answers cancelled/stop_requested —
+  // with no exit evidence, exactly as the contract demands of a stop.
+  const r = await rig();
+  const request = backgroundRequest(r.key, '1');
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    backgroundRequest(r.key, '1') as Parameters<
+      ManagedShellPublisherRegistry['prepare']
+    >[0],
+  );
+  prepared.sink.setStarted(1);
+  await prepared.sink.write('stdout', Buffer.from('half'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: null,
+    signal: 15,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  // The registry's terminate path marks the capture before it finalizes.
+  prepared.sink.setStopRequested();
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  const envelope = await prepared.sink.finalize('error', [], {
+    message: 'Background Shell terminated with SIGTERM.',
+  });
+
+  await r.registry.accept(prepared.identity, envelope);
+
+  const record = parseChildShellRun(
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'stop_requested',
+    stopRequested: true,
+    // A stop by anyone else carries no exit status (contract rule).
+    exitCode: null,
+    exitSignal: null,
+  });
+  expect(record.run.state).toBe('cancelled');
+  expect(record.run.execution).toBe('settled');
+  // The output still landed: the marker changes the stop's meaning, never
+  // the capture's bytes.
+  const finalManifest = parseToolResultManifestBytes(
+    await (
+      session!.resources as {
+        read: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+      }
+    ).read(record.outputRef!),
+  );
+  expect(finalManifest.captureStatus).toBe('complete');
+});
+
 it('melds a monitor watch through one terminal step only after its start receipt', async () => {
   const r = await rig();
   const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
@@ -470,7 +504,14 @@ it('melds a monitor watch through one terminal step only after its start receipt
   const loop = new HostedMonitorLoop(
     r.monitors,
     'monitor-execution',
-    new HostedMonitorRemoteExecutor(publisher!),
+    new HostedMonitorRemoteExecutor(publisher!, {
+      broker: {
+        monitorControl: () => Promise.reject(new Error('Never stopped.')),
+      },
+      sessionKey: r.key,
+      executionCallId: 'monitor-execution',
+      runtimeCallId: 'worker-call-a',
+    }),
   );
   await loop.resumeAttached({
     ownerScopeId: r.key.sessionId,
@@ -517,6 +558,274 @@ it('melds a monitor watch through one terminal step only after its start receipt
   expect(record).toMatchObject({
     observationSequence: 1,
     notifiedThrough: 1,
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+});
+
+it.each([
+  // The quota fires from the debounce window that commits its last
+  // observation; the idle window fires with nothing observed. A refused
+  // finalize still proves the stop, and its redrive lands the output.
+  ['max_events', false, 1_000, 1],
+  ['idle_timeout', false, 60_000, 0],
+  ['max_events', true, 1_000, 1],
+  ['idle_timeout', true, 60_000, 0],
+] as const)(
+  'settles the %s auto-stop only on the worker stop evidence, after its final output (refused finalize: %s) (#13896)',
+  async (reason, refused, firing, observed) => {
+    const r = await rig();
+    const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+    await r.monitors.admit({
+      monitorId: 'monitor-execution',
+      ownerScopeId: r.key.sessionId,
+      executionCallId: 'monitor-execution',
+      args: { command: 'tail -f build.log' },
+      maxEvents: 1,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+    });
+    await r.monitors.dispatchStarted('monitor-execution', BINDING);
+    const request = backgroundRequest(r.key, '1', true);
+    (request.capture as Record<string, unknown>)['executionCallId'] =
+      'monitor-execution';
+    publisher!.register(
+      { reference: request.reference, capture: request.capture },
+      'model-call-m',
+      request.reference.sessionId,
+    );
+    const prepared = await r.registry.prepare(
+      request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+    );
+    await r.monitors.attach('monitor-execution', BINDING, { pid: 8 });
+    // The worker's stop, as its registry answers monitor-stop: the capture
+    // finalizes through the publisher first, and only that completion's
+    // exit evidence comes back as `exited`.
+    const stops: unknown[] = [];
+    let advance: { mock: { calls: unknown[] } } | undefined;
+    const broker = {
+      async monitorControl(operation: unknown) {
+        stops.push(operation);
+        prepared.sink.setProcessResult({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          error: null,
+          aborted: false,
+          exitCode: null,
+          signal: 15,
+          pid: undefined,
+          executionMethod: 'child_process',
+        });
+        prepared.sink.setStopRequested();
+        await prepared.sink.finish('stdout', true);
+        await prepared.sink.finish('stderr', true);
+        // A store that fails the final forward and its first redrive, then
+        // heals: only the bounded redrive can land the sealed output.
+        if (refused)
+          advance = vi
+            .spyOn(r.monitors, 'advanceOutput')
+            .mockRejectedValueOnce(new Error('transient store 5xx #1'))
+            .mockRejectedValueOnce(new Error('transient store 5xx #2'));
+        try {
+          await r.registry.accept(
+            prepared.identity,
+            await prepared.sink.finalize('error', [], {
+              message: 'Background Shell terminated with SIGTERM.',
+            }),
+          );
+        } catch (cause) {
+          // The worker's completion records the delivery failure and keeps
+          // the exit evidence it answers with.
+          if (!refused) throw cause;
+        }
+        return {
+          operationId: 'worker-call-a',
+          state: 'exited' as const,
+          unitName: 'qwen-mon-worker-call-a',
+          evidence: { exitCode: null, exitSignal: 'SIGTERM' },
+        };
+      },
+    };
+    const timers = new Map<number, Array<() => void>>();
+    const loop = new HostedMonitorLoop(
+      r.monitors,
+      'monitor-execution',
+      new HostedMonitorRemoteExecutor(publisher!, {
+        broker,
+        sessionKey: r.key,
+        executionCallId: 'monitor-execution',
+        runtimeCallId: 'worker-call-a',
+      }),
+      {
+        now: () => Date.now(),
+        // Windows fire only when the case drives them.
+        setTimeout: (handler, ms) => {
+          timers.set(ms, [...(timers.get(ms) ?? []), handler]);
+          return 0 as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout: () => undefined,
+      },
+    );
+    await loop.resumeAttached({
+      ownerScopeId: r.key.sessionId,
+      executionCallId: 'monitor-execution',
+      args: { command: 'tail -f build.log' },
+      maxEvents: 1,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+      runtime: BINDING,
+    });
+
+    prepared.sink.setStarted(8);
+    if (observed > 0)
+      await prepared.sink.write('stdout', Buffer.from('built\n'));
+    timers.get(firing)!.shift()!();
+    await loop.done;
+    if (refused) {
+      // The record settles only once the redrive landed the sealed output.
+      await vi.waitFor(
+        async () => {
+          const settled = parseMonitorRun(
+            session!.authority.extensionRecord(
+              'monitor_run',
+              'monitor-execution',
+            )!.record,
+          );
+          expect(settled.stopReason).not.toBeNull();
+          const manifest = parseToolResultManifestBytes(
+            await (
+              session!.resources as {
+                read: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+              }
+            ).read(settled.outputRef!),
+          );
+          expect(manifest.captureStatus).toBe('complete');
+        },
+        { timeout: 5_000, interval: 50 },
+      );
+      expect(advance!.mock.calls.length).toBeGreaterThanOrEqual(3);
+    }
+
+    expect(stops).toEqual([
+      {
+        kind: 'monitor-stop',
+        sessionKey: r.key,
+        operationId: 'monitor-execution',
+        targetOperationId: 'worker-call-a',
+      },
+    ]);
+    const record = parseMonitorRun(
+      session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+        .record,
+    );
+    // The loop's own bound is the reason, proven by the worker — not the
+    // stop marker its finalize carried — and the record quotes the sealed
+    // output.
+    expect(record).toMatchObject({
+      observationSequence: observed,
+      stopReason: reason,
+      run: { state: 'settled', execution: 'settled' },
+    });
+    const finalManifest = parseToolResultManifestBytes(
+      await (
+        session!.resources as {
+          read: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+        }
+      ).read(record.outputRef!),
+    );
+    expect(finalManifest.captureStatus).toBe('complete');
+  },
+);
+
+it('settles a natural exit that crosses the quota without stopping the watch (#13896)', async () => {
+  // The worker answers a stop only after its in-flight finalize returns,
+  // and that finalize waits on this exit chain: a stop issued from here
+  // would wait on itself until a 30 s request timeout broke the cycle. The
+  // physical end supersedes the quota (#13856 R1-30).
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-execution',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-execution',
+    args: { command: 'tail -f build.log' },
+    maxEvents: 1,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-execution', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-execution';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  await r.monitors.attach('monitor-execution', BINDING, { pid: 8 });
+  const stops: unknown[] = [];
+  const loop = new HostedMonitorLoop(
+    r.monitors,
+    'monitor-execution',
+    new HostedMonitorRemoteExecutor(publisher!, {
+      broker: {
+        monitorControl: (operation) => {
+          stops.push(operation);
+          return Promise.reject(new Error('A stop from inside the exit.'));
+        },
+      },
+      sessionKey: r.key,
+      executionCallId: 'monitor-execution',
+      runtimeCallId: 'worker-call-a',
+    }),
+    {
+      now: () => Date.now(),
+      // No window ever fires: the last line reaches the loop only through
+      // the exit's own flush.
+      setTimeout: () => 0 as unknown as ReturnType<typeof setTimeout>,
+      clearTimeout: () => undefined,
+    },
+  );
+  await loop.resumeAttached({
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-execution',
+    args: { command: 'tail -f build.log' },
+    maxEvents: 1,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+    runtime: BINDING,
+  });
+
+  prepared.sink.setStarted(8);
+  await prepared.sink.write('stdout', Buffer.from('built\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  await r.registry.accept(
+    prepared.identity,
+    await prepared.sink.finalize('success', [], undefined),
+  );
+  await loop.done;
+
+  expect(stops).toEqual([]);
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
+  );
+  expect(record).toMatchObject({
+    observationSequence: 1,
     stopReason: 'exited',
     run: { state: 'settled', execution: 'settled' },
   });
@@ -584,62 +893,69 @@ it('retries a finalize that failed once instead of caching the refusal forever',
   });
 });
 
-it('commits the tail an ownerless watch decoded before its record settles', async () => {
-  const r = await rig();
-  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
-  await r.monitors.admit({
-    monitorId: 'monitor-tail',
-    ownerScopeId: r.key.sessionId,
-    executionCallId: 'monitor-tail',
-    args: { command: 'du -sh .', description: 'du watch' },
-    maxEvents: 100,
-    idleTimeoutMs: 60_000,
-    debounceMs: 1_000,
-  });
-  await r.monitors.dispatchStarted('monitor-tail', BINDING);
-  const request = backgroundRequest(r.key, '1', true);
-  (request.capture as Record<string, unknown>)['executionCallId'] =
-    'monitor-tail';
-  publisher!.register(
-    { reference: request.reference, capture: request.capture },
-    'model-call-m',
-    request.reference.sessionId,
-  );
-  const prepared = await r.registry.prepare(
-    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
-  );
-  await r.monitors.attach('monitor-tail', BINDING, { pid: 9 });
-  prepared.sink.setStarted(9);
-  // The watch ends before any observation arm registers: its decoded
-  // lines still commit — with the wake the end should raise too.
-  await prepared.sink.write('stdout', Buffer.from('last window\nvery last\n'));
-  prepared.sink.setProcessResult({
-    rawOutput: Buffer.alloc(0),
-    output: '',
-    error: null,
-    aborted: false,
-    exitCode: 0,
-    signal: null,
-    pid: undefined,
-    executionMethod: 'child_process',
-  });
-  await prepared.sink.finish('stdout', true);
-  const envelope = await prepared.sink.finalize('success', [], undefined);
-  await r.registry.accept(prepared.identity, envelope);
-  const record = parseMonitorRun(
-    session!.authority.extensionRecord('monitor_run', 'monitor-tail')!.record,
-  );
-  expect(record).toMatchObject({
-    observationSequence: 1,
-    notifiedThrough: 1,
-    stopReason: 'exited',
-    run: { state: 'settled', execution: 'settled' },
-  });
-  const wakes = session!.authority
-    .eventsInSequenceRange(1, session!.authority.committedSequence)
-    .filter((event) => event.kind === 'wake.requested');
-  expect(wakes).toHaveLength(1);
-});
+it.each([false, true])(
+  'commits an ownerless watch tail with lifecycle preparation=%s',
+  async (lifecycle) => {
+    const r = await rig();
+    const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+    await r.monitors.admit({
+      monitorId: 'monitor-tail',
+      ownerScopeId: r.key.sessionId,
+      executionCallId: 'monitor-tail',
+      args: { command: 'du -sh .', description: 'du watch' },
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+    });
+    await r.monitors.dispatchStarted('monitor-tail', BINDING);
+    const request = backgroundRequest(r.key, '1', true);
+    (request.capture as Record<string, unknown>)['executionCallId'] =
+      'monitor-tail';
+    publisher!.register(
+      { reference: request.reference, capture: request.capture },
+      'model-call-m',
+      request.reference.sessionId,
+    );
+    const prepared = await r.registry.prepare(
+      request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+    );
+    await r.monitors.attach('monitor-tail', BINDING, { pid: 9 });
+    if (lifecycle) publisher!.prepareLifecycle();
+    prepared.sink.setStarted(9);
+    // The watch ends before any observation arm registers: its decoded
+    // lines still commit — with the wake the end should raise too.
+    await prepared.sink.write(
+      'stdout',
+      Buffer.from('last window\nvery last\n'),
+    );
+    prepared.sink.setProcessResult({
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      error: null,
+      aborted: false,
+      exitCode: 0,
+      signal: null,
+      pid: undefined,
+      executionMethod: 'child_process',
+    });
+    await prepared.sink.finish('stdout', true);
+    const envelope = await prepared.sink.finalize('success', [], undefined);
+    await r.registry.accept(prepared.identity, envelope);
+    const record = parseMonitorRun(
+      session!.authority.extensionRecord('monitor_run', 'monitor-tail')!.record,
+    );
+    expect(record).toMatchObject({
+      observationSequence: 1,
+      notifiedThrough: lifecycle ? 0 : 1,
+      stopReason: 'exited',
+      run: { state: 'settled', execution: 'settled' },
+    });
+    const wakes = session!.authority
+      .eventsInSequenceRange(1, session!.authority.committedSequence)
+      .filter((event) => event.kind === 'wake.requested');
+    expect(wakes).toHaveLength(lifecycle ? 0 : 1);
+  },
+);
 
 it('completes a refused exit settle on the record’s own attach, without a client retry', async () => {
   const r = await rig();
@@ -1546,6 +1862,61 @@ it('settles an unproven monitor end as watch_failed, never as a clean exit', asy
   expect(record).toMatchObject({
     stopReason: 'watch_failed',
     run: { state: 'failed', execution: 'settled' },
+  });
+});
+
+it('settles a parked monitor from its real exit evidence, not the tail (#13856 R1-55)', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-parked',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-parked',
+    args: { command: 'du -sh .', description: 'du watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-parked', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-parked';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  await r.monitors.attach('monitor-parked', BINDING, { pid: 9 });
+  prepared.sink.setStarted(9);
+  await prepared.sink.write('stdout', Buffer.from('still watching\n'));
+  // The quota/idle park passed its stop unproven: the record sits blocked.
+  await r.monitors.blockedRuntimeLost('monitor-parked');
+  // A real exit arrives carrying a tail line: the parked record must settle
+  // from the exit evidence, not by re-committing the tail as an observation.
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  const envelope = await prepared.sink.finalize('success', []);
+  await r.registry.accept(prepared.identity, envelope);
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-parked')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'exited',
+    // The tail was not re-committed as an observation of the ended period.
+    observationSequence: 0,
+    run: { state: 'settled', execution: 'settled' },
   });
 });
 

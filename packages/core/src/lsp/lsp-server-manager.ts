@@ -37,12 +37,19 @@ import { lspServerConfigHash } from './configHash.js';
 
 const debugLogger = createDebugLogger('LSP');
 const SECURITY_SENSITIVE_ENV_KEYS = new Set([
+  // Loader and interpreter preload vectors.
   'DYLD_INSERT_LIBRARIES',
   'DYLD_LIBRARY_PATH',
   'LD_AUDIT',
   'LD_LIBRARY_PATH',
   'LD_PRELOAD',
   'NODE_OPTIONS',
+  // Shell startup files and npm's own node-options alias: npm maps
+  // npm_config_node_options onto the child's NODE_OPTIONS, so blocking only
+  // NODE_OPTIONS leaves the same preload reachable one level down.
+  'BASH_ENV',
+  'ENV',
+  'NPM_CONFIG_NODE_OPTIONS',
 ]);
 
 export interface LspServerManagerOptions {
@@ -383,12 +390,21 @@ export class LspServerManager {
   ): Promise<void> {
     const workspaceTrusted = this.config.isTrustedFolder();
     if (
-      (this.requireTrustedWorkspace || handle.config.trustRequired) &&
-      !workspaceTrusted
+      ((this.requireTrustedWorkspace || handle.config.trustRequired) &&
+        !workspaceTrusted) ||
+      (handle.config.source === 'workspace' &&
+        !this.config.isExplicitlyTrustedFolder())
     ) {
       debugLogger.warn(
-        `LSP server ${name} requires trusted workspace, skipping startup`,
+        `LSP server ${name} requires trusted workspace, skipping startup. Workspace .lsp.json requires explicit trust: enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
       );
+      // The admission early-returns precede the `try` that assigns
+      // handle.error, so record the cause here — a bare FAILED state gives
+      // the diagnostics surfaces nothing to render. processDiagnostics is
+      // cleared alongside so a stderr tail from an earlier attempt is not
+      // mistaken for the cause of this refusal.
+      handle.error = new Error('server requires a trusted workspace');
+      handle.processDiagnostics = undefined;
       handle.status = 'FAILED';
       this.serverConfigHashes.delete(name);
       return;
@@ -404,6 +420,8 @@ export class LspServerManager {
       debugLogger.warn(
         `Workspace trust check failed, not starting LSP server ${name}`,
       );
+      // The gate above rejects on the same predicate this check uses, so this
+      // branch is unreachable and records no cause; the reachable gate does.
       handle.status = 'FAILED';
       this.serverConfigHashes.delete(name);
       return;
@@ -420,6 +438,10 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} command path is unsafe: ${handle.config.command}`,
         );
+        handle.error = new Error(
+          `command path is unsafe: ${handle.config.command}`,
+        );
+        handle.processDiagnostics = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -435,6 +457,8 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} command not found: ${handle.config.command}`,
         );
+        handle.error = new Error(`command not found: ${handle.config.command}`);
+        handle.processDiagnostics = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -620,17 +644,25 @@ export class LspServerManager {
     if (!handle.process) {
       return;
     }
-    handle.process.once('exit', (code) => {
+    handle.process.once('exit', (code, signal) => {
       if (handle.stopRequested) {
         return;
       }
       handle.processExitedUnexpectedly = true;
+      // The exit the diagnostics surfaces render as the cause: without it a
+      // crash-exhausted handle reads as a bare `failed`, indistinguishable
+      // from a missing binary.
+      const exitCause = () =>
+        new Error(
+          `server process exited (code ${code ?? 'unknown'}, signal ${signal ?? 'unknown'})`,
+        );
       // Only unexpected process exits can trigger restart. Explicit stops set
       // stopRequested before terminating the process.
       if (!handle.config.restartOnCrash) {
         debugLogger.warn(
           `LSP server ${name} exited but restartOnCrash is disabled`,
         );
+        handle.error = exitCause();
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -640,6 +672,7 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} exited but maxRestarts is ${maxRestarts}`,
         );
+        handle.error = exitCause();
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -649,6 +682,7 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
+        handle.error = exitCause();
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;

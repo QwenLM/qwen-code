@@ -16,12 +16,6 @@ type CollabMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
-  'toolName.thread_post': 'ThreadPost',
-  'toolName.thread_wait': 'ThreadWait',
-  'toolName.thread_block': 'ThreadBlock',
-  'toolName.thread_review': 'ThreadReview',
-  'toolName.thread_create': 'ThreadCreate',
-  'toolName.thread_read': 'ThreadRead',
   'agents.description':
     'Manage reusable agent definitions for tasks, Agent Teams, and @-mention collaboration in chat.',
   'collab.elapsed.seconds': (v) => `${v?.count ?? 0}s`,
@@ -257,16 +251,21 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'That is not a join link. It looks like https://host:4170/join/<workspace>.',
   'collab.runtime.joinConnected': (v) =>
     `This computer joined ${v?.server} as a runtime.`,
+  'collab.runtime.notSavedHere': (v) =>
+    `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `No answer from this computer’s daemon${v?.error ? ` (${v.error})` : ''}. It may still be joining: check on the coordinator before trying again, with a new join token if it did not join.`,
+  'collab.runtime.joinFailed': (v) => `This computer’s join: ${v?.error ?? ''}`,
+  'collab.runtime.connectingHint':
+    'Connecting a runtime… Actions that leave this page wait until it finishes.',
+  'collab.runtime.joinNeedsHttp':
+    'This join link uses plain HTTP. Tick “Allow plain HTTP” if this network is trusted, or use an HTTPS link.',
   'collab.runtime.joinCli': 'Or from a terminal on this computer:',
 };
 
 export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
-  'toolName.thread_post': '发帖到线程',
-  'toolName.thread_wait': '等待协作方',
-  'toolName.thread_block': '提出阻塞问题',
-  'toolName.thread_review': '提交待评审',
-  'toolName.thread_create': '创建子线程',
-  'toolName.thread_read': '读取线程',
   'agents.description':
     '管理可复用的智能体定义，用于任务执行、Agent Team 或在对话中 @ 协作。',
   'collab.elapsed.seconds': (v) => `${v?.count ?? 0} 秒`,
@@ -486,5 +485,16 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     '这不是加入链接，格式应为 https://host:4170/join/<workspace>。',
   'collab.runtime.joinConnected': (v) =>
     `这台电脑已作为 Runtime 加入 ${v?.server}。`,
+  'collab.runtime.notSavedHere': (v) =>
+    `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `那台电脑已连接，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `这台电脑的守护进程没有应答${v?.error ? `（${v.error}）` : ''}，它可能仍在加入：请先在协调方确认；如果没有加入，再用新的加入令牌重试。`,
+  'collab.runtime.joinFailed': (v) => `这台电脑的加入请求：${v?.error ?? ''}`,
+  'collab.runtime.connectingHint':
+    '正在连接 Runtime…会离开本页的操作要等它完成。',
+  'collab.runtime.joinNeedsHttp':
+    '这个加入链接使用 HTTP 明文。如果网络可信，请勾选“允许 HTTP 明文”；否则请使用 HTTPS 链接。',
   'collab.runtime.joinCli': '也可以在这台电脑的终端里运行：',
 };

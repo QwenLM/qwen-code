@@ -326,6 +326,7 @@ async function hostedModelFixture(
           records.push(...batch);
         },
         seal: async () => {},
+        writerSealed: false,
         abort: async () => {},
       }),
     },
@@ -655,9 +656,12 @@ async function shellFixture(
   return { ...f, localSegmentId, emptySealId, manifestRef, seals, binary };
 }
 
-async function detachedShellFixture(options: { partial?: boolean } = {}) {
+async function detachedShellFixture(
+  options: { partial?: boolean; recoveredCancellation?: boolean } = {},
+) {
   const f = fixture();
   const partial = options.partial === true;
+  const recoveredCancellation = options.recoveredCancellation === true;
   const manifestRef = partial
     ? f.resource('managed-tool-result-manifest', {
         toolResult: 'managed-tool-result/1',
@@ -694,7 +698,11 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
       })
     : null;
   const envelope = {
-    executionStatus: partial ? ('error' as const) : ('success' as const),
+    executionStatus: recoveredCancellation
+      ? ('cancelled' as const)
+      : partial
+        ? ('error' as const)
+        : ('success' as const),
     responseParts: [
       { text: 'Background shell started under unit qwen-bg-call.' },
     ],
@@ -707,8 +715,12 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
           deliveryStatus: 'pending' as const,
         }
       : {
-          captureStatus: 'detached' as const,
-          captureReason: null,
+          captureStatus: recoveredCancellation
+            ? ('unavailable' as const)
+            : ('detached' as const),
+          captureReason: recoveredCancellation
+            ? ('producer_lost' as const)
+            : null,
           manifest: null,
           previewTruncated: false,
           deliveryStatus: 'pending' as const,
@@ -753,11 +765,24 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
     }),
   ]);
   const outcomeRef = f.resource('managed-tool-outcome', {
-    schemaVersion: 1,
+    ...(recoveredCancellation
+      ? {
+          version: 1,
+          identity: {
+            tenantId: 'tenant',
+            sessionId: SESSION,
+            turnId: 'prompt',
+            executionCallId: 'execution',
+            callId: 'call',
+            invocationDigest: 'sha256:' + 'a'.repeat(64),
+            bindingGeneration: '1',
+            captureId: 'capture',
+            revision: 1,
+          },
+        }
+      : { schemaVersion: 1, manifestRef, history }),
     decision: 'blocked',
     envelope,
-    manifestRef,
-    history,
   });
   f.append([
     f.event('tool.receipt', {
@@ -928,7 +953,7 @@ describe('migration profile evidence', () => {
     {},
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-shell/1' },
-    { toolProfile: 'hosted-workspace-shell/2' },
+    { toolProfile: 'hosted-workspace-team-lead/1' },
     { toolProfile: 'hosted-workspace-files/1', hookCatalog: {} },
     { toolProfile: 'hosted-workspace-files/1', captureBytes: 1024 },
   ])('rejects unsupported frozen definition %j', async (definition) => {
@@ -940,6 +965,179 @@ describe('migration profile evidence', () => {
 });
 
 describe('verifyRecoverySession', () => {
+  it.each([
+    [
+      'published catalog',
+      Buffer.from(
+        '[{"name":"review","description":"Review","body":"Check the diff."}]',
+      ),
+      undefined,
+      undefined,
+    ],
+    [
+      'corrupt bytes',
+      Buffer.from('[]'),
+      Buffer.from('{}'),
+      'resource bytes conflict',
+    ],
+    ['missing bytes', Buffer.from('[]'), null, 'missing_resource'],
+    [
+      'catalog above the previous 48 KiB limit',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'review',
+            description: 'Review',
+            body: 'x'.repeat(48 * 1024),
+          },
+        ]),
+      ),
+      undefined,
+      undefined,
+    ],
+    [
+      'catalog at the 2 MiB resource limit',
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024)),
+      undefined,
+      undefined,
+    ],
+    [
+      'oversized catalog',
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024 + 1)),
+      undefined,
+      'Invalid agent skills reference',
+    ],
+    [
+      'invalid UTF-8',
+      Buffer.from([0xff]),
+      undefined,
+      'The encoded data was not valid for encoding utf-8',
+    ],
+    [
+      'invalid catalog',
+      Buffer.from('[{"name":"review"}]'),
+      undefined,
+      'Invalid Hosted skill catalog',
+    ],
+  ] as const)(
+    'verifies pinned Skills through the recovery closure: %s',
+    async (_name, bytes, stored, error) => {
+      const skillsRef: ManagedSessionDurableRef = {
+        resourceId: 'agent-skills',
+        kind: 'managed-agent-skills',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+      const f = fixture({
+        toolProfile: 'hosted-workspace-files/1',
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          skillsRef,
+        },
+      });
+      if (stored !== null)
+        f.resources.set(skillsRef.resourceId, stored ?? bytes);
+      if (error) {
+        await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+          error,
+        );
+        expect(f.complete.has(skillsRef.resourceId)).toBe(false);
+      } else {
+        await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+          fileHistory: 'not_captured',
+        });
+        expect(f.complete.has(skillsRef.resourceId)).toBe(true);
+      }
+    },
+  );
+
+  it('captures raw pinned agent instructions and refuses changed bytes', async () => {
+    const bytes = Buffer.from('Keep the agent instructions. 保留指令。');
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.complete.has(instructionsRef.resourceId)).toBe(true);
+    const corrupt = fixture(definition);
+    corrupt.resources.set(
+      instructionsRef.resourceId,
+      Buffer.alloc(bytes.length),
+    );
+    await expect(
+      verifyRecoverySession(corrupt.source, corrupt.io),
+    ).rejects.toThrow('resource bytes conflict');
+  });
+
+  it('refuses agent instructions over the 64 KiB cap with a self-consistent digest', async () => {
+    const bytes = Buffer.alloc(64 * 1024 + 1, 0x20);
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'agent instructions exceed 64 KiB',
+    );
+  });
+
+  it('refuses agent instructions bytes that are not valid UTF-8 with a self-consistent digest', async () => {
+    const bytes = Buffer.from([0xff, 0xfe, 0xfd]);
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'The encoded data was not valid for encoding utf-8',
+    );
+  });
+
   it.each([
     {},
     { undoReceipts: undefined },
@@ -1003,6 +1201,63 @@ describe('verifyRecoverySession', () => {
     });
     expect(f.io.read).toHaveBeenCalledWith(f.checkpointRef);
     expect(f.complete.size).toBe(f.refs.size);
+  });
+
+  it('roundtrips fully collected retirement counters without replay or activation', async () => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+      },
+    };
+    const roundtrip = JSON.parse(
+      JSON.stringify(source),
+    ) as RecoverySessionSource;
+    const io = {
+      ...f.io,
+      async *transactions() {},
+      nextReference: vi.fn(async () => null),
+      enqueue: vi.fn(async () => {}),
+    };
+    await expect(
+      verifyRecoverySession(roundtrip, io, 'migration'),
+    ).resolves.toEqual({ fileHistory: 'not_captured' });
+    expect(roundtrip.retiredHead).toEqual(source.retiredHead);
+    expect(io.read).not.toHaveBeenCalled();
+    expect(io.enqueue).not.toHaveBeenCalled();
+    expect(roundtrip.publicSession.status).toBe('DELETED');
+  });
+
+  it.each([
+    { state: 'ACTIVE' },
+    { compactedThroughRevision: 0 },
+    { tenantId: 'other' },
+    { sessionId: 'other' },
+    { writerId: 'late-writer' },
+    { lastCommitDigest: 'bad' },
+    { writerGeneration: Number.MAX_SAFE_INTEGER + 1 },
+    { committedSequence: -1 },
+    { activationEpoch: 0.5 },
+  ])('rejects damaged collected retirement authority (%j)', async (damage) => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+        ...damage,
+      },
+    };
+    await expect(
+      verifyRecoverySession(source, {
+        ...f.io,
+        async *transactions() {},
+      }),
+    ).rejects.toThrow('invalid collected retirement head');
   });
 
   it('requires retirement evidence before accepting a cleared checkpoint pointer', async () => {
@@ -1556,6 +1811,16 @@ describe('verifyRecoverySession', () => {
       verifyRecoverySession(committedFree.source, committedFree.io),
     ).rejects.toThrow();
   });
+
+  it('replays a recovered cancellation without capture as not captured', async () => {
+    const f = await detachedShellFixture({ recoveredCancellation: true });
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+    expect(f.io.publicationObject).not.toHaveBeenCalled();
+    expect(f.complete.size).toBe(f.refs.size);
+  });
   it('uses the actual private workspace key and verifies an initial journal', async () => {
     const f = fixture();
     expect(await verifyRecoverySession(f.source, f.io)).toEqual({
@@ -1568,8 +1833,10 @@ describe('verifyRecoverySession', () => {
   it.each([
     { toolProfile: 'hosted-workspace-files/1' },
     { toolProfile: 'hosted-workspace-files/2' },
+    { toolProfile: 'hosted-workspace-files/3' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
-    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
     // One refused profile would abort recovery for the whole Workspace,
     // so recovery reads the same profile vocabulary creation persists.
@@ -1580,8 +1847,10 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each([
-    { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-files/4' },
+    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1', captureBytes: 1024 },
   ])('still refuses an unknown Hosted definition (%j)', async (definition) => {
     const f = fixture(definition);
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(

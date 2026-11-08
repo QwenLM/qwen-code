@@ -6,11 +6,19 @@ import { useI18n } from '../../i18n';
 /**
  * Compact label naming the host a chat runs on, with the working directory in
  * its tooltip. Hidden until a project can live on more than one host.
+ * `hostOrigin` names the ACTIVE session's host on multi-daemon pages; without
+ * it the page daemon (the behavior before fan-out) decides.
  */
-export function WorkspaceLocation({ cwd }: { cwd?: string }) {
+export function WorkspaceLocation({
+  cwd,
+  hostOrigin,
+}: {
+  cwd?: string;
+  hostOrigin?: string;
+}) {
   const { t } = useI18n();
   const hosts = useWorkspaceHosts();
-  const origin = getDaemonBaseUrl();
+  const origin = hostOrigin ?? getDaemonBaseUrl();
   const remote = Boolean(origin) && origin !== window.location.origin;
   if (
     !remote &&

@@ -55,7 +55,10 @@ vi.mock('../utils/debugLogger.js', () => ({
 }));
 vi.mock('fs');
 vi.mock('os');
-vi.mock('crypto');
+vi.mock('crypto', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:crypto')>()),
+  randomBytes: vi.fn(),
+}));
 vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<
     typeof import('../services/session-pr-service.js')
@@ -72,6 +75,7 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
 import { isCommandAllowed, stripShellWrapper } from '../utils/shell-utils.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
+  SHELL_RECORD_ARTIFACT_REMINDER,
   ShellTool,
   type ShellToolInvocation,
   type ShellToolParams,
@@ -356,6 +360,7 @@ describe('ShellTool', () => {
       getPermissionsAsk: vi.fn().mockReturnValue([]),
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(true),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
@@ -763,6 +768,9 @@ describe('ShellTool', () => {
       await runShell('gh pr create --help', 'usage: gh pr create\n');
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: URL absent from the command output',
+      );
     });
 
     it('attributes against the execution directory, not the target dir', async () => {
@@ -810,6 +818,11 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      // A merged PR arrives as `status: 'pr'`; the state is what names it.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'pr', state: 'merged' },
+      );
     });
 
     it('does not bind an open PR the branch already had before the run', async () => {
@@ -821,6 +834,10 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: PR already existed before the run',
+        { number: 42 },
+      );
     });
 
     it('does not bind when the pre-run snapshot errored', async () => {
@@ -834,6 +851,32 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: pre-run PR snapshot unavailable',
+      );
+    });
+
+    it('names the post-run resolution status instead of paraphrasing a cause', async () => {
+      // `none` (gh proved the branch has no PR) and `error` (gh could not
+      // answer at all) are different facts; the log must not report the first
+      // when the second happened.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'error' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'error' },
+      );
+
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'none' },
+      );
     });
 
     it('does not re-emit when the resolved PR is already bound', async () => {
@@ -854,6 +897,10 @@ describe('ShellTool', () => {
         [{ ...prRecord(42), source: 'create' }],
       );
       expect(sessionServiceMock().emitSessionPrBound).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: already bound',
+        { number: 42 },
+      );
     });
 
     it('binds when a promote is refused after the command settled', async () => {
@@ -912,6 +959,10 @@ describe('ShellTool', () => {
       );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: branch mismatch',
+        { created: 'other-branch', expected: 'main' },
+      );
     });
 
     it('does not bind when the pre-run branch could not be captured', async () => {
@@ -1365,6 +1416,22 @@ describe('ShellTool', () => {
       return () => captured;
     };
 
+    it('declares the raw size unknown when the capture bound discarded output', async () => {
+      const output = 'o'.repeat(5_000);
+      const clipped = await runFg('yes', {
+        output,
+        outputCaptureLimitExceeded: true,
+      });
+      expect(clipped.rawOutputSize).toBeNull();
+      expect(clipped.truncatedByProducer).toBe(true);
+
+      // Control: the same body without a discard is still measured, so the
+      // null above is the capture bound and not "shell never declares".
+      const whole = await runFg('yes', { output });
+      expect(whole.rawOutputSize).not.toBeNull();
+      expect(whole.truncatedByProducer).toBeUndefined();
+    });
+
     describe('simulated sed edit', () => {
       const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
       const SED = "sed -i 's/foo/bar/' file.txt";
@@ -1508,6 +1575,48 @@ describe('ShellTool', () => {
 
         expectSedSkipped();
         expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('does not report a CRLF edit whose only effect is the carriage return', async () => {
+        // `.$` consumes the `\r` under dotAll, but the write path restores CRLF,
+        // so the bytes on disk would be identical to the original.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('still skips that CRLF edit when the file carries a BOM', async () => {
+        // The read returns the content without the BOM, so the prediction has
+        // to compare content strings or the BOM bytes make it unequal.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), bom: true, lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('writes a CRLF edit whose bytes do change', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/foo/bar/' file.txt");
+
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
+          expect.objectContaining({ content: 'bar\r\n' }),
+        );
+        expect(result.llmContent).toContain('sed edit applied');
       });
 
       it.each([
@@ -2086,6 +2195,33 @@ describe('ShellTool', () => {
       expectSpawned('npm test');
     });
 
+    it('marks a user-cancelled command as interrupted before completion', async () => {
+      const result = await runFg('npm test', {
+        output: 'start',
+        exitCode: null,
+        signal: 15,
+        aborted: true,
+      });
+
+      // The tool returns (rather than throws), so the scheduler needs this
+      // signal to avoid reporting a killed command as already completed.
+      expect(result.interruptedBeforeCompletion).toBe(true);
+      expect(String(result.llmContent)).toContain(
+        'Command was cancelled by user before it could complete.',
+      );
+      // What already ran is part of the interrupted account, not a detail the
+      // cancellation may drop.
+      expect(String(result.llmContent)).toContain(
+        'Below is the output before it was cancelled:\nstart',
+      );
+    });
+
+    it('does not mark a completed command as interrupted', async () => {
+      const result = await runFg('npm test', { output: 'done', exitCode: 0 });
+
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
+    });
+
     it('preserves shell wrapper environment and flags during foreground execution', async () => {
       const command = `FOO=bar bash -e -c 'echo "$FOO"; false; echo bad'`;
       await runFg(command);
@@ -2109,6 +2245,59 @@ describe('ShellTool', () => {
       expectSpawned('dir', { cwd: '/test/dir' });
     });
 
+    it('asks the model to record deliverable files after a successful command', async () => {
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(result.llmContent).toContain('call record_artifact');
+      expect(result.llmContent).toContain('workspacePath');
+      expect(result.returnDisplay).toMatchObject({
+        text: 'wrote orders.csv',
+      });
+      expect(
+        (result.returnDisplay as { text?: string }).text ?? '',
+      ).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when recording is disabled', async () => {
+      vi.mocked(mockConfig.isRecordArtifactEnabled).mockReturnValue(false);
+
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact after a read-only command', async () => {
+      const result = await runFg('ls', { output: 'orders.csv', exitCode: 0 });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command exits non-zero', async () => {
+      const result = await runFg('python rewrite.py', {
+        exitCode: 2,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command fails', async () => {
+      const result = await runFg('python rewrite.py', {
+        error: new Error('boom'),
+        exitCode: 1,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
     it('should format error messages correctly', async () => {
       const error = new Error('wrapped command failed');
       const result = await runFg('user-command', {
@@ -2130,6 +2319,19 @@ describe('ShellTool', () => {
       expect(result.error).toBeDefined();
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
       expect(result.error?.message).toBe('command failed');
+    });
+
+    it('keeps bounded captured output in the model-facing QWEN_PTY_WRITE_LIMIT failure', async () => {
+      const code = 'QWEN_PTY_WRITE_LIMIT';
+      const result = await runFg('user-command', {
+        error: Object.assign(new Error('resource limit reached'), { code }),
+        exitCode: null,
+        signal: null,
+        output: 'captured-output-marker',
+      });
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+      expect(result.error?.message).toContain('captured-output-marker');
+      expect(result.error?.message).toBe(result.llmContent);
     });
 
     it('should throw an error for invalid parameters', async () => {
@@ -2906,6 +3108,7 @@ describe('ShellTool', () => {
     describe('output truncation threshold', () => {
       const TRUNCATED = 'Tool output was too large and has been truncated';
       const ADVISORY = 'this foreground command ran for 60s';
+      const recordReminderReserve = 2 + SHELL_RECORD_ARTIFACT_REMINDER.length;
 
       /** Runs `mid-output-cmd` to `output`/`exitCode` after 60s of faked Date/performance (so the advisory appends). */
       const runPastAdvisory = (output: string, exitCode = 0) => {
@@ -2939,7 +3142,9 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 30_000 }),
+          expect.objectContaining({
+            threshold: 30_000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3020,7 +3225,7 @@ describe('ShellTool', () => {
           ShellTool.Name,
           expect.any(String),
           expect.objectContaining({
-            threshold: 10_000,
+            threshold: 10_000 - recordReminderReserve,
             previewChars: 4000,
             lines: Number.POSITIVE_INFINITY,
           }),
@@ -3042,7 +3247,10 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 1000, previewChars: 1000 }),
+          expect.objectContaining({
+            threshold: 1000 - recordReminderReserve,
+            previewChars: 1000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3149,7 +3357,7 @@ describe('ShellTool', () => {
         it('still delivers a band-fitting body whole with the advisory', async () => {
           // Guards against over-shrinking: a body comfortably under
           // budget-minus-advisory is delivered whole, advisory included.
-          const output = 'x'.repeat(29_000);
+          const output = 'x'.repeat(29_000 - recordReminderReserve);
           const result = await runPastAdvisory(output);
 
           expect(result.outputBudgetApplied).toBe(true);
@@ -4296,6 +4504,8 @@ describe('ShellTool', () => {
           ['timed out'],
         );
         expect(result.returnDisplay).toMatchObject({ outcome: 'completed' });
+        // Neither a timeout nor a refused promote is a returned interruption.
+        expect(result.interruptedBeforeCompletion).toBeUndefined();
       });
 
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
@@ -5188,6 +5398,8 @@ describe('ShellTool', () => {
         message: TIMED_OUT,
         type: ToolErrorType.EXECUTION_TIMEOUT,
       });
+      // A timeout is reported as a tool error, never as a returned interruption.
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
     });
 
     it('returns a structured timeout when the command produced no output', async () => {
