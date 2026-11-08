@@ -665,7 +665,11 @@ export function createDaemonSessionActions({
     // Keep this lexical gate and two-pass lookup aligned with the daemon's
     // isSlashCommand/parseSlashCommand behavior. A built-in entry marks a
     // fully loaded command snapshot; until then unresolved commands fail closed.
-    let commands = getConnection().commands;
+    // The connection's snapshot belongs to the current session only; a
+    // detached client must classify against its own catalog (the async read
+    // below), not the session the user navigated to.
+    let commands =
+      sessionRef.current === session ? getConnection().commands : undefined;
     const findCommand = () =>
       commands?.find((candidate) => candidate.name === name) ??
       commands?.find((candidate) => candidate.altNames?.includes(name));

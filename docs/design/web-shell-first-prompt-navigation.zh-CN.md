@@ -103,8 +103,9 @@ detach；goal 与 mention 在分配时即 detach，因为它们的派发不经�
 `actions.ts` 中新增的"仅准入"action，在 `types.ts` 中声明类型：
 
 - 复用 `normalizePromptFiles`、`discardsSlashCommandAttachments`（注入
-  当前会话谓词，使 detached 客户端可以通过）、
-  `promptContentWithUploadedAttachments` 上传附件。
+  当前会话谓词，使 detached 客户端可以通过；初始命令快照按客户端身份
+  取值，detached 派发只按新建会话自己的命令表分类，绝不读导航去的
+  会话）、`promptContentWithUploadedAttachments` 上传附件。
 - 构造与 `sendPrompt` 相同的 prompt 请求（`eventDetailMode`、
   `_meta.qwen.submittedPrompt`、`inputAnnotations`、`retry`），通过
   `session.submitPrompt`（非阻塞准入）提交。
@@ -136,8 +137,10 @@ detach；goal 与 mention 在分配时即 detach，因为它们的派发不经�
   需要单独改动准入门禁与 scope 生命周期。
 - `registerAcceptedAttachmentSources` 自带 `sessionRef.current` 守卫，
   对 detached 客户端是 no-op；source 装饰本就是尽力而为。
-- 命令快照未加载时的斜杠命令附件分类会从 detached 客户端读
-  `supportedCommands`；结果绝不发布到当前连接。
+- 斜杠命令附件分类仅在客户端是当前会话时读连接的命令快照；detached
+  客户端从未解析状态起步、从自身读 `supportedCommands`，因此导航去
+  会话命令表里的同名命令不会丢弃新建会话的附件。结果绝不发布到
+  当前连接。
 - 残余窗口：点击落在 create 已返回并绑定连接之后、导航尚未发布之前，
   仍走 attached 路径的身份校验（行为不变）。被报告的竞态——create 在途
   时点击——走 detached 路径。

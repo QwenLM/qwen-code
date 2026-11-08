@@ -3392,6 +3392,40 @@ describe('createDaemonSessionActions', () => {
     expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
+  it('classifies detached slash attachments against the created session catalog, not the current connection', async () => {
+    const session = createMockSession('session-b');
+    session.supportedCommands.mockResolvedValue(
+      supportedCommandsStatus('session-b', 'deploy'),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-c',
+        workspaceCwd: '/workspace',
+        // The session the user navigated to has a built-in namesake; the
+        // created session's own 'deploy' is a custom command that keeps
+        // attachments.
+        commands: [commandInfo('deploy', 'builtin-command')],
+        capabilities: {
+          features: ['session_attachments'],
+        } as DaemonCapabilities,
+      },
+    });
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      '/deploy now',
+      { images: [{ data: 'aGVsbG8=', mimeType: 'image/png' }] },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.supportedCommands).toHaveBeenCalledOnce();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(getConnection().commands).toEqual([
+      commandInfo('deploy', 'builtin-command'),
+    ]);
+  });
+
   it('does not restore a detached session after the session was cleared', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();

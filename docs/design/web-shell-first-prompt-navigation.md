@@ -117,8 +117,11 @@ detach at allocation because their dispatch never touches the client.
 New admission-only action in `actions.ts`, typed in `types.ts`:
 
 - Reuses `normalizePromptFiles`, `discardsSlashCommandAttachments` (with an
-  injected current-session predicate so the detached client passes), and
-  `promptContentWithUploadedAttachments` for attachment upload.
+  injected current-session predicate so the detached client passes, and the
+  initial command snapshot keyed on client identity so a detached dispatch
+  classifies against the created session's own catalog, never the
+  navigated-to session's), and `promptContentWithUploadedAttachments` for
+  attachment upload.
 - Builds the same prompt request as `sendPrompt` (`eventDetailMode`,
   `_meta.qwen.submittedPrompt`, `inputAnnotations`, `retry`) and submits via
   `session.submitPrompt` (non-blocking admission).
@@ -156,9 +159,12 @@ New admission-only action in `actions.ts`, typed in `types.ts`:
   change to the admission gate and scope lifetime.
 - `registerAcceptedAttachmentSources` self-guards on `sessionRef.current` and
   is a no-op for the detached client; source decoration is best-effort.
-- Slash-command attachment classification with an unloaded command snapshot
-  reads `supportedCommands` from the detached client; the result is never
-  published to the current connection.
+- Slash-command attachment classification reads the connection's command
+  snapshot only when the client is the current session; a detached client
+  starts unresolved and reads `supportedCommands` from itself, so a
+  same-named command in the navigated-to session's catalog cannot discard
+  the created session's attachments. The result is never published to the
+  current connection.
 - Residual window: a click that lands after the create resolved and bound the
   connection, but before the navigation publishes, still goes through the
   attached path's identity checks (unchanged behavior). The reported race —

@@ -27861,6 +27861,236 @@ describe('App session callbacks', () => {
     expect(mockConnection.sessionId).toBe('session-2');
   });
 
+  it('releases the detached client when the Goals dialog creates a session after navigation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    mockWorkspaceActions.controlGoal.mockResolvedValueOnce({
+      snapshot: activeGoalSnapshot('goals dialog objective'),
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+
+    let pending!: Promise<unknown>;
+    await act(async () => {
+      pending = onCreateGoal('goals dialog objective');
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await pending;
+    });
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith('session-1', {
+      action: 'create',
+      objective: 'goals dialog objective',
+    });
+    expect(detachedClient.detach).toHaveBeenCalledOnce();
+    expect(mockConnection.sessionId).toBe('session-2');
+  });
+
+  it('releases the detached client when an agent mention creates the session after navigation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['agent_collaboration_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes('/agent/agents')
+        ? {
+            agents: [
+              {
+                id: 'a1',
+                name: 'helper',
+                enabled: true,
+                status: 'idle',
+                waiting: 0,
+              },
+            ],
+          }
+        : url.includes('/agent/squads')
+          ? { squads: [] }
+          : {};
+      return { ok: true, json: async () => body } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const create = deferred<{ sessionId: string }>();
+      const detachedClient = {
+        sessionId: 'session-1',
+        updateMetadata: vi.fn(async () => ({})),
+        setModel: vi.fn(async () => ({})),
+        setConfigOption: vi.fn(async () => ({})),
+        close: vi.fn(async () => {}),
+        detach: vi.fn(async () => {}),
+        client: {
+          setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+        },
+      };
+      mockSessionActions.createSession.mockImplementationOnce(
+        async (options?: { navigationOutcome?: { bound: boolean } }) => {
+          const result = await create.promise;
+          if (options?.navigationOutcome) {
+            options.navigationOutcome.bound = false;
+          }
+          return { ...result, ...detachedClient };
+        },
+      );
+      const { rerender } = renderApp();
+      await flush();
+
+      act(() => {
+        testState.latestChatEditorProps?.onSubmit('@helper please review');
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+
+      act(() => {
+        mockConnection.sessionId = 'session-2';
+        testState.ownerVersion += 1;
+        rerender();
+      });
+      await flush();
+
+      await act(async () => {
+        create.resolve({ sessionId: 'session-1' });
+        await create.promise;
+      });
+      await vi.waitFor(() => {
+        expect(detachedClient.detach).toHaveBeenCalledOnce();
+      });
+      expect(mockConnection.sessionId).toBe('session-2');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('dispatches a capacity-recovered draft detached when navigation interrupts the retry create', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    let draftCurrent = true;
+    const isCurrentDraft = vi.fn(() => draftCurrent);
+    mockSessionActions.createSession.mockRejectedValueOnce(
+      new DaemonHttpError(
+        503,
+        { code: 'acp_child_capacity_exhausted' },
+        'full',
+      ),
+    );
+    const retryCreate = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await retryCreate.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    mockRuntimeStopChoice();
+    const { rerender } = renderApp({ language: 'en' });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+        { isCurrentDraft },
+      );
+    });
+    await flush();
+    expect(
+      document.querySelector('[data-testid="capacity-recovery-dialog"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      (document.querySelector('[role="radio"]') as HTMLElement).click();
+    });
+    await act(async () => {
+      [...document.querySelectorAll('button')]
+        .find(
+          (node) => node.textContent === 'Stop these sessions and continue',
+        )!
+        .click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      draftCurrent = false;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      retryCreate.resolve({ sessionId: 'session-1' });
+      await retryCreate.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    // The retry's draft-unchanged preflight must not cancel a detached
+    // dispatch: the draft belongs to the view the user left.
+    expect(isCurrentDraft).not.toHaveBeenCalledWith({
+      allowSessionAssignment: true,
+    });
+    expect(mockConnection.sessionId).toBe('session-2');
+  });
+
   it('discards an armed /clear carry when a shrink-fold lands on a split pane', async () => {
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
