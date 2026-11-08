@@ -15,7 +15,10 @@ import {
   getRelaunchExecArgv,
 } from './processUtils.js';
 import { runExitCleanup } from './cleanup.js';
-import { RELAUNCH_SUPERVISED_ENV } from './env-provenance.js';
+import {
+  CHECKED_NODE_VERSION_ENV,
+  RELAUNCH_SUPERVISED_ENV,
+} from './env-provenance.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
 const debugLogger = createDebugLogger('RELAUNCH');
@@ -139,6 +142,8 @@ export async function relaunchAppInChildProcess(
       ...process.env,
       ...options?.childEnv,
       QWEN_CODE_NO_RELAUNCH: 'true',
+      // The CLI entrypoint already checked this runtime before relaunching.
+      [CHECKED_NODE_VERSION_ENV]: process.versions.node,
     };
     // Only the supervised spawn below marks its child.
     delete env[RELAUNCH_SUPERVISED_ENV];
