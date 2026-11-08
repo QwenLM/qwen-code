@@ -136,7 +136,7 @@ class ManagedExtensionConfigurationAdmissionTest {
         byte[] manifestBytes = ExtensionRecordJournal.bytes(manifest);
         var contributions = new CommitResource("contributions", "managed-extension-contributions", 1,
                 manifestBytes.length, DigestUtils.sha256Hex(manifestBytes), Base64.getEncoder().encodeToString(manifestBytes));
-        ObjectNode bundle = json.createObjectNode();
+        ObjectNode bundle = json.createObjectNode().put("configRevision", 1);
         bundle.putArray("packages").addObject().putObject("contributionsRef")
                 .put("resourceId", contributions.resourceId()).put("kind", contributions.kind())
                 .put("schemaVersion", 1).put("byteLength", contributions.byteLength()).put("digest", contributions.digest());
@@ -188,7 +188,7 @@ class ManagedExtensionConfigurationAdmissionTest {
         byte[] manifestBytes = ExtensionRecordJournal.bytes(manifest);
         var contributions = new CommitResource("contributions", "managed-extension-contributions", 1,
                 manifestBytes.length, DigestUtils.sha256Hex(manifestBytes), Base64.getEncoder().encodeToString(manifestBytes));
-        ObjectNode bundle = json.createObjectNode();
+        ObjectNode bundle = json.createObjectNode().put("configRevision", 1);
         bundle.putArray("packages").addObject().putObject("contributionsRef")
                 .put("resourceId", contributions.resourceId()).put("kind", contributions.kind())
                 .put("schemaVersion", 1).put("byteLength", contributions.byteLength()).put("digest", contributions.digest());
