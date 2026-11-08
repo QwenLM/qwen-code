@@ -127,6 +127,90 @@ describe('qwen pr review runner routing', () => {
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
   });
+
+  it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
+    // authorize is the write-permission gate for /review and /resolve. It
+    // loads CI_BOT_PAT but checks out nothing and runs no agent, so the
+    // persistent pool is safe whenever the trigger carries no fork code.
+    // issue_comment and workflow_dispatch have no github.event.pull_request
+    // payload: the old same-repo-only guard fell through to ubuntu-latest for
+    // every command, parking the gate in the hosted queue for hours (#15286).
+    // This removes the GATE wait only: the saving lands where the downstream
+    // job is already pool-routed (/review, /triage, /tmux, /verify); /resolve
+    // end-to-end latency is unchanged because resolve-pr stays on ubuntu-latest.
+    // Pin the exact expression so neither the new ECS disjuncts nor the fork
+    // guard / hosted fallback can be dropped silently.
+    const runsOn = String(parse(workflow).jobs['authorize']['runs-on']);
+
+    expect(runsOn).toBe(
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    );
+    // The command events must reach the persistent pool...
+    expect(runsOn).toContain("github.event_name == 'issue_comment'");
+    expect(runsOn).toContain("github.event_name == 'workflow_dispatch'");
+    // ...while PR-payload events keep the same-repo fork guard, and the
+    // hosted fallback + ECS kill switch stay for forks / disabled routing.
+    expect(runsOn).toContain(
+      'github.event.pull_request.head.repo.full_name == github.repository',
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The ECS routing above is only safe while authorize stays checkout-free:
+    // a `uses:` step (e.g. actions/checkout to read a label or config) would
+    // execute contributor-authored files on the persistent pool with
+    // CI_BOT_PAT in the step env while the expression pin stayed green. Scope
+    // to authorize — other jobs in this workflow legitimately check out.
+    const authorizeJob = parse(workflow).jobs['authorize'];
+    expect(authorizeJob.steps.every((s) => s.uses === undefined)).toBe(true);
+    // Pin the run: half of the premise too: the step inventory is exactly
+    // the one permission step, and no event value is spliced into the shell
+    // — everything must keep arriving through env:. A run-only debug step
+    // interpolating github.event.comment.body adds no `uses:` key and would
+    // slip past the assertion above.
+    expect(authorizeJob.steps.map((s) => s.name)).toEqual([
+      'Check principal write permission',
+    ]);
+    for (const s of authorizeJob.steps) {
+      expect(String(s.run ?? '')).not.toContain('${{');
+    }
+    // On the persistent pool the step must also pin gh's config resolution:
+    // GH_HOST plus a private, guarded GH_CONFIG_DIR, like qwen-autofix.yml's
+    // route/review-scan. Without them a planted shared ~/.config/gh
+    // (http_unix_socket) receives CI_BOT_PAT and can forge the permission
+    // response that downstream jobs consume as should_review.
+    const authorizeStep = authorizeJob.steps.find(
+      (s) => s.id === 'principal_permission',
+    );
+    // Evaluate the live (comment-stripped) lines, not mere substrings: an
+    // unguarded `export GH_CONFIG_DIR="$(mktemp ...)"` one-liner (a failed
+    // mktemp then leaves it empty and gh falls back to the shared config) or
+    // a preamble relocated below the first gh call must both red this test.
+    const live = String(authorizeStep.run)
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    // Fail-closed guarded mint in the sibling route/review-scan shape.
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then';
+    expect(live).toContain('export GH_HOST=github.com');
+    expect(live).toContain(guard);
+    expect(live).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+    // Both pins must be exported BEFORE the first permission API call.
+    const api = live.indexOf(
+      'gh api "repos/${GITHUB_REPOSITORY}/collaborators/',
+    );
+    expect(api).toBeGreaterThan(-1);
+    expect(live.indexOf('export GH_HOST=github.com')).toBeLessThan(api);
+    expect(live.indexOf(guard)).toBeLessThan(api);
+    // The body must execute no repository code: on the pool the cwd is the
+    // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+    // files, so a relative-path or interpreter invocation here would run a
+    // planted file with CI_BOT_PAT in the environment.
+    expect(live).not.toMatch(/(^|[\s;&|(`'"])(\.{1,2}\/)/m);
+    expect(live).not.toMatch(
+      /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+    );
+  });
 });
 
 function runReviewStep() {
