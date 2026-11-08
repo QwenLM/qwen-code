@@ -74,16 +74,36 @@ jobs:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     strategy:
       matrix:
-        runner:
-          [
-            'ecs-update-hk-1',
-            'ecs-update-hk-2',
-            'ecs-update-hk-3',
-            'ecs-update-hk-4',
-            'ecs-update-hk-5',
-          ]
+        # One leg per MACHINE, not per runner process: every runner on a
+        # host shares the same global npm install. The hk legs carry a
+        # dedicated ecs-update-hk-N label on the first runner of each host;
+        # the hz hosts target their first runner by name instead, so no
+        # runner re-registration (which would drop its pool labels) is
+        # needed. hz4 has only ephemeral container runners whose image
+        # carries the CLI — nothing persistent to update there.
+        include:
+          - runner: 'ecs-update-hk-1'
+            by: 'label'
+          - runner: 'ecs-update-hk-2'
+            by: 'label'
+          - runner: 'ecs-update-hk-3'
+            by: 'label'
+          - runner: 'ecs-update-hk-4'
+            by: 'label'
+          - runner: 'ecs-update-hk-5'
+            by: 'label'
+          - runner: 'ecs-qwen-hz1-1'
+            by: 'name'
+          - runner: 'ecs-qwen-hz2-1'
+            by: 'name'
+          - runner: 'ecs-qwen-hz3-1'
+            by: 'name'
+          - runner: 'ecs-qwen-hz5-1'
+            by: 'name'
+          - runner: 'ecs-qwen-hz6-1'
+            by: 'name'
       fail-fast: false
-    runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
+    runs-on: '${{ matrix.by == ''label'' && fromJSON(format(''["self-hosted", "linux", "x64", "{0}"]'', matrix.runner)) || fromJSON(format(''["self-hosted", "linux", "{0}"]'', matrix.runner)) }}'
     concurrency:
       group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
       cancel-in-progress: false
@@ -102,12 +122,18 @@ jobs:
             # job's concurrent `npm install -g` can race npm's rename of the
             # package dir (ENOTEMPTY). Clear trash left by crashed installs
             # and retry through the seconds-long race window.
-            PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
+            # Install into BOTH global prefixes in use across the fleet: hk
+            # hosts resolve /usr/local/bin/qwen, while the hz hosts carry a
+            # legacy /usr/bin/qwen symlink from their image build. Updating
+            # only /usr/local left hz serving the old version through
+            # /usr/bin whenever PATH order or a cached hash favored it
+            # (observed: every hz host stuck on 0.26.0 after 0.27.0 shipped).
             for attempt in 1 2 3; do
-              sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              # --prefix pins the install to /usr/local: on the hk-4/hk-5
-              # machines root's npm global prefix is a custom Node directory
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+              sudo rm -rf /usr/local/lib/node_modules/@qwen-code/.qwen-code-* /usr/lib/node_modules/@qwen-code/.qwen-code-* 2>/dev/null || true
+              # --prefix pins the install: on the hk-4/hk-5 machines root's
+              # npm global prefix is a custom Node directory.
+              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}" \
+                && sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then
@@ -130,6 +156,15 @@ jobs:
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
           test "${actual}" = "${VERSION}"
+          # Every absolute path a service could resolve must agree too — a
+          # fresh PATH lookup alone hid the stale /usr/bin copy on hz.
+          for pinned in /usr/local/bin/qwen /usr/bin/qwen; do
+            if [ -e "${pinned}" ]; then
+              pinned_actual="$("${pinned}" --version)"
+              echo "${pinned}: ${pinned_actual}"
+              test "${pinned_actual}" = "${VERSION}"
+            fi
+          done
 
   # A failed fleet update is otherwise invisible. `qwen-code-pr-review.yml` and
   # `qwen-triage.yml` install the CLI only when it is absent, and on a

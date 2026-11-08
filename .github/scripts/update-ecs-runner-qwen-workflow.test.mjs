@@ -61,14 +61,19 @@ const updateJobName =
   workflow.match(/\n {2}update:\n {4}name: '([^']*)'/)?.[1] ?? '';
 const poolPrefix = updateJobName.replace(/\$\{\{.*\}\}$/, '');
 
-// Both layouts, because the checked-in workflow carries the reflowed form
-// prettier produces for an inline matrix array, and older branches still
-// carry the single-line one. A parser that reads only one finds zero pools.
+// Three layouts, because the checked-in workflow carries an `include:`
+// matrix (each leg pins its own routing mode), while older branches carry
+// the reflowed or single-line inline array prettier produces. A parser that
+// reads only one shape finds zero pools.
 function parsePools(text) {
-  return (text.match(/\n\s+runner:\s*\[([^\]]*)\]/)?.[1] ?? '')
-    .split(',')
-    .map((entry) => entry.trim().replace(/^'|'$/g, ''))
-    .filter(Boolean);
+  const inline = text.match(/\n\s+runner:\s*\[([^\]]*)\]/)?.[1];
+  if (inline !== undefined) {
+    return inline
+      .split(',')
+      .map((entry) => entry.trim().replace(/^'|'$/g, ''))
+      .filter(Boolean);
+  }
+  return [...text.matchAll(/\n\s+- runner:\s*'([^']+)'/g)].map((m) => m[1]);
 }
 
 const pools = parsePools(workflow);
@@ -134,6 +139,14 @@ describe('ECS runner qwen update workflow', () => {
     // target explicit, and it was dropped once before without anything
     // objecting.
     assert.ok(workflow.includes('npm install -g --prefix /usr/local'));
+    // The hz hosts also carry a legacy /usr/bin/qwen from their image build;
+    // updating only /usr/local left them serving the stale copy (every hz
+    // host was on 0.26.0 after 0.27.0 shipped). Both prefixes must update,
+    // and verify must pin BOTH absolute paths, not just the PATH winner.
+    assert.ok(workflow.includes('npm install -g --prefix /usr '));
+    assert.ok(
+      workflow.includes('for pinned in /usr/local/bin/qwen /usr/bin/qwen'),
+    );
   });
 
   it('pins the 90-minute resolve budget', () => {
@@ -168,7 +181,11 @@ describe('ECS runner qwen update workflow', () => {
     );
     assert.ok(workflow.includes('for attempt in 1 2 3; do'));
     assert.ok(workflow.includes('if [[ "${attempt}" -lt 3 ]]; then'));
-    assert.ok(workflow.includes('sudo rm -rf "${PKG_DIR}"/.qwen-code-*'));
+    assert.ok(
+      workflow.includes(
+        'sudo rm -rf /usr/local/lib/node_modules/@qwen-code/.qwen-code-* /usr/lib/node_modules/@qwen-code/.qwen-code-*',
+      ),
+    );
   });
 
   it('resolves once on a hosted runner and feeds every pool', () => {
