@@ -21,6 +21,7 @@ import type {
   ChannelConfig,
   ChannelTaskLifecycleEvent,
   Envelope,
+  PrBindingEntry,
   PrBindingRole,
   PrBindingSummary,
 } from '@qwen-code/channel-base';
@@ -30,6 +31,7 @@ import {
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
   buildBoundEventPrompt,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   lowercaseGroupAllowedUsers,
@@ -5301,9 +5303,48 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const summary = this.boundSessionByPr.get(
       this.prBindingKey(chatId, issueNumber),
     );
-    return summary
-      ? { kind: 'bound-session', sessionId: summary.sessionId }
-      : undefined;
+    if (!summary) return undefined;
+    const role = this.boundRoleOf(summary, chatId, issueNumber);
+    return {
+      kind: 'bound-session',
+      sessionId: summary.sessionId,
+      ...(role ? { role } : {}),
+    };
+  }
+
+  /**
+   * The role of the entry that names THIS PR, or undefined for an untyped
+   * binding. Takes the winner legacy routing already resolved, so the URL
+   * parse stays within that one session's entries instead of repeating the
+   * whole follower scan on a path that used to be a single Map lookup.
+   */
+  private boundRoleOf(
+    summary: PrBindingSummary,
+    chatId: string,
+    issueNumber: number,
+  ): PrBindingRole | undefined {
+    return this.boundPrEntryFor(summary, this.prBindingKey(chatId, issueNumber))
+      ?.role;
+  }
+
+  /**
+   * The entry of `summary` that names the PR behind `key`, matched the same
+   * way for every candidate: the URL must parse, agree with its own number,
+   * and normalize to that key. Shared so the legacy role lookup and the
+   * role-aware follower scan cannot drift apart.
+   */
+  private boundPrEntryFor(
+    summary: PrBindingSummary,
+    key: string,
+  ): PrBindingEntry | undefined {
+    return summary.prs.find((pr) => {
+      const identity = this.parsePrBindingUrl(pr.url);
+      return (
+        !!identity &&
+        identity.number === pr.number &&
+        this.prBindingKey(identity.chatId, identity.number) === key
+      );
+    });
   }
 
   /**
@@ -5343,10 +5384,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ? {
           kind: 'bound-session',
           sessionId: best.summary.sessionId,
-          // Legacy mode must stay byte-compatible even when bindings carry
-          // roles (a /review backfill stamps them with no map configured):
-          // a role here would grow a Role: line in the generic prompt.
-          ...(this.boundRoleAware && best.role ? { role: best.role } : {}),
+          ...(best.role ? { role: best.role } : {}),
         }
       : undefined;
   }
@@ -5377,14 +5415,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }> = [];
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
-      const entry = summary.prs.find((pr) => {
-        const identity = this.parsePrBindingUrl(pr.url);
-        return (
-          !!identity &&
-          identity.number === pr.number &&
-          this.prBindingKey(identity.chatId, identity.number) === key
-        );
-      });
+      const entry = this.boundPrEntryFor(summary, key);
       if (!entry) continue;
       followers.push({ summary, ...(entry.role ? { role: entry.role } : {}) });
     }
@@ -5647,12 +5678,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const summary = this.boundSessionByPr.get(
         this.prBindingKey(chatId, issueNumber),
       );
-      return summary
-        ? {
-            targets: [{ sessionId: summary.sessionId }],
-            followed: true,
-          }
-        : { targets: [], followed: false };
+      if (!summary) return { targets: [], followed: false };
+      const role = this.boundRoleOf(summary, chatId, issueNumber);
+      return {
+        targets: [{ sessionId: summary.sessionId, ...(role ? { role } : {}) }],
+        followed: true,
+      };
     }
     const followers = this.boundFollowersOf(chatId, issueNumber);
     const byRole = new Map<
@@ -5840,8 +5871,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // removed on acceptance, so a silent cut would drop the tail from every
     // surface. With a matching operator template the generic workflow line
     // becomes a labeled trusted instruction block; the untrusted warning
-    // extends to the substituted values. Without one (and without a role)
-    // the prompt is byte-identical to the pre-template contract.
+    // extends to the substituted values. Without one, a role-carrying binding
+    // gets the built-in guidance for that role and an untyped binding keeps
+    // the prompt byte-identical to the pre-template contract.
     const eventClass = this.boundEventClass(envelope);
     const template = resolveBoundActionTemplate(
       this.boundSessionActions,
@@ -5867,6 +5899,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : {}),
       dataLines: [identity, ...contextLines],
       ...(role ? { role } : {}),
+      // The builder uses this only when no operator instruction resolved.
+      // Role-aware targets are selected BY template match, so they always
+      // carry an instruction and the guidance is inert there; the per-role
+      // subscription is enforced at selection, not by a flag here.
+      ...(role ? { roleGuidance: DEFAULT_BOUND_ROLE_GUIDANCE[role] } : {}),
       body: text,
     });
   }
@@ -5929,7 +5966,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.boundEventClass(envelope),
         this.boundLaneClass(task.dedupe),
       );
-      if (current && current.sessionId !== delivery.sessionId) {
+      // The ROLE is part of the target, not just the session: a deferred
+      // legacy delivery whose binding was re-roled in the meantime must not
+      // build its prompt from the frozen role, or a session that is now a
+      // verifier still receives the fixer's guidance. Role-aware targets are
+      // re-resolved within their own role group, so the role half is inert
+      // there.
+      if (
+        current &&
+        (current.sessionId !== delivery.sessionId ||
+          current.role !== delivery.role)
+      ) {
         this.transitionInboundTask(task.id, 'running', { delivery: current });
         task.delivery = current;
         delivery = current;
@@ -6043,10 +6090,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
         try {
+          // Rebuild for THIS target: the legacy fallback scans every
+          // follower, so it can land on a different role (or an untyped
+          // binding). Reusing the first target's prompt would hand this
+          // session the gone session's Role line and role guidance.
+          // Role-aware fallbacks stay inside their role group, where the
+          // deterministic renderer rebuilds the identical string.
+          const targetPrompt = this.buildBoundSessionPrompt(
+            envelope,
+            next.role,
+            this.boundLaneClass(task.dedupe),
+          );
           // Same event key: a different session's ring has never seen it.
           await boundSessions.deliverPrompt(
             next.sessionId,
-            prompt,
+            targetPrompt,
             idempotencyKey,
           );
           this.recordBoundDelivered(envelope, next.sessionId);
@@ -6643,7 +6701,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : '';
       events.push({
         type: 'ci_failure',
-        summary: `CI failed on head ${headSha}.${failedChecks} Inspect the failed checks and fix or attribute the failure.`,
+        summary: `CI failed on head ${headSha}.${failedChecks}`,
       });
     }
 
@@ -6661,7 +6719,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       events.push({
         type: 'merge_conflict',
-        summary: `Merge conflicts detected (mergeable_state: dirty). Rebase or merge the base branch and resolve the conflicts.`,
+        summary: 'Merge conflicts detected (mergeable_state: dirty).',
       });
     }
 
@@ -6675,7 +6733,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       events.push({
         type: 'state_change',
         summary: pr.merged
-          ? 'The PR was merged. Wrap up any follow-up work.'
+          ? 'The PR was merged.'
           : 'The PR was closed without merging.',
       });
     }

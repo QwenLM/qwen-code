@@ -580,17 +580,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         }
         boolean activeExecutions = executionRepository.hasActiveByBinding(
                 claimed.getBindingId(), claimed.getGeneration());
-        // A restart-fenced external-workspace binding may still own a live
-        // worker with one stale Session row. The drain below marks it
-        // drain-requested, stops that worker for the persisted receipt and
-        // re-checks for unsettled rows before RELEASED, so refusing here would
-        // only fence the storage holder with no exit. Executions in flight
-        // still refuse: nothing can settle them without their worker.
-        boolean liveWorkerStopRecoverable = lost && absence == null
-                && claimed.getDrainReceipt() == null && !activeExecutions
-                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
-                        .isExternalWorkspaceRequest(claimed.getRequest());
-        if ((lost || absence != null) && !liveWorkerStopRecoverable
+        if ((lost || absence != null)
+                && !RuntimeDrainRelease.isLiveWorkerStopRecoverable(claimed, lost, absence, activeExecutions)
                 && (activeExecutions || absence == null && sessionRepository.countActiveByBinding(
                         claimed.getBindingId(), claimed.getGeneration()) != 0)) {
             bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
@@ -751,47 +742,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         }
         return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
                 : drainSessions(binding, renewal, authority, batch.getLast().getRuntimeSessionId()));
-    }
-
-    private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
-        if (!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        var batch = executionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
-        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
-        for (var execution : batch) {
-            work = work.thenCompose(ignored -> executionDispatcher.acknowledgePersistedTools(binding, execution));
-        }
-        return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
-                : acknowledgeDrainedTools(binding, batch.getLast().getExecutionCallId()));
-    }
-
-    private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding) {
-        if (!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
-            return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
-        }
-        return safeStage(() -> provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
-                binding.getResourceHandle(), binding.getLease())).handle((observation, error) -> {
-                    if (error != null) {
-                        Throwable cause = unwrap(error);
-                        if (cause instanceof RuntimeBrokerException failure && failure.getCode().contains("conflict")) {
-                            return RuntimeBrokerSupport.<RuntimeDrainReceipt>failed(failure);
-                        }
-                        return safeStage(() -> provisioner.stopDrained(binding));
-                    }
-                    if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY) {
-                        return safeStage(() -> provisioner.stopDrained(binding));
-                    }
-                    RuntimeLease lease = binding.getLease();
-                    if (!binding.getResourceHandle().equals(observation.getHandle())
-                            || !lease.getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
-                            || !lease.getLeaseId().equals(observation.getLeaseId()) || lease.getEpoch() != observation.getEpoch()
-                            || !lease.getEndpoint().equals(observation.getEndpoint())) {
-                        return RuntimeBrokerSupport.<RuntimeDrainReceipt>failed(conflict("workspace_close_identity_unverified",
-                                "Original SSH worker identity changed"));
-                    }
-                    return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
-                }).thenCompose(stage -> stage);
     }
 
     CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
@@ -2113,10 +2063,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      * here. Only the latest acquire's claim may hand the mount back, and a
      * lifecycle operation's window refuses it like the sibling release.
      * A Session with an active operation keeps its mount honestly, the
-     * same freeze the fleet promises while anything is unproven — every
-     * kind of unsettled row counts, background processes included (the
-     * drain excludes them because its sweep stops or settles them first,
-     * and this path runs no sweep). A settled execution whose capture
+     * same freeze the fleet promises while anything is unproven. An
+     * observe-only sweep first settles any background row whose exit it
+     * can prove — stopping nothing, because this handback is
+     * observe-and-hold (#13800), not a drain — and the busy check then
+     * re-reads without the exclusion, so a background row still live or
+     * unproven keeps the mount instead of being handed back over a
+     * running writer. A settled execution whose capture
      * never proved its writer stopped keeps the mount for good: the
      * operator-recovery family fences exactly that Workspace, and the
      * distinct refusal tells the caller that waiting settles nothing. The
@@ -2152,24 +2105,17 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     throw conflict("runtime_session_conflict",
                             "Mount claim was superseded by a later acquire");
                 }
-                if (context.hasActiveControl()
-                        || executionRepository.hasActiveByRuntimeSession(
-                                context.binding().getBindingId(),
-                                context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("runtime_session_busy",
-                            "Runtime Session has an active operation");
-                }
-                if (executionRepository.hasUnprovenCaptureByRuntimeSession(
-                        context.binding().getBindingId(),
-                        context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("workspace_writer_unproven",
-                            "A settled execution never proved its writer stopped");
-                }
-                return safeStage(() -> transport.releaseMount(context.lease(),
-                        context.session())).toCompletableFuture();
             } finally {
                 context.unlock();
             }
+            // R17-2 / R18-1: observe the unproven background rows (stop nothing —
+            // observe-and-hold, #13800), then hand back under the claim/busy/
+            // unproven guard in releaseMountAfterSweep: a provable exit un-wedges
+            // a routine detach, a live or unproven row keeps the mount. Mount
+            // handback only — the owner id stays re-acquirable (R13-1).
+            return executionRecovery.settleUnprovenBackgroundRows(context, false)
+                    .thenCompose(ignored -> executionRecovery.releaseMountAfterSweep(
+                            context, claimId, runtimeId));
         });
     }
 
@@ -2968,15 +2914,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             monitor.lock();
             try {
                 var expected = requireDrainClaim(authority != null);
-                if (receipt == null || !receipt.matches(expected)
-                        || expected.getDrainReceipt() != null && !expected.getDrainReceipt().equals(receipt)
-                        || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(expected.getRequest().getProvisionerKind())
-                                && (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(expected.getRequest())
-                                        || expected.getResourceHandle() == null || expected.getProvisionSeed() == null
-                                        || expected.getLease() == null || !expected.getProvisionSeed().matches(expected.getLease())
-                                        || !expected.getResourceHandle().equals(receipt.resourceHandle()))) {
-                    throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
-                }
+                RuntimeDrainRelease.verifyDrainReceiptIdentity(expected, receipt);
                 var replacement = expected.withDrainReceipt(receipt);
                 if (authority != null) {
                     replacement = replacement.withLifecycleAuthority(authority)
@@ -3031,8 +2969,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             var binding = current.get();
             if (closed.get() || stopped.get() || !valid.get()
                     || !brokerOwnerId.equals(binding.getOperationOwner())
-                    || !binding.isDrainRequested() || !(binding.getState() == RuntimeBindingRecord.State.DRAINING
-                            || (stoppedRecovery || lostClaim) && binding.getState() == RuntimeBindingRecord.State.LOST)
+                    || !binding.isDrainRequested()
+                    || !RuntimeBrokerSupport.isDrainClaimStateValid(binding, stoppedRecovery, lostClaim)
                     || binding.getOperationLeaseUntil() == null
                     || !binding.getOperationLeaseUntil().isAfter(clock.instant())) {
                 throw unavailable("runtime_close_claim_pending", "Original drain claim expired");
