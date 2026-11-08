@@ -3400,3 +3400,82 @@ describe('completion during a streamed final answer', () => {
     },
   );
 });
+
+describe('turn collapse with a background notification ack', () => {
+  // Repro from #13998: a background task completes 8 ms after the turn's real
+  // answer, its notification is injected into the still-active turn, and the
+  // model ack lands after the marker. The collapsed turn must keep the real
+  // answer, not the ack, as its final answer.
+  function notificationAckShape(): DisplayItem[] {
+    return groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 'report',
+        role: 'assistant',
+        content: 'the deliverable report',
+      },
+      {
+        id: 'marker',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'Background result',
+        backgroundTurn: {
+          turnId: 'auto-task',
+          taskId: 'task',
+          kind: 'shell',
+          startedAt: 100,
+        },
+      },
+      {
+        id: 'notice',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification',
+        content: '<task-notification>done</task-notification>',
+      },
+      {
+        id: 'ack',
+        role: 'assistant',
+        content: 'acknowledged',
+      },
+    ]);
+  }
+
+  it('collapses the turn instead of waiting for a summary the ack already gave', () => {
+    // The ack is no longer the turn's answer, so it must not hold the turn open
+    // as pending summary narration.
+    const rows = collapseItems(notificationAckShape());
+    expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
+  });
+
+  it('keeps the real answer visible and folds the ack', () => {
+    const rows = collapseItems(notificationAckShape(), {
+      backgroundSummaryGraceActive: false,
+    });
+    expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
+    expect(collapseOf(rows, 'u1')).toMatchObject({
+      collapsed: true,
+      hiddenCount: 4,
+    });
+  });
+
+  it('restores the ack as a step when the turn is expanded', () => {
+    const rows = collapseItems(notificationAckShape(), {
+      backgroundSummaryGraceActive: false,
+      overrides: new Map([['u1', true]]),
+    });
+    // An expanded turn keeps its execution steps; the ack comes back after the
+    // real answer instead of replacing it.
+    expect(rowIds(rows)).toEqual([
+      'u1',
+      'tc-u1',
+      'g1',
+      'report',
+      'marker',
+      'notice',
+      'ack',
+    ]);
+  });
+});

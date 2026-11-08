@@ -809,6 +809,68 @@ function findFinalAnswerIndex(
   return -1;
 }
 
+/**
+ * Rows the collapsed turn keeps as its answer.
+ *
+ * A background task can start inside a turn that is still active; its result
+ * marker (`background_notification_turn_started`) is injected into the turn and
+ * the model's reply to it lands right after the marker. That reply
+ * acknowledges the background result rather than answering the turn, so taking
+ * it as the final answer folds the real deliverable into the collapsed steps
+ * (#13998). When no execution work separates the reply from the marker, prefer
+ * the answer above the marker and keep the reply only as a fallback.
+ *
+ * This is deliberately separate from `findFinalAnswerIndex`: that one also
+ * feeds `turnAwaitsBackgroundSummary`, where a reply after a background
+ * notification is the expected summary narration and must keep the turn open
+ * while the grace window runs.
+ */
+function findFinalAnswerIndexForDisplay(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+  includeBackgroundNotifications = true,
+): number {
+  const answerIdx = findFinalAnswerIndex(
+    items,
+    start,
+    end,
+    includeBackgroundNotifications,
+  );
+  if (answerIdx < 0) return answerIdx;
+  let markerIdx = -1;
+  for (let i = answerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    // Tool work between the marker and the reply means the model kept going
+    // after the background result, so the reply is a real follow-up answer.
+    // A mid-turn injected message does the same: the turn continued on its own
+    // after the answer above it.
+    if (
+      isExecutionWorkStep(item) ||
+      (item.type === 'message' &&
+        item.message.role === 'system' &&
+        item.message.source === 'mid_turn_message_injected')
+    )
+      return answerIdx;
+    if (
+      item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'background_notification_turn_started'
+    ) {
+      markerIdx = i;
+      break;
+    }
+  }
+  if (markerIdx < 0) return answerIdx;
+  const answerAboveMarker = findFinalAnswerIndex(
+    items,
+    start,
+    markerIdx - 1,
+    includeBackgroundNotifications,
+  );
+  return answerAboveMarker >= 0 ? answerAboveMarker : answerIdx;
+}
+
 function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   {
@@ -2095,7 +2157,7 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    const answerIdx = findFinalAnswerIndex(items, start, end);
+    const answerIdx = findFinalAnswerIndexForDisplay(items, start, end);
     let answerStartIdx = answerIdx;
     // A passive completion can split one streamed answer into several rows.
     // Keep those segments, but stop at work or an automatic execution marker.
