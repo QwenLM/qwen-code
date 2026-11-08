@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellBrand } from '../../brandContext';
 import {
   DAEMON_APPROVAL_MODES,
+  clickSidebarElement,
   createSidebarMocks,
   installSidebarDomShims,
   sidebarSessionPage,
@@ -61,7 +62,7 @@ let container: HTMLDivElement;
 
 function renderSidebar(
   brand?: WebShellBrand,
-  branding?: { render?: () => ReactNode },
+  branding?: false | { render?: () => ReactNode },
   sessionProps?: Pick<
     ComponentProps<typeof WebShellSidebar>,
     'sessionContent' | 'sessionHeader' | 'onNewSession'
@@ -106,6 +107,10 @@ function builtInMark(): Element | null {
 beforeEach(() => {
   catalogOptions.mockClear();
   catalogRefresh.mockClear();
+  mocks.connection.capabilities = {
+    qwenCodeVersion: '1.2.3',
+    features: [],
+  };
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -163,6 +168,34 @@ describe('sidebar brand', () => {
     expect(
       catalogOptions.mock.calls.some(
         ([options]) => options.enabled === true && options.autoLoad === true,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the question sort control reachable when the brand row is hidden', async () => {
+    mocks.connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_last_user_prompt_sort'],
+    };
+    renderSidebar(undefined, false);
+
+    expect(container.textContent).not.toContain('Qwen Code');
+    const sort = container.querySelector<HTMLElement>(
+      'button[aria-label="Sort sessions"]',
+    );
+    expect(sort).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="manage-workspaces"]'),
+    ).toBeNull();
+    await act(async () => clickSidebarElement(sort!, true));
+    const choice = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ).find((item) => item.textContent === 'Last question');
+    expect(choice).toBeDefined();
+    await act(async () => clickSidebarElement(choice!));
+    expect(
+      catalogOptions.mock.calls.some(
+        ([options]) => options.sortBy === 'lastUserPromptAt',
       ),
     ).toBe(true);
   });
