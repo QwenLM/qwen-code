@@ -847,6 +847,9 @@ function ownershipLockKeyForWorktree(recordedPath: string): string {
   }
 }
 
+export const ownershipLockKeyForWorktreeForTesting =
+  ownershipLockKeyForWorktree;
+
 /**
  * Refuses a restore whose worktree checks would act on a checkout this
  * request does not hold the ownership lock for: a reset of that checkout
