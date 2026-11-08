@@ -208,11 +208,19 @@ export function createManager(config, dependencies = {}) {
       const name =
         typeof state?.name === 'string' ? state.name.replace(/^ecs-/, '') : '';
       const prefix = `qwen-${config.poolId}-${slot}-`;
+      // Main wrote the bare display name before registrations gained a
+      // unique suffix; accept that legacy shape so a deploy over a running
+      // host loads (and then cleans up) its existing slots. The next start()
+      // writes the suffixed name.
+      const validRunnerName = (value) =>
+        value === runnerName(slot) ||
+        (value.startsWith(`${runnerName(slot)}-`) &&
+          /^[0-9a-f]{8}$/.test(value.slice(runnerName(slot).length + 1)));
       if (
         !name.startsWith(prefix) ||
         !/^[0-9a-f-]{36}$/.test(name.slice(prefix.length)) ||
         (state.runnerName !== undefined &&
-          !state.runnerName.startsWith(`${runnerName(slot)}-`)) ||
+          !validRunnerName(state.runnerName)) ||
         typeof state.uncertain !== 'boolean' ||
         (!state.uncertain &&
           (!Number.isSafeInteger(state.runnerId) || state.runnerId < 1)) ||
@@ -293,12 +301,17 @@ export function createManager(config, dependencies = {}) {
     });
     if (identified.length !== 1)
       throw new Error(
-        'Container has no recorded runner identity; manual reconciliation required',
+        identified.length === 0
+          ? 'Container has no recorded runner identity; manual reconciliation required'
+          : 'Container labels disagree about the runner identity; manual reconciliation required',
       );
     log(`slot ${slot}: recovered runner identity from resource labels`);
+    // Resources carry only the instance label, not the registration's display
+    // name: main registered under the bare name, this version under a
+    // suffixed one. Cleanup matches either, so an orphaned registration is
+    // deleted instead of being silently left in the pool.
     return {
       name: identified[0],
-      runnerName: runnerName(slot),
       uncertain: false,
     };
   }
@@ -394,14 +407,27 @@ export function createManager(config, dependencies = {}) {
     if ((await listNetworks(slot)).length)
       throw new Error('Network cleanup failed');
     if (state?.name) {
-      const name = state.runnerName ?? state.name;
       const all = await listRunners();
-      const runners = all.filter((runner) => runner.name === name);
+      // A recorded runnerName is exact. A label-recovered identity carries
+      // only the instance name: main registered under the bare display name,
+      // this version under a suffixed one, so match either form and let the
+      // runnerId checks below reject anything ambiguous.
+      const matches = state.runnerName
+        ? (runner) => runner.name === state.runnerName
+        : (runner) =>
+            runner.name === state.name ||
+            runner.name === runnerName(slot) ||
+            (typeof runner.name === 'string' &&
+              runner.name.startsWith(`${runnerName(slot)}-`) &&
+              /^[0-9a-f]{8}$/.test(
+                runner.name.slice(runnerName(slot).length + 1),
+              ));
+      const runners = all.filter(matches);
       if (
         state.runnerId &&
         (runners.some((runner) => runner.id !== state.runnerId) ||
           all.some(
-            (runner) => runner.id === state.runnerId && runner.name !== name,
+            (runner) => runner.id === state.runnerId && !matches(runner),
           ))
       )
         throw new Error(

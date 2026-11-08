@@ -164,6 +164,10 @@ A container or network whose slot state was lost is reconciled from its
 `qwen.instance` label, so an interrupted `docker create` no longer wedges the
 slot permanently. Resources whose label does not identify this pool and slot,
 or that disagree about the identity, still block it for manual reconciliation.
+The label carries the instance name, not the registration's display name, so
+recovery matches registrations under both the bare display name written by
+older versions and the current suffixed one; an ambiguous match still blocks
+the slot rather than deleting anything.
 A runner deletion GitHub rejects (for example while it still reports the runner
 busy) keeps the slot state and is retried, instead of dropping the only record
 that can remove the registration.

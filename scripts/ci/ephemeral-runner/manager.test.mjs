@@ -848,6 +848,15 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
       },
     },
     {
+      label: 'malformed name suffix',
+      state: {
+        name: validName,
+        runnerName: 'ecs-qwen-trial-01-not-hex!',
+        runnerId: 42,
+        uncertain: false,
+      },
+    },
+    {
       label: 'zero runner id',
       state: { name: validName, runnerId: 0, uncertain: false },
     },
@@ -868,6 +877,40 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
       item.label,
     );
   }
+});
+
+test('loads the bare runnerName that main wrote before the suffix', async (t) => {
+  const f = await fixture(t);
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+      runnerName: 'ecs-qwen-trial-01',
+      runnerId: 42,
+      uncertain: false,
+    }),
+  );
+  f.setRunner({ id: 42, name: 'ecs-qwen-trial-01' });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/42'),
+    ),
+    'the legacy registration is deleted, not wedged by validation',
+  );
+  const request = f.calls.find(
+    (c) =>
+      c.program === 'gh' &&
+      c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+  );
+  assert.match(
+    JSON.parse(request.options.input).name,
+    /^ecs-qwen-trial-01-[0-9a-f]{8}$/,
+    'the replacement registers under a suffixed name',
+  );
 });
 
 test('backs off on a failed container even after the startup window', async (t) => {
@@ -996,6 +1039,47 @@ test('an orphaned container with an unidentifiable label still blocks replacemen
     f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
       .length,
     0,
+  );
+});
+
+test('label recovery deletes the orphaned suffixed registration', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'the registration is deleted even though its display name is suffixed',
+  );
+});
+
+test('disagreeing resource labels are reported as ambiguous, not missing', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /labels disagree/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    0,
+    'an ambiguous identity still deletes nothing',
   );
 });
 
