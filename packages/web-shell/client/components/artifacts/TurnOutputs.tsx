@@ -685,9 +685,10 @@ export function getFileChangePreviewContent(change: TurnOutputFileChange) {
 
 function isRenderedArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
-  // Match the panel's own predicates so a card never says Open for an artifact
-  // the panel renders: normalise mime parameters (text/html; charset=utf-8) and
-  // honour image/* mime even when the path has no extension.
+  // Match the panel's predicates for the relabelled kinds (HTML, Markdown,
+  // images): normalise mime parameters (text/html; charset=utf-8) and honour
+  // image/* mime even when the path has no extension. PDF/DOCX/XLSX are
+  // rendered by the panel through their own viewers but keep "Open" here.
   const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     artifact.kind === 'html' ||
