@@ -60,6 +60,85 @@ describe('terminalSupportsSynchronizedOutput', () => {
   ])('detects support for %j', (env, expected) => {
     expect(terminalSupportsSynchronizedOutput(env)).toBe(expected);
   });
+
+  it.each([
+    // Windows Terminal 1.23+ ships in the 26100 (24H2) servicing line; WSL2
+    // exposes that build in its kernel release.
+    ['4.4.0-26100-Microsoft', true],
+    ['5.15.167.4-microsoft-standard-WSL2', false],
+    // WSL1 kernels carry no Windows build number.
+    ['4.19.104-microsoft-standard', false],
+    // Windows 10 22H2 (19045) predates DECSET 2026 support in Windows Terminal.
+    ['4.4.0-19045-Microsoft', false],
+  ])('reads the host build from WSL kernel %s', (osRelease, expected) => {
+    expect(
+      terminalSupportsSynchronizedOutput(
+        { WT_SESSION: '00000000-0000-0000-0000-000000000000' },
+        osRelease,
+        'linux',
+      ),
+    ).toBe(expected);
+  });
+
+  it.each([
+    ['10.0.26100', true],
+    ['10.0.22631', false],
+    ['10.0.19045', false],
+  ])(
+    'reads the build from the native Windows release %s',
+    (osRelease, expected) => {
+      expect(
+        terminalSupportsSynchronizedOutput(
+          { WT_SESSION: '00000000-0000-0000-0000-000000000000' },
+          osRelease,
+          'win32',
+        ),
+      ).toBe(expected);
+    },
+  );
+
+  it('requires an explicit override for Windows Terminal when the build is unknown', () => {
+    // Without a kernel release there is no way to learn the host build, so the
+    // wrappers stay off rather than risk old Windows Terminal dropping them.
+    expect(
+      terminalSupportsSynchronizedOutput({
+        WT_SESSION: '00000000-0000-0000-0000-000000000000',
+      }),
+    ).toBe(false);
+    expect(
+      terminalSupportsSynchronizedOutput({
+        WT_SESSION: '00000000-0000-0000-0000-000000000000',
+        QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT: '1',
+      }),
+    ).toBe(true);
+  });
+
+  it('keeps the wrappers off when Windows Terminal is behind tmux', () => {
+    // The multiplexer in between decides whether DECSET 2026 reaches the host,
+    // so the host build alone is not enough.
+    expect(
+      terminalSupportsSynchronizedOutput(
+        {
+          WT_SESSION: '00000000-0000-0000-0000-000000000000',
+          TMUX: '/tmp/tmux-1000/default,123,0',
+        },
+        '4.4.0-26100-Microsoft',
+        'linux',
+      ),
+    ).toBe(false);
+  });
+
+  it('honours the disable switch on Windows Terminal', () => {
+    expect(
+      terminalSupportsSynchronizedOutput(
+        {
+          WT_SESSION: '00000000-0000-0000-0000-000000000000',
+          QWEN_CODE_SYNCHRONIZED_OUTPUT: '0',
+        },
+        '4.4.0-26100-Microsoft',
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('installSynchronizedOutput', () => {
