@@ -60,9 +60,40 @@ const CREATION_COMMAND_PATTERNS: readonly RegExp[] = [
  */
 const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|-X\s*)GET\b/i;
 
+/**
+ * Drop quoted spans so a creation subcommand or write flag inside a quoted
+ * argument is not mistaken for the real command: `grep 'gh pr comment' …` is a
+ * read, and `--jq '.[] | .id'` must not fragment the pipeline split below.
+ * Best-effort (escaped quotes are not modeled), consistent with the module's
+ * best-effort attribution that fails open toward delivery.
+ */
+function stripQuotedSpans(command: string): string {
+  return command.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+}
+
+/**
+ * Split a shell chain into pipeline stages. A write flag must sit in the SAME
+ * stage as the collection path to count as a creation: `gh api …/comments
+ * --jq … ; stat -f '%Sm' …` is a GET listing followed by an unrelated `-f`, not
+ * a POST. Matching the flag anywhere in the whole command text over-attributed
+ * every id such a read printed and silently withheld those comments from the
+ * listing session.
+ */
+function commandSegments(command: string): string[] {
+  return command.split(/&&|\|\||[;|]/);
+}
+
 function isCreationCommand(command: string): boolean {
-  if (EXPLICIT_GET_PATTERN.test(command)) return false;
-  return CREATION_COMMAND_PATTERNS.some((pattern) => pattern.test(command));
+  const stripped = stripQuotedSpans(command);
+  for (const segment of commandSegments(stripped)) {
+    // An explicit GET is a read even with field flags (gh api sends them as
+    // query parameters on a GET).
+    if (EXPLICIT_GET_PATTERN.test(segment)) continue;
+    if (CREATION_COMMAND_PATTERNS.some((pattern) => pattern.test(segment))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Which collection an api/curl creation targeted, for bare JSON `id`s. */

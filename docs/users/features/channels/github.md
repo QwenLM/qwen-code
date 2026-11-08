@@ -373,9 +373,10 @@ its transcript (the daemon's posted-comment lookup): a comment is withheld only
 from the session that actually wrote it, so a session's own reply does not
 re-trigger it. No marker or `@mention` is required.
 
-Comments are fetched when the PR's activity advances or on a periodic re-check
-(about every 2 minutes), and the first observation baselines silently — comments
-that predate the watch are not replayed. A rate-limited or credential answer
+Comments are fetched on a periodic re-check (about every 2 minutes), and the
+first observation baselines silently — comments that predate the watch are not
+replayed. A comment-only channel (no `prWatchEvents`) issues no per-poll
+`pulls.get`; the comment fetch is the only watch call. A rate-limited or credential answer
 fails fast and aborts the watch pass (the same rule as the state watch), so it
 never sleep-retries ahead of task recovery and notification intake. Delivery
 reuses the bound-session contract: role-aware templates (`comment` /
@@ -391,11 +392,14 @@ the file path and line in the prompt. Attribution is best-effort and fails open
 toward delivery: a posting method that leaves no recognizable comment-creation
 result in the transcript is not attributed, so such a comment may be delivered
 once to its author's session (the stable id still bounds it to a single
-delivery). Two common paths are not attributed — code-mode shell calls omit the
-`Command:` line the detector reads, and a shell call made through the deferred
-`tool_call` wrapper records that name rather than `run_shell_command` — and an
-explicit GET is never treated as a creation even when it passes field flags as
-query parameters.
+delivery). Several paths are not attributed — code-mode shell calls omit the
+`Command:` line the detector reads; a shell call made through the deferred
+`tool_call` wrapper records that name rather than `run_shell_command`; and the
+lookup reads only the active transcript, so a session archived after posting
+does not have its own comments attributed. A read is never treated as a
+creation: an explicit GET is vetoed even with field flags, and a write flag must
+sit in the same pipeline stage as the comments collection (a chained `stat -f`
+or a quoted `grep 'gh pr comment'` does not attribute).
 
 ### Role-Aware Action Templates
 

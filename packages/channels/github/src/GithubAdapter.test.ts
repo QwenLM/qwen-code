@@ -22994,6 +22994,41 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         // the shared error aborts the watch pass rather than being swallowed.
         expect(mockOctokit.rest.issues.listComments).toHaveBeenCalledTimes(1);
       });
+
+      it('issues no pulls.get for a comment-only channel', async () => {
+        // commentWatchConfig subscribes no state events, so the per-poll state
+        // observation is skipped and the comment fetch is the only watch call.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+      });
+
+      it('records comment times so watch dedupe keys stay evictable', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const cursor = (
+          channel as unknown as {
+            cursor: { dispatchedCommentTimes?: Record<string, string> };
+          }
+        ).cursor;
+        expect(cursor.dispatchedCommentTimes?.['IC_555']).toBe(
+          '2026-07-02T10:00:00.000Z',
+        );
+      });
     });
   });
 });

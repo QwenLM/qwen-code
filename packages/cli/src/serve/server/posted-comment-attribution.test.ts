@@ -121,6 +121,32 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(post)).toContain(issueCommentKey('555'));
   });
 
+  it('does not attribute a GET listing chained with an unrelated -f (stat -f)', () => {
+    // The write flag must be in the same pipeline stage as the collection
+    // path; a trailing `stat -f` in the chain is not a POST body field.
+    const entry = shellResult(
+      "gh api repos/QwenLM/qwen-code/issues/15974/comments --jq '.[] | {id, user: .user.login}' | tail -20; echo done; stat -f '%Sm %N' report.md",
+      '[{"id":6538275524},{"id":111}]',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not attribute a creation subcommand inside a quoted grep pattern', () => {
+    const entry = shellResult(
+      "grep -n 'gh pr comment' scripts/post.sh",
+      'https://github.com/o/r/pull/1#issuecomment-999',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a creation piped into a reader', () => {
+    const entry = shellResult(
+      'gh pr comment 42 --body hi | tee comment.log',
+      'https://github.com/o/r/pull/42#issuecomment-777',
+    );
+    expect(extractPostedCommentIds(entry)).toContain(issueCommentKey('777'));
+  });
+
   it('does not attribute a received channel event (user message)', () => {
     const entry = {
       type: 'user',

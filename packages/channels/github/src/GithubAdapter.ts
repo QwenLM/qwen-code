@@ -6711,7 +6711,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     for (const [key, candidate] of watched) {
       try {
-        await this.watchOnePr(key, candidate.chatId, candidate.number);
+        // The state observation costs a pulls.get per watched PR per poll; skip
+        // it when no state event is subscribed so a comment-only channel does
+        // not pay for transitions it never emits.
+        if (this.prWatchEvents.size > 0) {
+          await this.watchOnePr(key, candidate.chatId, candidate.number);
+        }
         // Additive comment watch: isolates its own failures so a comment
         // fetch problem never skips the state transitions above.
         await this.watchPrComments(key, candidate.chatId, candidate.number);
@@ -7167,6 +7172,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] comment watch fetch failed for ${key}, continuing without comments this pass: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
       );
       return;
+    }
+
+    // Record created_at per fetched comment exactly as the notification lanes'
+    // fetch does, so the watch's dispatchedComments keys carry a time and stay
+    // evictable once older than the cursor. Without a time a key is treated as
+    // protected and the ring would grow monotonically for the daemon's life.
+    const commentTimes = (this.cursor.dispatchedCommentTimes ??= {});
+    for (const comment of [...conversation, ...review]) {
+      if (comment.created_at) {
+        commentTimes[comment.node_id || String(comment.id)] =
+          comment.created_at;
+      }
     }
 
     const { targets } = this.resolveBoundTargets(
