@@ -463,6 +463,46 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not attribute a JSON object produced by a read chained after a redirected creation', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments -f body=hi >/dev/null && gh api repos/o/r/issues/42/comments --jq '.[0] | {id,body}'",
+      '{"id":111,"body":"someone else wrote this"}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not attribute a bare id produced by a read chained after a redirected creation', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments -f body=hi >/dev/null && gh api repos/o/r/issues/42/comments --jq '.[0].id'",
+      '111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('counts a wrapper-with-flags read in a chain (env -u) when checking output origin', () => {
+    const entry = shellResult(
+      "gh pr comment 42 --body-file report.md >/dev/null && env -u HTTP_PROXY gh api repos/o/r/issues/42/comments --jq '.[0].html_url'",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not split a shell comment on its separators into a phantom creation', () => {
+    const entry = shellResult(
+      'cat comment-url.txt # inspect; gh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a lone creation with a JSON result (origin-check control)', () => {
+    const entry = shellResult(
+      'gh api repos/o/r/issues/42/comments -f body=hi',
+      '{"id":900}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('900')]);
+  });
+
   it('ignores non-shell tool results and malformed entries', () => {
     expect(extractPostedCommentIds(null)).toEqual([]);
     expect(extractPostedCommentIds({})).toEqual([]);

@@ -49,12 +49,14 @@ const SUBCOMMAND_STAGE_START =
   /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)*gh\s+(?:pr|issue)\s+comment\b/;
 
 /**
- * Leads a `gh`/`curl` invocation (read or write). Used to count how many API
- * commands a chain runs: when a creation is chained with another API command,
- * a bare-URL output cannot be proven to come from the creation.
+ * Leads a `gh`/`curl` invocation (read or write), with the same wrapper /
+ * assignment prefixes the creation recognition accepts (so `env -u VAR gh api`
+ * is counted too). Used to count how many API commands a chain runs: when a
+ * creation is chained with another API command, the output — URL, JSON, or bare
+ * id alike — cannot be proven to come from the creation.
  */
 const API_COMMAND_LEAD =
-  /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+|(?:env|time|nohup|command|sudo)\s+)*(?:gh|curl)\b/;
+  /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)*(?:gh|curl)\b/;
 
 const PATH_PATTERNS: readonly RegExp[] = [
   // gh api / curl writing to a comments collection.
@@ -146,6 +148,22 @@ function commandSegments(command: string): string[] {
     if (ch === "'" || ch === '"') {
       quote = ch;
       current += ch;
+      continue;
+    }
+    // An unquoted word-initial `#` begins a shell comment: ignore the rest of
+    // the line INCLUDING any separators in it, so `cat urls.txt # inspect; gh
+    // pr comment …` does not split the comment's `;` into a phantom creation.
+    if (
+      ch === '#' &&
+      (i === 0 || /\s/.test(command[i - 1]!) || current.trim() === '')
+    ) {
+      while (
+        i + 1 < command.length &&
+        command[i + 1] !== '\n' &&
+        command[i + 1] !== '\r'
+      ) {
+        i++;
+      }
       continue;
     }
     // A backslash-newline is a line continuation, not a command boundary: the
@@ -241,15 +259,24 @@ function creationSegment(command: string): string | undefined {
 }
 
 /**
- * How many `gh`/`curl` invocations (read or write) the chain runs. A bare-URL
- * output is only attributable to a creation when it is the sole API command:
- * `gh pr comment … >/dev/null && gh api … --jq '.[0].html_url'` takes its URL
- * from the read, so counting URLs cannot prove ownership there.
+ * Whether the creation's output cannot be proven to be the result we see. When
+ * another `gh`/`curl` command runs AFTER the creation, that later command may
+ * have produced the output — e.g. `gh pr comment … >/dev/null && gh api …
+ * --jq '.[0].html_url'` takes its URL from the read — so attribute nothing.
+ * A read BEFORE the creation is fine: the creation is the last API command and
+ * a creation-shaped result is its own.
  */
-function apiCommandCount(command: string): number {
-  return commandSegments(command).filter((segment) =>
-    API_COMMAND_LEAD.test(stripQuotedSpans(stripShellComment(segment))),
-  ).length;
+function creationOutputIsAmbiguous(command: string): boolean {
+  const segments = commandSegments(command);
+  const creationIdx = segments.findIndex((segment) =>
+    segmentIsCreation(segment),
+  );
+  if (creationIdx === -1) return true;
+  return segments
+    .slice(creationIdx + 1)
+    .some((segment) =>
+      API_COMMAND_LEAD.test(stripQuotedSpans(stripShellComment(segment))),
+    );
 }
 
 /**
@@ -309,14 +336,19 @@ export function extractPostedCommentIds(entry: unknown): string[] {
       output.match(/\nOutput: ([\s\S]*)$/)?.[1] ??
       '';
 
+    // The output must be attributable to the creation. When another gh/curl
+    // command runs AFTER the creation, it may have produced the output —
+    // whatever its shape (URL, JSON object, or bare id) — so attribute nothing
+    // (fail-open: the author may self-echo once, but a mere reader is never
+    // credited with comments it only read). This gates every result shape below,
+    // not just the bare-URL one.
+    if (creationOutputIsAmbiguous(command)) continue;
+
     // Harvest only a creation-shaped response, never a listing or free text.
     // Prefer the structured result: a single JSON object's top-level id is the
     // created comment, and a URL quoted inside its body is data, not another
     // posted comment — so do not URL-scan a structured result. A bare id is the
-    // `--jq '.id'` shape. A bare URL is only attributable when the creation is
-    // the sole API command in the chain; otherwise the URL may come from a
-    // chained read (fail-open: the author may self-echo once, but a mere reader
-    // is never credited with comments it only read).
+    // `--jq '.id'` shape; a single comment URL is the `gh pr comment` shape.
     const target = creationTarget(segment);
     const trimmed = result.trim();
     const keyFor = (id: string | number): string =>
@@ -351,7 +383,7 @@ export function extractPostedCommentIds(entry: unknown): string[] {
         reviewCommentKey(m[1]!),
       ),
     );
-    if (urlMatches.length === 1 && apiCommandCount(command) <= 1) {
+    if (urlMatches.length === 1) {
       ids.add(urlMatches[0]!);
     }
   }
