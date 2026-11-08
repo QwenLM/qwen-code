@@ -551,7 +551,7 @@ function ArtifactCard({
                 ) : (
                   openIcon
                 )}
-                {t(rendered ? 'common.preview' : 'common.open')}
+                {t(rendered ? 'turnOutputs.preview' : 'common.open')}
               </button>
             )}
           </span>

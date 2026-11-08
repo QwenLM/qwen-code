@@ -1,18 +1,21 @@
-# AskUser details: one-click HTML preview and UI-language output
+# AskUser details: Preview affordance on the HTML artifact card and UI-language output
 
 [中文](2026-11-07-ask-details-preview-and-ui-language.zh-CN.md)
 
-Status: draft. Follow-up to the merged details side task (#16458, squash
-`61aef512e7`). Two friction points surfaced in real use:
+Status: implemented (follow-up PR #16587). Follow-up to the merged details side
+task (#16458, squash `61aef512e7`). Two friction points surfaced in real use:
 
 1. The HTML explanation the details side task writes to `.qwen/tmp/` is
-   inconvenient to view: the user reports having to open the file and then
-   trigger a preview, rather than seeing the rendered explanation directly.
+   inconvenient to discover as a rendered view: the artifact card labelled the
+   action generically ("Open"), which did not signal that the HTML opens
+   rendered. The user described it as having to open the file and then preview;
+   the verification below finds the routing already renders in one action, so
+   the friction is discoverability, not step count.
 2. The generated HTML is not reliably in the reader's language. The whole point
    of the details task is to let the user quickly understand the pending
    question; a language mismatch defeats that.
 
-## Problem 1 — one-click preview on the HTML artifact card
+## Problem 1 — Preview affordance on the HTML artifact card
 
 ### Current state
 
@@ -27,11 +30,16 @@ which `ArtifactPanel.tsx` renders through `ArtifactDetail` →
 this renders directly; only documents over the large-document threshold fall
 back to a source-first "render full preview" gate.
 
-The reported multi-step experience comes from the side-task context: the child
-pane is a nested right panel, and opening an artifact from it goes through the
-nested right-panel wiring rather than landing the user directly on a rendered
-preview. The card also labels the action generically ("Open"), which does not
-signal that the HTML can be viewed rendered.
+Tracing the open path shows the click already lands on the rendered preview in
+one action: the card's `Open` dispatches the same `{kind:'artifact'}` request,
+and the nested side-task pane routes through the same `handleTurnOutputOpen`
+(`onNestedRightPanelOpen`), so it inherits the identical artifact-tab preview
+path. The only source-first gate on that path is `LargeDocumentPreview`
+(>1 MiB), which a self-contained details explanation does not reach. The gap is
+therefore discoverability: the generic "Open" label (with an external-link
+icon) did not signal that the HTML opens rendered. This is a static code trace,
+not a live click inside the nested pane; the visuals capture exercises the card
+in a session transcript against a mock daemon.
 
 ### Proposed change
 
@@ -39,33 +47,47 @@ Give the HTML artifact card an explicit, primary **Preview** action that opens
 the rendered HTML directly, reusing the existing artifact-tab preview path
 (no new preview renderer, no new tab kind):
 
-- `ArtifactCard` renders a `Preview` button for artifacts that render as HTML
-  (`isRenderedArtifact` / HTML mime/extension), alongside the existing `Open`
-  and `Download` actions. The button dispatches the same artifact open request
-  the card already uses, which lands on the rendered preview tab.
+- `ArtifactCard` relabels its single open action to **Preview** (with an eye
+  icon) for rendered artifacts (`isRenderedArtifact`: HTML, Markdown, images).
+  It _replaces_ the generic `Open` label on those artifacts — one button with a
+  conditional icon and label, not an extra button alongside `Open`; `Download`
+  is unchanged. The click handler is byte-identical to before: it dispatches the
+  same artifact open request, which already lands on the rendered preview tab.
 - The action is only offered when the artifact can actually be opened
   (`canOpenWorkspaceArtifact`, no external URL), mirroring the existing `Open`
   guard, so a missing or blocked artifact never shows a dead Preview button.
-- i18n: reuse `common.preview` if present, otherwise add a localized label
-  (en/zh-CN).
+- i18n: reuse the existing `turnOutputs.preview` key (already defined in en/zh
+  and used by `ArtifactPanel`); no new i18n key is added.
 
-The change is additive and scoped to the card affordance and its open request;
-the preview renderer, sandbox/CSP, and large-document gate are unchanged.
+The change is scoped to the card affordance (label + icon); the click dispatch,
+preview renderer, sandbox/CSP, and large-document gate are unchanged.
+
+**Blast radius.** The relabel keys off `isRenderedArtifact`, so every HTML,
+Markdown, and image artifact card in every session reads "Preview", not only the
+ask-details card. This is intentional for consistency: those artifacts all open
+in a rendered preview tab. Non-rendered artifacts (e.g. CSV, PPTX) and external
+link artifacts keep "Open".
 
 ### Files affected
 
 - `packages/web-shell/client/components/artifacts/TurnOutputs.tsx`
-  (`ArtifactCard`, the artifact open request).
-- `packages/web-shell/client/i18n.tsx` (Preview label, if not reused).
-- Tests: `TurnOutputs.dom.test.tsx` (Preview button appears for HTML artifacts,
-  dispatches the open request, absent/disabled for non-openable artifacts).
+  (`ArtifactCard`, conditional icon/label).
+- `packages/web-shell/client/i18n.tsx` (no new key; reuses `turnOutputs.preview`).
+- Tests: `TurnOutputs.dom.test.tsx` (Preview label for HTML artifacts, Open kept
+  for non-rendered, Preview disabled for non-openable artifacts).
 
-### Verification point
+### Verification (resolved)
 
-Confirm in a real details side task that clicking Preview lands directly on the
-rendered HTML (single action), including the nested right-panel routing. If the
-nested routing still introduces an intermediate pane, route the Preview request
-so the rendered preview tab is activated directly.
+The nested-routing open question is closed by code trace: the nested side-task
+pane uses the same `handleTurnOutputOpen` as the main transcript, and a workspace
+HTML artifact routes to the rendered preview tab with no source-first gate below
+1 MiB, so the click already lands on the rendered HTML in one action. The PR
+therefore fixes the labelling (discoverability), not the step count. A visuals
+capture (real Chromium, mock daemon) shows the card before ("Open") and after
+("Preview"); the click dispatch is unchanged. This is a static trace plus a
+mock-daemon capture, not a live click inside a real nested side-task pane; if a
+future report still shows extra steps on the latest build, the nested routing
+would need a separate live investigation.
 
 ## Problem 2 — reliably follow the UI language
 
@@ -105,11 +127,15 @@ strengthens adherence, it does not change the language source.
   registration, or the side-task creation flow.
 - No change to the language source (still UI language); no daemon
   output-language coupling.
-- No auto-open of the preview on generation (the user chose an explicit
-  one-click Preview action, not automatic opening).
+- No auto-open of the preview on generation (the user chose an explicit Preview
+  action, not automatic opening).
+- No routing change: the click dispatch is identical to the previous "Open".
 
 ## Open questions
 
-- Whether the nested side-task right-panel routing needs an explicit adjustment
-  to activate the rendered preview tab in one action (resolved during
-  verification).
+- None outstanding for the affordance change. The nested-routing question is
+  resolved by code trace (see Verification above).
+- Whether the strengthened whole-page directive moves model output language in
+  practice is inherently probabilistic; the tests pin the prompt string, not
+  model adherence. A language _setting_ (mechanism) would be the stronger lever
+  but is deliberately out of scope here.

@@ -1092,7 +1092,6 @@ const EN: Messages = {
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
-  'common.preview': 'Preview',
   'excel.worksheet': 'Worksheet',
   'excel.row': 'Row',
   'excel.truncated': (v) =>
@@ -6120,7 +6119,6 @@ const ZH: Messages = {
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
-  'common.preview': '预览',
   'excel.worksheet': '工作表',
   'excel.row': '行',
   'excel.truncated': (v) =>
