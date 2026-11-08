@@ -102,8 +102,8 @@ function validate(c) {
     !(c.shutdownGraceSeconds >= 0) ||
     !Number.isSafeInteger(c.minDiskBytes) ||
     c.minDiskBytes < 0 ||
-    (c.stallAlertRetries !== undefined &&
-      (!Number.isInteger(c.stallAlertRetries) || c.stallAlertRetries < 1))
+    (c.stallAlertSeconds !== undefined &&
+      (!Number.isFinite(c.stallAlertSeconds) || c.stallAlertSeconds < 1))
   )
     throw new Error('Invalid manager configuration');
   if (c.proxy !== undefined) {
@@ -132,6 +132,15 @@ function validate(c) {
     if (noProxy !== undefined && (typeof noProxy !== 'string' || !noProxy))
       throw new Error('Invalid proxy.noProxy');
   }
+}
+
+export function backoffDelay(failures, isRateLimited) {
+  const base = isRateLimited ? 30000 : 10000;
+  const max = isRateLimited ? 300000 : 60000;
+  const delay = Math.min(base * 2 ** Math.min(failures - 1, 5), max);
+  // Equal jitter: without it every slot that entered the storm together
+  // wakes together and keeps hammering the API at the same instant.
+  return Math.round(delay / 2 + Math.random() * (delay / 2));
 }
 
 export function createManager(config, dependencies = {}) {
@@ -172,7 +181,27 @@ export function createManager(config, dependencies = {}) {
   const lockPath = join(stateDir, 'manager.lock');
   const slotPath = (slot) => join(stateDir, `slot-${slot}.json`);
   const log = (message) => console.log(`[${config.poolId}] ${message}`);
-  const stallAlertRetries = config.stallAlertRetries ?? 30;
+  // Time-based, not retry-count-based: with jittered exponential backoff a
+  // retry count no longer maps to a fixed wall-clock delay. Half an hour is
+  // long enough that a pool-wide rate-limit storm — every slot backing off on
+  // the same 300 s ceiling — does not put one alert per slot in the journal at
+  // once, and short enough that a genuinely wedged slot is still surfaced
+  // within a shift.
+  const stallAlertMs = (config.stallAlertSeconds ?? 1800) * 1000;
+  // A backoff sleep must stay interruptible: the service gives the manager
+  // TimeoutStopSec to exit, and an unsliced five-minute sleep would have
+  // systemd SIGKILL it mid-cycle. Wake at least once a second and cut the
+  // sleep short once stop() sets the stopping flag. The flag alone bounds
+  // the overshoot to one 1 s slice; a stopAt term here would also make the
+  // loop skip every slice when shutdownGraceSeconds is 0.
+  const interruptibleWait = async (ms) => {
+    let remaining = ms;
+    while (!stopping && remaining > 0) {
+      const chunk = Math.min(1000, remaining);
+      await wait(chunk);
+      remaining -= chunk;
+    }
+  };
   function parseJson(text) {
     try {
       return JSON.parse(text);
@@ -458,11 +487,17 @@ export function createManager(config, dependencies = {}) {
           // GitHub rejects deletion while it still considers the runner busy.
           // Keep the state so the next cycle retries the same identity instead
           // of orphaning a registration that blocks its own replacement.
-          throw new Error(
+          // Carry the status through the rewrap: the retry loop picks the
+          // rate-limit ladder from it, and a 403/429 DELETE is exactly the
+          // shape a rate-limit storm produces here.
+          const rejected = new Error(
             `Runner ${runner.id} deletion was rejected${
               error.status ? ` (HTTP ${error.status})` : ''
             }; retaining slot state to retry`,
+            { cause: error },
           );
+          rejected.status = error.status;
+          throw rejected;
         }
       }
     }
@@ -515,14 +550,27 @@ export function createManager(config, dependencies = {}) {
         ),
       );
     } catch (error) {
-      if (error.status >= 400 && error.status < 500 && error.status !== 408) {
-        // The request was definitively rejected, so it created no runner, but a
-        // registration left by an earlier failed cleanup still owns this display
-        // name and would reject every retry. Reconcile it instead of dropping
-        // the only state that can still delete it.
-        await cleanup(slot, { ...state, uncertain: false });
-      } else {
-        await cleanup(slot, state);
+      // A rejected JIT request ends the cycle, but cleanup can fail as well —
+      // during a rate-limit storm that is the expected second failure. The
+      // escaped error is what the retry loop reads its backoff ladder from, so
+      // a cleanup failure must not downgrade a rate-limited request to the
+      // ordinary ladder.
+      const rateLimited = error.status === 403 || error.status === 429;
+      try {
+        if (error.status >= 400 && error.status < 500 && error.status !== 408) {
+          // The request was definitively rejected, so it created no runner, but a
+          // registration left by an earlier failed cleanup still owns this display
+          // name and would reject every retry. Reconcile it instead of dropping
+          // the only state that can still delete it.
+          await cleanup(slot, { ...state, uncertain: false });
+        } else {
+          await cleanup(slot, state);
+        }
+      } catch (cleanupError) {
+        if (!rateLimited) throw cleanupError;
+        log(
+          `slot ${slot}: cleanup after a rate-limited JIT failure also failed (${cleanupError.message}); keeping the rate-limit backoff`,
+        );
       }
       throw error;
     }
@@ -710,28 +758,48 @@ export function createManager(config, dependencies = {}) {
           const slot = i + 1;
           let failures = 0;
           let lastMessage;
+          let consecutiveFailures = 0;
+          let stalledSince;
+          let stallAlerted = false;
           while (!stopping) {
             try {
               const result = await cycle(slot);
               failures = 0;
               lastMessage = undefined;
+              consecutiveFailures = 0;
+              stalledSince = undefined;
+              stallAlerted = false;
               if (result?.earlyExit && !stopping) {
                 log(`slot ${slot}: backing off 60 s before replenishing`);
-                await wait(60000);
+                await interruptibleWait(60000);
               }
             } catch (error) {
               failures = error.message === lastMessage ? failures + 1 : 1;
+              if (failures === 1) {
+                stalledSince = Date.now();
+                stallAlerted = false;
+              }
               lastMessage = error.message;
-              if (failures % stallAlertRetries === 0)
+              // Two counters, two jobs: `failures` counts consecutive
+              // identical messages and anchors the stall clock, while
+              // `consecutiveFailures` counts every consecutive failure and
+              // sizes the backoff, so a slot whose error text keeps changing
+              // still escalates instead of restarting from the base delay.
+              consecutiveFailures += 1;
+              const isRateLimited =
+                error.status === 403 || error.status === 429;
+              const delay = backoffDelay(consecutiveFailures, isRateLimited);
+              if (!stallAlerted && Date.now() - stalledSince >= stallAlertMs) {
+                stallAlerted = true;
                 log(
-                  `STALL ALERT slot ${slot}: no runner replenished after ${failures} consecutive identical failures ` +
+                  `STALL ALERT slot ${slot}: no runner replenished for ${Math.round((Date.now() - stalledSince) / 1000)}s across ${failures} consecutive identical failures ` +
                     `(${error.message}); this slot serves no jobs until it is reconciled`,
                 );
-              else
+              } else
                 log(
-                  `slot ${slot}: ${error.message}; retrying without replenishing`,
+                  `slot ${slot}: ${error.message}; retrying in ${Math.round(delay / 1000)}s without replenishing`,
                 );
-              await wait(10000);
+              await interruptibleWait(delay);
             }
           }
         }),
