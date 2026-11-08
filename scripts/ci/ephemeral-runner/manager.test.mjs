@@ -45,6 +45,7 @@ async function fixture(t) {
   let keepContainerAfterRemove = false;
   let loseJit = false;
   let failDelete = false;
+  let deleteStatus = 422;
   const labelsFromArgs = (args) => {
     const labels = {};
     for (let i = 0; i < args.length; i += 1) {
@@ -80,8 +81,8 @@ async function fixture(t) {
       }
       if (args.includes('DELETE')) {
         if (failDelete) {
-          const error = new Error('gh failed (exit 1, HTTP 422)');
-          error.status = 422;
+          const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
+          error.status = deleteStatus;
           throw error;
         }
         runner = undefined;
@@ -163,8 +164,9 @@ async function fixture(t) {
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
     },
-    setFailDelete: (v) => {
+    setFailDelete: (v, status = 422) => {
       failDelete = v;
+      deleteStatus = status;
     },
     setRunner: (value) => {
       runner = { status: 'offline', busy: false, ...value };
@@ -669,6 +671,29 @@ test('the identity-less sweep never deletes an online registration', async (t) =
         c.args.includes('/repos/owner/repo/actions/runners/77'),
     ),
     'an online registration may belong to a live runner elsewhere',
+  );
+});
+
+test('the identity-less sweep keeps the HTTP status of a rejected deletion', async (t) => {
+  // A 403/429 on the sweep's DELETE must escape with .status intact so the
+  // retry loop can pick the rate-limit backoff ladder; a bare rewrap would
+  // classify a rate-limit storm as an ordinary failure.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef' });
+  f.setFailDelete(true, 429);
+  await assert.rejects(
+    createManager(f.config, { command: f.command }).cycle(1),
+    (error) =>
+      error.status === 429 && /deletion was rejected/.test(error.message),
   );
 });
 

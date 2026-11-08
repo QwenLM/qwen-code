@@ -473,11 +473,17 @@ export function createManager(config, dependencies = {}) {
           ]);
         } catch (error) {
           if (error.status === 404) continue;
-          throw new Error(
+          // Carry the status through the rewrap so a rate-limited sweep
+          // picks the same backoff ladder as any other 403/429 once the
+          // exponential-backoff change lands on main.
+          const rejected = new Error(
             `Runner ${runner.id} deletion was rejected${
               error.status ? ` (HTTP ${error.status})` : ''
             }; retrying on the next cycle`,
+            { cause: error },
           );
+          rejected.status = error.status;
+          throw rejected;
         }
       }
     }
