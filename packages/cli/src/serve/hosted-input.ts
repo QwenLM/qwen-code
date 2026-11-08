@@ -8,7 +8,7 @@ import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
-export const HOSTED_ATTACHMENT_INPUT_BYTES = 48 * 1024;
+export const HOSTED_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set([
   'txt',
   'md',
@@ -85,7 +85,8 @@ export function parseHostedInput(value: unknown): {
       typeof item['mimeType'] === 'string'
     ) {
       const data = item['data'];
-      const mimeType = item['mimeType'];
+      const mimeType =
+        item['mimeType'] === 'image/jpg' ? 'image/jpeg' : item['mimeType'];
       if (!data || data.length > HOSTED_ATTACHMENT_INPUT_BYTES)
         throw new Error('Invalid Hosted image.');
       const bytes = Buffer.from(data, 'base64');
@@ -100,10 +101,12 @@ export function parseHostedInput(value: unknown): {
               bytes[0] === 255 &&
               bytes[1] === 216 &&
               bytes[2] === 255
-            : mimeType === 'image/webp' &&
-              bytes.length >= 12 &&
-              bytes.toString('ascii', 0, 4) === 'RIFF' &&
-              bytes.toString('ascii', 8, 12) === 'WEBP';
+            : mimeType === 'image/gif'
+              ? ['GIF87a', 'GIF89a'].includes(bytes.toString('latin1', 0, 6))
+              : mimeType === 'image/webp' &&
+                bytes.length >= 12 &&
+                bytes.toString('ascii', 0, 4) === 'RIFF' &&
+                bytes.toString('ascii', 8, 12) === 'WEBP';
       if (!valid || bytes.toString('base64') !== data)
         throw new Error('Invalid Hosted image.');
       attachments.push({ inlineData: { data, mimeType } });
@@ -152,7 +155,7 @@ export function parseHostedInput(value: unknown): {
     attachments.length &&
     Buffer.byteLength(JSON.stringify(value)) > HOSTED_ATTACHMENT_INPUT_BYTES
   )
-    throw new Error('Hosted attachment input exceeds 48 KiB.');
+    throw new Error('Hosted attachment input exceeds 8 MiB.');
   const text = texts.join('\n');
   return {
     text,
@@ -186,7 +189,7 @@ export async function readHostedInput(
   if (
     ref.kind !== 'managed-input' ||
     ref.schemaVersion !== 1 ||
-    ref.byteLength > 64 * 1024
+    ref.byteLength > HOSTED_ATTACHMENT_INPUT_BYTES
   )
     throw new Error('Invalid Hosted input reference.');
   return parseHostedInput(

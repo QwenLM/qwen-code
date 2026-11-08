@@ -237,6 +237,18 @@ export function formatClockTime(
   }).format(epochMs);
 }
 
+/** A point on the axis, as the model's mode names one. */
+export function formatTimelinePoint(
+  model: Pick<TimelineModel, 'mode' | 'originMs'> | undefined,
+  ms: number,
+  windowMs: number,
+  language: string,
+): string {
+  return model?.mode === 'clock'
+    ? formatClockTime(model.originMs + ms, windowMs, language)
+    : formatWindowTime(ms, windowMs);
+}
+
 function spanStyle(span: TimelineSpan, total: number): CSSProperties {
   const length = span.end - span.start;
   const share = total > 0 ? length / total : 0;
@@ -542,11 +554,8 @@ export function TrajectoryOverview({
     left: percent(vLength > 0 ? -(vStart / vLength) * 100 : 0),
     width: percent(vLength > 0 ? (total / vLength) * 100 : 100),
   };
-  /** A point on the axis, as the mode in force names one. */
   const pointAt = (ms: number, windowMs: number): string =>
-    clock
-      ? formatClockTime((model?.originMs ?? 0) + ms, windowMs, language)
-      : formatWindowTime(ms, windowMs);
+    formatTimelinePoint(model, ms, windowMs, language);
   const windowFrom = pointAt(vStart, vLength);
   const windowTo = pointAt(vStart + vLength, vLength);
   const elapsed = busy;

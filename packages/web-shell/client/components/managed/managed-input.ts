@@ -2,7 +2,7 @@ import type { PromptFile, PromptImage } from '../../adapters/promptTypes';
 import type { ManagedInputBlock } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 
-const MAX_INPUT_BYTES = 48 * 1024;
+const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set([
   'txt',
   'md',
@@ -57,7 +57,12 @@ function privateBlock(block: ManagedInputBlock) {
       },
     };
   if (block.type === 'input_image')
-    return { type: 'image', data: block.data, mimeType: block.mime_type };
+    return {
+      type: 'image',
+      data: block.data,
+      mimeType:
+        block.mime_type === 'image/jpg' ? 'image/jpeg' : block.mime_type,
+    };
   return { type: 'text', text: block.text };
 }
 
@@ -112,11 +117,14 @@ export function isManagedInput(value: unknown): value is ManagedInputBlock[] {
         const valid =
           block['mime_type'] === 'image/png'
             ? bytes.startsWith('\x89PNG\r\n\x1a\n')
-            : block['mime_type'] === 'image/jpeg'
+            : block['mime_type'] === 'image/jpeg' ||
+                block['mime_type'] === 'image/jpg'
               ? bytes.startsWith('\xff\xd8\xff')
-              : block['mime_type'] === 'image/webp' &&
-                bytes.startsWith('RIFF') &&
-                bytes.slice(8, 12) === 'WEBP';
+              : block['mime_type'] === 'image/gif'
+                ? bytes.startsWith('GIF87a') || bytes.startsWith('GIF89a')
+                : block['mime_type'] === 'image/webp' &&
+                  bytes.startsWith('RIFF') &&
+                  bytes.slice(8, 12) === 'WEBP';
         if (!valid) return false;
       } else return false;
     }
@@ -143,7 +151,7 @@ export async function encodeManagedInput(
   for (const file of files) {
     if (file.data && file.data.size > MAX_INPUT_BYTES)
       throw new Error(
-        'Attachments and text together must fit within 48 KiB of encoded input.',
+        'Attachments and text together must fit within 8 MiB of encoded input.',
       );
     let contents = file.text;
     if (contents === undefined && file.data) {
@@ -167,9 +175,15 @@ export async function encodeManagedInput(
     });
   }
   for (const image of images) {
-    const mime = image.media_type;
-    if (mime !== 'image/png' && mime !== 'image/jpeg' && mime !== 'image/webp')
-      throw new Error('Only PNG, JPEG and WebP images are supported.');
+    const mime =
+      image.media_type === 'image/jpg' ? 'image/jpeg' : image.media_type;
+    if (
+      mime !== 'image/png' &&
+      mime !== 'image/jpeg' &&
+      mime !== 'image/gif' &&
+      mime !== 'image/webp'
+    )
+      throw new Error('Only PNG, JPEG, GIF and WebP images are supported.');
     blocks.push({
       type: 'input_image',
       data: image.data,
@@ -178,7 +192,7 @@ export async function encodeManagedInput(
   }
   if (!isManagedInput(blocks))
     throw new Error(
-      'Use a nonempty UTF-8 text file or a valid PNG, JPEG or WebP image. Attachments and text together must fit within 48 KiB of encoded input.',
+      'Use a nonempty UTF-8 text file or a valid PNG, JPEG, GIF or WebP image. Attachments and text together must fit within 8 MiB of encoded input.',
     );
   return blocks;
 }
@@ -206,7 +220,15 @@ export function restoreManagedAttachments(
   editor.restoreImages(
     input.flatMap((block) =>
       block.type === 'input_image'
-        ? [{ data: block.data, media_type: block.mime_type }]
+        ? [
+            {
+              data: block.data,
+              media_type:
+                block.mime_type === 'image/jpg'
+                  ? 'image/jpeg'
+                  : block.mime_type,
+            },
+          ]
         : [],
     ),
   );

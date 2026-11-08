@@ -5,11 +5,25 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { getCliVersion } from '../utils/version.js';
+import {
+  readWorkspaceFiles,
+  WorkspaceFileError,
+  sessionWorkspaceFileScope,
+  workspaceFilePath,
+  type SessionWorkspaceFileScope,
+} from './managed-workspace-files.js';
+import {
+  inspectWorkspaceUpload,
+  workspaceUploadRequest,
+  workspaceUploadResult,
+  writeWorkspaceUpload,
+  type WorkspaceUploadResult,
+} from './managed-workspace-upload.js';
 import {
   createManagedContextAttestationResponse,
   isManagedContextReady,
@@ -20,6 +34,7 @@ import {
 
 const MARKER = '.qwen-managed-storage.json';
 const MAX_BYTES = 64 * 1024;
+const MAX_UPLOAD_REQUEST_BYTES = 12 * 1024 * 1024;
 const ID = /^[a-zA-Z0-9_.:-]{1,512}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 let hostId: string | undefined;
@@ -55,7 +70,9 @@ export interface SshRuntimeRecord {
 }
 
 export interface SshRuntimeCleanProof {
-  readonly version: 1;
+  readonly version: 1 | 2;
+  readonly executionMode?: 'linux-cgroup' | 'developer-process-group';
+  readonly scope?: 'process_tree' | 'process_group';
   readonly resourceId: string;
   readonly bindingId: string;
   readonly bindingGeneration: number;
@@ -360,7 +377,16 @@ export function sshCleanProof(
   retiredAt: string,
 ): SshRuntimeCleanProof {
   return {
-    version: 1,
+    version: record.boot.managedExtensions ? 2 : 1,
+    ...(record.boot.managedExtensions
+      ? {
+          executionMode: record.boot.managedExtensions.mode,
+          scope:
+            record.boot.managedExtensions.mode === 'linux-cgroup'
+              ? ('process_tree' as const)
+              : ('process_group' as const),
+        }
+      : {}),
     resourceId: record.resourceId,
     bindingId: record.bindingId,
     bindingGeneration: record.bindingGeneration,
@@ -659,6 +685,128 @@ async function ensure(
   return observe(saved);
 }
 
+async function workspaceUpload(
+  request: Record<string, unknown>,
+  expected: { device: string; inode: string },
+  verifyStorage: () => Promise<void>,
+  sessionScope?: SessionWorkspaceFileScope,
+): Promise<WorkspaceUploadResult> {
+  const { metadata, bytes } = workspaceUploadRequest(request['files']);
+  const root = absolute(request['root']);
+  const cwd =
+    sessionScope?.cwdRelative ?? workspaceFilePath(request['cwdRelative']);
+  const target = {
+    nodeId: request['nodeId'],
+    root,
+    cwd,
+    expected,
+    identity: request['identity'] ?? null,
+    marker: request['marker'] ?? null,
+    ...(sessionScope ? { sessionFileScope: sessionScope } : {}),
+    ...metadata,
+  };
+  const canonical = (value: unknown): unknown =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, item]) => [key, canonical(item)]),
+        )
+      : value;
+  const requestDigest = createHash('sha256')
+    .update(JSON.stringify(canonical(target)))
+    .digest('hex');
+  const stateDirectory = absolute(request['stateDirectory']);
+  await privateDirectory(stateDirectory);
+  const directory = path.join(
+    stateDirectory,
+    'workspace-uploads',
+    metadata.uploadId,
+  );
+  await privateDirectory(directory);
+  const claimPath = path.join(directory, 'claim.json');
+  const receiptPath = path.join(directory, 'receipt.json');
+  let claim = await optionalJson(claimPath);
+  let started = false;
+  if (claim === undefined) {
+    if ((await optionalJson(receiptPath)) !== undefined)
+      refuse('Workspace upload claim is unavailable.');
+    const proposed = {
+      version: 1,
+      target,
+      requestDigest,
+      pid: bytes === undefined ? null : process.pid,
+    };
+    started = await createSshPrivateJson(claimPath, proposed);
+    claim = started ? proposed : await readSshPrivateJson(claimPath);
+  }
+  const saved = object(claim);
+  exact(saved, ['version', 'target', 'requestDigest', 'pid']);
+  if (
+    saved['version'] !== 1 ||
+    saved['requestDigest'] !== requestDigest ||
+    !isDeepStrictEqual(saved['target'], target)
+  )
+    throw new WorkspaceFileError('ssh_runtime_file_upload_conflict');
+  const pid = saved['pid'];
+  if (pid !== null && (!Number.isSafeInteger(pid) || Number(pid) <= 1))
+    refuse('Workspace upload process identity is invalid.');
+  const receipt = await optionalJson(receiptPath);
+  if (receipt !== undefined) {
+    const result = object(receipt);
+    if (
+      !['completed', 'failed'].includes(String(result['state'])) ||
+      (result['state'] === 'failed' && typeof result['code'] !== 'string') ||
+      !isDeepStrictEqual(
+        receipt,
+        workspaceUploadResult(
+          metadata,
+          result['state'] as 'completed' | 'failed',
+          result['code'] as string | undefined,
+        ),
+      )
+    )
+      refuse('Workspace upload receipt is invalid.');
+    return receipt as WorkspaceUploadResult;
+  }
+  let result: WorkspaceUploadResult;
+  if (pid === null) {
+    result = workspaceUploadResult(
+      metadata,
+      'failed',
+      'ssh_runtime_file_upload_not_started',
+    );
+  } else if (started && bytes !== undefined) {
+    result = await writeWorkspaceUpload(
+      root,
+      cwd,
+      metadata,
+      bytes,
+      expected,
+      verifyStorage,
+      sessionScope,
+    );
+  } else {
+    let live = true;
+    try {
+      live = alive(Number(pid));
+    } catch {
+      // An unknown process state cannot authorize cleanup or a terminal receipt.
+    }
+    if (live) return workspaceUploadResult(metadata, 'pending');
+    result = await inspectWorkspaceUpload(
+      root,
+      cwd,
+      metadata,
+      expected,
+      verifyStorage,
+      sessionScope,
+    );
+  }
+  await writeSshPrivateJson(receiptPath, result);
+  return result;
+}
+
 export async function executeSshBootstrap(
   value: unknown,
 ): Promise<Record<string, unknown>> {
@@ -687,6 +835,56 @@ export async function executeSshBootstrap(
       refuse('Directory is outside the configured roots.');
     if (within(root, stateDirectory) || within(stateDirectory, root))
       refuse('Runtime state and Workspace roots must not overlap.');
+    if (request['files'] !== undefined) {
+      const fileOperation = object(request['files'])['operation'];
+      const uploading = ['upload', 'upload-status'].includes(
+        String(fileOperation),
+      );
+      const identity =
+        request['identity'] === undefined
+          ? undefined
+          : identityDocument(request['identity']);
+      const marker = identity
+        ? markerDocument(request['marker'], identity)
+        : undefined;
+      if (identity && identity.root !== root) refuse('Storage root conflicts.');
+      if (identity && !uploading) await verifySshStorage(identity, marker);
+      const expected = identity ?? object(request['localRootIdentity']);
+      try {
+        if (request['sessionFileScope'] !== undefined && identity)
+          refuse('Session file scopes require local storage.');
+        const sessionScope = sessionWorkspaceFileScope(
+          request['sessionFileScope'],
+          request['cwdRelative'],
+        );
+        const fileIdentity = {
+          device: text(expected.device),
+          inode: text(expected.inode),
+        };
+        const files = uploading
+          ? await workspaceUpload(
+              request,
+              fileIdentity,
+              async () => {
+                if (identity) await verifySshStorage(identity, marker);
+              },
+              sessionScope,
+            )
+          : await readWorkspaceFiles(
+              root,
+              text(request['cwdRelative']),
+              request['files'],
+              fileIdentity,
+              sessionScope,
+            );
+        if (identity && !uploading) await verifySshStorage(identity, marker);
+        return { qwenVersion: await getCliVersion(), files };
+      } catch (error) {
+        if (error instanceof WorkspaceFileError)
+          throw new SshBootstrapError(error.code, error.message);
+        throw error;
+      }
+    }
     const identity = await inspectSshStorage(root);
     if (request['cwdRelative'] !== undefined) {
       const relative = text(request['cwdRelative']);
@@ -832,7 +1030,16 @@ export async function executeSshBootstrap(
   );
 }
 
-export async function runManagedRuntimeBootstrap(): Promise<void> {
+export async function runManagedRuntimeBootstrap(
+  help = false,
+  workspaceFileUpload = false,
+): Promise<void> {
+  if (help) {
+    process.stdout.write(
+      `${JSON.stringify({ protocolVersion: 1, capabilities: { workspaceFiles: 1, workspaceFileUpload: 1 } })}\n`,
+    );
+    return;
+  }
   let response;
   try {
     const chunks: Buffer[] = [];
@@ -840,17 +1047,30 @@ export async function runManagedRuntimeBootstrap(): Promise<void> {
     for await (const chunk of process.stdin) {
       const bytes = Buffer.from(chunk as Uint8Array);
       size += bytes.length;
-      if (size > MAX_BYTES)
+      if (size > (workspaceFileUpload ? MAX_UPLOAD_REQUEST_BYTES : MAX_BYTES))
         refuse('Runtime bootstrap request exceeds its limit.');
       chunks.push(bytes);
     }
     const source = new TextDecoder('utf-8', { fatal: true }).decode(
       Buffer.concat(chunks),
     );
+    const request = object(JSON.parse(source) as unknown);
+    const files = request['files'];
+    const upload =
+      files && typeof files === 'object' && !Array.isArray(files)
+        ? ['upload', 'upload-status'].includes(
+            String((files as Record<string, unknown>)['operation']),
+          )
+        : false;
+    if (
+      workspaceFileUpload !== upload ||
+      (upload && request['operation'] !== 'probe')
+    )
+      refuse('Workspace upload requires its dedicated bootstrap entry.');
     response = {
       protocolVersion: 1,
       ok: true,
-      result: await executeSshBootstrap(JSON.parse(source) as unknown),
+      result: await executeSshBootstrap(request),
     };
   } catch (error) {
     const known =

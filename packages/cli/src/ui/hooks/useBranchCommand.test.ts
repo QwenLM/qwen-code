@@ -11,6 +11,7 @@ import { useBranchCommand } from './useBranchCommand.js';
 import { makeSwapSlotClient } from '../../test-utils/mock-swap-slot-client.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { ModSession } from '../../services/mod-session.js';
 
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
@@ -162,6 +163,108 @@ describe('useBranchCommand', () => {
     };
   });
 
+  it('waits for the mode snapshot under the swap latch before forking', async () => {
+    const client = makeSwapSlotClient();
+    client.initialize.mockRejectedValueOnce(new Error('destination failed'));
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: true,
+      turns: 0,
+    };
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const restore = vi.fn();
+    Object.assign(config, {
+      getLlmClient: () => client,
+      captureWorkflowModeState: async () => {
+        expect(client.isTelemetrySwapInProgress()).toBe(true);
+        await held;
+        return snapshot;
+      },
+      restoreWorkflowModeState: restore,
+    });
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handleBranch();
+    });
+    const forksBeforeSnapshot = forkSession.mock.calls.length;
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(forksBeforeSnapshot).toBe(0);
+    expect(restore).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(client.isTelemetrySwapInProgress()).toBe(false);
+  });
+
+  it.each([
+    'rollback-init',
+    'forward-old',
+    'forward-target',
+    'before-invalidate',
+  ])('restores eligible Mod ownership after %s', async (mode) => {
+    let sessionId = config.getSessionId();
+    const oldSessionId = sessionId;
+    Object.assign(config, {
+      getSessionId: () => sessionId,
+      isInteractive: () => true,
+    });
+    const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+    const old = owner.captureToolSignal();
+    const restore = vi.fn(() => owner.restoreTools());
+    const binding = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue({
+        invalidateTools: () => owner.invalidateTools(),
+        restoreTools: restore,
+        syncSession: vi.fn(),
+      } as unknown as interactiveMods.InteractiveModSession);
+    const settle = vi.fn(() => {
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+    });
+    const client = {
+      beginTelemetrySwap: () => true,
+      abortTelemetrySwap: settle,
+      commitTelemetrySwap: settle,
+      initialize: vi.fn(async () => {
+        throw new Error('init failed');
+      }),
+    };
+    startNewSessionConfig.mockImplementation((id) => {
+      if (!id) throw new Error('missing session ID');
+      if (mode === 'forward-old')
+        throw new Error('start failed before mutation');
+      sessionId = id;
+      if (mode === 'forward-target')
+        throw new Error('start failed after mutation');
+      return sessionId;
+    });
+    config.getLlmClient = () => client;
+    if (mode === 'before-invalidate')
+      forkSession.mockRejectedValue(new Error('fork failed'));
+    try {
+      const { result } = renderHook(() => useBranchCommand(makeOptions()));
+      await act(async () => {
+        await result.current.handleBranch('recovery');
+      });
+      const renew = mode === 'rollback-init' || mode === 'forward-old';
+      expect(restore).toHaveBeenCalledTimes(renew ? 1 : 0);
+      expect(old.aborted).toBe(mode !== 'before-invalidate');
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+      if (renew) expect(owner.captureToolSignal()).not.toBe(old);
+      else expect(owner.captureToolSignal()).toBe(old);
+      expect(sessionId === oldSessionId).toBe(mode !== 'forward-target');
+      expect(settle).toHaveBeenCalledOnce();
+    } finally {
+      binding.mockRestore();
+      await owner.close();
+    }
+  });
+
   it('refuses to branch while background work is running', async () => {
     backgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
     backgroundTaskRegistry.getAll.mockReturnValue([
@@ -200,6 +303,8 @@ describe('useBranchCommand', () => {
         .spyOn(interactiveMods, 'getInteractiveModSession')
         .mockReturnValue({
           syncSession,
+          invalidateTools: vi.fn(),
+          restoreTools: vi.fn().mockResolvedValue(undefined),
         } as unknown as interactiveMods.InteractiveModSession);
       if (failed)
         getGoalRuntimeReady.mockRejectedValueOnce(new Error('invalid branch'));

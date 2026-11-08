@@ -459,9 +459,9 @@ a stale failure is cleared (#13742).
 ## 7. Validation
 
 - The Managed Agent server's `mvn test` (151 tests) and Checkstyle pass.
-- `ManagedAgentMySqlIT` passes against `mariadb:10.11.18`, the image CI uses,
-  and against `mysql:8.4`, including the V17 upgrade. `HostedHarnessMySqlIT`
-  passes against `mysql:8.4` with the bundled CLI.
+- `ManagedAgentMySqlIT` has passed against both `mariadb:10.11.18` and
+  `mysql:8.4`, including the V17 upgrade. `HostedHarnessMySqlIT` passes against
+  `mysql:8.4` with the bundled CLI.
 - On this branch, focused H2 migration and publication tests pass 24/24. On a
   fresh MySQL 8.4 schema, `ManagedAgentMySqlIT` passes 11/11 with V16–V19
   applied in order. MariaDB verification of the combined sequence awaits CI.

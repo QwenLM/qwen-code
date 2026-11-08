@@ -25,8 +25,7 @@
 //!   as it was at the last paint until the cursor moves or fades. The cutoff
 //!   path had the same limitation over the smaller alpha≥128 silhouette.
 //! - Z-ordering: `XRaiseWindow` every 80ms to stay above normal windows.
-//! - Wayland: when WAYLAND_DISPLAY is set but DISPLAY is also available (XWayland),
-//!   the X11 path is used.  Pure Wayland support is a TODO.
+//! - X11 applications under XWayland use the same X11 path.
 //!
 //! ## Cross-platform note (2026-05 dedup audit)
 //!
@@ -156,9 +155,7 @@ impl Drop for X11OverlayThreadCleanup {
         // Disconnect first so an animator racing teardown cannot enqueue after
         // the waiter sweep. Registrations before release are swept below;
         // registrations after release observe a disconnected channel and cancel
-        // themselves. On X11, also make future calls observe the renderer as
-        // unavailable. A Wayland session may still use its native forwarding
-        // path even when the optional XWayland owner thread cannot start.
+        // themselves. Future calls must observe the renderer as unavailable.
         self.teardown_with_after_disconnect(|| {});
     }
 }
@@ -288,9 +285,7 @@ pub fn send_command_for(key: CursorKey, cmd: OverlayCommand) {
     let _ = try_send_command_for(key, cmd);
 }
 
-/// Dispatch to every active Linux overlay backend. The result reports only
-/// whether the X11 owner accepted the command and can fire `ARRIVAL_TX`; the
-/// Wayland layer-shell path does not currently publish arrival notifications.
+/// Dispatch to the X11 owner, which acknowledges arrivals via ARRIVAL_TX.
 fn try_send_command_for(key: CursorKey, cmd: OverlayCommand) -> bool {
     if key.is_empty() {
         return false;
@@ -306,66 +301,6 @@ fn try_send_command_for(key: CursorKey, cmd: OverlayCommand) -> bool {
             sender_missing = CMD_TX.get().is_none(),
             "overlay: X11 channel rejected command (no sender or queue full)"
         );
-    }
-    // Also forward to the native-Wayland layer-shell overlay when Wayland
-    // is opted in. The wayland overlay's `forward` is a no-op when its
-    // owner thread isn't started yet (which is the normal X11-only case).
-    #[cfg(target_os = "linux")]
-    {
-        if crate::wayland::is_wayland() {
-            if crate::wayland::shell_helper::semantic_cursor_available() {
-                crate::wayland::shell_helper::set_cursor_color(&cursor_overlay::session_fill_hex(
-                    &key,
-                ));
-                // GNOME has no layer-shell. Drive only the final positioning
-                // commands through the compositor helper; it performs its own
-                // easing and avoids starting a worker that must fail.
-                match &cmd {
-                    cursor_overlay::OverlayCommand::ClickPulse { x, y } => {
-                        crate::wayland::shell_helper::click_pulse(*x as i32, *y as i32);
-                    }
-                    cursor_overlay::OverlayCommand::MoveTo { x, y, .. } => {
-                        crate::wayland::shell_helper::move_cursor(*x as i32, *y as i32);
-                    }
-                    cursor_overlay::OverlayCommand::SnapTo { x, y, .. } => {
-                        crate::wayland::shell_helper::move_cursor(*x as i32, *y as i32);
-                    }
-                    cursor_overlay::OverlayCommand::BeginAction {
-                        action,
-                        delivery,
-                        target,
-                    } => {
-                        crate::wayland::shell_helper::set_cursor_state(
-                            action.as_str(),
-                            delivery.as_ref().map_or("", |value| value.as_str()),
-                            target.as_ref().map_or("", |value| value.as_str()),
-                            true,
-                        );
-                    }
-                    cursor_overlay::OverlayCommand::EndAction(action) => {
-                        crate::wayland::shell_helper::set_cursor_state(
-                            action.as_str(),
-                            "",
-                            "",
-                            false,
-                        );
-                    }
-                    cursor_overlay::OverlayCommand::SetSessionLabel(label) => {
-                        crate::wayland::shell_helper::set_session_label(
-                            cursor_overlay::sanitize_session_label(label)
-                                .as_deref()
-                                .unwrap_or(""),
-                        );
-                    }
-                    cursor_overlay::OverlayCommand::SetEnabled(false) => {
-                        crate::wayland::shell_helper::hide_cursor();
-                    }
-                    _ => {}
-                }
-            } else if !crate::wayland::shell_helper::available() {
-                let _ = crate::wayland::overlay::forward(&msg);
-            }
-        }
     }
     x11_queued
 }
@@ -537,15 +472,9 @@ pub fn remove_cursor(key: CursorKey) {
     if let Some(tx) = CMD_TX.get() {
         let _ = tx.try_send(msg.clone());
     }
-    #[cfg(target_os = "linux")]
-    if crate::wayland::is_wayland() && !crate::wayland::shell_helper::available() {
-        let _ = crate::wayland::overlay::forward(&msg);
-    }
 }
 
-/// Clear the X11 render-side tombstone after a successful explicit session
-/// revival. Wayland has no keyed tombstone, so forwarding this lifecycle
-/// signal there is an accepted no-op.
+/// Clear the render-side tombstone after explicit session revival.
 pub fn revive_cursor(key: CursorKey) {
     if key.is_empty() {
         return;
@@ -553,10 +482,6 @@ pub fn revive_cursor(key: CursorKey) {
     let msg = OverlayMsg::Revive(key);
     if let Some(tx) = CMD_TX.get() {
         let _ = tx.try_send(msg.clone());
-    }
-    #[cfg(target_os = "linux")]
-    if crate::wayland::is_wayland() && !crate::wayland::shell_helper::available() {
-        let _ = crate::wayland::overlay::forward(&msg);
     }
 }
 
@@ -578,17 +503,6 @@ pub fn run_on_thread() {
     if !cfg.enabled {
         return;
     }
-
-    // Wayland layer-shell overlay is started LAZILY on the first
-    // send_command_for() that targets a Wayland session (see the
-    // wayland::overlay::forward() path). Starting it eagerly here added
-    // ~100-300ms to cua-driver mcp startup — enough to push the CI
-    // `cursor-click-gif` test (20s budget for the full launch_app →
-    // click → type sequence) over its limit, intermittently. The
-    // forward() path's own ensure_started() OnceLock guarantees the
-    // thread spins up on demand without losing any commands (the
-    // first send_command_for that triggers it spawns the thread,
-    // future commands reuse it).
 
     std::thread::Builder::new()
         .name("cua-overlay-x11".into())
@@ -986,7 +900,6 @@ fn map_x11_overlay_with_empty_input(
         &[],
     )?
     .check()?;
-    conn.map_window(win)?.check()?;
     conn.flush()?;
     Ok(())
 }
@@ -1004,7 +917,7 @@ fn run_overlay_thread(cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
 
     let cleanup = X11OverlayThreadCleanup {
         receiver: Some(rx),
-        disable_render_state: !crate::wayland::is_wayland(),
+        disable_render_state: true,
     };
     let rx = cleanup.receiver();
 
@@ -1178,6 +1091,7 @@ fn run_overlay_thread(cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
         return;
     }
     let paint_target = X11PaintTarget {
+        mapped: std::cell::Cell::new(false),
         win,
         root,
         depth,
@@ -1607,6 +1521,7 @@ struct X11PaintTile {
 /// inputs grow.
 #[cfg(target_os = "linux")]
 struct X11PaintTarget {
+    mapped: std::cell::Cell<bool>,
     win: u32,
     root: u32,
     depth: u8,
@@ -2532,6 +2447,16 @@ fn paint_x11_tiles(
     )?;
     if checked_requests {
         shape_cookie.check()?;
+    }
+
+    let should_map = !visible_shape.is_empty();
+    if should_map != target.mapped.get() {
+        if should_map {
+            conn.map_window(target.win)?.check()?;
+        } else {
+            conn.unmap_window(target.win)?.check()?;
+        }
+        target.mapped.set(should_map);
     }
 
     // Phase D — upload. A composited buffer covers the whole tile rect; pixels
