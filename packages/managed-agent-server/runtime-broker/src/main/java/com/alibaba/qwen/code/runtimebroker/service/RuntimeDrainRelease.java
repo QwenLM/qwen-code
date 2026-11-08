@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
@@ -180,6 +181,37 @@ final class RuntimeDrainRelease {
             current = current.withLifecycleAuthority(authority);
         }
         return current;
+    }
+
+    /**
+     * A restart-fenced external-workspace binding may still own a live worker
+     * with one stale Session row. The drain marks it drain-requested, stops
+     * that worker for the persisted receipt and re-checks for unsettled rows
+     * before RELEASED, so refusing here would only fence the storage holder
+     * with no exit. Executions in flight still refuse: nothing can settle
+     * them without their worker.
+     */
+    static boolean isLiveWorkerStopRecoverable(RuntimeBindingRecord claimed, boolean lost,
+            RuntimeRecoveryEvidence absence, boolean activeExecutions) {
+        return lost && absence == null && claimed.getDrainReceipt() == null && !activeExecutions
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(claimed.getRequest());
+    }
+
+    /**
+     * Verifies that a drain receipt matches the claimed binding's identity,
+     * including the external-workspace seed/lease/handle chain.
+     */
+    static void verifyDrainReceiptIdentity(RuntimeBindingRecord expected, RuntimeDrainReceipt receipt) {
+        if (receipt == null || !receipt.matches(expected)
+                || expected.getDrainReceipt() != null && !expected.getDrainReceipt().equals(receipt)
+                || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(expected.getRequest().getProvisionerKind())
+                        && (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(expected.getRequest())
+                                || expected.getResourceHandle() == null || expected.getProvisionSeed() == null
+                                || expected.getLease() == null || !expected.getProvisionSeed().matches(expected.getLease())
+                                || !expected.getResourceHandle().equals(receipt.resourceHandle()))) {
+            throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
+        }
     }
 
     CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding,

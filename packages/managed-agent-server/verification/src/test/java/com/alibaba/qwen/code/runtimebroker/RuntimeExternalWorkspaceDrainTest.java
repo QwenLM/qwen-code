@@ -160,7 +160,7 @@ class RuntimeExternalWorkspaceDrainTest {
 
     @ParameterizedTest
     @ValueSource(ints = {408, 429, 502, 503, 504})
-    void initialRetryableProviderResponseKeepsSeedAndHandleAndRetryOnlyReconcilesOriginal(int status) throws IOException {
+    void initialRetryableProviderResponseKeepsSeedAndHandleAndRetryReprovisionsOriginal(int status) throws IOException {
         try (var fixture = new Fixture()) {
             fixture.providerResponds(status);
             var error = assertThrows(CompletionException.class,
@@ -182,9 +182,9 @@ class RuntimeExternalWorkspaceDrainTest {
             assertEquals(original.getProvisionSeed(), ready.getProvisionSeed());
             assertEquals(original.getResourceHandle(), ready.getResourceHandle());
             assertEquals(original.getGeneration(), ready.getGeneration());
-            assertFalse(fixture.events.contains("provision"));
-            assertFalse(fixture.events.contains("ensure"));
-            assertTrue(fixture.events.contains("reconcile"));
+            assertTrue(fixture.events.contains("provision"));
+            assertTrue(fixture.events.contains("ensure"));
+            assertFalse(fixture.events.contains("reconcile"));
         }
     }
 

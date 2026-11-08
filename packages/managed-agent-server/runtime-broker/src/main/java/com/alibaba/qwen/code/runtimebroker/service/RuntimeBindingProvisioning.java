@@ -16,8 +16,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService.BindingRenewal;
 
@@ -112,35 +110,6 @@ final class RuntimeBindingProvisioning {
     // reclaim resumes where this one stopped.
     private static final int MAX_RECOVERY_PASSES = 16;
 
-    /**
-     * Retryable provider answers that keep an already-placed external worker
-     * adoptable: capacity and unavailable/shutdown. Both external kinds share
-     * them under scratch and under registered-storage (managed-context)
-     * placement, so a transient provider answer never buries a recoverable
-     * worker behind a permanent recovery block.
-     */
-    private static boolean externalRetryable(RuntimeProvisionRequest request,
-            RuntimeBrokerException failure) {
-        return ExternalRuntimeKinds.isExternal(request.getProvisionerKind())
-                && failure.getStatusCode() == 503
-                && ("runtime_external_capacity".equals(failure.getCode())
-                        || "runtime_external_unavailable".equals(failure.getCode()));
-    }
-
-    private static boolean retryableExternalWorkspaceProvision(RuntimeProvisionRequest request, Throwable cause) {
-        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
-            return false;
-        }
-        if (cause instanceof RuntimeBrokerException failure) {
-            return failure.isRetryable()
-                    && ("runtime_external_provider_failed".equals(failure.getCode())
-                            || failure.getStatusCode() == 503 && (externalRetryable(request, failure)
-                                    || "runtime_broker_provision_timeout".equals(failure.getCode())
-                                    || "managed_runtime_unavailable".equals(failure.getCode())));
-        }
-        return cause instanceof java.io.IOException || cause instanceof TimeoutException;
-    }
-
     CompletionStage<BindingContext> ensureBinding(
             RuntimeProvisionRequest request) {
         RuntimeBindingRecord record = bindingRepository.findOrCreate(request);
@@ -215,7 +184,7 @@ final class RuntimeBindingProvisioning {
             return failed(unavailable("runtime_binding_unavailable",
                     "Runtime binding is not available"));
         }
-        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(request) && record.getResourceHandle() != null && record.getLease() != null && record.getAttestationGeneration() > 0) {
+        if (RuntimeBrokerSupport.shouldReconcileExternalWorkspace(request, record)) {
             return reconcileBinding(record);
         }
         CompletableFuture<BindingContext> created =
@@ -332,7 +301,7 @@ final class RuntimeBindingProvisioning {
             // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && (claimed.getResourceHandle() == null
-                            || externalRetryable(request, brokerFailure)
+                            || RuntimeBrokerSupport.externalRetryable(request, brokerFailure)
                             || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
                                     && "workspace_csi_busy".equals(brokerFailure.getCode()))
                             || (!request.isManagedContext()
@@ -386,7 +355,7 @@ final class RuntimeBindingProvisioning {
                 try {
                     RuntimeBindingRecord timedOut = renewal.stopAndGet();
                     blocked = request.isManagedContext() && timedOut != null
-                            && !retryableExternalWorkspaceProvision(request, answer)
+                            && !RuntimeBrokerSupport.retryableExternalWorkspaceProvision(request, answer)
                             && blockRecoveryQuietly(timedOut, answer);
                 } finally {
                     bindingRegistry.releaseOperationQuietly(bindingId, operationGeneration);
@@ -439,7 +408,7 @@ final class RuntimeBindingProvisioning {
                     try {
                         if (error != null) {
                             if (request.isManagedContext()
-                                    && retryableExternalWorkspaceProvision(request, cause)) {
+                                    && RuntimeBrokerSupport.retryableExternalWorkspaceProvision(request, cause)) {
                                 // A retryable external-workspace failure keeps the
                                 // binding recoverable instead of blocking it.
                                 if (cause instanceof RuntimeBrokerException brokerFailure) {

@@ -889,6 +889,30 @@ it('settles the turn over a held Runtime and owes it to the close (#13856)', asy
   expect(turn.runtimeHeld).toBe(true);
 });
 
+it('never registers a held Runtime for a Hook-configured turn (R27-1 known gap)', async () => {
+  // Every producer of session.heldRuntimeTurns keys on runtimeHeld, and a
+  // Hook turn cannot set it: finish() skips broker.release() when hooks are
+  // configured, so the 409 runtime_session_held catch that assigns `held`
+  // never runs. The v2 close's drain therefore does not reach this shape and
+  // the detach still parks on recovery-required. Pinning the producer fact
+  // keeps that drain from being mistaken for a fix of the Hook shape; lifting
+  // it needs a keep-READY drain, which the terminal release here cannot be
+  // (a deterministic owner would get a RELEASED tombstone, R13-1/R14-1).
+  turn = createTurn(
+    false,
+    undefined,
+    hookSession(vi.fn() as unknown as HostedHookSession['fire']),
+  );
+  broker.release.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).not.toHaveBeenCalled();
+  expect(turn.runtimeHeld).toBe(false);
+});
+
 it('keeps the honesty contract for a busy refusal (#13856)', async () => {
   // The unproven busy refusal keeps its exact old meaning: the turn cannot
   // prove its outcome, so the Session parks — only the held arm is soft.

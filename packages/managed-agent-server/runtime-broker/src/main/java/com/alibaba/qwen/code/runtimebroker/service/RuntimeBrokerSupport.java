@@ -8,10 +8,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 
 import java.time.Duration;
+import java.util.concurrent.TimeoutException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -278,5 +281,55 @@ final class RuntimeBrokerSupport {
 
     static long renewalDelayMillis(Duration duration) {
         return Math.max(1, duration.toMillis() / 3);
+    }
+
+    /**
+     * A retryable external-workspace provision failure keeps the binding
+     * recoverable instead of blocking it: the provider may answer on retry.
+     */
+    static boolean retryableExternalWorkspaceProvision(
+            com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request, Throwable cause) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
+            return false;
+        }
+        if (cause instanceof RuntimeBrokerException failure) {
+            return failure.isRetryable()
+                    && ("runtime_external_provider_failed".equals(failure.getCode())
+                            || failure.getStatusCode() == 503 && (externalRetryable(request, failure)
+                                    || "runtime_broker_provision_timeout".equals(failure.getCode())
+                                    || "managed_runtime_unavailable".equals(failure.getCode())));
+        }
+        return cause instanceof java.io.IOException || cause instanceof TimeoutException;
+    }
+
+    static boolean externalRetryable(
+            com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request,
+            RuntimeBrokerException failure) {
+        return ExternalRuntimeKinds.isExternal(request.getProvisionerKind())
+                && failure.getStatusCode() == 503
+                && ("runtime_external_capacity".equals(failure.getCode())
+                        || "runtime_external_unavailable".equals(failure.getCode()));
+    }
+
+    /**
+     * An external-workspace binding that already carries a lease and
+     * attestation adopts the worker through reconciliation rather than
+     * re-provisioning.
+     */
+    static boolean shouldReconcileExternalWorkspace(
+            com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request,
+            RuntimeBindingRecord record) {
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                && record.getResourceHandle() != null && record.getLease() != null
+                && record.getAttestationGeneration() > 0;
+    }
+
+    /**
+     * A drain claim stays valid while its binding is DRAINING, or while a
+     * LOST binding still belongs to the claim that captured it.
+     */
+    static boolean isDrainClaimStateValid(RuntimeBindingRecord binding, boolean stoppedRecovery, boolean lostClaim) {
+        return binding.getState() == RuntimeBindingRecord.State.DRAINING
+                || (stoppedRecovery || lostClaim) && binding.getState() == RuntimeBindingRecord.State.LOST;
     }
 }
