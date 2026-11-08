@@ -49,12 +49,15 @@ used for a trial. Runner and base versions need routine security updates.
 Run one manager on each host, managing only that host's Docker socket. Give each
 host a unique `poolId`; matching runner labels let GitHub share work across the
 hosts without a central scheduler. `slots` is a per-host limit, not a fleet total.
-Runner display names use `ecs-qwen-<poolId>-<slot>`, with two-digit slots, for
-example `ecs-qwen-hz4-ephemeral-01`. The name stays the same when a slot is
-replenished; each job still gets a fresh GitHub runner ID, container and internal
-UUID for state and diagnostics. The `ecs-qwen-` prefix preserves existing CI
-worker caps and timeouts. Restart recovery also accepts earlier UUID-based
-runner names, including the old `qwen-` prefix.
+Runner display names use `ecs-qwen-<poolId>-<slot>-<suffix>`, with two-digit
+slots and an eight-hex-character suffix, for example
+`ecs-qwen-hz4-ephemeral-01-1a2b3c4d`. The suffix is fresh for every
+registration, so a leftover registration that still owns an earlier name can
+never reject a replacement with HTTP 422; each job also gets a fresh GitHub
+runner ID, container and internal UUID for state and diagnostics. The
+`ecs-qwen-` prefix preserves existing CI worker caps and timeouts. Restart
+recovery accepts the suffixed form, earlier UUID-based runner names, and the
+old `qwen-` prefix.
 
 Install Docker, Node 22, `gh`, and `flock` on the host. The manager uses a
 dedicated PAT supplied as `GH_TOKEN`. The account must administer the target
@@ -115,6 +118,14 @@ output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 
+`stallAlertRetries` (default 30, roughly five minutes at the ten-second retry
+interval) sets how many consecutive identical failures a slot may accumulate
+before the manager logs `STALL ALERT` instead of the ordinary retry line. The
+counter resets whenever a cycle succeeds or the failure changes. A stall alert
+means the slot is serving no jobs and needs reconciliation; the manager keeps
+retrying and never exits on its own, so systemd does not restart it. Alert on
+that journal marker rather than on service state.
+
 ## Install and operate
 
 Install `manager.mjs` in `/opt/qwen-ephemeral-runner/`, install the supplied
@@ -148,6 +159,18 @@ period, and cleans up its containers. The next start reconciles abandoned
 resources first. A cleanup or ambiguous registration error blocks that slot;
 inspect its state and GitHub runner list before manual reconciliation. Never
 remove unrelated runners or run a global Docker prune.
+
+A container or network whose slot state was lost is reconciled from its
+`qwen.instance` label, so an interrupted `docker create` no longer wedges the
+slot permanently. Resources whose label does not identify this pool and slot,
+or that disagree about the identity, still block it for manual reconciliation.
+The label carries the instance name, not the registration's display name, so
+recovery matches registrations under both the bare display name written by
+older versions and the current suffixed one; an ambiguous match still blocks
+the slot rather than deleting anything.
+A runner deletion GitHub rejects (for example while it still reports the runner
+busy) keeps the slot state and is retried, instead of dropping the only record
+that can remove the registration.
 
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service
