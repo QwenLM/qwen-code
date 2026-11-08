@@ -188,8 +188,14 @@ describe('<HistoryItemDisplay />', () => {
     // Guards the check below: a blank frame would make it pass vacuously.
     expect(frame).toContain('first numbered item');
 
-    const overWide = frame.split('\n').filter((line) => stringWidth(line) > 98);
+    const lines = frame.split('\n');
+    const overWide = lines.filter((line) => stringWidth(line) > 98);
     expect(overWide).toEqual([]);
+
+    // The widest item reaches the margin, so a narrower wrap is a regression
+    // too, not only an overrun.
+    const widest = Math.max(...lines.map((line) => stringWidth(line)));
+    expect(widest).toBeGreaterThanOrEqual(90);
   });
 
   it('keeps nested markdown list items inside the right margin', () => {
@@ -220,8 +226,12 @@ describe('<HistoryItemDisplay />', () => {
     // Guards the check below: a blank frame would make it pass vacuously.
     expect(frame).toContain('inner numbered item');
 
-    const overWide = frame.split('\n').filter((line) => stringWidth(line) > 98);
+    const lines = frame.split('\n');
+    const overWide = lines.filter((line) => stringWidth(line) > 98);
     expect(overWide).toEqual([]);
+
+    const widest = Math.max(...lines.map((line) => stringWidth(line)));
+    expect(widest).toBeGreaterThanOrEqual(90);
   });
 
   it('keeps markdown blockquote lines inside the right margin', () => {
@@ -249,8 +259,12 @@ describe('<HistoryItemDisplay />', () => {
     // Guards the check below: a blank frame would make it pass vacuously.
     expect(frame).toContain('quoted passage');
 
-    const overWide = frame.split('\n').filter((line) => stringWidth(line) > 98);
+    const lines = frame.split('\n');
+    const overWide = lines.filter((line) => stringWidth(line) > 98);
     expect(overWide).toEqual([]);
+
+    const widest = Math.max(...lines.map((line) => stringWidth(line)));
+    expect(widest).toBeGreaterThanOrEqual(90);
   });
 
   it('keeps markdown headings inside the right margin on the static path', () => {
@@ -279,58 +293,66 @@ describe('<HistoryItemDisplay />', () => {
       // Guards the check below: a blank frame would make it pass vacuously.
       expect(frame).toContain('long heading');
 
-      const overWide = frame
-        .split('\n')
-        .filter((line) => stringWidth(line) > terminalWidth - 2);
+      const lines = frame.split('\n');
+      const overWide = lines.filter(
+        (line) => stringWidth(line) > terminalWidth - 2,
+      );
       expect(overWide).toEqual([]);
+
+      const widest = Math.max(...lines.map((line) => stringWidth(line)));
+      expect(widest).toBeGreaterThanOrEqual(terminalWidth - 6);
     }
   });
 
-  it('keeps an expanded thought inside the right margin on the static path', () => {
-    const item: HistoryItem = {
-      id: 1,
-      type: 'gemini_thought',
-      text: 'This is a long reasoning passage about the history of computing from the earliest mechanical counting machines and Babbage analytic engine through vacuum tube computers.',
-      durationMs: 1200,
-    };
-    const { lastFrame } = renderWithProviders(
-      <ThoughtExpandedProvider
-        value={{
-          allExpanded: true,
-          expandedHeadIds: new Set<number>(),
-          toggle: () => {},
-        }}
-      >
-        <Static
-          items={[
-            <HistoryItemDisplay
-              key="row"
-              item={item}
-              terminalWidth={100}
-              isPending={false}
-            />,
-          ]}
+  it.each([90, 100])(
+    'keeps an expanded thought inside the right margin at %i columns',
+    (terminalWidth) => {
+      const item: HistoryItem = {
+        id: 1,
+        type: 'gemini_thought',
+        text: 'This is a long reasoning passage about the history of computing from the earliest mechanical counting machines and Babbage analytic engine through vacuum tube computers.',
+        durationMs: 1200,
+      };
+      const { lastFrame } = renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: true,
+            expandedHeadIds: new Set<number>(),
+            toggle: () => {},
+          }}
         >
-          {(row) => row}
-        </Static>
-      </ThoughtExpandedProvider>,
-    );
+          <Static
+            items={[
+              <HistoryItemDisplay
+                key="row"
+                item={item}
+                terminalWidth={terminalWidth}
+                isPending={false}
+              />,
+            ]}
+          >
+            {(row) => row}
+          </Static>
+        </ThoughtExpandedProvider>,
+      );
 
-    const frame = stripAnsi(lastFrame() ?? '');
-    // Guards the check below: a blank frame would make it pass vacuously.
-    expect(frame).toContain('long reasoning passage');
+      const frame = stripAnsi(lastFrame() ?? '');
+      // Guards the check below: a blank frame would make it pass vacuously.
+      expect(frame).toContain('long reasoning passage');
 
-    const lines = frame.split('\n');
-    const overWide = lines.filter((line) => stringWidth(line) > 98);
-    expect(overWide).toEqual([]);
+      const lines = frame.split('\n');
+      const overWide = lines.filter(
+        (line) => stringWidth(line) > terminalWidth - 2,
+      );
+      expect(overWide).toEqual([]);
 
-    // The thought body reserves two columns of its own, so its text reaches 96.
-    // Removing `constrainBlockWidth` there changes nothing at this width — the
-    // ancestor chain already bounds the body — but wrapping narrower would
-    // waste the margin, and that is what this lower bound catches.
-    const widest = Math.max(...lines.map((line) => stringWidth(line)));
-    expect(widest).toBeGreaterThanOrEqual(94);
-  });
+      // Without `constrainBlockWidth` the thought body is measured implicitly
+      // and overruns the margin at 90 columns; the lower bound catches the
+      // opposite failure, wrapping narrower than the margin allows.
+      const widest = Math.max(...lines.map((line) => stringWidth(line)));
+      expect(widest).toBeGreaterThanOrEqual(terminalWidth - 6);
+    },
+  );
 
   it.each(['gemini', 'gemini_content'] as const)(
     'passes images from a %s history item to the assistant renderer',
