@@ -89,20 +89,27 @@ Web Shell 的新聊天是草稿态：首条 prompt 提交时才真正创建 daem
 - `!cmd` shell 流：通过 `detachedSession.shellCommand` 派发，随后 detach
   客户端。
 - `/goal` 与 Goals 对话框：`createGoalForAllocatedSession` 本就按 id 定位
-  会话，detached 分配直接继续；客户端立即 detach（按 id 派发根本不使用
-  它）；detached 时跳过本地 transcript 回显。
-- `ensureAgentMentionSession`：只消费 `sessionId`，并立即 detach 客户端；
-  mention 通过 workspace 级路由按 id 发送。
+  会话，detached 分配直接继续；客户端在派发落定后的 finally 中 detach；
+  detached 时跳过本地 transcript 回显。
+- `ensureAgentMentionSession`：消费 `sessionId` 并返回 `release` 回调；
+  mention hook 通过 workspace 级路由按 id 发送，在其 finally 中调用
+  `release`。
 
 每个收到 unbound 客户端的调用方都必须释放它：客户端是 daemon 侧的活注册，
-`POST /session/:id/detach` 是唯一的释放方式。prompt 与 shell 在派发落定后
-detach；goal 与 mention 在分配时即 detach，因为它们的派发不经过客户端。
+`POST /session/:id/detach` 是唯一的释放方式。每条流都只在派发落定后
+detach——最后一个客户端 detach 时 daemon 会关闭空闲会话，分配时即释放
+会在按 id 的 goal/mention 派发落地前关闭会话（goal 控制只解析存活会话）。
+goal 与 mention 的派发不经过客户端，但注册必须撑过派发；mention hook 在
+其 finally 中调用分配返回的 release 回调。
 
 两条导航不变式约束 detached 路径：
 
 - **分配复用按草稿作用域。** 在途创建只被同一 composer source generation
   的提交复用；新草稿（New session 会 bump generation）创建自己的会话，
-  不继承在途分配，因此两个草稿的 prompt 不会落到同一会话。
+  不继承在途分配，因此两个草稿的 prompt 不会落到同一会话。generation 还
+  传入 provider 的绑定判定（sourceVersion / getCurrentSourceVersion）：
+  后一个 create 会重置共享导航标记，被取代的 create 即使在新草稿仍无
+  会话时解析，也必须保持 unbound，不得绑定覆盖新草稿。
 - **detached goal 状态不向本地发布。** detached goal 按 id 在自己的会话
   创建；本地 goal strip 发布（把无会话连接当作即将成为的草稿）对
   detached 分配被抑制，无关新草稿不会显示别的会话的 goal。
@@ -137,8 +144,8 @@ detach；goal 与 mention 在分配时即 detach，因为它们的派发不经�
 
 ## 约束与风险
 
-- detached 客户端在每条流里都是短命的：prompt 与 shell 在派发落定后
-  detach，goal 与 mention 在分配后立即 detach。turn 的事件流在用户打开
+- detached 客户端在每条流里都是短命的：均在派发落定后 detach，绝不在
+  分配时（最后客户端 detach 会关闭空闲会话）。turn 的事件流在用户打开
   会话时接上（或经 background-turn live state）。
 - 后台 turn 通知的对等性是后续工作：provider 的 `turnNotifications.admit`
   受当前会话门禁限制，其观察器只观察当前会话的事件，因此 detached 首条

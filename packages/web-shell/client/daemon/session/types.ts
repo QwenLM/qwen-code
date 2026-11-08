@@ -673,6 +673,14 @@ export interface DaemonSessionActions {
     branch?: { name: string };
     keepOnNavigation?: boolean;
     navigationOutcome?: { bound: boolean };
+    /**
+     * Draft generation that started this creation, with a live reader. A
+     * later create resets the shared navigation markers, so the bind
+     * decision also compares generations: a new draft means the originating
+     * submission was superseded even when the view looks session-less again.
+     */
+    sourceVersion?: number;
+    getCurrentSourceVersion?: () => number;
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;

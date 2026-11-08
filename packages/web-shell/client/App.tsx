@@ -12386,6 +12386,8 @@ export function App({
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
             getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
+            sourceVersion: composerSourceVersionRef.current,
+            getCurrentSourceVersion: () => composerSourceVersionRef.current,
           }).then((result) => {
             if (pendingManualTitleRef.current === pendingManualTitle) {
               pendingManualTitleRef.current = undefined;
@@ -18735,6 +18737,7 @@ export function App({
         const sourceSessionId = connectionRef.current.sessionId;
         let allocatedSessionId: string | undefined;
         let detachedGoalSession = false;
+        let detachedGoalClient: DaemonSessionClient | undefined;
         if (!connectionRef.current.sessionId) {
           if (operation.kind !== 'set') {
             throw new Error(t('localCommand.noSession'));
@@ -18742,12 +18745,7 @@ export function App({
           const allocation = await ensureSessionForPrompt();
           allocatedSessionId = allocation?.sessionId;
           detachedGoalSession = allocation?.detachedSession !== undefined;
-          // Goal control dispatches by id through workspace routes and never
-          // uses this client; release it so the registration does not hold
-          // off the daemon's idle cleanup.
-          if (allocation?.detachedSession) {
-            void allocation.detachedSession.detach().catch(() => undefined);
-          }
+          detachedGoalClient = allocation?.detachedSession;
         }
         if (!detachedGoalSession) {
           const currentSessionId = connectionRef.current.sessionId;
@@ -18785,14 +18783,23 @@ export function App({
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        if (allocatedSessionId && operation.kind === 'set') {
-          await createGoalForAllocatedSession(
-            allocatedSessionId,
-            operation.objective,
-            { detached: detachedGoalSession },
-          );
-        } else {
-          await controlCurrentGoal(action, objective);
+        try {
+          if (allocatedSessionId && operation.kind === 'set') {
+            await createGoalForAllocatedSession(
+              allocatedSessionId,
+              operation.objective,
+              { detached: detachedGoalSession },
+            );
+          } else {
+            await controlCurrentGoal(action, objective);
+          }
+        } finally {
+          // Release only after the dispatch settles: the daemon closes an
+          // idle session when its last client detaches, and goal control
+          // resolves live sessions only.
+          if (detachedGoalClient) {
+            void detachedGoalClient.detach().catch(() => undefined);
+          }
         }
       })()
         .catch((error: unknown) => {
@@ -22028,12 +22035,6 @@ export function App({
   const ensureAgentMentionSession = useCallback(async () => {
     const existing = connectionRef.current.sessionId;
     const allocated = existing ? undefined : await ensureSessionForPrompt();
-    // The mention posts by id through workspace routes and never uses this
-    // client; release it so the registration does not hold off the daemon's
-    // idle cleanup.
-    if (allocated?.detachedSession) {
-      void allocated.detachedSession.detach().catch(() => undefined);
-    }
     const sessionId =
       existing ?? allocated?.sessionId ?? connectionRef.current.sessionId;
     if (!sessionId) return undefined;
@@ -22042,7 +22043,20 @@ export function App({
       allocatedOwner?.sessionId === sessionId
         ? allocatedOwner.workspaceCwd
         : getComposerWorkspaceCwd();
-    return { sessionId, ...(workspaceCwd ? { workspaceCwd } : {}) };
+    const detachedClient = allocated?.detachedSession;
+    return {
+      sessionId,
+      ...(workspaceCwd ? { workspaceCwd } : {}),
+      // The daemon closes an idle session when its last client detaches;
+      // the hook releases only after the mention posts.
+      ...(detachedClient
+        ? {
+            release: () => {
+              void detachedClient.detach().catch(() => undefined);
+            },
+          }
+        : {}),
+    };
   }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
   const settledAgentRunsKey = useMemo(
     () => settledAgentRunKey(blocks),
@@ -24664,13 +24678,6 @@ export function App({
                         const allocatedSessionId = allocation?.sessionId;
                         const detachedGoalSession =
                           allocation?.detachedSession !== undefined;
-                        // Same release obligation as the /goal command: the
-                        // goal dispatches by id, the client is not needed.
-                        if (allocation?.detachedSession) {
-                          void allocation.detachedSession
-                            .detach()
-                            .catch(() => undefined);
-                        }
                         if (!detachedGoalSession) {
                           const currentSessionId =
                             connectionRef.current.sessionId;
@@ -24717,6 +24724,14 @@ export function App({
                               connectionRef.current.sessionId;
                           }
                           throw error;
+                        } finally {
+                          // Same release rule as the /goal command: after
+                          // the dispatch settles, never at allocation.
+                          if (allocation?.detachedSession) {
+                            void allocation.detachedSession
+                              .detach()
+                              .catch(() => undefined);
+                          }
                         }
                         if (detachedGoalSession) {
                           // The goal landed in its own session; the user

@@ -23,6 +23,8 @@ type PromptSessionActions = {
     branch?: { name: string };
     keepOnNavigation?: boolean;
     navigationOutcome?: { bound: boolean };
+    sourceVersion?: number;
+    getCurrentSourceVersion?: () => number;
   }) => Promise<{
     sessionId: string;
     worktree?: { slug: string; path: string; branch: string };
@@ -70,6 +72,8 @@ export async function createAndAttachSessionForPrompt({
   onSessionAllocated,
   getCurrentSessionId,
   getCurrentWorkspaceCwd,
+  sourceVersion,
+  getCurrentSourceVersion,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
@@ -98,6 +102,8 @@ export async function createAndAttachSessionForPrompt({
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
   getCurrentWorkspaceCwd?: () => string | undefined;
+  sourceVersion?: number;
+  getCurrentSourceVersion?: () => number;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<{
   worktree?: { slug: string; path: string; branch: string };
@@ -118,6 +124,10 @@ export async function createAndAttachSessionForPrompt({
   // create, keep the created client (unbound) instead of aborting, so the
   // prompt can still be dispatched. Only this first-prompt flow opts in.
   const navigationOutcome = { bound: true };
+  const navigationOwnership =
+    sourceVersion !== undefined
+      ? { sourceVersion, getCurrentSourceVersion }
+      : {};
   const created = await sessionActions.createSession(
     sessionContext?.kind === 'standalone'
       ? {
@@ -126,6 +136,7 @@ export async function createAndAttachSessionForPrompt({
           ...(approvalMode ? { approvalMode } : {}),
           keepOnNavigation: true,
           navigationOutcome,
+          ...navigationOwnership,
         }
       : {
           workspaceCwd,
@@ -137,6 +148,7 @@ export async function createAndAttachSessionForPrompt({
           ...(branch ? { branch } : {}),
           keepOnNavigation: true,
           navigationOutcome,
+          ...navigationOwnership,
         },
   );
   const {

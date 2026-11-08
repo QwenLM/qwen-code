@@ -2634,6 +2634,8 @@ export function createDaemonSessionActions({
       branch?: { name: string };
       keepOnNavigation?: boolean;
       navigationOutcome?: { bound: boolean };
+      sourceVersion?: number;
+      getCurrentSourceVersion?: () => number;
     }) {
       let targetSessionContext: DaemonProductSessionContext | undefined;
       let rawCreateStarted = false;
@@ -2792,7 +2794,9 @@ export function createDaemonSessionActions({
               );
         const userMovedAway =
           (getConnection().sessionId !== connectionSessionIdAtStart ||
-            getWorkspaceSelectionKey() !== workspaceSelectionAtStart) &&
+            getWorkspaceSelectionKey() !== workspaceSelectionAtStart ||
+            (options?.sourceVersion !== undefined &&
+              options.getCurrentSourceVersion?.() !== options.sourceVersion)) &&
           getConnection().sessionId !== nextSession.sessionId;
         if (manualSessionClearRef.current || userMovedAway) {
           if (options?.keepOnNavigation) {

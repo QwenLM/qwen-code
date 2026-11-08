@@ -3287,6 +3287,78 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection()).toBe(navigatedConnection);
   });
 
+  it.each([
+    'superseded create resolves last',
+    'superseded create resolves first',
+  ])(
+    'keeps concurrent draft creates bound to their own draft (%s)',
+    async (order) => {
+      const sessionA = createMockSession('session-a');
+      const sessionB = createMockSession('session-b');
+      const deferredA = createDeferred<DaemonSessionClient>();
+      const deferredB = createDeferred<DaemonSessionClient>();
+      const manualSessionClearRef = { current: false };
+      const { actions, getConnection } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        },
+        createDetachedSession: vi
+          .fn()
+          .mockReturnValueOnce(deferredA.promise)
+          .mockReturnValueOnce(deferredB.promise),
+        manualSessionClearRef,
+      });
+      let currentVersion = 1;
+      const outcomeA = { bound: true };
+      const pendingA = actions.createSession({
+        workspaceCwd: '/workspace',
+        getCurrentWorkspaceCwd: () => '/workspace',
+        keepOnNavigation: true,
+        navigationOutcome: outcomeA,
+        sourceVersion: 1,
+        getCurrentSourceVersion: () => currentVersion,
+      });
+      // The user opens a new draft in the same workspace and submits: the
+      // view is session-less again, and the second create resets the shared
+      // navigation marker.
+      currentVersion = 2;
+      manualSessionClearRef.current = true;
+      const outcomeB = { bound: true };
+      const pendingB = actions.createSession({
+        workspaceCwd: '/workspace',
+        getCurrentWorkspaceCwd: () => '/workspace',
+        keepOnNavigation: true,
+        navigationOutcome: outcomeB,
+        sourceVersion: 2,
+        getCurrentSourceVersion: () => currentVersion,
+      });
+      expect(manualSessionClearRef.current).toBe(false);
+
+      if (order === 'superseded create resolves last') {
+        // B binds the current draft first; A must not hijack it afterwards.
+        deferredB.resolve(sessionB as unknown as DaemonSessionClient);
+        await pendingB;
+        expect(outcomeB.bound).toBe(true);
+        expect(getConnection().sessionId).toBe('session-b');
+        deferredA.resolve(sessionA as unknown as DaemonSessionClient);
+        await pendingA;
+      } else {
+        // A resolves while B is still pending: without the generation
+        // check, A sees the same session-less view and binds over draft B.
+        deferredA.resolve(sessionA as unknown as DaemonSessionClient);
+        await pendingA;
+        expect(getConnection().sessionId).toBeUndefined();
+        deferredB.resolve(sessionB as unknown as DaemonSessionClient);
+        await pendingB;
+      }
+      expect(outcomeA.bound).toBe(false);
+      expect(sessionA.detach).not.toHaveBeenCalled();
+      expect(outcomeB.bound).toBe(true);
+      expect(getConnection().sessionId).toBe('session-b');
+    },
+  );
+
   it('dispatches a detached prompt admission-only and detaches the client', async () => {
     const session = createMockSession('session-b');
     const { actions, store, setPromptStatus, getConnection } =

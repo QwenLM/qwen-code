@@ -102,15 +102,20 @@ Call sites:
   detach the client.
 - `/goal` and Goals dialog: `createGoalForAllocatedSession` already targets
   the session by id, so a detached allocation proceeds; the client is
-  detached immediately (the id-based dispatch never uses it), and the local
+  detached in a finally after the dispatch settles, and the local
   transcript echo is skipped when detached.
-- `ensureAgentMentionSession`: consumes `sessionId` only and detaches the
-  client immediately; the mention posts by id through workspace routes.
+- `ensureAgentMentionSession`: consumes `sessionId` and returns a `release`
+  callback; the mention hook posts by id through workspace routes and
+  calls `release` in its finally.
 
 Every receiver of an unbound client must release it: the client is a live
 daemon-side registration, and `POST /session/:id/detach` is the only release.
-Prompt and shell detach after their dispatch settles; goal and mention
-detach at allocation because their dispatch never touches the client.
+Every flow detaches only after its dispatch settles — the daemon closes an
+idle session when its last client detaches, so releasing at allocation
+would close the session before the id-based goal/mention dispatch lands
+(goal control resolves live sessions only). Goal and mention never use the
+client for dispatch, but the registration must outlive it; the mention hook
+calls the allocation's `release` callback in its finally.
 
 Two navigation invariants bound the detached path:
 
@@ -118,7 +123,11 @@ Two navigation invariants bound the detached path:
   only by submissions from the same composer source generation; a new
   draft (New session bumps the generation) creates its own session instead
   of inheriting the pending allocation, so two drafts' prompts never land
-  in one session.
+  in one session. The generation also travels into the provider's bind
+  decision (`sourceVersion` / `getCurrentSourceVersion`): a later create
+  resets the shared navigation markers, so a superseded create that
+  resolves while the new draft is still session-less must stay unbound
+  instead of binding over it.
 - **Detached goal state never publishes locally.** A detached goal is
   created by id in its own session; the local goal-strip publication
   (which treats a session-less connection as the becoming draft) is
@@ -160,9 +169,9 @@ New admission-only action in `actions.ts`, typed in `types.ts`:
 
 ## Constraints and risks
 
-- The detached client is short-lived in every flow: prompt and shell detach
-  after dispatch settles, goal and mention detach immediately after
-  allocation. Event streaming for the turn is picked up when the user opens
+- The detached client is short-lived in every flow: each detaches after its
+  dispatch settles, never at allocation (last-client detach closes an idle
+  session). Event streaming for the turn is picked up when the user opens
   the session (or via background-turn live state).
 - Background-turn notification parity is a follow-up: the provider's
   `turnNotifications.admit` is gated on the current session and its observer

@@ -3048,11 +3048,13 @@ vi.doMock('./components/QueuedPromptDisplay', async () => {
   };
 });
 // Agents' live runs read the daemon over fetch + SSE; inert here so a test
-// that turns collaboration on opens no real connection.
+// that turns collaboration on opens no real connection. The mention spy
+// lets navigation tests pin release-after-dispatch ordering.
+const mentionApiSpy = vi.fn(() => Promise.resolve({ recordId: '', runs: [] }));
 vi.doMock('./components/workspace-agents/session-agents-api', () => ({
   createSessionAgentsHttpApi: () => ({
     listRuns: () => Promise.resolve({ frames: [] }),
-    mention: () => Promise.resolve({ recordId: '', runs: [] }),
+    mention: mentionApiSpy,
     cancelRun: () => Promise.resolve({}),
     stopAll: () => Promise.resolve({}),
     respondToPermission: () => Promise.resolve({}),
@@ -27805,6 +27807,11 @@ describe('App session callbacks', () => {
       );
     });
     expect(detachedClient.detach).toHaveBeenCalledOnce();
+    // The daemon closes an idle session on last-client detach: the release
+    // must follow the dispatch, never precede it.
+    expect(detachedClient.detach.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mockWorkspaceActions.controlGoal.mock.invocationCallOrder[0],
+    );
     expect(mockConnection.sessionId).toBe('session-2');
   });
 
@@ -27920,10 +27927,14 @@ describe('App session callbacks', () => {
       objective: 'goals dialog objective',
     });
     expect(detachedClient.detach).toHaveBeenCalledOnce();
+    expect(detachedClient.detach.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mockWorkspaceActions.controlGoal.mock.invocationCallOrder[0],
+    );
     expect(mockConnection.sessionId).toBe('session-2');
   });
 
   it('releases the detached client when an agent mention creates the session after navigation', async () => {
+    mentionApiSpy.mockClear();
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
     mockWorkspace.capabilities = {
@@ -27999,6 +28010,12 @@ describe('App session callbacks', () => {
       await vi.waitFor(() => {
         expect(detachedClient.detach).toHaveBeenCalledOnce();
       });
+      // Release follows the mention post: detaching earlier would let the
+      // daemon close the idle session before the post lands.
+      expect(mentionApiSpy).toHaveBeenCalledOnce();
+      expect(detachedClient.detach.mock.invocationCallOrder[0]).toBeGreaterThan(
+        mentionApiSpy.mock.invocationCallOrder[0],
+      );
       expect(mockConnection.sessionId).toBe('session-2');
     } finally {
       vi.unstubAllGlobals();
@@ -47741,6 +47758,8 @@ describe('App session callbacks', () => {
       approvalMode: 'default',
       keepOnNavigation: true,
       navigationOutcome: { bound: true },
+      sourceVersion: expect.any(Number),
+      getCurrentSourceVersion: expect.any(Function),
     });
     expect(mockSessionActions.setModel).not.toHaveBeenCalled();
     await vi.waitFor(() => {
@@ -47796,6 +47815,8 @@ describe('App session callbacks', () => {
       approvalMode: 'yolo',
       keepOnNavigation: true,
       navigationOutcome: { bound: true },
+      sourceVersion: expect.any(Number),
+      getCurrentSourceVersion: expect.any(Function),
     });
   });
 
@@ -47838,6 +47859,8 @@ describe('App session callbacks', () => {
       approvalMode: 'default',
       keepOnNavigation: true,
       navigationOutcome: { bound: true },
+      sourceVersion: expect.any(Number),
+      getCurrentSourceVersion: expect.any(Function),
     });
   });
 
