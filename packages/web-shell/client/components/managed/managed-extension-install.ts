@@ -9,7 +9,6 @@ import type {
   ManagedExtensionPackageOperation,
   ManagedExtensionPin,
   ManagedExtensionSnapshot,
-  ManagedRuntimeSkillImport,
 } from './managed-extension-types';
 import { isManagedExtensionPins } from './managed-extension-types';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
@@ -33,7 +32,6 @@ export interface ManagedExtensionInstallCommand {
   applyKey: string;
   stage: 'publish' | 'settings' | 'apply';
   pin?: ManagedExtensionPin;
-  runtimeSnapshot?: ManagedRuntimeSkillImport;
   applySubmitted?: boolean;
 }
 
@@ -59,7 +57,6 @@ export function createManagedExtensionInstall(
     | 'expectedSettingsRevision'
     | 'settingsKeys'
     | 'keepSettingsRevision'
-    | 'runtimeSnapshot'
   >,
   snapshot: ManagedExtensionSnapshot,
 ): ManagedExtensionInstallCommand {
@@ -113,7 +110,6 @@ export function parseManagedExtensionInstall(
             'applyKey',
             'stage',
             'pin',
-            'runtimeSnapshot',
             'applySubmitted',
           ].includes(key),
       ) ||
@@ -144,43 +140,6 @@ export function parseManagedExtensionInstall(
         typeof command.applySubmitted !== 'boolean')
     )
       return;
-    if (command.runtimeSnapshot !== undefined) {
-      const source = command.runtimeSnapshot;
-      if (
-        !source ||
-        typeof source !== 'object' ||
-        Array.isArray(source) ||
-        Object.keys(source).some(
-          (key) =>
-            ![
-              'sessionId',
-              'owner',
-              'operationId',
-              'preparationId',
-              'sourceDigest',
-              'byteLength',
-              'target',
-            ].includes(key),
-        ) ||
-        source.sessionId !== sessionId ||
-        !source.owner ||
-        typeof source.owner !== 'object' ||
-        Object.keys(source.owner).sort().join(',') !== 'bindingId,generation' ||
-        typeof source.owner.bindingId !== 'string' ||
-        !source.owner.bindingId ||
-        typeof source.owner.generation !== 'string' ||
-        !/^\d+$/.test(source.owner.generation) ||
-        typeof source.operationId !== 'string' ||
-        !/^[\w:-]{1,256}$/.test(source.operationId) ||
-        typeof source.preparationId !== 'string' ||
-        !/^[\w:-]{1,256}$/.test(source.preparationId) ||
-        source.sourceDigest !== metadata.sourceDigest ||
-        !safeInteger(source.byteLength) ||
-        source.byteLength > 100 * 1024 * 1024 ||
-        JSON.stringify(source.target) !== JSON.stringify(metadata.target)
-      )
-        return;
-    }
     if (
       !metadata ||
       typeof metadata !== 'object' ||
@@ -347,7 +306,7 @@ export async function continueManagedExtensionInstall(
   progress: (command: ManagedExtensionInstallCommand) => void,
 ): Promise<ManagedExtensionSnapshot> {
   if (
-    (!management.importPackage && !management.importRuntimeSkill) ||
+    !management.importPackage ||
     !management.lookupPackageOperation ||
     !management.lookupApplyOperation
   )
@@ -369,37 +328,21 @@ export async function continueManagedExtensionInstall(
       ),
     );
     if (published?.state !== 'settled') {
-      if (command.runtimeSnapshot) {
-        if (!management.importRuntimeSkill)
-          throw new Error('Runtime Skill import is unavailable.');
-        options.signal?.throwIfAborted();
-        published = await management.importRuntimeSkill(
-          command.sessionId,
-          {
-            ...command.runtimeSnapshot,
-            ...(command.extensionId
-              ? { extensionId: command.extensionId }
-              : {}),
-          },
-          { ...options, idempotencyKey: command.publishKey },
-        );
-      } else {
-        if (!source || !management.importPackage)
-          throw new ManagedExtensionInstallInputRequired('source');
-        if (
-          (await managedExtensionSourceDigest(source)) !==
-          command.metadata.sourceDigest
-        )
-          throw new Error('The original package input has changed.');
-        options.signal?.throwIfAborted();
-        published = await management.importPackage(
-          command.workspaceId,
-          command.extensionId,
-          command.metadata,
-          source,
-          { ...options, idempotencyKey: command.publishKey },
-        );
-      }
+      if (!source || !management.importPackage)
+        throw new ManagedExtensionInstallInputRequired('source');
+      if (
+        (await managedExtensionSourceDigest(source)) !==
+        command.metadata.sourceDigest
+      )
+        throw new Error('The original package input has changed.');
+      options.signal?.throwIfAborted();
+      published = await management.importPackage(
+        command.workspaceId,
+        command.extensionId,
+        command.metadata,
+        source,
+        { ...options, idempotencyKey: command.publishKey },
+      );
     }
     save({ pin: packagePin(published), stage: 'settings' });
   }

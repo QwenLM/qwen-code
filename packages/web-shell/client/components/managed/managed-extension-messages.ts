@@ -100,16 +100,6 @@ export const MANAGED_EXTENSION_MESSAGES_EN = {
     'This package could not be opened as a single connection. Manage composite extensions from the Extensions page.',
   'managed.install.replacePackage':
     'This updates the entire selected package in this session. Other sessions keep their selected versions.',
-  'managed.runtimeSkills.title': 'Import from current Workspace',
-  'managed.runtimeSkills.description':
-    'Scan project Skills in the selected Runtime, review an immutable snapshot, then explicitly install it into this session.',
-  'managed.runtimeSkills.scan': 'Scan current Runtime',
-  'managed.runtimeSkills.empty':
-    'No project Skills were found in the current Runtime.',
-  'managed.runtimeSkills.shadowed': 'Lower-priority source',
-  'managed.runtimeSkills.incompatible': 'This Skill uses unsupported metadata.',
-  'managed.runtimeSkills.failed':
-    'The Runtime source could not be confirmed. Check the original operation; changed sources or Runtime owners require an explicit new scan and snapshot.',
   'managed.install.discardDraft': 'Discard draft; keep saved versions',
   'managed.install.discarded':
     'The draft was discarded. Any saved package or settings revisions remain available in this workspace.',
@@ -214,15 +204,6 @@ export const MANAGED_EXTENSION_MESSAGES_ZH: Record<
     '此包无法作为独立连接打开。请在扩展页面管理复合扩展包。',
   'managed.install.replacePackage':
     '这会更新此会话所选的整个扩展包。其他会话继续使用其已选版本。',
-  'managed.runtimeSkills.title': '从当前 Workspace 导入',
-  'managed.runtimeSkills.description':
-    '扫描所选 Runtime 的项目 Skills，预览不可变快照，然后显式安装到此会话。',
-  'managed.runtimeSkills.scan': '扫描当前 Runtime',
-  'managed.runtimeSkills.empty': '当前 Runtime 中没有发现项目 Skill。',
-  'managed.runtimeSkills.shadowed': '较低优先级来源',
-  'managed.runtimeSkills.incompatible': '此 Skill 使用了不支持的元数据。',
-  'managed.runtimeSkills.failed':
-    '无法确认 Runtime 来源。请检查原操作；来源或 Runtime owner 变化后，需要显式重新扫描并制作快照。',
   'managed.install.discardDraft': '放弃草稿，保留已保存版本',
   'managed.install.discarded':
     '已放弃草稿。已保存的包或 settings revisions 仍保留在此 Workspace。',

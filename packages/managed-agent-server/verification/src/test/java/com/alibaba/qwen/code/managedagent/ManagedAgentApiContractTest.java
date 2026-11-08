@@ -3432,14 +3432,7 @@ class ManagedAgentApiContractTest {
                 "{\"idempotencyKey\":\"lookup\"}");
         exchange(drift, "lookupWebShellSessionExtensionOperation", 401, post(WEB_SHELL + "/session-extensions/operations/lookup").header(TENANT, tenant),
                 query + ",\"idempotencyKey\":\"lookup\"}");
-        exchange(drift, "publicRuntimeSkillCandidates", 401, get(session + "/skills/candidates").header(TENANT, tenant), null);
-        exchange(drift, "publicRuntimeSkillSnapshot", 401, post(session + "/skills/snapshot").header(TENANT, tenant), "{}");
-        exchange(drift, "publicRuntimeSkillImports", 401, post(session + "/skills/imports").header(TENANT, tenant)
-                .header(IDEMPOTENCY_KEY, "skill-import"), "{}");
-        exchange(drift, "webShellRuntimeSkillCandidates", 401, post(WEB_SHELL + "/session-extensions/skills/candidates/query").header(TENANT, tenant), query + "}");
-        exchange(drift, "webShellRuntimeSkillSnapshot", 401, post(WEB_SHELL + "/session-extensions/skills/snapshot").header(TENANT, tenant), query + "}");
-        exchange(drift, "webShellRuntimeSkillImports", 401, post(WEB_SHELL + "/session-extensions/skills/imports").header(TENANT, tenant),
-                query + ",\"idempotencyKey\":\"skill-import\"}");
+
     }
 
     private String exchange(Map<String, String> drift, String operationId,

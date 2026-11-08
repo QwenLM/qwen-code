@@ -86,8 +86,7 @@ public class ManagedExtensionManagementService {
     private JsonNode withSelfService(ObjectNode result, String tenant, String actor, SessionRecord session, boolean supported) {
         boolean enabled = supported && packages.selfServiceSupported();
         result.putObject("selfService").put("supported", enabled).put("canApply", enabled && store.canApplyExtensions(session)
-                && "ACTIVE".equals(session.status()) && packages.canPublish(tenant, actor, session.workspace().getWorkspaceId()))
-                .put("runtimeSkillImportSupported", packages.runtimeSkillImportEnabled() && harness.supportsRuntimeSkillImport());
+                && "ACTIVE".equals(session.status()) && packages.canPublish(tenant, actor, session.workspace().getWorkspaceId()));
         return result;
     }
 

@@ -369,44 +369,6 @@ describe('Managed installation receipts', () => {
     ).toBeUndefined();
   });
 
-  it('publishes a frozen Runtime snapshot without reading a local source', async () => {
-    const input = await command();
-    input.value.runtimeSnapshot = {
-      sessionId: 'session',
-      owner: { bindingId: 'binding', generation: '2' },
-      operationId: 'operation',
-      preparationId: 'prepared',
-      sourceDigest: input.value.metadata.sourceDigest,
-      byteLength: 42,
-      target: input.value.metadata.target,
-    };
-    expect(
-      parseManagedExtensionInstall(
-        JSON.stringify(input.value),
-        'workspace',
-        'session',
-      ),
-    ).toEqual(input.value);
-    const client = {
-      ...api(),
-      importRuntimeSkill: vi.fn(async () => publication),
-    };
-    await continueManagedExtensionInstall(
-      client as unknown as NonNullable<ManagedAgentProvider['extensions']>,
-      input.value,
-      undefined,
-      undefined,
-      { clientId: 'client' },
-      vi.fn(),
-    );
-    expect(client.importRuntimeSkill).toHaveBeenCalledWith(
-      'session',
-      input.value.runtimeSnapshot,
-      expect.objectContaining({ idempotencyKey: input.value.publishKey }),
-    );
-    expect(client.importPackage).not.toHaveBeenCalled();
-  });
-
   it('does not call restored content installed merely because recovery is active', async () => {
     const input = await command();
     input.value.pin = pin;

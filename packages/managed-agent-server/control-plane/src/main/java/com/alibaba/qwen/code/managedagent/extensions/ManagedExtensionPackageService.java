@@ -74,7 +74,6 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     public boolean selfServiceSupported() { return properties.getExtensions().isSelfServiceEnabled() && supportsPreparation(); }
 
-    public boolean runtimeSkillImportEnabled() { return selfServiceSupported() && properties.getExtensions().isRuntimeSkillImportEnabled(); }
 
     private void requireSelfService() {
         if (!selfServiceSupported()) {

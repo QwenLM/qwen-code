@@ -8,10 +8,6 @@ import type {
   ManagedExtensionSelection,
   ManagedExtensionImportMetadata,
   ManagedExtensionInspection,
-  ManagedRuntimeSkillCandidates,
-  ManagedRuntimeSkillSnapshot,
-  ManagedRuntimeSkillImport,
-  ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
@@ -655,44 +651,6 @@ export class JavaManagedAgentClient {
     return this.post<ManagedExtensionSnapshot>(
       '/session-extensions/operations/lookup',
       { sessionId, idempotencyKey },
-      signal,
-    );
-  }
-
-  getRuntimeSkillCandidates(sessionId: string, signal?: AbortSignal) {
-    return this.post<ManagedRuntimeSkillCandidates>(
-      '/session-extensions/skills/candidates/query',
-      { sessionId },
-      signal,
-    );
-  }
-
-  snapshotRuntimeSkill(
-    sessionId: string,
-    input: {
-      owner: ManagedRuntimeSkillOwner;
-      path: string;
-      digest: string;
-      target: ManagedExtensionImportMetadata['target'];
-    },
-    signal?: AbortSignal,
-  ) {
-    return this.post<ManagedRuntimeSkillSnapshot>(
-      '/session-extensions/skills/snapshot',
-      { sessionId, ...input },
-      signal,
-    );
-  }
-
-  importRuntimeSkill(
-    sessionId: string,
-    input: ManagedRuntimeSkillImport & { extensionId?: string },
-    idempotencyKey: string,
-    signal?: AbortSignal,
-  ) {
-    return this.post<ManagedExtensionPackageOperation>(
-      '/session-extensions/skills/imports',
-      { ...input, sessionId, idempotencyKey },
       signal,
     );
   }

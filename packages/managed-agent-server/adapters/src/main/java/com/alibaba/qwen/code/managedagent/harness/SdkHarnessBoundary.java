@@ -177,24 +177,6 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
-    public boolean supportsRuntimeSkillImport() { return call(delegate::supportsRuntimeSkillImport); }
-
-    @Override
-    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
-        return call(() -> delegate.runtimeSkillCandidates(tenant, session));
-    }
-
-    @Override
-    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
-        return call(() -> delegate.runtimeSkillSnapshot(tenant, session, request));
-    }
-
-    @Override
-    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
-        return call(() -> delegate.runtimeSkillArchive(tenant, session, request));
-    }
-
-    @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         return call(() -> delegate.applyExtensions(tenantId, sessionId, command));
     }

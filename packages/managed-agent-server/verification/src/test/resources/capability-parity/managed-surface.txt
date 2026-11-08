@@ -27,7 +27,6 @@ ARTIFACT_CONTENT GET /v1/agents/sessions/{sessionId}/artifacts/{artifactId}/cont
 TAIL_EVENTS GET /v1/agents/sessions/{sessionId}/events public
 EXTENSION_CONFIG_GET GET /v1/agents/sessions/{sessionId}/extensions public
 EXTENSION_CONFIG_GET GET /v1/agents/sessions/{sessionId}/extensions/operations/{operationId} public
-RUNTIME_SKILL_IMPORT GET /v1/agents/sessions/{sessionId}/extensions/skills/candidates public
 HOOK_CATALOG GET /v1/agents/sessions/{sessionId}/hook-catalog public
 ITEM_LIST GET /v1/agents/sessions/{sessionId}/items public
 TOOL_RESULT_GET GET /v1/agents/sessions/{sessionId}/items/{itemId}/tool-result public
@@ -69,9 +68,6 @@ EXTENSION_CONFIG_APPLY POST /api/agent/web-shell/v1/session-extensions/continue 
 EXTENSION_CONFIG_GET POST /api/agent/web-shell/v1/session-extensions/operations/lookup webshell
 EXTENSION_CONFIG_GET POST /api/agent/web-shell/v1/session-extensions/query webshell
 EXTENSION_CONFIG_APPLY POST /api/agent/web-shell/v1/session-extensions/recover-previous webshell
-RUNTIME_SKILL_IMPORT POST /api/agent/web-shell/v1/session-extensions/skills/candidates/query webshell
-RUNTIME_SKILL_IMPORT POST /api/agent/web-shell/v1/session-extensions/skills/imports webshell
-RUNTIME_SKILL_IMPORT POST /api/agent/web-shell/v1/session-extensions/skills/snapshot webshell
 EXTENSION_CONFIG_APPLY POST /api/agent/web-shell/v1/session-extensions/submit webshell
 MCP_MANAGEMENT POST /api/agent/web-shell/v1/session-mcp/management/operations/query webshell
 MCP_MANAGEMENT POST /api/agent/web-shell/v1/session-mcp/management/query webshell
@@ -171,8 +167,6 @@ EXTENSION_CONFIG_APPLY POST /v1/agents/sessions/{sessionId}/extensions public
 EXTENSION_CONFIG_GET POST /v1/agents/sessions/{sessionId}/extensions/operations/lookup public
 EXTENSION_CONFIG_APPLY POST /v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/continue public
 EXTENSION_CONFIG_APPLY POST /v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/recover-previous public
-RUNTIME_SKILL_IMPORT POST /v1/agents/sessions/{sessionId}/extensions/skills/imports public
-RUNTIME_SKILL_IMPORT POST /v1/agents/sessions/{sessionId}/extensions/skills/snapshot public
 MCP_MANAGEMENT POST /v1/agents/sessions/{sessionId}/mcp-management/commands public
 SESSION_RECOVERY_RECHECK POST /v1/agents/sessions/{sessionId}/recovery/recheck public
 TASK_CANCEL POST /v1/agents/sessions/{sessionId}/tasks/{taskId}/cancel public

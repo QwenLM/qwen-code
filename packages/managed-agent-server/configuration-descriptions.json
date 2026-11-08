@@ -309,10 +309,6 @@
       "en": "Whether extension packages can be published and managed for Workspaces through the public extensions API. Management also needs `qwen.managed-agent.extensions.artifact-directory`, an actor in `qwen.managed-agent.extensions.allowed-actors` and Workspace OPERATOR access. With `qwen.managed-agent.runtime-broker.enabled`, startup refuses `qwen.managed-agent.managed-extensions.enabled` without it; otherwise extension execution simply stays off.",
       "zh": "是否允许通过公开扩展 API 为 Workspace 发布和管理扩展包。管理操作还需要设置 `qwen.managed-agent.extensions.artifact-directory`、actor 位于 `qwen.managed-agent.extensions.allowed-actors` 中，并具备 Workspace OPERATOR 权限。开启 `qwen.managed-agent.runtime-broker.enabled` 时，开启 `qwen.managed-agent.managed-extensions.enabled` 而未开启本项会在启动时拒绝；否则扩展执行只是保持关闭。"
     },
-    "qwen.managed-agent.extensions.runtime-skill-import-enabled": {
-      "en": "Whether eligible Sessions can explicitly discover and snapshot project Skills from their original ready execution Runtime. Requires `qwen.managed-agent.extensions.self-service-enabled` and the Hosted `managed-runtime-skill-import/1` capability. A changed or unavailable owner fails without fallback or provisioning. Disabling this does not remove published packages or watch/update source directories.",
-      "zh": "是否允许符合条件的 Session 从原始 ready 执行 Runtime 显式发现项目 Skill 并制作快照。需要开启 `qwen.managed-agent.extensions.self-service-enabled`，且 Hosted 支持 `managed-runtime-skill-import/1`。owner 变化或不可用时直接失败，不回退或申请新实例。关闭本项不会删除已发布包，也不会监视或自动更新来源目录。"
-    },
     "qwen.managed-agent.extensions.self-service-enabled": {
       "en": "Whether Skill/extension archive uploads and authored MCP configurations can be prepared and imported without a daemon. Requires extension management, its configured artifact directory, an allowed actor with Workspace OPERATOR access, and the Hosted `managed-package-preparation/1` capability. Disabling this entry point preserves published content and existing package apply/recovery.",
       "zh": "是否允许在没有 daemon 时准备和导入上传的 Skill/扩展归档及用户编写的 MCP 配置。需要启用扩展管理、配置归档目录、actor 位于 allowlist 且具备 Workspace OPERATOR 权限，并要求 Hosted 支持 `managed-package-preparation/1`。关闭此入口保留已发布内容及现有包应用/恢复能力。"
