@@ -1606,3 +1606,69 @@ test('a slot that keeps stalling after the alert never alerts again', async (t) 
   );
   assert.match(found[0], /across \d+ consecutive identical failures/);
 });
+
+test('a recovered slot that stalls again raises a second alert', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  const alerts = () =>
+    messages.filter((message) => message.includes('STALL ALERT'));
+  // Six failing cycles carry the first episode past the alert, the seventh
+  // completes so the slot recovers, and every later cycle fails again.
+  const RECOVER_AT = 7;
+  let cycles = 0;
+  let failing = true;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      cycles += 1;
+      failing = cycles !== RECOVER_AT;
+    }
+    if (failing && program === 'docker' && args[0] === 'info') {
+      return Promise.reject(new Error('docker unavailable'));
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 20 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+        // Stop on the second alert, or after an hour of simulated time so a
+        // missing re-arm fails the assertion instead of looping forever.
+        if (alerts().length >= 2 || now >= 1_000_000 + 3_600_000)
+          manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  const found = alerts();
+  assert.equal(
+    found.length,
+    2,
+    `a slot that recovered and stalled again raised ${found.length} alerts instead of 2`,
+  );
+  assert.ok(
+    cycles >= RECOVER_AT + 4,
+    `only ${cycles} cycles ran; the scenario needs a second stall past the threshold`,
+  );
+  // Both episodes alert from their own clock, so the recovered slot must not
+  // inherit the failures counted before it recovered.
+  assert.match(found[0], /across 4 consecutive identical failures/);
+  assert.match(found[1], /across 4 consecutive identical failures/);
+});
