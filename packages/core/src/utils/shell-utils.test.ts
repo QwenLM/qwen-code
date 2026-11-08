@@ -29,6 +29,7 @@ import {
   stripTrailingBackgroundAmp,
   stripShellWrapper,
 } from './shell-utils.js';
+import { extractShellOperationsAcrossCommand } from '../permissions/shell-semantics.js';
 import type { Config } from '../config/config.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
@@ -732,6 +733,32 @@ describe('stripShellWrapper', () => {
       'pkill -f $(echo qwen)',
     );
   });
+
+  // R4-2 (#16540 review): an unquoted brace word expands into several words
+  // before bash reads `-c`, so `{--,'cat > /etc/motd'}` is the option
+  // terminator followed by the script (witnessed: `bash -c {--,'echo A-RAN'}`
+  // prints A-RAN). Reading it as one literal word hid the payload from op
+  // extraction.
+  it('unwraps an unquoted brace expansion that spells the option terminator', () => {
+    expect(stripShellWrapper("bash -c {--,'cat > /etc/motd'}")).toEqual(
+      'cat > /etc/motd',
+    );
+    // A quoted suffix cannot hide the expansion: bash expands the brace before
+    // quote removal, so the empty suffix vanishes and the script still runs
+    // (witnessed: `bash -c {--,'echo E-RAN'}""` prints E-RAN).
+    expect(stripShellWrapper(`bash -c {--,'cat > /etc/motd'}""`)).toEqual(
+      'cat > /etc/motd',
+    );
+    // A QUOTED brace word is data: bash runs a program literally named
+    // `{--,x}` (witnessed: rc 127), so it stays the payload.
+    expect(stripShellWrapper("bash -c '{--,x}'")).toEqual('{--,x}');
+    // The expansion can also sit in the payload slot after an explicit `--`,
+    // where its first word IS the script (witnessed: `bash -c --
+    // {'echo P-RAN',x}` prints P-RAN).
+    expect(stripShellWrapper(`bash -c -- {'cat > /etc/motd',x}`)).toEqual(
+      'cat > /etc/motd',
+    );
+  });
 });
 
 describe('stripTrailingBackgroundAmp', () => {
@@ -1086,6 +1113,45 @@ describe('normalizeMonitorCommand', () => {
     ['bash -c "echo a && echo b"', 'bash -c "echo a && echo b"'],
   ])('keeps a non-backgrounding &: %s', (command, want) => {
     expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
+  });
+
+  // R4-1 (#16540 review): the payload's background `&` sits inside the closing
+  // quote even when the payload word has an unquoted prefix. The old
+  // start-anchored pattern missed it, so the tracked shell forked the payload
+  // and exited 0 before it ran (witnessed: spawn rc 0, the same command without
+  // `&` rc 127).
+  it.each([
+    ['bash -c x"$Y &"', 'bash -c x"$Y"'],
+    ['bash -c /bin/sh"$Y &"', 'bash -c /bin/sh"$Y"'],
+    // The same background operator hides behind an unquoted prefix even when
+    // the script is static (witnessed: the spawn exited 0 while the payload
+    // without `&` exited 127).
+    ['bash -c x"exit 1 &"', 'bash -c x"exit 1"'],
+  ])(
+    'strips a quoted payload & behind an unquoted prefix: %s',
+    (command, want) => {
+      const normalized = normalizeMonitorCommand(command);
+      expect(normalized.spawnCommand).toBe(want);
+      expect(normalized.strippedTrailingAmp).toBe(true);
+    },
+  );
+
+  // R4-2 (#16540 review): a brace word in the -c slot is several words to the
+  // shell, so the wrapper must stay unresolvable for the gate instead of reading
+  // as one literal word, while op extraction sees the script it expands to
+  // (`bash -c {--,'echo A-RAN'}` prints A-RAN).
+  it('fails closed on an unquoted brace expansion in the -c slot', () => {
+    const command = "bash -c {--,'cat > /etc/motd'}";
+    expect(normalizeMonitorCommand(command)).toEqual({
+      analysisCommand: command,
+      safetyCommand: command,
+      spawnCommand: command,
+      strippedTrailingAmp: false,
+      wrapperPayloadUnresolved: true,
+    });
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      { virtualTool: 'write_file', filePath: '/etc/motd' },
+    ]);
   });
 
   // R1-11 (#16540 review): `$\<newline>'…'` is still an ANSI-C word.

@@ -721,6 +721,72 @@ interface QuoteRemovedWord {
 }
 
 /**
+ * First index at or after `from` of `target` outside quotes and escapes, or -1.
+ * A brace inside `'…'` / `"…"` is data. Nested groups are not matched (the first
+ * unquoted `}` wins), which only makes the callers more conservative.
+ */
+function findUnquotedChar(
+  token: string,
+  from: number,
+  target: '{' | '}',
+): number {
+  let quote: '"' | "'" | '' = '';
+  for (let i = from; i < token.length; i++) {
+    const ch = token[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = '';
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '\\') i++;
+      else if (ch === '"') quote = '';
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === target) return i;
+  }
+  return -1;
+}
+
+/**
+ * Whether the body of a brace group carries the separator bash needs to expand
+ * it: an unquoted `,` (list) or `..` (sequence). A quoted separator is data.
+ */
+function hasBraceExpansionSeparator(braceBody: string): boolean {
+  let quote: '"' | "'" | '' = '';
+  for (let i = 0; i < braceBody.length; i++) {
+    const ch = braceBody[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = '';
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '\\') i++;
+      else if (ch === '"') quote = '';
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === ',') return true;
+    if (ch === '.' && braceBody[i + 1] === '.') return true;
+  }
+  return false;
+}
+
+/**
  * Quote removal that keeps expansion syntax as text and reports whether the
  * word is fully quoted. Returns null only on an unterminated quote/escape. The
  * option-terminator test reads the fail-closed projection (a word with any
@@ -843,10 +909,96 @@ function shellWordQuoteRemoval(token: string): QuoteRemovedWord | null {
       i++;
       continue;
     }
+    if (ch === '{') {
+      // Unquoted brace expansion turns ONE word into several: bash expands
+      // `{--,'cat > /etc/motd'}` to `--` and the payload, so the token is not
+      // the single literal word the static reading assumed. Treat it like an
+      // unquoted `$X` and fail closed (#16540 review, R4-2). A QUOTED brace
+      // word (`'{--,x}'`) is data and never reaches this branch.
+      const close = findUnquotedChar(token, i + 1, '}');
+      if (
+        close !== -1 &&
+        hasBraceExpansionSeparator(token.slice(i + 1, close))
+      ) {
+        hasExpansion = true;
+        unquotedExpansion = true;
+      }
+      out += ch;
+      i++;
+      continue;
+    }
     out += ch;
     i++;
   }
   return { text: out, hasExpansion, fullyQuoted: !unquotedExpansion };
+}
+
+/**
+ * Expand a word carrying one unquoted brace group (`{a,b}`) into the words the
+ * shell builds, each quote-removed. Prefix and suffix are re-attached to every
+ * alternative, as bash expands the brace before quote removal — so
+ * `{--,'cat > /etc/motd'}""` is still the option terminator plus the script.
+ * Returns null when the group is not statically enumerable (nested group,
+ * sequence range, dynamic alternative): the caller must then fail closed.
+ *
+ * Brace expansion runs before quote removal, so `{--,'cat > /etc/motd'}` is TWO
+ * words (`--` and the script), not the single opaque word the static reading
+ * used to hand back (#16540 review, R4-2).
+ */
+function expandBraceWords(token: string): string[] | null {
+  const trimmed = token.trim();
+  const open = findUnquotedChar(trimmed, 0, '{');
+  if (open === -1) return null;
+  const close = findUnquotedChar(trimmed, open + 1, '}');
+  if (close === -1) return null;
+  const body = trimmed.slice(open + 1, close);
+  if (!hasBraceExpansionSeparator(body)) return null;
+  const parts: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | '' = '';
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i]!;
+    if (quote !== '') {
+      current += ch;
+      if (ch === quote) quote = '';
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      i++;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < body.length) {
+      current += ch + body[i + 1]!;
+      i += 2;
+      continue;
+    }
+    if (ch === ',') {
+      parts.push(current);
+      current = '';
+      i++;
+      continue;
+    }
+    current += ch;
+    i++;
+  }
+  if (quote !== '') return null;
+  parts.push(current);
+  if (parts.length < 2) return null;
+  // Nested groups (cartesian expansion) are not enumerated.
+  if (parts.some((part) => part.includes('{'))) return null;
+  const prefix = trimmed.slice(0, open);
+  const suffix = trimmed.slice(close + 1);
+  const words: string[] = [];
+  for (const part of parts) {
+    const removal = shellWordQuoteRemoval(prefix + part + suffix);
+    if (removal === null || removal.hasExpansion) return null;
+    words.push(removal.text);
+  }
+  return words;
 }
 
 export function stripShellWrapper(command: string): string {
@@ -889,6 +1041,21 @@ export function stripShellWrapper(command: string): string {
         terminatorQuote && !terminatorQuote.hasExpansion
           ? terminatorQuote.text
           : null;
+      // A brace word expands into several words before the shell reads the
+      // options: `bash -c {--,'cat > /etc/motd'}` is the option terminator
+      // followed by the script, exactly like `bash -c -- 'cat > /etc/motd'`
+      // (witnessed: `bash -c {--,'echo A-RAN'}` prints A-RAN). Handing the brace
+      // word back as one literal word hid the payload's writes from op
+      // extraction (#16540 review, R4-2). Brace expansion is POSIX-shell
+      // syntax; cmd.exe / PowerShell only get their remaining tokens after /c
+      // or -Command.
+      const posixWrapper = !shellWrapperCommandConsumesRest(wrapperToken.token);
+      const braceWords =
+        posixWrapper && terminator ? expandBraceWords(terminator.token) : null;
+      if (braceWords !== null) {
+        const script = braceWords[0] === '--' ? braceWords[1] : braceWords[0];
+        if (script) return script;
+      }
       if (terminator && terminatorWord === '--') {
         markerRest = terminator.rest;
       } else if (terminator && terminatorWord === null) {
@@ -909,6 +1076,15 @@ export function stripShellWrapper(command: string): string {
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
+      // The same brace expansion can occupy the payload slot after an explicit
+      // `--` (`bash -c -- {'cat > /etc/motd',x}` runs its first word): the
+      // expansion's first word IS the script.
+      const payloadBraceWords = posixWrapper
+        ? expandBraceWords(commandToken.token)
+        : null;
+      if (payloadBraceWords !== null && payloadBraceWords[0]) {
+        return payloadBraceWords[0];
+      }
       const payloadQuote = shellWordQuoteRemoval(commandToken.token);
       const { value, quote } = stripSymmetricQuotes(commandToken.token);
       // An ANSI-C payload (`bash -c $'cat > /etc/motd'`) is the decoded text
@@ -1511,22 +1687,25 @@ function buildMonitorSpawnOverride(
  * (#16540 review, R1-1). */
 function stripPayloadBackgroundAmp(payloadToken: string): string {
   // Strip the payload's own background `&` from its script text: spaced before
-  // the closing quote (`"… &"`) or glued after it (`"…"&`). `&&` and `\&` are
-  // not background operators, and an `&` that ends a NESTED quoted word
-  // (`"echo $X '&'"`) is script data — the trimming below only fires when the
-  // last non-space character of the script text is the bare operator
-  // (#16540 review, R1-1 second round).
+  // the closing quote (`"… &"`), glued after it (`"…"&`), or behind an unquoted
+  // prefix (`x"$Y &"`). `&&` and `\&` are not background operators, and an `&`
+  // that ends a NESTED quoted word (`"echo $X '&'"`) is script data — the
+  // trimming below only fires when the last non-space character of the script
+  // text is the bare operator (#16540 review, R1-1 second round / R4-1).
   const trimmed = payloadToken.trimEnd();
-  const quoted = /^(\$?["'])([\s\S]*)(["'])$/.exec(trimmed);
-  if (quoted !== null && quoted[1]!.slice(-1) === quoted[3]) {
-    const body = quoted[2]!.trimEnd();
-    if (body.endsWith('&') && !body.endsWith('&&') && !body.endsWith('\\&')) {
-      const script = body.replace(/[ \t]*&$/, '').trimEnd();
-      return `${quoted[1]}${script}${quoted[3]}`;
-    }
-    return trimmed;
-  }
-  return stripTrailingBackgroundAmp(trimmed);
+  // Anchored at the END of the token, not at its start: an unquoted prefix
+  // (`bash -c x"$Y &"`) still closes with a quoted span whose `&` is the
+  // background operator the tracked shell runs. Leaving it in made the shell
+  // fork the payload and exit before it, so the monitor saw rc 0 for a failing
+  // payload (#16540 review, R4-1).
+  const closing = /[ \t]*&[ \t]*(["'])$/.exec(trimmed);
+  if (closing === null) return stripTrailingBackgroundAmp(trimmed);
+  const ampIndex = closing.index + closing[0].indexOf('&');
+  const previous = ampIndex > 0 ? trimmed[ampIndex - 1] : '';
+  // The operator is the last character of the script text, not `&&`, and not
+  // escaped.
+  if (previous === '&' || previous === '\\') return trimmed;
+  return `${trimmed.slice(0, closing.index).trimEnd()}${closing[1]}`;
 }
 
 export function hasNonFinalTopLevelBackgroundOperator(
@@ -1908,6 +2087,7 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 
   rest = wrapperToken.rest;
   const wrapperTokens = [...leadingEnvTokens, wrapperToken.token];
+  const posixWrapper = !shellWrapperCommandConsumesRest(wrapperToken.token);
 
   while (true) {
     const token = takeLeadingToken(rest);
@@ -2005,6 +2185,17 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
       const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
         commandToken.token,
       );
+      // A payload with an UNQUOTED prefix (`x"exit 1 &"`) is not symmetric, so
+      // the reconstruction below would keep it verbatim — including the
+      // background `&` its closing quote holds. Build the spawn from the token
+      // itself so the operator is normalised away while the user's quoting
+      // stays (#16540 review, R4-1).
+      const backgroundAmpBehindPrefix =
+        posixWrapper &&
+        payloadRemoval !== null &&
+        innerQuote === '' &&
+        !/^["']/.test(commandToken.token) &&
+        stripPayloadBackgroundAmp(commandToken.token) !== commandToken.token;
       // An ANSI-C payload is the decoded text for op extraction and the
       // self-kill gate, while the command still spawns as written
       // (#16540 review, R1-3).
@@ -2012,12 +2203,16 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         payloadIsAnsiC && payloadRemoval ? payloadRemoval.text : innerCommand;
       return {
         wrapperTokens,
-        innerCommand: decodedPayload,
-        innerQuote: payloadIsAnsiC ? '' : innerQuote,
+        innerCommand:
+          backgroundAmpBehindPrefix && payloadRemoval
+            ? payloadRemoval.text
+            : decodedPayload,
+        innerQuote:
+          payloadIsAnsiC || backgroundAmpBehindPrefix ? '' : innerQuote,
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
-        ...(payloadIsAnsiC
+        ...(payloadIsAnsiC || backgroundAmpBehindPrefix
           ? {
               spawnOverride: buildMonitorSpawnOverride(
                 wrapperTokens,
