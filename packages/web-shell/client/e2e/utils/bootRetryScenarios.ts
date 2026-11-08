@@ -241,6 +241,33 @@ export const bootRetryScenarios: BootRetryScenario[] = [
     },
   },
   {
+    // Specs that install a peer daemon call the installer twice on one page.
+    // Two listener sets each reload at the same load event, doubling the
+    // navigations a failing boot performs.
+    title:
+      'a second install on the same page does not double the reloads @smoke',
+    async run(page, testInfo) {
+      const scenario = await openShell(page, testInfo);
+      await installBootRetry(page);
+
+      let entryRequests = 0;
+      await page.route('**/main.tsx', async (route) => {
+        entryRequests += 1;
+        await route.abort('failed');
+      });
+
+      const documents = trackDocuments(page);
+      await page.goto(ENTRY_URL(scenario.sessionId));
+
+      await expect.poll(() => entryRequests, { timeout: 30_000 }).toBe(3);
+      // The extra listener would fire its own reload immediately; hold the
+      // page quiet for one cycle so the count is final.
+      await page.waitForTimeout(4_000);
+      expect(documents).toHaveLength(3);
+      await expect(page.locator('[data-boot-fallback]')).toHaveCount(1);
+    },
+  },
+  {
     // A request issued by the outgoing document *while the next response is
     // pending* also belongs to the page being left. A real server is needed:
     // routed documents commit early enough that the effect disappears.
