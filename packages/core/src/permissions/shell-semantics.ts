@@ -4525,29 +4525,22 @@ function amendOccurrencesProvablyInert(command: string): boolean {
 }
 
 /**
- * Check whether a shell command actually invokes `git commit --amend`.
- *
- * Two layers, deny-only in combination (#16075 R9, B1):
- *   1. the parsed recognizer, which ignores quoted text, heredoc bodies,
- *      commit-message arguments, and commands whose program is not git, and
- *      unwraps the execution constructs it models;
- *   2. a fail-closed backstop — the base substring pattern over the raw
- *      command plus its wrapper-stripped form. A literal phrase the
- *      recognizer did not confirm is denied unless
- *      `amendOccurrencesProvablyInert` proves every occurrence inert data.
- * The recognizer can therefore only ever ADD denials, never remove one the
- * base guard made.
- */
-/**
  * Which layer recognised a `git commit --amend` (#16075 maintainer stopgap,
- * round-15 assessment):
+ * round-15 assessment). Two layers, fail-closed in combination (#16075 R9,
+ * B1):
  *  - `invocation`: the parsed recognizer identified an amend invocation —
  *    positively, or fail-closed on an expansion whose inertness it cannot
- *    prove. These keep the session-commit check and hard denial.
- *  - `unprovable-text`: only the literal-phrase backstop fired. The command
- *    mentions the amend but no invocation was identified and inertness is
- *    unprovable; the guard routes these to approval, not hard denial.
+ *    prove. It ignores quoted text, heredoc bodies, commit-message arguments,
+ *    and commands whose program is not git, and unwraps the execution
+ *    constructs it models. These keep the session-commit check and hard
+ *    denial.
+ *  - `unprovable-text`: only the literal-phrase backstop fired — the base
+ *    substring pattern over the raw command plus its wrapper-stripped form,
+ *    with `amendOccurrencesProvablyInert` unable to prove every occurrence
+ *    inert data. The guard routes these to approval, not hard denial.
  *  - `none`: no amend recognised.
+ * The recognizer can therefore only ever ADD recognitions, never remove one
+ * the backstop made.
  */
 export type GitAmendRecognition = 'invocation' | 'unprovable-text' | 'none';
 
@@ -4563,6 +4556,8 @@ export function classifyGitAmend(command: string): GitAmendRecognition {
   return 'none';
 }
 
+/** Boolean union of both recognition channels; the guard decides block vs
+ * approval from the channel itself (`classifyGitAmend`). */
 export function commandContainsGitAmend(command: string): boolean {
   return classifyGitAmend(command) !== 'none';
 }
