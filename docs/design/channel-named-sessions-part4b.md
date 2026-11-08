@@ -1088,7 +1088,9 @@ every other daemon failure keeps the existing generic named-session message.
   integrity `500` — and simply fails closed on it. Every non-live Part 4A
   restore takes the worktree-keyed ownership lock for the same reason: the
   reset route is public, so a source-less restore must not attest exclusive
-  ownership while a transfer moves it. `S_old` never reclaims the worktree.
+  ownership while a transfer moves it. A Part 4A sidecar read that names a
+  checkout the restore did not lock fails with a `500` before either check.
+  `S_old` never reclaims the worktree.
 
 ## User-facing error classes
 

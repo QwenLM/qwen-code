@@ -830,9 +830,11 @@ function parseRequestedSessionSource(
 
 /**
  * Key for the worktree ownership lock (`acquireWorktreeOwnershipOp`) of a
- * sidecar's recorded checkout. Best-effort canonical: the reset route keys
- * by the fully validated realpath, which agrees whenever the checkout still
- * exists. A missing checkout falls back to the raw sidecar path, and the
+ * sidecar's recorded checkout, by the rule stated in
+ * `server/worktree-ownership-op.ts`: for a checkout that resolves, it gives
+ * the same key as the reset route's `realTarget` and the orphan cleanup's
+ * `canonicalPath`, and the restore compares it with its own `realTarget`. A
+ * path that does not resolve falls back to the raw sidecar path, and the
  * restore never attests it.
  */
 function ownershipLockKeyForWorktree(recordedPath: string): string {
@@ -4635,6 +4637,8 @@ export function registerSessionRoutes(
               const candidateRoots = workspaceRoots.map((root) =>
                 path.join(root, '.qwen', 'worktrees'),
               );
+              // Compared with the ownership lock key below, so it must keep
+              // the rule stated in `server/worktree-ownership-op.ts`.
               let realTarget: string;
               try {
                 realTarget = fs.realpathSync(sidecar.worktreePath);
@@ -4915,6 +4919,8 @@ export function registerSessionRoutes(
     const candidateRoots = workspaceRoots.map((root) =>
       path.join(root, '.qwen', 'worktrees'),
     );
+    // Also the ownership lock key, so it must keep the rule stated in
+    // `server/worktree-ownership-op.ts`.
     let realTarget: string;
     try {
       realTarget = fs.realpathSync(sidecar.worktreePath);
