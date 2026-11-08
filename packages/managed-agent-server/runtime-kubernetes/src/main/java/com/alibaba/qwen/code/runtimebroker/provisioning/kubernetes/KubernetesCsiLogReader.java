@@ -2,16 +2,16 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames;
 import com.alibaba.qwen.code.runtimebroker.spi.KubernetesRuntimeClient;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -24,8 +24,8 @@ public final class KubernetesCsiLogReader {
     public record Source(String podName, String podUid, String nodeName, String nodeUid,
             String daemonSetUid, String containerId, String imageId) {
         public Source {
-            com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames.dnsSubdomain(podName);
-            com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames.dnsSubdomain(nodeName);
+            KubernetesNames.dnsSubdomain(podName);
+            KubernetesNames.dnsSubdomain(nodeName);
             if (!podName.startsWith("csi-plugin-") || !uuid(podUid) || !uuid(nodeUid) || !uuid(daemonSetUid)
                     || containerId == null || !containerId.matches("containerd://[0-9a-f]{64}")
                     || imageId == null || imageId.length() > 512 || !imageId.matches("[^\\s]*sha256:[0-9a-f]{64}")) {
@@ -42,12 +42,7 @@ public final class KubernetesCsiLogReader {
         private Snapshot(Source source, String content) {
             this.source = source;
             this.content = content;
-            try {
-                this.sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                        .digest(content.getBytes(StandardCharsets.UTF_8)));
-            } catch (NoSuchAlgorithmException impossible) {
-                throw new IllegalStateException(impossible);
-            }
+            this.sha256 = DigestUtils.sha256Hex(content.getBytes(StandardCharsets.UTF_8));
         }
 
         public Source source() {
@@ -129,7 +124,7 @@ public final class KubernetesCsiLogReader {
                     && source.imageId().equals(container.get("imageID"))
                     && Long.valueOf(0).equals(BrokerValues.exactLong(container.get("restartCount")))
                     && Boolean.TRUE.equals(container.get("ready"))
-                    && map(container.get("state")).keySet().equals(java.util.Set.of("running")));
+                    && map(container.get("state")).keySet().equals(Set.of("running")));
             var ready = list(map(node.join().get("status")).get("conditions")).stream()
                     .map(KubernetesCsiLogReader::map).filter(value -> "Ready".equals(value.get("type"))).toList();
             require(ready.size() == 1 && "True".equals(ready.getFirst().get("status")));

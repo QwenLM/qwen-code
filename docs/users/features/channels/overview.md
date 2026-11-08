@@ -251,6 +251,13 @@ Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
 remember request and an exact entry ID when a natural reference is ambiguous.
 
+A turn a channel sends also runs no
+[auto-memory](../memory#auto-memory-what-qwen-learns-about-you) extraction or
+periodic cleanup (Dream) and gets no
+[follow-up suggestion](../followup-suggestions), including a message delivered
+to a session bound to a pull request. Auto-memory recall still runs, so a reply
+can draw on saved auto-memories.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
@@ -552,8 +559,12 @@ Channel loops differ from the session-scoped tasks described in
 - They are scoped to the current channel chat or thread. Each target can have up
   to 10 enabled loops, and each prompt is limited to 4,000 characters.
 - They require an adapter and target that support proactive delivery. Telegram,
-  DingTalk, Feishu, and WeCom opt in, subject to platform-specific target
-  restrictions.
+  DingTalk, DingTalk Workspace, Feishu, WeCom, QQ, and Email opt in, subject to
+  platform-specific target restrictions. Email opts in only when
+  `proactiveRecipients` lists the exact target. QQ delivers loop results as
+  active group messages, supports no threaded targets, and requires the chat
+  type to be already learned: a delivery to a group whose type is unknown is
+  rejected.
 - They are unavailable with `sessionScope: "single"` because that scope is not
   tied to one chat target.
 - A saved loop is disabled if its target is no longer authorized when it is due.
@@ -593,9 +604,13 @@ Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, W
 
 The Web Shell's **Channel events** page shows a timeline of what every Channel
 in the current workspace did: the inbound messages it accepted, and the ones it
-skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
-rejection), the replies it published or suppressed, its inbound task
-transitions, and how each poll went. Pick the workspace whose Channels you want
+skipped and why (`reason_filter`, `mention_required`, `duplicate`,
+`edited_comment` for an older GitHub comment that mentions the bot and was
+edited, a sender-gate rejection, `github_api_error` when reading or handling a GitHub
+thread failed;
+a `failed` row with that reason means the thread will be read again), the
+replies it published or suppressed, its inbound task transitions, and how each
+poll went. Pick the workspace whose Channels you want
 to inspect, then filter by Channel and by event type; the page refreshes every
 few seconds while its tab is visible, pauses in a background tab, and has a
 manual refresh.
@@ -606,6 +621,12 @@ identifiers, and errors. The page and its route exist wherever Channel
 management is available (`channel_management`), and each Channel keeps its
 journal under `~/.qwen/channels/<workspace>/` with one rotated file, so it
 never grows without bound.
+
+Rows that refer to a concrete session carry an **Open session** button:
+outbound rows open the Channel's own reply session, and GitHub task rows for
+bound-session delivery open the PR-bound session that received the event —
+including when that session lives in another registered workspace. Rows
+without a session (polls, skipped inbound messages) show no button.
 
 ## Running
 

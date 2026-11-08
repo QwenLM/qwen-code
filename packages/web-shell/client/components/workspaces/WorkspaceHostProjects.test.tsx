@@ -257,6 +257,38 @@ describe('WorkspaceHostHeading / OtherHostProjects', () => {
     );
   });
 
+  it('renders the untitled label for a nameless fanout session', async () => {
+    rememberWorkspaceHost('https://host-n.example', []);
+    registerHost('https://host-n.example', {
+      workspaces: [
+        { id: 'wn', cwd: '/srv/repo-n', primary: true, trusted: true },
+      ],
+      sessions: {
+        '/srv/repo-n': [
+          {
+            sessionId: 'nameless',
+            workspaceCwd: '/srv/repo-n',
+            displayName: '',
+          },
+        ],
+      },
+    });
+    const container = renderWithHosts(
+      <>
+        <WorkspaceHostHeading />
+        <OtherHostProjects onOpenHostSession={vi.fn()} />
+      </>,
+    );
+    await settle();
+
+    const row = sessionRow(container, 'Untitled session');
+    expect(row).not.toBeNull();
+    expect(sessionRow(container, 'nameless')).toBeNull();
+    // The row has no visible id and no details tooltip; the title attribute
+    // keeps the id so two nameless rows stay distinguishable.
+    expect(row!.getAttribute('title')).toContain('nameless');
+  });
+
   it('falls back to the legacy navigation when no in-app opener is wired', async () => {
     rememberWorkspaceHost('https://host-c.example', []);
     registerHost('https://host-c.example', {

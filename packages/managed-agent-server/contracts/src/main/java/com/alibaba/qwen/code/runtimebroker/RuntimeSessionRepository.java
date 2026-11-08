@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import java.util.Collection;
+import java.util.List;
+
 /** Persistence boundary for logical Runtime Sessions. */
 public interface RuntimeSessionRepository {
     public RuntimeSessionRecord findOrCreate(RuntimeSessionRecord candidate);
@@ -18,8 +21,8 @@ public interface RuntimeSessionRepository {
      * inventory resolve the whole candidate set without one point read per
      * candidate (#13986 review R1-9).
      */
-    public default java.util.List<RuntimeSessionRecord> findHistoricalByIds(String tenantId,
-            String harnessSessionId, java.util.Collection<String> runtimeSessionIds) {
+    public default List<RuntimeSessionRecord> findHistoricalByIds(String tenantId,
+            String harnessSessionId, Collection<String> runtimeSessionIds) {
         throw new RuntimeBrokerException(409, "workspace_close_identity_unverified",
                 "Harness Session inventory is unavailable", false);
     }
@@ -27,7 +30,7 @@ public interface RuntimeSessionRepository {
     public RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement);
 
-    public java.util.List<RuntimeSessionRecord> findByBinding(String bindingId, long generation,
+    public List<RuntimeSessionRecord> findByBinding(String bindingId, long generation,
             String afterSessionId, int limit);
 
     public long countActiveByBinding(String bindingId, long runtimeGeneration);
@@ -36,7 +39,7 @@ public interface RuntimeSessionRepository {
      * Active Runtime Sessions of one Harness Session in {@code (scope, runtimeSessionId)}
      * order after {@code after}. Callers re-verify the tenant and Harness Session.
      */
-    public default java.util.List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId,
+    public default List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId,
             String harnessSessionId, RuntimeSessionRecord after, int limit) {
         throw new RuntimeBrokerException(409, "workspace_close_identity_unverified",
                 "Harness Session inventory is unavailable", false);

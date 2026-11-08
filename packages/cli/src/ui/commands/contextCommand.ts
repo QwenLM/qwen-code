@@ -277,8 +277,7 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
  * qwen-code attaches media to `functionResponse.parts` (an extension to the
  * `@google/genai` schema; see `coreToolScheduler.createFunctionResponsePart`),
  * and `JSON.stringify`ing the whole part would bill that raw base64 as ASCII
- * text — a single ~100 KB screenshot alone is enough to push the estimate past
- * the provider total and deflate every category row through `scale`. Nested
+ * text, greatly inflating the conversation estimate. Nested
  * media is charged at the flat per-image budget core uses for the same carrier
  * (`estimatePartChars` in `compactionInputSlimming`).
  */
@@ -646,30 +645,9 @@ export async function collectContextData(
     0,
   );
 
-  let totalTokens: number;
-  let displaySystemPrompt: number;
-  let displayBuiltinTools: number;
-  let displayMcpTools: number;
-  let displayInstructionFiles: number;
-  let displayMemoryFiles: number;
-  let displaySkills: number;
-  let displayStartupContext: number;
-  let messagesTokens: number;
-  let unattributedTokens = 0;
-  let freeSpace: number;
-  let detailBuiltinTools: ContextToolDetail[];
-  let detailMcpTools: ContextToolDetail[];
-  let detailInstructionFiles: ContextMemoryDetail[];
-  let detailMemoryFiles: ContextMemoryDetail[];
-  let detailSkills: ContextSkillDetail[];
+  const totalTokens = hasTokenCount ? apiTotalTokens : 0;
 
-  // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
-  // the MCP schemas together exceed the declared tool list, that excess would
-  // push the estimate past the window, or come straight out of `messages`
-  // against a provider total.
-  // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
-  // to the Skill definition `skills` carries, so the three rows still account
-  // for exactly `allToolsTokens` plus the listing and the loaded bodies.
+  // Keep the tool-category allocation bounded by the declared tool-list estimate.
   const clampDeficit = Math.max(
     0,
     skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
@@ -684,118 +662,13 @@ export async function collectContextData(
   // The MCP detail rows sit under the mcp row, so they carry its deficit too.
   const mcpDetailShare =
     mcpToolsTotalTokens > 0 ? clampedMcpTools / mcpToolsTotalTokens : 1;
-  const scaleTokens = <T extends { tokens: number }>(
-    items: T[],
-    factor: number,
-  ): T[] =>
-    factor < 1
-      ? items.map((item) => ({
+  const detailMcpTools =
+    mcpDetailShare < 1
+      ? mcpTools.map((item) => ({
           ...item,
-          tokens: Math.round(item.tokens * factor),
+          tokens: Math.round(item.tokens * mcpDetailShare),
         }))
-      : items;
-
-  if (!hasTokenCount) {
-    totalTokens = 0;
-    displaySystemPrompt = systemPromptTokens;
-    displaySkills = clampedSkills;
-    displayStartupContext = startupContextTokens;
-    displayBuiltinTools = clampedBuiltinTools;
-    displayMcpTools = clampedMcpTools;
-    displayInstructionFiles = instructionFilesTokens;
-    displayMemoryFiles = memoryFilesTokens;
-    // Include the conversation: a `/model` switch, `/restore` or a resume
-    // zeroes the provider count while leaving `this.history` intact, and such a
-    // session must not report a 100K history as free window. The same estimate
-    // drives the tier, so it is reported as `messages` rather than hidden.
-    messagesTokens = conversationTokens;
-    freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
-    detailBuiltinTools = builtinTools;
-    detailMcpTools = scaleTokens(mcpTools, mcpDetailShare);
-    detailInstructionFiles = instructionFiles;
-    detailMemoryFiles = memoryFiles;
-    detailSkills = skills;
-  } else {
-    totalTokens = apiTotalTokens;
-
-    // Categories partition the request by content (#12033). When the overhead
-    // exceeds the provider total it is scaled down as a whole; when it falls
-    // short, the gap is reported as `unattributed` rather than folded into
-    // another category. The cached count is never subtracted: a cache hit spans
-    // several categories, so it is only an annotation.
-    //
-    // Only the overhead is scaled, and only against itself. Conversation content
-    // is deliberately kept out of the denominator: `conversationTokens` measures
-    // a strictly larger content set than the last request's `promptTokenCount`
-    // (which excludes the answer `history` already carries) with a CJK-aware
-    // estimator, so including it deflates every exactly-measured row. The total
-    // is not always provider-reported either — `compressFast()` and resume
-    // seeding stamp a char/4 estimate of the compressed history alone, which can
-    // sit below the overhead — so the clamp must stay armed there too, or the
-    // rows overshoot the total with no row able to report it. Conversation-side
-    // overshoot is absorbed by the `messages` cap below.
-    const scale = rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
-
-    // The clamped categories partition `rawOverhead` before scaling. Flooring
-    // each share keeps their sum at or below `totalTokens`; independently
-    // rounding them can overshoot the total by a token with no negative row
-    // available to absorb the excess.
-    displaySystemPrompt = Math.floor(systemPromptTokens * scale);
-    displayBuiltinTools = Math.floor(clampedBuiltinTools * scale);
-    displayMcpTools = Math.floor(clampedMcpTools * scale);
-    displayInstructionFiles = Math.floor(instructionFilesTokens * scale);
-    displayMemoryFiles = Math.floor(memoryFilesTokens * scale);
-    displaySkills = Math.floor(clampedSkills * scale);
-    displayStartupContext = Math.floor(startupContextTokens * scale);
-
-    const attributedOverhead =
-      displaySystemPrompt +
-      displayBuiltinTools +
-      displayMcpTools +
-      displayInstructionFiles +
-      displayMemoryFiles +
-      displaySkills +
-      displayStartupContext;
-
-    if (scale < 1) {
-      // Fully attributed; messages absorbs the per-row rounding so the rows
-      // sum to the total exactly.
-      messagesTokens = Math.max(0, totalTokens - attributedOverhead);
-    } else {
-      // Unscaled, the overhead already fits inside the total
-      // (`rawOverhead <= totalTokens`), so `messages` is capped only by the
-      // conversation estimate. A genuine shortfall still surfaces as
-      // `unattributed`.
-      messagesTokens = Math.min(
-        conversationTokens,
-        Math.max(0, totalTokens - attributedOverhead),
-      );
-      unattributedTokens = Math.max(
-        0,
-        totalTokens - attributedOverhead - messagesTokens,
-      );
-    }
-
-    freeSpace = Math.max(
-      0,
-      contextWindowSize - totalTokens - autocompactBuffer,
-    );
-
-    detailBuiltinTools = scaleTokens(builtinTools, scale);
-    detailMcpTools = scaleTokens(mcpTools, scale * mcpDetailShare);
-    detailInstructionFiles = scaleTokens(instructionFiles, scale);
-    detailMemoryFiles = scaleTokens(memoryFiles, scale);
-    detailSkills =
-      scale < 1
-        ? skills.map((item) => ({
-            ...item,
-            tokens: Math.round(item.tokens * scale),
-            bodyTokens: item.bodyTokens
-              ? Math.round(item.bodyTokens * scale)
-              : undefined,
-          }))
-        : skills;
-  }
+      : mcpTools;
 
   // Tier classification: prefer the API-reported total when available.
   // When no API call has happened yet (first /context, --continue resume,
@@ -817,17 +690,20 @@ export async function collectContextData(
   // TODO: use estimatePromptTokens(history, undefined, 0, 0,
   // imageTokenEstimate) here for same-source-of-truth as the cheap gate.
   const tierTokens = hasTokenCount ? apiTotalTokens : rawContent;
+  const freeSpace = Math.max(
+    0,
+    contextWindowSize - tierTokens - autocompactBuffer,
+  );
 
   const breakdown: ContextCategoryBreakdown = {
-    systemPrompt: displaySystemPrompt,
-    builtinTools: displayBuiltinTools,
-    mcpTools: displayMcpTools,
-    instructionFiles: displayInstructionFiles,
-    memoryFiles: displayMemoryFiles,
-    skills: displaySkills,
-    startupContext: displayStartupContext,
-    messages: messagesTokens,
-    unattributed: unattributedTokens,
+    systemPrompt: systemPromptTokens,
+    builtinTools: clampedBuiltinTools,
+    mcpTools: clampedMcpTools,
+    instructionFiles: instructionFilesTokens,
+    memoryFiles: memoryFilesTokens,
+    skills: clampedSkills,
+    startupContext: startupContextTokens,
+    messages: conversationTokens,
     cachedTokens: hasTokenCount ? apiCachedTokens : 0,
     freeSpace,
     autocompactBuffer,
@@ -841,12 +717,12 @@ export async function collectContextData(
     totalTokens,
     contextWindowSize,
     breakdown,
-    builtinTools: showDetails ? detailBuiltinTools : [],
+    builtinTools: showDetails ? builtinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
-    instructionFiles: showDetails ? detailInstructionFiles : [],
-    memoryFiles: showDetails ? detailMemoryFiles : [],
+    instructionFiles: showDetails ? instructionFiles : [],
+    memoryFiles: showDetails ? memoryFiles : [],
     skills: showDetails
-      ? detailSkills.filter(
+      ? skills.filter(
           (skill) =>
             skill.loaded || enabledSkillNames.has(skill.name.toLowerCase()),
         )
@@ -1014,15 +890,6 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     lines.push(
       fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
     );
-    if ((breakdown.unattributed ?? 0) > 0) {
-      lines.push(
-        fmtCategoryRow(
-          'Unattributed',
-          breakdown.unattributed!,
-          contextWindowSize,
-        ),
-      );
-    }
   }
 
   if (showDetails) {

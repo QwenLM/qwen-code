@@ -175,6 +175,9 @@
                     <argLine>@{argLine} -XX:MaxRAMPercentage=40</argLine>
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
+                    <!-- H2 fixtures retain named databases for the JVM's lifetime.
+                         Keep those catalogs scoped to a test class, not the whole suite. -->
+                    <reuseForks>false</reuseForks>
                     <systemPropertyVariables>
                         <managed.module.root>${managed.module.root}</managed.module.root>
                         <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
@@ -319,7 +322,7 @@
                                     qwen.hosted.mysql.isolation = true
                                 </configurationParameters>
                             </properties>
-                            <forkedProcessTimeoutInSeconds>11591</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>11658</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
