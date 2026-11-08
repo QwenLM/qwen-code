@@ -96,3 +96,15 @@ describe('build/parse round-trip', () => {
     expect(parseSessionId(pathname)).toBe('real-id');
   });
 });
+
+describe('page route base compatibility', () => {
+  it.each(['plugins', 'channels', 'scheduled-tasks', 'goals', 'settings'])(
+    'keeps page %s alongside sessions when building links',
+    (page) => {
+      expect(buildSessionPathname(`/agentic-code/${page}`, 'next')).toBe(
+        '/agentic-code/session/next',
+      );
+      expect(buildSessionPathname(`/${page}`, undefined)).toBe('/');
+    },
+  );
+});

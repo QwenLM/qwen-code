@@ -54,7 +54,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 // (storage, atomicFileWrite, debugLogger, noFollowOpen, envVarResolver,
 // toolWriteOrigin, memoryScopes, conversationsRuntimeMarker), plus the
 // subpaths `npm start` reaches through @qwen-code/acp-bridge
-// (subSessionConstants, goalWire, transcriptRecords). Values are the dist
+// (subSessionConstants, goalWire, transcriptRecords, telemetryConstants).
+// Values are the dist
 // targets pinned by the exports map in packages/core/package.json. Probes
 // run from packages/cli; acp-bridge is a `file:` dependency there, so
 // acp-bridge-routed specifiers resolve identically from that cwd.
@@ -83,6 +84,8 @@ const expectedDistTargets = {
     'packages/core/dist/src/goals/goal-wire.js',
   '@qwen-code/qwen-code-core/transcriptRecords':
     'packages/core/dist/src/utils/transcript-records.js',
+  '@qwen-code/qwen-code-core/telemetryConstants':
+    'packages/core/dist/src/telemetry/constants.js',
 };
 
 function probe(specifier) {
@@ -176,7 +179,8 @@ describe('core subpath specifiers bundle from the core src tree', () => {
 });
 
 // The core subpath specifiers the bundle reaches through @qwen-code/acp-bridge
-// — goalWire and transcriptRecords from transcript-replay.ts,
+// — goalWire, transcriptRecords and telemetryConstants from
+// transcript-replay.ts,
 // subSessionConstants from bridgeOptions.ts, noFollowOpen from
 // sessionArtifacts.ts — each mapped to the core source file the matching
 // named `paths` entry in packages/acp-bridge/tsconfig.json must resolve it
@@ -190,6 +194,8 @@ const expectedAcpBridgeSrcTargets = {
     'packages/core/src/utils/transcript-records.ts',
   '@qwen-code/qwen-code-core/subSessionConstants':
     'packages/core/src/tools/sub-session-constants.ts',
+  '@qwen-code/qwen-code-core/telemetryConstants':
+    'packages/core/src/telemetry/constants.ts',
   '@qwen-code/qwen-code-core/noFollowOpen':
     'packages/core/src/utils/no-follow-open.ts',
 };

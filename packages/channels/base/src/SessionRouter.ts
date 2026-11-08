@@ -10,7 +10,11 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import process from 'node:process';
-import type { SessionScope, SessionTarget } from './types.js';
+import type {
+  SessionRotationConfig,
+  SessionScope,
+  SessionTarget,
+} from './types.js';
 import type {
   ChannelAgentBridge,
   ChannelAgentBridgeSessionOptions,
@@ -22,6 +26,8 @@ interface PersistedEntry {
   sessionId: string;
   target: SessionTarget;
   cwd: string;
+  turns?: number;
+  startedAt?: number;
   // Present only for managed worktree routes: the generic restore cannot
   // resolve a worktree cwd to its workspace, so cold-start restore must
   // re-attach these through the managed load path with the workspace root.
@@ -46,6 +52,8 @@ interface SessionOperation {
 type SessionLoadWindow = Set<string>;
 interface ResolveOptions {
   routingThreadId?: string;
+  routeKey?: string;
+  holdForTurn?: boolean;
 }
 
 export type SessionRecoveryMode = 'eager' | 'lazy';
@@ -116,10 +124,67 @@ export interface SessionRouterOptions {
   recoveryMode?: SessionRecoveryMode;
 }
 
+/**
+ * The routing key a `single` scope builds for a channel: one context shared by
+ * every group and every direct message. Exported so consumers that reason about
+ * persisted keys (a channel's legacy-route purge, for one) name the same string
+ * the router does instead of re-deriving it.
+ */
+export function singleScopeRoutingKey(channelName: string): string {
+  return `${channelName}:__single__`;
+}
+
+/**
+ * The persisted form of a message route's routing key. A per-message route
+ * (`resolve` with `routeKey`) wraps its chat-level key in a fixed two-element
+ * tuple so a message route can never collide with a chat route; the wrap and
+ * the unwrap below are the only two places that shape is encoded.
+ */
+export function wrapMessageRoutingKey(
+  baseKey: string,
+  routeKey: string,
+): string {
+  return JSON.stringify([baseKey, routeKey]);
+}
+
+/**
+ * The chat-level key inside a routing key, for a caller that was handed keys
+ * from the router without their shape (the purge's orphan predicates). A
+ * channel name may legitimately start with `[`, so an unparsable or
+ * non-wrapper `[` string is returned unchanged rather than discarded: every
+ * purging caller must fail toward inspecting the route, never toward skipping
+ * one it cannot classify.
+ */
+export function unwrapMessageRoutingKey(key: string): string {
+  if (!key.startsWith('[')) return key;
+  try {
+    const parsed: unknown = JSON.parse(key);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length === 2 &&
+      typeof parsed[0] === 'string'
+    ) {
+      return parsed[0];
+    }
+  } catch {
+    // Fall through: treat it as a base key that merely starts with '['.
+  }
+  return key;
+}
+
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
+  private toTurns = new Map<string, number>();
+  private toStartedAt = new Map<string, number>();
+  private routingLeases = new Map<string, number>();
+  private channelRotations = new Map<string, SessionRotationConfig>();
+  private rotationActivity = new Map<string, (sessionId: string) => boolean>();
+  private rotationListeners = new Map<
+    string,
+    (sessionId: string, target: SessionTarget) => void
+  >();
   private toManagedMeta: Map<
     string,
     { isolation: 'worktree'; workspaceCwd: string }
@@ -138,6 +203,8 @@ export class SessionRouter {
   private channelApprovalModes: Map<string, string> = new Map();
   private readonly channelsWithoutLoops = new Set<string>();
   private persistPath: string | undefined;
+  private restoreDepth = 0;
+  private persistPending = false;
   private readonly recoveryMode: SessionRecoveryMode;
 
   constructor(
@@ -158,12 +225,118 @@ export class SessionRouter {
   setBridge(bridge: ChannelAgentBridge): void {
     this.bridge = bridge;
     this.liveSessionIds.clear();
+    this.routingLeases.clear();
     this.staleBridgeBindings.clear();
   }
 
   /** Set scope override for a specific channel. */
   setChannelScope(channelName: string, scope: SessionScope): void {
     this.channelScopes.set(channelName, scope);
+  }
+
+  setChannelRotation(
+    channelName: string,
+    rotation: SessionRotationConfig | undefined,
+  ): void {
+    const maxTurns =
+      Number.isSafeInteger(rotation?.maxTurns) && (rotation?.maxTurns ?? 0) > 0
+        ? rotation?.maxTurns
+        : undefined;
+    const maxAgeHours =
+      typeof rotation?.maxAgeHours === 'number' &&
+      Number.isFinite(rotation.maxAgeHours) &&
+      rotation.maxAgeHours > 0
+        ? rotation.maxAgeHours
+        : undefined;
+    if (maxTurns === undefined && maxAgeHours === undefined) {
+      this.channelRotations.delete(channelName);
+      this.rotationActivity.delete(channelName);
+      this.rotationListeners.delete(channelName);
+    } else {
+      this.channelRotations.set(channelName, { maxTurns, maxAgeHours });
+    }
+  }
+
+  setRotationActivityChecker(
+    channelName: string,
+    checker: (sessionId: string) => boolean,
+  ): void {
+    this.rotationActivity.set(channelName, checker);
+  }
+
+  setRotationListener(
+    channelName: string,
+    listener: (sessionId: string, target: SessionTarget) => void,
+  ): void {
+    this.rotationListeners.set(channelName, listener);
+  }
+
+  releaseRoutingLease(sessionId: string): void {
+    const count = this.routingLeases.get(sessionId);
+    if (count === undefined) return;
+    if (count <= 1) this.routingLeases.delete(sessionId);
+    else this.routingLeases.set(sessionId, count - 1);
+  }
+
+  private shouldRotate(channelName: string, sessionId: string): boolean {
+    const rotation = this.channelRotations.get(channelName);
+    if (!rotation) return false;
+    const startedAt = this.toStartedAt.get(sessionId);
+    return (
+      (rotation.maxTurns !== undefined &&
+        (this.toTurns.get(sessionId) ?? 0) >= rotation.maxTurns) ||
+      (rotation.maxAgeHours !== undefined &&
+        startedAt !== undefined &&
+        Date.now() - startedAt >= rotation.maxAgeHours * 60 * 60 * 1000)
+    );
+  }
+
+  private recordRoutedUse(
+    channelName: string,
+    sessionId: string,
+    holdForTurn: boolean | undefined,
+  ): void {
+    const rotation = this.channelRotations.get(channelName);
+    if (!rotation) return;
+    if (holdForTurn) {
+      this.routingLeases.set(
+        sessionId,
+        (this.routingLeases.get(sessionId) ?? 0) + 1,
+      );
+    }
+    let changed = false;
+    if (
+      rotation.maxAgeHours !== undefined &&
+      !this.toStartedAt.has(sessionId)
+    ) {
+      this.toStartedAt.set(sessionId, Date.now());
+      changed = true;
+    }
+    if (rotation.maxTurns !== undefined) {
+      this.toTurns.set(sessionId, (this.toTurns.get(sessionId) ?? 0) + 1);
+      changed = true;
+    }
+    if (changed) {
+      if (this.restoreDepth > 0) this.persistPending = true;
+      else this.persist();
+    }
+  }
+
+  private rotateRoute(
+    key: string,
+    sessionId: string,
+    channelName: string,
+    target: SessionTarget,
+  ): void {
+    try {
+      this.rotationListeners.get(channelName)?.(sessionId, target);
+    } catch (error) {
+      process.stderr.write(
+        `[SessionRouter] Rotation cleanup failed for ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+    }
+    this.deleteByKey(key);
+    this.persist();
   }
 
   setChannelApprovalMode(
@@ -190,7 +363,14 @@ export class SessionRouter {
     senderId: string,
     chatId: string,
     threadId?: string,
+    routeKey?: string,
   ): string {
+    if (routeKey !== undefined) {
+      return wrapMessageRoutingKey(
+        this.routingKey(channelName, senderId, chatId, threadId),
+        routeKey,
+      );
+    }
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     switch (scope) {
       case 'thread':
@@ -200,7 +380,7 @@ export class SessionRouter {
           ? `${channelName}:${chatId}:${threadId}`
           : `${channelName}:${chatId}`;
       case 'single':
-        return `${channelName}:__single__`;
+        return singleScopeRoutingKey(channelName);
       case 'user':
       default:
         return `${channelName}:${senderId}:${chatId}`;
@@ -233,6 +413,7 @@ export class SessionRouter {
       senderId,
       chatId,
       options?.routingThreadId ?? threadId,
+      options?.routeKey,
     );
     const input = {
       channelName,
@@ -241,12 +422,32 @@ export class SessionRouter {
       threadId,
       cwd: cwd || this.defaultCwd,
       isGroup,
+      ...(options?.routeKey !== undefined
+        ? { messageRoute: options.routeKey }
+        : {}),
     };
     let failedWaits = 0;
     for (;;) {
-      const existing = this.toSession.get(key);
+      let existing = this.toSession.get(key);
+      let retiring:
+        | { sessionId: string; bridge: ChannelAgentBridge }
+        | undefined;
+      if (
+        existing &&
+        this.restoreDepth === 0 &&
+        !this.creatingSessions.has(key) &&
+        !this.toManagedMeta.has(existing) &&
+        (this.routingLeases.get(existing) ?? 0) === 0 &&
+        !this.rotationActivity.get(channelName)?.(existing) &&
+        this.shouldRotate(channelName, existing)
+      ) {
+        retiring = { sessionId: existing, bridge: this.bridge };
+        this.rotateRoute(key, existing, channelName, input);
+        existing = undefined;
+      }
       if (existing && this.isLive(existing)) {
         this.promoteTargetToGroup(existing, isGroup);
+        this.recordRoutedUse(channelName, existing, options?.holdForTurn);
         return existing;
       }
 
@@ -261,6 +462,7 @@ export class SessionRouter {
             throw error;
           }
           this.promoteTargetToGroup(sessionId, isGroup);
+          this.recordRoutedUse(channelName, sessionId, options?.holdForTurn);
           return sessionId;
         } catch (error) {
           if (creating.invalidationError) {
@@ -284,11 +486,27 @@ export class SessionRouter {
           chatId: input.chatId,
           threadId: input.threadId,
           isGroup: input.isGroup,
+          ...(input.messageRoute !== undefined
+            ? { messageRoute: input.messageRoute }
+            : {}),
         },
         (currentOperation) =>
-          existing
-            ? this.loadOrReplaceSession(key, existing, input, currentOperation)
-            : this.createAndStoreSession(key, input, currentOperation),
+          retiring
+            ? Promise.resolve(
+                retiring.bridge.discardSession?.(retiring.sessionId),
+              )
+                .catch(() => undefined)
+                .then(() =>
+                  this.createAndStoreSession(key, input, currentOperation),
+                )
+            : existing
+              ? this.loadOrReplaceSession(
+                  key,
+                  existing,
+                  input,
+                  currentOperation,
+                )
+              : this.createAndStoreSession(key, input, currentOperation),
       );
       this.creatingSessions.set(key, operation);
       try {
@@ -300,6 +518,7 @@ export class SessionRouter {
           throw error;
         }
         this.promoteTargetToGroup(sessionId, isGroup);
+        this.recordRoutedUse(channelName, sessionId, options?.holdForTurn);
         return sessionId;
       } finally {
         if (this.creatingSessions.get(key) === operation) {
@@ -323,6 +542,7 @@ export class SessionRouter {
       threadId?: string;
       cwd: string;
       isGroup?: boolean;
+      messageRoute?: string;
     },
     operation: SessionOperation,
   ): Promise<string> {
@@ -348,6 +568,9 @@ export class SessionRouter {
         chatId: input.chatId,
         threadId: input.threadId,
         isGroup: input.isGroup,
+        ...(input.messageRoute !== undefined
+          ? { messageRoute: input.messageRoute }
+          : {}),
       });
       this.toCwd.set(sessionId, input.cwd);
       this.liveSessionIds.add(sessionId);
@@ -368,6 +591,7 @@ export class SessionRouter {
       threadId?: string;
       cwd: string;
       isGroup?: boolean;
+      messageRoute?: string;
     },
     operation: SessionOperation,
   ): Promise<string> {
@@ -400,10 +624,15 @@ export class SessionRouter {
         }
         if (loadedSessionId !== savedSessionId) {
           const target = this.toTarget.get(savedSessionId);
+          const turns = this.toTurns.get(savedSessionId);
+          const startedAt = this.toStartedAt.get(savedSessionId);
           this.deleteByKey(key);
           this.toSession.set(key, loadedSessionId);
           if (target) this.toTarget.set(loadedSessionId, target);
           this.toCwd.set(loadedSessionId, savedCwd);
+          if (turns !== undefined) this.toTurns.set(loadedSessionId, turns);
+          if (startedAt !== undefined)
+            this.toStartedAt.set(loadedSessionId, startedAt);
           this.persist();
         }
         this.liveSessionIds.add(loadedSessionId);
@@ -432,6 +661,9 @@ export class SessionRouter {
             chatId: input.chatId,
             threadId: input.threadId,
             isGroup: input.isGroup,
+            ...(input.messageRoute !== undefined
+              ? { messageRoute: input.messageRoute }
+              : {}),
           });
           this.toCwd.set(replacement, input.cwd);
           this.liveSessionIds.add(replacement);
@@ -466,9 +698,10 @@ export class SessionRouter {
     senderId: string,
     chatId: string,
     threadId?: string,
+    routeKey?: string,
   ): string | undefined {
     return this.toSession.get(
-      this.routingKey(channelName, senderId, chatId, threadId),
+      this.routingKey(channelName, senderId, chatId, threadId, routeKey),
     );
   }
 
@@ -477,6 +710,7 @@ export class SessionRouter {
     senderId: string,
     chatId?: string,
     threadId?: string,
+    routeKey?: string,
   ): boolean {
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     // If chatId is provided, do an exact scoped lookup; otherwise scan for any
@@ -485,7 +719,7 @@ export class SessionRouter {
     // check.
     if (chatId) {
       return this.toSession.has(
-        this.routingKey(channelName, senderId, chatId, threadId),
+        this.routingKey(channelName, senderId, chatId, threadId, routeKey),
       );
     }
     if (scope === 'single') {
@@ -883,6 +1117,9 @@ export class SessionRouter {
     changed = this.toCwd.delete(sessionId) || changed;
     changed = this.toManagedMeta.delete(sessionId) || changed;
     changed = this.liveSessionIds.delete(sessionId) || changed;
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
+    this.routingLeases.delete(sessionId);
     this.staleBridgeBindings.delete(sessionId);
     if (changed) this.persist();
   }
@@ -915,11 +1152,18 @@ export class SessionRouter {
     senderId: string,
     chatId?: string,
     threadId?: string,
+    routeKey?: string,
   ): string[] {
     const removedIds: string[] = [];
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     if (chatId) {
-      const key = this.routingKey(channelName, senderId, chatId, threadId);
+      const key = this.routingKey(
+        channelName,
+        senderId,
+        chatId,
+        threadId,
+        routeKey,
+      );
       this.invalidateRouteOperation(key);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
@@ -970,6 +1214,9 @@ export class SessionRouter {
     if (this.toManagedMeta.delete(sessionId)) {
       removed = true;
     }
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
+    this.routingLeases.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
       for (const loadWindow of this.sessionLoadWindows) {
@@ -1002,6 +1249,9 @@ export class SessionRouter {
     this.toCwd.delete(sessionId);
     this.toManagedMeta.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
+    this.routingLeases.delete(sessionId);
     return sessionId;
   }
 
@@ -1044,6 +1294,7 @@ export class SessionRouter {
       this.toSession.set(key, entry.sessionId);
       this.toTarget.set(entry.sessionId, entry.target);
       this.toCwd.set(entry.sessionId, entry.cwd);
+      this.restoreRotationState(entry.sessionId, entry);
       if (entry.isolation === 'worktree' && entry.workspaceCwd !== undefined) {
         this.toManagedMeta.set(entry.sessionId, {
           isolation: 'worktree',
@@ -1062,6 +1313,22 @@ export class SessionRouter {
    * Failed loads are dropped (new session on next message).
    */
   async restoreSessions(): Promise<{
+    restored: number;
+    failed: number;
+  }> {
+    this.restoreDepth++;
+    try {
+      return await this.restoreSessionsInner();
+    } finally {
+      this.restoreDepth--;
+      if (this.restoreDepth === 0 && this.persistPending) {
+        this.persistPending = false;
+        this.persist();
+      }
+    }
+  }
+
+  private async restoreSessionsInner(): Promise<{
     restored: number;
     failed: number;
   }> {
@@ -1148,6 +1415,7 @@ export class SessionRouter {
               throw error;
             }
             this.toSession.set(key, managed.sessionId);
+            this.restoreRotationState(managed.sessionId, entry);
             this.toManagedMeta.set(managed.sessionId, {
               isolation: 'worktree',
               workspaceCwd: entry.workspaceCwd,
@@ -1181,6 +1449,7 @@ export class SessionRouter {
           this.toTarget.set(sessionId, entry.target);
           this.toCwd.set(sessionId, entry.cwd);
           this.liveSessionIds.add(sessionId);
+          this.restoreRotationState(sessionId, entry);
           reservation.resolve(sessionId);
           if (sessionId !== entry.sessionId) {
             changed = true;
@@ -1218,12 +1487,16 @@ export class SessionRouter {
 
   dispose(): void {
     this.lifecycleGeneration++;
+    this.persistPending = false;
     for (const operation of this.creatingSessions.values()) {
       this.invalidateOperation(operation);
     }
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
+    this.toTurns.clear();
+    this.toStartedAt.clear();
+    this.routingLeases.clear();
     this.toManagedMeta.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
@@ -1306,9 +1579,18 @@ export class SessionRouter {
       entry['sessionId'].length > 0 &&
       typeof entry['cwd'] === 'string' &&
       entry['cwd'].length > 0 &&
+      (entry['turns'] === undefined ||
+        (Number.isSafeInteger(entry['turns']) &&
+          Number(entry['turns']) >= 0)) &&
+      (entry['startedAt'] === undefined ||
+        (typeof entry['startedAt'] === 'number' &&
+          Number.isFinite(entry['startedAt']) &&
+          entry['startedAt'] >= 0)) &&
       typeof typedTarget['channelName'] === 'string' &&
       typeof typedTarget['senderId'] === 'string' &&
       typeof typedTarget['chatId'] === 'string' &&
+      (typedTarget['messageRoute'] === undefined ||
+        typeof typedTarget['messageRoute'] === 'string') &&
       (typedTarget['threadId'] === undefined ||
         typeof typedTarget['threadId'] === 'string') &&
       (typedTarget['isGroup'] === undefined ||
@@ -1333,6 +1615,12 @@ export class SessionRouter {
         sessionId,
         target,
         cwd: this.toCwd.get(sessionId) ?? this.defaultCwd,
+        ...(this.toTurns.has(sessionId)
+          ? { turns: this.toTurns.get(sessionId) }
+          : {}),
+        ...(this.toStartedAt.has(sessionId)
+          ? { startedAt: this.toStartedAt.get(sessionId) }
+          : {}),
         ...(this.toManagedMeta.get(sessionId) ?? {}),
       };
     }
@@ -1370,6 +1658,12 @@ export class SessionRouter {
         // best-effort temp cleanup
       }
     }
+  }
+
+  private restoreRotationState(sessionId: string, entry: PersistedEntry): void {
+    if (entry.turns !== undefined) this.toTurns.set(sessionId, entry.turns);
+    if (entry.startedAt !== undefined)
+      this.toStartedAt.set(sessionId, entry.startedAt);
   }
 
   private async createLiveSession(

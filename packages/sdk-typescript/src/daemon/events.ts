@@ -155,6 +155,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'user_shell_result',
   'turn_complete',
   'turn_error',
+  'session_messages_deleted',
   'session_rewound',
   'session_branched',
   // A5 (#4511): synthetic side-channel snapshot yielded after
@@ -269,6 +270,7 @@ export interface DaemonPermissionForbiddenData {
 export interface DaemonModelSwitchedData {
   sessionId: string;
   modelId: string;
+  subscriptionSignedOut?: boolean;
   [key: string]: unknown;
 }
 
@@ -290,8 +292,12 @@ export interface DaemonSessionDiedData {
 export type DaemonSessionClosedReason = 'client_close' | (string & {});
 
 export interface DaemonSessionClosedData {
+  cause?: 'workspace_runtime_stop' | (string & {});
+  persistenceUnconfirmed?: boolean;
   sessionId: string;
   reason: DaemonSessionClosedReason;
+  exitCode?: number | null;
+  signalCode?: string | null;
   closedBy?: string;
   [key: string]: unknown;
 }
@@ -858,14 +864,30 @@ export interface DaemonTurnErrorData {
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
   loopType?: string;
+  /** Which cause stopped the turn when `loopType` covers several. */
+  loopReason?: string;
+  /** For `turn_tool_call_cap`: calls counted when the cap fired. */
+  toolCallCount?: number;
+  /** For `turn_tool_call_cap`: the limit that applied. */
+  toolCallLimit?: number;
   promptId?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonSessionMessagesDeletedData {
+  sessionId: string;
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
   [key: string]: unknown;
 }
 
 export interface DaemonSessionRewoundData {
   sessionId: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
+  /** Authoritative surviving UI prefix, with newly seeded daemon event IDs. */
+  replay?: DaemonEvent[];
   filesChanged: string[];
   filesFailed: string[];
   originatorClientId?: string;
@@ -1187,6 +1209,10 @@ export type DaemonTurnErrorEvent = DaemonEventEnvelope<
   'turn_error',
   DaemonTurnErrorData
 >;
+export type DaemonSessionMessagesDeletedEvent = DaemonEventEnvelope<
+  'session_messages_deleted',
+  DaemonSessionMessagesDeletedData
+>;
 export type DaemonSessionRewoundEvent = DaemonEventEnvelope<
   'session_rewound',
   DaemonSessionRewoundData
@@ -1241,6 +1267,7 @@ export type DaemonControlEvent =
   | DaemonSettingsReloadedEvent
   | DaemonMcpServerAddedEvent
   | DaemonMcpServerRemovedEvent
+  | DaemonSessionMessagesDeletedEvent
   | DaemonSessionRewoundEvent;
 
 export type DaemonStreamLifecycleEvent =
@@ -1847,6 +1874,10 @@ export function asKnownDaemonEvent(
       return isTurnErrorData(event.data)
         ? (event as DaemonTurnErrorEvent)
         : undefined;
+    case 'session_messages_deleted':
+      return isSessionMessagesDeletedData(event.data)
+        ? (event as DaemonSessionMessagesDeletedEvent)
+        : undefined;
     case 'session_rewound':
       return isSessionRewoundData(event.data)
         ? (event as DaemonSessionRewoundEvent)
@@ -1864,6 +1895,19 @@ export function asKnownDaemonEvent(
   }
 }
 
+function isSessionMessagesDeletedData(
+  value: unknown,
+): value is DaemonSessionMessagesDeletedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    Array.isArray(value['deletedGroupIds']) &&
+    value['deletedGroupIds'].every((id) => typeof id === 'string') &&
+    Array.isArray(value['deletedPromptIds']) &&
+    value['deletedPromptIds'].every((id) => typeof id === 'string')
+  );
+}
+
 function isSessionRewoundData(
   value: unknown,
 ): value is DaemonSessionRewoundData {
@@ -1872,6 +1916,21 @@ function isSessionRewoundData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['promptId']) &&
     isFiniteNumber(value['targetTurnIndex']) &&
+    (value['replay'] === undefined ||
+      (Array.isArray(value['replay']) &&
+        value['replay'].every(
+          (event) =>
+            isRecord(event) &&
+            event['v'] === 1 &&
+            isNonEmptyString(event['type']) &&
+            event['type'] !== 'session_rewound' &&
+            'data' in event &&
+            (!isRecord(event['data']) ||
+              event['data']['sessionId'] === undefined ||
+              event['data']['sessionId'] === value['sessionId'] ||
+              (event['type'] === 'approval_mode_changed' &&
+                event['data']['persisted'] === true)),
+        ))) &&
     Array.isArray(value['filesChanged']) &&
     Array.isArray(value['filesFailed'])
   );
@@ -2021,7 +2080,7 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         sessionId: event.data.sessionId,
-        currentModelId: event.data.modelId,
+        currentModelId: event.data.modelId || undefined,
         lastModelSwitchFailure: undefined,
       };
     case 'model_switch_failed':
@@ -2239,6 +2298,7 @@ export function reduceDaemonSessionEvent(
     // `mid_turn_message_injected` is a transient UX signal (the browser dedupes
     // its own pending queue); like these mcp/settings notices it carries no
     // reduced session-view state.
+    case 'session_messages_deleted':
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'mcp_server_changed':
@@ -2653,7 +2713,8 @@ function isModelSwitchedData(value: unknown): value is DaemonModelSwitchedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
-    isNonEmptyString(value['modelId'])
+    (isNonEmptyString(value['modelId']) ||
+      (value['modelId'] === '' && value['subscriptionSignedOut'] === true))
   );
 }
 
@@ -2683,7 +2744,12 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['reason']) &&
-    isOptionalStringOrNull(value['closedBy'])
+    isOptionalStringOrNull(value['closedBy']) &&
+    isOptionalNumberOrNull(value['exitCode']) &&
+    isOptionalStringOrNull(value['signalCode']) &&
+    (value['cause'] === undefined || typeof value['cause'] === 'string') &&
+    (value['persistenceUnconfirmed'] === undefined ||
+      typeof value['persistenceUnconfirmed'] === 'boolean')
   );
 }
 

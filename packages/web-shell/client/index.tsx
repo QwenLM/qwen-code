@@ -1,4 +1,6 @@
 import { type ReactNode } from 'react';
+import type { WebShellUrlNavigationOptions } from './navigation';
+export type { WebShellUrlNavigationOptions, WebShellPage } from './navigation';
 import {
   DaemonWorkspaceProvider,
   type DaemonProductSessionContext,
@@ -15,9 +17,69 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
+export type { WebShellApprovalMode } from './utils/planMode';
 export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
+export {
+  JavaManagedAgentClient,
+  JavaManagedAgentHttpError,
+  type JavaAgentCommandAdmission,
+  type JavaAgentTurnAdmission,
+  type JavaAgentEnvironment,
+  type JavaAgentEvent,
+  type JavaAgentSession,
+  type JavaAgentTranscript,
+  type JavaAgentTurn,
+  type JavaManagedAgentClientOptions,
+} from './components/managed/java-managed-agent-client';
+export {
+  createJavaManagedAgentProvider,
+  type JavaManagedAgentProviderOptions,
+} from './components/managed/java-managed-agent-provider';
+export {
+  ManagedAgentWebShell,
+  type ManagedAgentWebShellProps,
+} from './ManagedAgentWebShell';
+export type {
+  ManagedArtifact,
+  ManagedArtifactPage,
+  ManagedArtifactResponse,
+  ManagedArtifactSave,
+  ManagedToolResult,
+  ManagedToolResultReader,
+  ManagedToolResultResponse,
+} from './components/managed/managed-tool-result-types';
+export {
+  type ManagedAgentCommandOptions,
+  type ManagedAgentPendingAction,
+  type ManagedAgentPendingPermissionAction,
+  type ManagedAgentPendingQuestionAction,
+  type ManagedAgentQuestionAnswer,
+  type ManagedAgentQuestionResponse,
+  type ManagedAgentActionResponse,
+  type ManagedAgentProvider,
+  type ManagedAgentRequestOptions,
+  type ManagedAgentRuntimeState,
+  type ManagedAgentSessionEvent,
+  type ManagedAgentSessionEventType,
+  type ManagedAgentSessionPhase,
+  type ManagedAgentSessionSummary,
+  type ManagedAgentSessionTranscript,
+  type ManagedAgentTurnAdmission,
+  type ManagedRuntimeNode,
+  type ManagedWorkspaceDirectory,
+  type ManagedWorkspaceCreateOperation,
+  type ManagedWorkspaceRegistration,
+} from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
+  /** Unmount the chat view and its portals while keeping the daemon session attached. */
+  viewHidden?: boolean;
+  /**
+   * Opt in to URL routing. Explicit initial session target props override the
+   * URL; later target prop changes replace it. Stop host history writes when
+   * enabled. Omit to keep host-owned navigation. basePath defaults to root.
+   */
+  urlNavigation?: WebShellUrlNavigationOptions;
   /** Connect browser notifications with optional branding and an initial preference (off by default). */
   browserNotifications?: WebShellBrowserNotificationsOptions;
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -104,6 +166,7 @@ export function WebShell(props: WebShellProps) {
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
   const {
     browserNotifications,
+    urlNavigation,
     baseUrl,
     token,
     sessionId,
@@ -114,12 +177,14 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     clientId,
     restartSseOnPrompt,
     historyPageSize,
+    viewHidden,
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
   const shell = (
     <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
       <WorkspaceSessionProvider
+        urlNavigation={urlNavigation}
         sessionId={sessionId}
         workspaceId={workspaceId}
         workspaceCwd={workspaceCwd}
@@ -128,6 +193,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
         clientId={clientId}
         restartSseOnPrompt={restartSseOnPrompt}
         historyPageSize={historyPageSize}
+        viewHidden={viewHidden}
         webShellProps={webShellProps}
       />
     </DaemonWorkspaceProvider>
@@ -240,6 +306,7 @@ export type {
   WebShellAtProviderTab,
   WebShellAtItem,
   WebShellAtProvider,
+  WebShellWorkspaceDirectoryPicker,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,
@@ -253,6 +320,8 @@ export type {
   WebShellFootnotePreviewHandle,
   WebShellFootnotePreviewMount,
   WebShellAssistantMessageInfo,
+  WebShellAssistantTurnOutcome,
+  WebShellAssistantTurnSettledEvent,
   WebShellAssistantTurnFooterRenderInfo,
   ArtifactImageRenderer,
   WebShellArtifactCustomization,
@@ -269,6 +338,11 @@ export type {
   WebShellSessionArtifactsChangeReason,
   WebShellModelInfo,
   WebShellSkillInfo,
+  WebShellAssistantFeedbackInfo,
+  WebShellAssistantFeedbackOptions,
+  WebShellAssistantFeedbackRating,
+  WebShellAssistantFeedbackUserMessage,
+  AssistantFeedbackHandler,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
@@ -276,6 +350,7 @@ export type {
   PaneHeaderActionsRenderer,
 } from './components/ChatPane';
 export type {
+  ArtifactFilter,
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './components/artifacts/TurnOutputs';
@@ -303,3 +378,22 @@ export type {
   WebShellSettingItemId,
   WebShellSettingsOptions,
 } from './settings';
+
+export type { WebShellModelManagementOptions } from './modelManagement';
+export type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipHandle,
+  WebShellUnavailableModelTooltipInfo,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
+export type {
+  WebShellMessageNavigationRequest,
+  WebShellMessageNavigationResult,
+} from './hooks/useMessageNavigation';
+export { highlightCode } from './components/messages/codeHighlighter';
+export type { CodeHighlightRequest } from './components/messages/codeHighlighter';
+
+export {
+  QwenSubscriptionPanel,
+  QwenSubscriptionFlow,
+} from './components/messages/QwenSubscriptionPanel';

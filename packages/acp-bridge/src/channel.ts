@@ -38,6 +38,8 @@ export interface AcpChannel {
   transportGuard?: AcpChannelTransportGuard;
   /** Best-effort terminate; resolves when owned teardown is complete. */
   kill(): Promise<void>;
+  /** Resolves only after this owned child leaves process-registry accounting. */
+  registryReleased?: Promise<void>;
   /**
    * Synchronous force-kill for the second-signal force-exit path.
    * Force-kills the owned process tree (or equivalent in-process tear-down)

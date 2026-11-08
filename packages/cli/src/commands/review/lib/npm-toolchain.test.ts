@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { npmToolchainAdapter } from './npm-toolchain.js';
+import {
+  lockfileInstaller,
+  npmInstallComplete,
+  npmToolchainAdapter,
+} from './npm-toolchain.js';
 import { selectToolchainAdapter } from './toolchain.js';
 
 const statfsSyncMock = vi.hoisted(() => vi.fn());
@@ -229,5 +233,53 @@ describe('npm toolchain adapter', () => {
     expect(report.test.map((t) => t.command)).toEqual([
       'npm test --workspace="packages/a"',
     ]);
+  });
+});
+
+describe('lockfileInstaller', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'lockfile-installer-'));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads the installer off the committed lockfile', () => {
+    expect(lockfileInstaller(root)).toBeNull();
+    writeFileSync(join(root, 'package-lock.json'), '{}');
+    expect(lockfileInstaller(root)).toBe('npm');
+    rmSync(join(root, 'package-lock.json'));
+    writeFileSync(join(root, 'pnpm-lock.yaml'), '');
+    expect(lockfileInstaller(root)).toBe('pnpm');
+  });
+
+  it('lets packageManager break the tie when both lockfiles are committed', () => {
+    writeFileSync(join(root, 'package-lock.json'), '{}');
+    writeFileSync(join(root, 'pnpm-lock.yaml'), '');
+    // No manifest, or one that does not name pnpm: npm, exactly as before.
+    expect(lockfileInstaller(root)).toBe('npm');
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ packageManager: 'npm@10.9.8' }),
+    );
+    expect(lockfileInstaller(root)).toBe('npm');
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ packageManager: 'pnpm@11.24.0' }),
+    );
+    expect(lockfileInstaller(root)).toBe('pnpm');
+  });
+
+  it("gates completeness on the installer's own marker", () => {
+    mkdirSync(join(root, 'node_modules'));
+    writeFileSync(join(root, 'node_modules', '.package-lock.json'), '{}');
+    writeFileSync(join(root, 'pnpm-lock.yaml'), '');
+    // npm's marker says nothing about whether a pnpm install finished.
+    expect(npmInstallComplete(root)).toBe(false);
+    writeFileSync(join(root, 'node_modules', '.modules.yaml'), '');
+    expect(npmInstallComplete(root)).toBe(true);
   });
 });

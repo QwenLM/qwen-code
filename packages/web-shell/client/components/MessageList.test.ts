@@ -3030,7 +3030,7 @@ it('retains a complete main reply when a later background tool-only execution en
     rows.some(
       (item) => item.type === 'message' && item.message.id === 'marker',
     ),
-  ).toBe(true);
+  ).toBe(false);
   const ordinary = collapseItems(
     groupParallelAgents(messages.filter((message) => message.id !== 'marker')),
   );
@@ -3042,6 +3042,38 @@ it('retains a complete main reply when a later background tool-only execution en
 });
 
 describe('background completion markers', () => {
+  it.each(['agent', 'shell', 'peer'] as const)(
+    'folds a %s result marker even when it is the only step',
+    (kind) => {
+      const items = groupParallelAgents([
+        makeUserMessage('u1'),
+        {
+          id: 'result',
+          role: 'system',
+          source: 'background_notification_turn_started',
+          variant: 'info',
+          content: 'Task result',
+          backgroundTurn: {
+            turnId: 'auto-task',
+            taskId: 'task',
+            kind,
+            startedAt: 100,
+          },
+        },
+        makeAssistantMessage('answer'),
+      ]);
+      const collapsed = collapseItems(items);
+      expect(rowIds(collapsed)).toEqual(['u1', 'tc-u1', 'answer']);
+      expect(collapseOf(collapsed, 'u1')).toMatchObject({
+        collapsed: true,
+        hiddenCount: 1,
+      });
+      expect(
+        rowIds(collapseItems(items, { overrides: new Map([['u1', true]]) })),
+      ).toEqual(['u1', 'tc-u1', 'result', 'answer']);
+    },
+  );
+
   it.each(['agent', 'shell'] as const)(
     'reconciles a consumed %s completion from the transcript producer without a task record',
     async (kind) => {
@@ -3110,7 +3142,7 @@ describe('background completion markers', () => {
         ]),
       );
       expect(collapseOf(collapsed, 'u1')?.collapsed).toBe(true);
-      expect(rowIds(collapsed)).toContain(markers[0]!.id);
+      expect(rowIds(collapsed)).not.toContain(markers[0]!.id);
     },
   );
 
@@ -3154,7 +3186,7 @@ describe('background completion markers', () => {
       const collapsed = collapseItems(groupParallelAgents(messages));
       expect(collapseOf(collapsed, 'u1')?.collapsed).toBe(true);
       expect(collapseOf(collapsed, 'u2')?.collapsed).toBe(true);
-      expect(rowIds(collapsed)).toContain('marker');
+      expect(rowIds(collapsed)).not.toContain('marker');
     },
   );
 
@@ -3180,7 +3212,7 @@ describe('background completion markers', () => {
     };
   }
 
-  it('keeps both completion markers and only the last parent reply when collapsed', () => {
+  it('hides completion markers and keeps only the last parent reply when collapsed', () => {
     const messages: Message[] = [
       makeUserMessage('user-1'),
       makeMultiToolGroup('launch-tools'),
@@ -3197,13 +3229,11 @@ describe('background completion markers', () => {
     expect(rowIds(collapsed)).toEqual([
       'user-1',
       'tc-user-1',
-      'marker-baidu',
-      'marker-alibaba',
       'comparison-final',
     ]);
     expect(collapseOf(collapsed, 'user-1')).toMatchObject({
       collapsed: true,
-      hiddenCount: 5,
+      hiddenCount: 7,
     });
     expect(
       getSessionTimelineEntries(messages).map((entry) => entry.id),
@@ -3247,7 +3277,6 @@ describe('background completion markers', () => {
       'launch-ack',
       'user-2',
       'tc-user-2',
-      'marker-baidu',
       'steering',
       'auto-answer',
     ]);
@@ -3352,12 +3381,21 @@ describe('completion during a streamed final answer', () => {
       else {
         expect(visible).toContain('Answer second half.');
         expect(visible).toContain('Answer first half. ');
+        expect(visible).not.toContain('Old task completed');
         expect(visible.indexOf('Answer first half. ')).toBeLessThan(
-          visible.indexOf('Old task completed'),
-        );
-        expect(visible.indexOf('Old task completed')).toBeLessThan(
           visible.indexOf('Answer second half.'),
         );
+        const expanded = collapseItems(items, {
+          overrides: new Map([
+            [messages.find((m) => m.content === 'New question')!.id, true],
+          ]),
+          backgroundSummaryGraceActive: false,
+        });
+        expect(
+          expanded
+            .filter((item) => item.type === 'message')
+            .map((item) => item.message.content),
+        ).toContain('Old task completed');
       }
     },
   );

@@ -16,19 +16,18 @@ import {
   ProviderInstallError,
   type ProviderConfig,
   type ProviderInstallPlan,
+  type ProviderModelProvidersPatch,
   type ProviderSettingsAdapter,
+  type ProviderSetupInputs,
 } from '../index.js';
 
-function createAdapter(modelProviders: ModelProvidersConfig = {}) {
+function createAdapter(
+  modelProviders: ModelProvidersConfig = {},
+  values?: Record<string, unknown>,
+) {
   let snapshot = modelProviders;
-  const adapter: ProviderSettingsAdapter & {
-    setValue: ReturnType<typeof vi.fn>;
-    persist: ReturnType<typeof vi.fn>;
-    backup: ReturnType<typeof vi.fn>;
-    restore: ReturnType<typeof vi.fn>;
-    cleanupBackup: ReturnType<typeof vi.fn>;
-  } = {
-    getValue: vi.fn(),
+  return {
+    getValue: vi.fn((key: string) => values?.[key]),
     setValue: vi.fn((key: string, value: unknown) => {
       if (key.startsWith('modelProviders.'))
         modelProviders = {
@@ -46,46 +45,226 @@ function createAdapter(modelProviders: ModelProvidersConfig = {}) {
       modelProviders = snapshot;
     }),
     cleanupBackup: vi.fn(),
-  };
-  return adapter;
+  } satisfies ProviderSettingsAdapter;
 }
+
+type Adapter = ReturnType<typeof createAdapter>;
+type Deps = Omit<Parameters<typeof applyProviderInstallPlan>[1], 'settings'>;
+
+const MEDIA = 'https://media.example/v1';
+const MINIMAX = 'https://api.minimax.io/v1';
+const DASHSCOPE = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const GATEWAY = 'https://gateway.test/v1';
+const IMAGE = { imageOnly: true, supportsImageGeneration: true };
+
+/** The install writes process.env directly; afterEach unstubs these keys. */
+function preserveEnv(...keys: string[]) {
+  for (const key of keys) vi.stubEnv(key, process.env[key]);
+}
+
+function makePlan(
+  overrides: Partial<ProviderInstallPlan> = {},
+): ProviderInstallPlan {
+  return {
+    providerId: 'test-provider',
+    authType: AuthType.USE_OPENAI,
+    ...overrides,
+  };
+}
+
+/** A plan carrying one modelProviders patch (openai, prepend-and-remove-owned). */
+function modelsPlan(
+  models: ModelConfig[],
+  patch: Partial<ProviderModelProvidersPatch> = {},
+  overrides: Partial<ProviderInstallPlan> = {},
+): ProviderInstallPlan {
+  return makePlan({
+    modelProviders: [
+      {
+        authType: AuthType.USE_OPENAI,
+        models,
+        mergeStrategy: 'prepend-and-remove-owned',
+        ...patch,
+      },
+    ],
+    ...overrides,
+  });
+}
+
+/** A custom-provider plan (media endpoint by default); `existing` is the reconnect's list. */
+const customPlan = (
+  inputs: Partial<ProviderSetupInputs> & Pick<ProviderSetupInputs, 'modelIds'>,
+  existing?: Parameters<typeof buildInstallPlan>[2],
+) =>
+  buildInstallPlan(
+    customProvider,
+    { baseUrl: MEDIA, apiKey: 'test-only', ...inputs },
+    existing,
+  );
+
+/** A MiniMax preset plan, at the international endpoint by default. */
+const minimaxPlan = (
+  modelIds: string[],
+  inputs: Partial<ProviderSetupInputs> = {},
+) =>
+  buildInstallPlan(minimaxProvider, {
+    baseUrl: MINIMAX,
+    apiKey: 'test-only',
+    modelIds,
+    ...inputs,
+  });
+
+const minimaxModel = (
+  id: string,
+  name: string,
+  extra: Partial<ModelConfig> = {},
+) => ({ id, name, baseUrl: MINIMAX, envKey: 'MINIMAX_API_KEY', ...extra });
+
+/** qwen3-asr-flash already installed as a voice model at the first endpoint. */
+const firstVoice = (): ModelConfig => ({
+  id: 'qwen3-asr-flash',
+  baseUrl: 'https://first.example/v1',
+  voiceOnly: true,
+  envKey: 'FIRST',
+});
+
+/** Connects qwen3-asr-flash at `baseUrl` with a throwaway key. */
+const asrPlan = (
+  baseUrl: string,
+  advancedConfig?: ProviderSetupInputs['advancedConfig'],
+) =>
+  customPlan({
+    baseUrl,
+    apiKey: 'unused',
+    modelIds: ['qwen3-asr-flash'],
+    ...(advancedConfig && { advancedConfig }),
+  });
+
+const planModels = (plan: ProviderInstallPlan) =>
+  plan.modelProviders![0]!.models;
+
+const rejecting = (message: string) =>
+  vi.fn(async () => {
+    throw new Error(message);
+  });
+
+/** Applies `plan` to `settings` (a fresh adapter by default). */
+const apply = (
+  plan: ProviderInstallPlan,
+  settings: ProviderSettingsAdapter = createAdapter(),
+  deps: Deps = {},
+) => applyProviderInstallPlan(plan, { settings, ...deps });
+
+const rejectsPurpose = (
+  plan: ProviderInstallPlan,
+  settings: Adapter,
+  deps: Deps = {},
+) =>
+  expect(apply(plan, settings, deps)).rejects.toMatchObject({
+    step: 'modelPurpose',
+  });
+
+/** Applies `plan` with a refreshAuth rejecting `message`; asserts the rethrow. */
+const failRefresh = (
+  plan: ProviderInstallPlan,
+  settings: Adapter,
+  message: string,
+  deps: Deps = {},
+) =>
+  expect(
+    apply(plan, settings, { refreshAuth: rejecting(message), ...deps }),
+  ).rejects.toThrow(message);
+
+function expectNothingWritten(adapter: Adapter) {
+  expect(adapter.setValue).not.toHaveBeenCalled();
+  expect(adapter.backup).not.toHaveBeenCalled();
+  expect(adapter.persist).not.toHaveBeenCalled();
+}
+
+/** One setValue assertion per `key: value` entry. */
+function expectSet(adapter: Adapter, values: Record<string, unknown>) {
+  for (const [key, value] of Object.entries(values))
+    expect(adapter.setValue).toHaveBeenCalledWith(key, value);
+}
+
+function expectNotSet(adapter: Adapter, ...keys: string[]) {
+  for (const key of keys)
+    expect(adapter.setValue).not.toHaveBeenCalledWith(key, expect.anything());
+}
+
+async function expectMerged(
+  existing: ModelConfig[],
+  plan: ProviderInstallPlan,
+  merged: ModelConfig[],
+) {
+  const adapter = createAdapter({ openai: existing });
+  await apply(plan, adapter);
+  expectSet(adapter, { 'modelProviders.openai': merged });
+}
+
+/** Installs `models` on the Responses route while OpenAI `current` is selected at the gateway. */
+async function installResponses(
+  providers: ModelProvidersConfig,
+  current: string,
+  models: ModelConfig[],
+  modelId: string,
+  patch?: Partial<ProviderModelProvidersPatch>,
+) {
+  const adapter = createAdapter(providers, {
+    'security.auth.selectedType': AuthType.USE_OPENAI,
+    'model.name': current,
+    'model.baseUrl': GATEWAY,
+  });
+  const syncAuthState = vi.fn();
+  await apply(
+    modelsPlan(models, patch, {
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      modelSelection: { modelId, baseUrl: GATEWAY },
+    }),
+    adapter,
+    { syncAuthState },
+  );
+  return { adapter, syncAuthState };
+}
+
+/** Settings holding an OpenAI-routed `idealab` bucket with an invalid `wireApi`. */
+const idealabAdapter = (
+  providers: ModelProvidersConfig = {},
+  values: Record<string, unknown> = {},
+) =>
+  createAdapter(
+    {
+      idealab: [
+        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
+      ],
+      ...providers,
+    },
+    {
+      'security.auth.selectedType': AuthType.USE_OPENAI,
+      providerProtocol: { idealab: 'openai' },
+      ...values,
+    },
+  );
 
 describe('applyProviderInstallPlan', () => {
   it('rolls back a provider write shadowed by a higher-precedence scope before selecting it', async () => {
     const original = { openai: [{ id: 'workspace-chat' }] };
     const adapter = createAdapter(original);
     vi.mocked(adapter.getModelProviders).mockReturnValue(original);
-    const plan: ProviderInstallPlan = {
-      providerId: 'test',
-      authType: AuthType.USE_OPENAI,
-      modelSelection: { modelId: 'new-user-model' },
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'new-user-model' }],
-          mergeStrategy: 'append',
-        },
-      ],
-    };
+    const plan = modelsPlan(
+      [{ id: 'new-user-model' }],
+      { mergeStrategy: 'append' },
+      { modelSelection: { modelId: 'new-user-model' } },
+    );
     const reload = vi.fn();
     await expect(
-      applyProviderInstallPlan(plan, {
-        settings: adapter,
-        reloadModelProviders: reload,
-      }),
+      apply(plan, adapter, { reloadModelProviders: reload }),
     ).rejects.toMatchObject({ step: 'modelProviders' });
     expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
       { id: 'workspace-chat' },
       { id: 'new-user-model' },
     ]);
-    expect(adapter.setValue).not.toHaveBeenCalledWith(
-      'model.name',
-      expect.anything(),
-    );
-    expect(adapter.setValue).not.toHaveBeenCalledWith(
-      'security.auth.selectedType',
-      expect.anything(),
-    );
+    expectNotSet(adapter, 'model.name', 'security.auth.selectedType');
     expect(adapter.restore).toHaveBeenCalledOnce();
     expect(reload).toHaveBeenCalledExactlyOnceWith(original);
   });
@@ -100,19 +279,19 @@ describe('applyProviderInstallPlan', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it.each(['image', 'voice'] as const)(
     'rejects a slash-varied %s reconnect before it can overwrite conversation credentials',
     async (purpose) => {
-      const baseUrl = 'https://media.example/v1';
-      const chatKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+      const chatKey = generateCustomEnvKey(AuthType.USE_OPENAI, MEDIA);
       const serviceKey = `${chatKey}_${purpose.toUpperCase()}`;
       const models = [
-        { id: 'chat', baseUrl, envKey: chatKey },
+        { id: 'chat', baseUrl: MEDIA, envKey: chatKey },
         {
           id: 'service',
-          baseUrl: `${baseUrl}/`,
+          baseUrl: `${MEDIA}/`,
           envKey: serviceKey,
           ...(purpose === 'image' ? { imageOnly: true } : { voiceOnly: true }),
           generationConfig: { contextWindowSize: 65536 },
@@ -121,29 +300,18 @@ describe('applyProviderInstallPlan', () => {
       const adapter = createAdapter({ openai: models });
       vi.stubEnv(chatKey, 'chat-old');
       vi.stubEnv(serviceKey, 'service-old');
-      try {
-        await expect(
-          (async () => {
-            const plan = buildInstallPlan(
-              customProvider,
-              {
-                protocol: AuthType.USE_OPENAI,
-                baseUrl,
-                apiKey: 'service-new',
-                modelIds: ['service'],
-              },
-              models,
-            );
-            await applyProviderInstallPlan(plan, { settings: adapter });
-          })(),
-        ).rejects.toMatchObject({ step: 'modelPurpose' });
-        expect(adapter.setValue).not.toHaveBeenCalled();
-        expect(process.env[chatKey]).toBe('chat-old');
-        expect(process.env[serviceKey]).toBe('service-old');
-        expect(adapter.getModelProviders()).toEqual({ openai: models });
-      } finally {
-        vi.unstubAllEnvs();
-      }
+      const inputs = { protocol: AuthType.USE_OPENAI, apiKey: 'service-new' };
+      await expect(
+        (async () =>
+          apply(
+            customPlan({ ...inputs, modelIds: ['service'] }, models),
+            adapter,
+          ))(),
+      ).rejects.toMatchObject({ step: 'modelPurpose' });
+      expect(adapter.setValue).not.toHaveBeenCalled();
+      expect(process.env[chatKey]).toBe('chat-old');
+      expect(process.env[serviceKey]).toBe('service-old');
+      expect(adapter.getModelProviders()).toEqual({ openai: models });
     },
   );
 
@@ -151,48 +319,34 @@ describe('applyProviderInstallPlan', () => {
     'installs %s models without changing conversation selection',
     async (purpose) => {
       const adapter = createAdapter({ anthropic: [{ id: 'main' }] });
-      const plan = buildInstallPlan(customProvider, {
+      const plan = customPlan({
         protocol: AuthType.USE_OPENAI,
-        baseUrl: 'https://media.example/v1',
-        apiKey: 'test-only',
         modelIds: [purpose === 'voice' ? 'qwen3-asr-flash' : 'image-01'],
         advancedConfig: { purpose, contextWindowSize: 65536 },
       });
-      const envKey = Object.keys(plan.env!)[0]!;
-      const previous = process.env[envKey];
+      preserveEnv(Object.keys(plan.env!)[0]!);
       const refreshAuth = vi.fn();
       const syncAuthState = vi.fn();
-      try {
-        expect(plan.modelSelection).toBeUndefined();
-        const result = await applyProviderInstallPlan(plan, {
-          settings: adapter,
-          refreshAuth,
-          syncAuthState,
-        });
-        expect(result.updatedModelProviders['openai']?.[0]).toMatchObject({
-          ...(purpose === 'image'
-            ? { imageOnly: true, supportsImageGeneration: true }
-            : { voiceOnly: true }),
-          generationConfig: { contextWindowSize: 65536 },
-        });
-        expect(result.updatedModelProviders['anthropic']).toEqual([
-          { id: 'main' },
-        ]);
-        expect(
-          adapter.setValue.mock.calls.some(
-            ([key]) =>
-              key === 'security.auth.selectedType' ||
-              key === 'model.name' ||
-              key === 'model.baseUrl',
-          ),
-        ).toBe(false);
-        expect(refreshAuth).not.toHaveBeenCalled();
-        expect(syncAuthState).not.toHaveBeenCalled();
-        expect(adapter.persist).toHaveBeenCalledOnce();
-      } finally {
-        if (previous === undefined) delete process.env[envKey];
-        else process.env[envKey] = previous;
-      }
+      expect(plan.modelSelection).toBeUndefined();
+      const result = await apply(plan, adapter, { refreshAuth, syncAuthState });
+      expect(result.updatedModelProviders['openai']?.[0]).toMatchObject({
+        ...(purpose === 'image' ? IMAGE : { voiceOnly: true }),
+        generationConfig: { contextWindowSize: 65536 },
+      });
+      expect(result.updatedModelProviders['anthropic']).toEqual([
+        { id: 'main' },
+      ]);
+      expect(
+        adapter.setValue.mock.calls.some(
+          ([key]) =>
+            key === 'security.auth.selectedType' ||
+            key === 'model.name' ||
+            key === 'model.baseUrl',
+        ),
+      ).toBe(false);
+      expect(refreshAuth).not.toHaveBeenCalled();
+      expect(syncAuthState).not.toHaveBeenCalled();
+      expect(adapter.persist).toHaveBeenCalledOnce();
     },
   );
 
@@ -203,8 +357,7 @@ describe('applyProviderInstallPlan', () => {
         openai: targetNull ? null : [],
         gemini: null,
       } as unknown as ModelProvidersConfig;
-      const plan = buildInstallPlan(
-        customProvider,
+      const plan = customPlan(
         {
           baseUrl: 'https://new.example/v1',
           apiKey: 'test',
@@ -212,178 +365,160 @@ describe('applyProviderInstallPlan', () => {
         },
         providers['openai'],
       );
-      const envKey = Object.keys(plan.env!)[0]!;
-      const previous = process.env[envKey];
-      try {
-        const result = await applyProviderInstallPlan(plan, {
-          settings: createAdapter(providers),
-        });
-        expect(result.updatedModelProviders['openai']).toEqual([
-          expect.objectContaining({ id: 'chat' }),
-        ]);
-        expect(result.updatedModelProviders['gemini']).toBeNull();
-      } finally {
-        if (previous === undefined) delete process.env[envKey];
-        else process.env[envKey] = previous;
-      }
+      preserveEnv(Object.keys(plan.env!)[0]!);
+      const result = await apply(plan, createAdapter(providers));
+      expect(result.updatedModelProviders['openai']).toEqual([
+        expect.objectContaining({ id: 'chat' }),
+      ]);
+      expect(result.updatedModelProviders['gemini']).toBeNull();
     },
   );
 
   it('replaces a same-identity custom image route with the preset credential', async () => {
-    const baseUrl = 'https://api.minimax.io/v1';
     const adapter = createAdapter({
       openai: [
         {
           id: 'image-01',
-          baseUrl,
-          envKey: `${generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl)}_IMAGE`,
-          imageOnly: true,
-          supportsImageGeneration: true,
+          baseUrl: MINIMAX,
+          envKey: `${generateCustomEnvKey(AuthType.USE_OPENAI, MINIMAX)}_IMAGE`,
+          ...IMAGE,
         },
       ],
     });
-    const plan = buildInstallPlan(minimaxProvider, {
-      baseUrl,
-      apiKey: 'test-preset-key',
-      modelIds: ['image-01'],
-    });
-    const previous = process.env['MINIMAX_API_KEY'];
-    try {
-      const result = await applyProviderInstallPlan(plan, {
-        settings: adapter,
-      });
-      expect(result.updatedModelProviders['openai']).toEqual([
-        expect.objectContaining({
-          id: 'image-01',
-          baseUrl,
-          envKey: 'MINIMAX_API_KEY',
-          imageOnly: true,
-        }),
-      ]);
-    } finally {
-      if (previous === undefined) delete process.env['MINIMAX_API_KEY'];
-      else process.env['MINIMAX_API_KEY'] = previous;
-    }
+    const plan = minimaxPlan(['image-01'], { apiKey: 'test-preset-key' });
+    preserveEnv('MINIMAX_API_KEY');
+    const result = await apply(plan, adapter);
+    expect(result.updatedModelProviders['openai']).toEqual([
+      expect.objectContaining({
+        id: 'image-01',
+        baseUrl: MINIMAX,
+        envKey: 'MINIMAX_API_KEY',
+        imageOnly: true,
+      }),
+    ]);
   });
 
   it.each([undefined, 'voice'] as const)(
     'rejects a second endpoint for an existing voice ID before writing (%s)',
     async (purpose) => {
-      const adapter = createAdapter({
-        openai: [
-          {
-            id: 'qwen3-asr-flash',
-            baseUrl: 'https://first.example/v1',
-            voiceOnly: true,
-            envKey: 'FIRST',
-          },
-        ],
-      });
-      const plan = buildInstallPlan(customProvider, {
-        baseUrl: 'https://second.example/v1',
-        apiKey: 'unused',
-        modelIds: ['qwen3-asr-flash'],
-        ...(purpose ? { advancedConfig: { purpose } } : {}),
-      });
-      await expect(
-        applyProviderInstallPlan(plan, { settings: adapter }),
-      ).rejects.toMatchObject({ step: 'modelPurpose' });
-      expect(adapter.setValue).not.toHaveBeenCalled();
-      expect(adapter.backup).not.toHaveBeenCalled();
-      expect(adapter.persist).not.toHaveBeenCalled();
+      const adapter = createAdapter({ openai: [firstVoice()] });
+      const plan = asrPlan('https://second.example/v1', purpose && { purpose });
+      await rejectsPurpose(plan, adapter);
+      expectNothingWritten(adapter);
     },
   );
 
   it.each(['image', 'voice'] as const)(
     'reconnects a mixed provider without losing the %s configuration or independent key',
     async (purpose) => {
-      const baseUrl = 'https://media.example/v1';
-      const service = buildInstallPlan(customProvider, {
-        baseUrl,
-        apiKey: 'old-service',
-        modelIds: ['service'],
-        advancedConfig: { purpose, contextWindowSize: 65536 },
-      }).modelProviders![0]!.models[0]!;
-      const chatKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+      const [service] = planModels(
+        customPlan({
+          apiKey: 'old-service',
+          modelIds: ['service'],
+          advancedConfig: { purpose, contextWindowSize: 65536 },
+        }),
+      );
+      const chatKey = generateCustomEnvKey(AuthType.USE_OPENAI, MEDIA);
       const existing = [
-        { id: 'chat', baseUrl, envKey: chatKey },
+        { id: 'chat', baseUrl: MEDIA, envKey: chatKey },
         {
-          ...service,
+          ...service!,
           name: 'My service',
           generationConfig: {
-            ...service.generationConfig,
+            ...service!.generationConfig,
             customHeaders: { 'X-Test': 'preserved' },
           },
         },
       ];
-      const plan = buildInstallPlan(
-        customProvider,
-        { baseUrl, apiKey: 'new-chat', modelIds: ['chat', 'service'] },
+      const plan = customPlan(
+        { apiKey: 'new-chat', modelIds: ['chat', 'service'] },
         existing,
       );
-      const previous = process.env[chatKey];
-      try {
-        expect(plan.env).toEqual({ [chatKey]: 'new-chat' });
-        const result = await applyProviderInstallPlan(plan, {
-          settings: createAdapter({ openai: existing }),
-        });
-        expect(
-          result.updatedModelProviders['openai']?.find(
-            (model) => model.id === 'service',
-          ),
-        ).toEqual(existing[1]);
-        expect(plan.modelSelection?.modelId).toBe('chat');
-      } finally {
-        if (previous === undefined) delete process.env[chatKey];
-        else process.env[chatKey] = previous;
-      }
+      preserveEnv(chatKey);
+      expect(plan.env).toEqual({ [chatKey]: 'new-chat' });
+      const result = await apply(plan, createAdapter({ openai: existing }));
+      expect(
+        result.updatedModelProviders['openai']?.find(
+          (model) => model.id === 'service',
+        ),
+      ).toEqual(existing[1]);
+      expect(plan.modelSelection?.modelId).toBe('chat');
     },
   );
+
+  it('rotates the key of a realtime-only provider without touching the conversation selection', async () => {
+    const envKey = `${generateCustomEnvKey(AuthType.USE_OPENAI, DASHSCOPE)}_REALTIME`;
+    const existing = [
+      { id: 'omni-realtime', baseUrl: DASHSCOPE, envKey, realtimeOnly: true },
+    ];
+    const plan = customPlan(
+      { baseUrl: DASHSCOPE, apiKey: 'rotated', modelIds: ['omni-realtime'] },
+      existing,
+    );
+    expect(plan.env).toEqual({ [envKey]: 'rotated' });
+    expect(planModels(plan)).toEqual([
+      expect.objectContaining({ id: 'omni-realtime', realtimeOnly: true }),
+    ]);
+    expect(plan.modelSelection).toBeUndefined();
+
+    const adapter = createAdapter({ openai: existing });
+    const refreshAuth = vi.fn();
+    preserveEnv(envKey);
+    await apply(plan, adapter, { refreshAuth });
+    // A service-role reconnect must not re-point the chat session.
+    expectNotSet(adapter, 'security.auth.selectedType', 'model.name');
+    expect(refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('refuses a realtime reconnect that would land on another route’s credential key', () => {
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, DASHSCOPE);
+    expect(() =>
+      customPlan(
+        { baseUrl: DASHSCOPE, apiKey: 'new', modelIds: ['omni-realtime'] },
+        [
+          {
+            id: 'omni-realtime',
+            baseUrl: `${DASHSCOPE}/`,
+            envKey,
+            realtimeOnly: true,
+          },
+        ],
+      ),
+    ).toThrow('A service model already uses this credential endpoint');
+  });
 
   it.each(['image', 'voice'] as const)(
     'rekeys a purpose-less %s reconnect at the original credential key',
     (purpose) => {
-      const inputs = {
-        baseUrl: 'https://media.example/v1',
-        apiKey: 'old',
-        modelIds: ['service'],
-      };
-      const installed = buildInstallPlan(customProvider, {
-        ...inputs,
-        advancedConfig: { purpose },
-      });
-      const originalModels = installed.modelProviders![0]!.models;
-      const reconnect = buildInstallPlan(
-        customProvider,
-        { ...inputs, apiKey: 'new' },
+      const originalModels = planModels(
+        customPlan({
+          apiKey: 'old',
+          modelIds: ['service'],
+          advancedConfig: { purpose },
+        }),
+      );
+      const reconnect = customPlan(
+        { apiKey: 'new', modelIds: ['service'] },
         originalModels,
       );
       expect(reconnect.env).toEqual({ [originalModels[0]!.envKey!]: 'new' });
-      expect(reconnect.modelProviders![0]!.models).toEqual(originalModels);
+      expect(planModels(reconnect)).toEqual(originalModels);
       expect(reconnect.modelSelection).toBeUndefined();
     },
   );
 
   it('rejects a single credential update for independently keyed image and voice models', () => {
-    const inputs = {
-      baseUrl: 'https://media.example/v1',
-      apiKey: 'unused',
-      modelIds: [] as string[],
-    };
-    const existing = (['image', 'voice'] as const).flatMap(
-      (purpose) =>
-        buildInstallPlan(customProvider, {
-          ...inputs,
+    const existing = (['image', 'voice'] as const).flatMap((purpose) =>
+      planModels(
+        customPlan({
+          apiKey: 'unused',
           modelIds: [purpose],
           advancedConfig: { purpose },
-        }).modelProviders![0]!.models,
+        }),
+      ),
     );
     expect(() =>
-      buildInstallPlan(
-        customProvider,
-        { ...inputs, modelIds: ['image', 'voice'] },
-        existing,
-      ),
+      customPlan({ apiKey: 'unused', modelIds: ['image', 'voice'] }, existing),
     ).toThrow('separately');
   });
 
@@ -401,7 +536,7 @@ describe('applyProviderInstallPlan', () => {
         openai: [
           {
             id: 'main',
-            baseUrl: 'https://media.example/v1',
+            baseUrl: MEDIA,
             ...(from === 'image' ? { imageOnly: true } : {}),
             ...(from === 'voice' ? { voiceOnly: true } : {}),
           },
@@ -410,28 +545,21 @@ describe('applyProviderInstallPlan', () => {
       const snapshot = structuredClone(existing);
       const adapter = createAdapter(existing);
       process.env['TEST_API_KEY'] = 'unchanged';
-      const plan = buildInstallPlan(customProvider, {
+      const plan = customPlan({
         protocol: AuthType.USE_OPENAI,
-        baseUrl: 'https://media.example/v1',
-        apiKey: 'test-only',
         modelIds: ['main'],
         ...(to === 'chat' ? {} : { advancedConfig: { purpose: to } }),
       });
       plan.env = { TEST_API_KEY: 'must-not-write' };
       const reloadModelProviders = vi.fn();
       await expect(
-        applyProviderInstallPlan(plan, {
-          settings: adapter,
-          reloadModelProviders,
-        }),
+        apply(plan, adapter, { reloadModelProviders }),
       ).rejects.toMatchObject({
         name: 'ProviderInstallError',
         step: 'modelPurpose',
         authType: AuthType.USE_OPENAI,
       });
-      expect(adapter.setValue).not.toHaveBeenCalled();
-      expect(adapter.backup).not.toHaveBeenCalled();
-      expect(adapter.persist).not.toHaveBeenCalled();
+      expectNothingWritten(adapter);
       expect(reloadModelProviders).not.toHaveBeenCalled();
       expect(process.env['TEST_API_KEY']).toBe('unchanged');
       expect(existing).toEqual(snapshot);
@@ -439,163 +567,97 @@ describe('applyProviderInstallPlan', () => {
   );
 
   it('rejects a service preset that would remove an owned conversation model', async () => {
-    const conversation = {
-      id: 'MiniMax-M2.7',
-      name: '[MiniMax] MiniMax-M2.7',
-      baseUrl: 'https://api.minimax.io/v1',
-      envKey: 'MINIMAX_API_KEY',
-    };
+    const conversation = minimaxModel('MiniMax-M2.7', '[MiniMax] MiniMax-M2.7');
     const adapter = createAdapter({ openai: [conversation] });
-    const plan = buildInstallPlan(minimaxProvider, {
-      baseUrl: conversation.baseUrl,
-      apiKey: 'must-not-write',
-      modelIds: ['image-01'],
-    });
-    const previous = process.env['MINIMAX_API_KEY'];
-    process.env['MINIMAX_API_KEY'] = 'chat-secret';
-    try {
-      expect(plan.modelSelection).toBeUndefined();
-      expect(plan.modelProviders?.[0]?.ownsModel?.(conversation)).toBe(true);
-      await expect(
-        applyProviderInstallPlan(plan, { settings: adapter }),
-      ).rejects.toMatchObject({ step: 'modelPurpose' });
-      expect(adapter.setValue).not.toHaveBeenCalled();
-      expect(adapter.backup).not.toHaveBeenCalled();
-      expect(adapter.persist).not.toHaveBeenCalled();
-      expect(adapter.getModelProviders()).toEqual({ openai: [conversation] });
-      expect(process.env['MINIMAX_API_KEY']).toBe('chat-secret');
-    } finally {
-      if (previous === undefined) delete process.env['MINIMAX_API_KEY'];
-      else process.env['MINIMAX_API_KEY'] = previous;
-    }
+    const plan = minimaxPlan(['image-01'], { apiKey: 'must-not-write' });
+    vi.stubEnv('MINIMAX_API_KEY', 'chat-secret');
+    expect(plan.modelSelection).toBeUndefined();
+    expect(plan.modelProviders?.[0]?.ownsModel?.(conversation)).toBe(true);
+    await rejectsPurpose(plan, adapter);
+    expectNothingWritten(adapter);
+    expect(adapter.getModelProviders()).toEqual({ openai: [conversation] });
+    expect(process.env['MINIMAX_API_KEY']).toBe('chat-secret');
   });
 
   it.each(['image', 'voice', 'mixed'] as const)(
     'rejects a conversation preset that would remove an owned service model (%s)',
     async (purpose) => {
-      const service = {
-        id: purpose === 'voice' ? 'qwen3-asr-flash' : 'image-01',
-        name: '[MiniMax] service',
-        baseUrl: 'https://api.minimax.io/v1',
-        envKey: 'MINIMAX_API_KEY',
-        ...(purpose === 'voice'
-          ? { voiceOnly: true }
-          : { imageOnly: true, supportsImageGeneration: true }),
-      };
+      const service = minimaxModel(
+        purpose === 'voice' ? 'qwen3-asr-flash' : 'image-01',
+        '[MiniMax] service',
+        purpose === 'voice' ? { voiceOnly: true } : IMAGE,
+      );
       const adapter = createAdapter({ openai: [service] });
-      const plan = buildInstallPlan(minimaxProvider, {
-        baseUrl: service.baseUrl,
-        apiKey: 'must-not-write',
-        modelIds:
-          purpose === 'mixed'
-            ? ['MiniMax-M2.7', 'image-01-live']
-            : ['MiniMax-M2.7'],
-      });
-      const previous = process.env['MINIMAX_API_KEY'];
-      process.env['MINIMAX_API_KEY'] = 'service-secret';
+      const plan = minimaxPlan(
+        purpose === 'mixed'
+          ? ['MiniMax-M2.7', 'image-01-live']
+          : ['MiniMax-M2.7'],
+        { apiKey: 'must-not-write' },
+      );
+      vi.stubEnv('MINIMAX_API_KEY', 'service-secret');
       const reloadModelProviders = vi.fn();
-      try {
-        expect(plan.modelProviders?.[0]?.ownsModel?.(service)).toBe(true);
-        await expect(
-          applyProviderInstallPlan(plan, {
-            settings: adapter,
-            reloadModelProviders,
-          }),
-        ).rejects.toMatchObject({ step: 'modelPurpose' });
-        expect(adapter.setValue).not.toHaveBeenCalled();
-        expect(adapter.backup).not.toHaveBeenCalled();
-        expect(adapter.persist).not.toHaveBeenCalled();
-        expect(reloadModelProviders).not.toHaveBeenCalled();
-        expect(adapter.getModelProviders()).toEqual({ openai: [service] });
-        expect(process.env['MINIMAX_API_KEY']).toBe('service-secret');
-      } finally {
-        if (previous === undefined) delete process.env['MINIMAX_API_KEY'];
-        else process.env['MINIMAX_API_KEY'] = previous;
-      }
+      expect(plan.modelProviders?.[0]?.ownsModel?.(service)).toBe(true);
+      await rejectsPurpose(plan, adapter, { reloadModelProviders });
+      expectNothingWritten(adapter);
+      expect(reloadModelProviders).not.toHaveBeenCalled();
+      expect(adapter.getModelProviders()).toEqual({ openai: [service] });
+      expect(process.env['MINIMAX_API_KEY']).toBe('service-secret');
     },
   );
 
   it.each(['conversation', 'service'] as const)(
     'does not reject a %s preset over an owned model in a sibling route bucket it never rewrites',
     async (installs) => {
-      const conversation = {
-        id: 'MiniMax-M2.7',
-        name: '[MiniMax] MiniMax-M2.7',
-        baseUrl: 'https://api.minimax.io/v1',
-        envKey: 'MINIMAX_API_KEY',
-      };
-      const service = {
-        id: 'image-01',
-        name: '[MiniMax] service',
-        baseUrl: 'https://api.minimax.io/v1',
-        envKey: 'MINIMAX_API_KEY',
-        imageOnly: true,
-        supportsImageGeneration: true,
-      };
-      // The owned model of the *other* purpose lives in a user-named bucket
-      // that merely resolves to the same protocol. The install rewrites only
-      // `modelProviders.openai`, so nothing here can drop it and the removal
-      // guards must not fire.
-      const sibling = installs === 'conversation' ? service : conversation;
-      const adapter = createAdapter({ myrouter: [sibling], openai: [] });
-      vi.mocked(adapter.getValue).mockImplementation((key) =>
-        key === 'providerProtocol' ? { myrouter: 'openai' } : undefined,
+      // The other purpose's owned model lives in a user-named bucket that only
+      // resolves to the same protocol. The install rewrites only
+      // `modelProviders.openai`, so nothing can drop it: no guard may fire.
+      const sibling =
+        installs === 'conversation'
+          ? minimaxModel('image-01', '[MiniMax] service', IMAGE)
+          : minimaxModel('MiniMax-M2.7', '[MiniMax] MiniMax-M2.7');
+      const adapter = createAdapter(
+        { myrouter: [sibling], openai: [] },
+        { providerProtocol: { myrouter: 'openai' } },
       );
-      const plan = buildInstallPlan(minimaxProvider, {
-        baseUrl: sibling.baseUrl,
-        apiKey: 'test-only',
-        modelIds: installs === 'conversation' ? ['MiniMax-M2.7'] : ['image-01'],
-      });
+      const plan = minimaxPlan(
+        installs === 'conversation' ? ['MiniMax-M2.7'] : ['image-01'],
+      );
       delete plan.env;
       expect(plan.modelProviders?.[0]?.ownsModel?.(sibling)).toBe(true);
-      const result = await applyProviderInstallPlan(plan, {
-        settings: adapter,
-      });
+      const result = await apply(plan, adapter);
       expect(adapter.getModelProviders()).toEqual({
         myrouter: [sibling],
-        openai: plan.modelProviders![0]!.models,
+        openai: planModels(plan),
       });
       expect(result.updatedModelProviders).toEqual(adapter.getModelProviders());
-      expect(adapter.setValue).not.toHaveBeenCalledWith(
-        'modelProviders.myrouter',
-        expect.anything(),
-      );
+      expectNotSet(adapter, 'modelProviders.myrouter');
       expect(adapter.persist).toHaveBeenCalledOnce();
     },
   );
 
   it('still rejects a purpose change for the same identity in a sibling Responses bucket', async () => {
-    // Unlike the removal guards, the purpose-change guard must keep its
-    // route-aware view: the legacy-bucket cleanup deletes an identity match
-    // from any bucket resolving to the Responses route, so replacing an
-    // image model there with a conversation model is a real removal.
-    const baseUrl = 'https://media.example/v1';
+    // Unlike the removal guards, the purpose-change guard stays route-aware:
+    // the legacy-bucket cleanup deletes an identity match from any bucket on
+    // the Responses route, so replacing an image model there is a real removal.
     const existing: ModelProvidersConfig = {
-      myrouter: [{ id: 'main', baseUrl, imageOnly: true }],
+      myrouter: [{ id: 'main', baseUrl: MEDIA, imageOnly: true }],
       openai: [],
     };
     const snapshot = structuredClone(existing);
-    const adapter = createAdapter(existing);
-    vi.mocked(adapter.getValue).mockImplementation((key) =>
-      key === 'providerProtocol' ? { myrouter: 'openai-responses' } : undefined,
-    );
-    const plan = buildInstallPlan(customProvider, {
+    const adapter = createAdapter(existing, {
+      providerProtocol: { myrouter: 'openai-responses' },
+    });
+    const plan = customPlan({
       protocol: AuthType.USE_OPENAI,
       wireApi: 'responses',
-      baseUrl,
-      apiKey: 'test-only',
       modelIds: ['main'],
     });
     plan.env = { TEST_API_KEY: 'must-not-write' };
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).rejects.toMatchObject({
+    await expect(apply(plan, adapter)).rejects.toMatchObject({
       step: 'modelPurpose',
       message: expect.stringContaining('another purpose'),
     });
-    expect(adapter.setValue).not.toHaveBeenCalled();
-    expect(adapter.backup).not.toHaveBeenCalled();
-    expect(adapter.persist).not.toHaveBeenCalled();
+    expectNothingWritten(adapter);
     expect(process.env['TEST_API_KEY']).toBeUndefined();
     expect(existing).toEqual(snapshot);
   });
@@ -603,56 +665,38 @@ describe('applyProviderInstallPlan', () => {
   it.each(['append-chat', 'reselect-service', 'reselect-chat'] as const)(
     'preserves intentional preset merge behavior (%s)',
     async (scenario) => {
-      const existing = {
-        id: scenario === 'reselect-chat' ? 'MiniMax-M2.7' : 'image-01',
-        name: '[MiniMax] existing',
-        baseUrl: 'https://api.minimax.io/v1',
-        envKey: 'MINIMAX_API_KEY',
-        ...(scenario === 'reselect-chat'
-          ? {}
-          : { imageOnly: true, supportsImageGeneration: true }),
-      };
-      const plan = buildInstallPlan(minimaxProvider, {
-        baseUrl: existing.baseUrl,
-        apiKey: 'test-only',
-        modelIds: [
-          scenario === 'reselect-service'
-            ? 'image-01-live'
-            : 'MiniMax-M2.7-highspeed',
-        ],
-      });
+      const existing = minimaxModel(
+        scenario === 'reselect-chat' ? 'MiniMax-M2.7' : 'image-01',
+        '[MiniMax] existing',
+        scenario === 'reselect-chat' ? {} : IMAGE,
+      );
+      const plan = minimaxPlan([
+        scenario === 'reselect-service'
+          ? 'image-01-live'
+          : 'MiniMax-M2.7-highspeed',
+      ]);
       if (scenario === 'append-chat')
         plan.modelProviders![0]!.mergeStrategy = 'append';
       delete plan.env;
-      const result = await applyProviderInstallPlan(plan, {
-        settings: createAdapter({ openai: [existing] }),
-      });
+      const result = await apply(plan, createAdapter({ openai: [existing] }));
       expect(result.updatedModelProviders['openai']).toEqual([
         ...(scenario === 'append-chat' ? [existing] : []),
-        ...plan.modelProviders![0]!.models,
+        ...planModels(plan),
       ]);
     },
   );
 
-  it.each(['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'])(
+  it.each([MINIMAX, 'https://api.minimaxi.com/v1'])(
     'reinstalls owned conversation and image models at %s',
     async (baseUrl) => {
-      const inputs = {
-        baseUrl: 'https://api.minimax.io/v1',
-        apiKey: 'test-only',
-        modelIds: ['MiniMax-M2.7', 'image-01'],
-      };
-      const existing = buildInstallPlan(minimaxProvider, inputs)
-        .modelProviders![0]!.models;
+      const modelIds = ['MiniMax-M2.7', 'image-01'];
+      const existing = planModels(minimaxPlan(modelIds));
       const foreign = { id: 'foreign', envKey: 'OTHER_KEY' };
       const adapter = createAdapter({ openai: [...existing, foreign] });
-      const plan = buildInstallPlan(minimaxProvider, { ...inputs, baseUrl });
+      const plan = minimaxPlan(modelIds, { baseUrl });
       delete plan.env;
       const reloadModelProviders = vi.fn();
-      const result = await applyProviderInstallPlan(plan, {
-        settings: adapter,
-        reloadModelProviders,
-      });
+      const result = await apply(plan, adapter, { reloadModelProviders });
       const models = result.updatedModelProviders['openai']!;
       expect(models).toHaveLength(3);
       expect(models).toContainEqual(foreign);
@@ -677,33 +721,20 @@ describe('applyProviderInstallPlan', () => {
   it.each(['chat', 'voice'] as const)(
     'rejects migrating an owned image model to %s at a different endpoint before writing',
     async (purpose) => {
-      const service = {
-        id: 'image-01',
-        name: '[MiniMax] image-01',
-        baseUrl: 'https://api.minimax.io/v1',
-        envKey: 'MINIMAX_API_KEY',
-        imageOnly: true,
-        supportsImageGeneration: true,
-      };
+      const service = minimaxModel('image-01', '[MiniMax] image-01', IMAGE);
       const adapter = createAdapter({ openai: [service] });
-      const plan = buildInstallPlan(minimaxProvider, {
+      const plan = minimaxPlan(['MiniMax-M2.7', service.id], {
         baseUrl: 'https://api.minimaxi.com/v1',
-        apiKey: 'test-only',
-        modelIds: ['MiniMax-M2.7', service.id],
       });
-      const replacement = plan.modelProviders![0]!.models[1]!;
+      const replacement = planModels(plan)[1]!;
       replacement.imageOnly = false;
       replacement.voiceOnly = purpose === 'voice';
       replacement.supportsImageGeneration = false;
       plan.env = { TEST_API_KEY: 'must-not-write' };
       process.env['TEST_API_KEY'] = 'unchanged';
-      await expect(
-        applyProviderInstallPlan(plan, { settings: adapter }),
-      ).rejects.toMatchObject({ step: 'modelPurpose' });
+      await rejectsPurpose(plan, adapter);
       expect(adapter.getModelProviders()).toEqual({ openai: [service] });
-      expect(adapter.setValue).not.toHaveBeenCalled();
-      expect(adapter.backup).not.toHaveBeenCalled();
-      expect(adapter.persist).not.toHaveBeenCalled();
+      expectNothingWritten(adapter);
       expect(process.env['TEST_API_KEY']).toBe('unchanged');
     },
   );
@@ -711,84 +742,55 @@ describe('applyProviderInstallPlan', () => {
   it.each(['image', 'voice'] as const)(
     'isolates %s credentials from a conversation model at the same endpoint',
     async (purpose) => {
-      const inputs = {
-        protocol: AuthType.USE_OPENAI,
-        baseUrl: 'https://media.example/v1',
-      };
-      const chat = buildInstallPlan(customProvider, {
-        ...inputs,
+      const protocol = AuthType.USE_OPENAI;
+      const chat = customPlan({
+        protocol,
         apiKey: 'chat-secret',
         modelIds: ['chat-model'],
       });
-      const service = buildInstallPlan(customProvider, {
-        ...inputs,
+      const service = customPlan({
+        protocol,
         apiKey: 'service-secret',
         modelIds: ['service-model'],
         advancedConfig: { purpose },
       });
       const chatKey = Object.keys(chat.env!)[0]!;
       const serviceKey = Object.keys(service.env!)[0]!;
-      const previous = new Map(
-        [chatKey, serviceKey].map((key) => [key, process.env[key]]),
-      );
-      try {
-        expect(serviceKey).not.toBe(chatKey);
-        const installed = await applyProviderInstallPlan(chat, {
-          settings: createAdapter(),
-        });
-        const adapter = createAdapter(installed.updatedModelProviders);
-        const result = await applyProviderInstallPlan(service, {
-          settings: adapter,
-        });
-        expect(result.updatedModelProviders['openai']).toEqual([
-          ...installed.updatedModelProviders['openai']!,
-          expect.objectContaining({ id: 'service-model', envKey: serviceKey }),
-        ]);
-        expect(result.updatedModelProviders['openai']?.[0]?.envKey).toBe(
-          chatKey,
-        );
-        expect(adapter.setValue).toHaveBeenCalledWith(
-          `env.${serviceKey}`,
-          'service-secret',
-        );
-        expect(adapter.setValue).not.toHaveBeenCalledWith(
-          `env.${chatKey}`,
-          expect.anything(),
-        );
-        expect(process.env[chatKey]).toBe('chat-secret');
-        expect(process.env[serviceKey]).toBe('service-secret');
-      } finally {
-        for (const [key, value] of previous) {
-          if (value === undefined) delete process.env[key];
-          else process.env[key] = value;
-        }
-      }
+      preserveEnv(chatKey, serviceKey);
+      expect(serviceKey).not.toBe(chatKey);
+      const installed = await apply(chat);
+      const adapter = createAdapter(installed.updatedModelProviders);
+      const result = await apply(service, adapter);
+      expect(result.updatedModelProviders['openai']).toEqual([
+        ...installed.updatedModelProviders['openai']!,
+        expect.objectContaining({ id: 'service-model', envKey: serviceKey }),
+      ]);
+      expect(result.updatedModelProviders['openai']?.[0]?.envKey).toBe(chatKey);
+      expectSet(adapter, { [`env.${serviceKey}`]: 'service-secret' });
+      expectNotSet(adapter, `env.${chatKey}`);
+      expect(process.env[chatKey]).toBe('chat-secret');
+      expect(process.env[serviceKey]).toBe('service-secret');
     },
   );
 
   it('updates a service model while preserving the same conversation ID at another endpoint', async () => {
     const conversation = { id: 'model', baseUrl: 'https://chat.example/v1' };
     const adapter = createAdapter({
-      openai: [
-        conversation,
-        { id: 'model', baseUrl: 'https://media.example/v1', imageOnly: true },
-      ],
+      openai: [conversation, { id: 'model', baseUrl: MEDIA, imageOnly: true }],
     });
-    const plan = buildInstallPlan(customProvider, {
+    const plan = customPlan({
       protocol: AuthType.USE_OPENAI,
-      baseUrl: 'https://media.example/v1',
-      apiKey: 'test-only',
       modelIds: ['model'],
       advancedConfig: { purpose: 'image', contextWindowSize: 65536 },
     });
     plan.env = {};
-    const result = await applyProviderInstallPlan(plan, { settings: adapter });
+    const result = await apply(plan, adapter);
     expect(result.updatedModelProviders['openai']).toHaveLength(2);
     expect(result.updatedModelProviders['openai']?.[0]).toEqual(conversation);
     expect(result.updatedModelProviders['openai']).toContainEqual(
       expect.objectContaining({
         id: 'model',
-        baseUrl: 'https://media.example/v1',
+        baseUrl: MEDIA,
         imageOnly: true,
         generationConfig: { contextWindowSize: 65536 },
       }),
@@ -797,59 +799,45 @@ describe('applyProviderInstallPlan', () => {
 
   it('refuses an install plan that sets a reserved env var (NODE_OPTIONS)', async () => {
     const adapter = createAdapter();
-    // CI sets NODE_OPTIONS (e.g. --max-old-space-size); snapshot whatever it
-    // is so we can assert the rejected plan left it UNCHANGED rather than
-    // assuming it's unset.
+    // CI sets NODE_OPTIONS (e.g. --max-old-space-size): snapshot it to assert
+    // the rejected plan left it UNCHANGED rather than assuming it's unset.
     const originalNodeOptions = process.env['NODE_OPTIONS'];
-    const plan: ProviderInstallPlan = {
-      providerId: 'evil',
-      authType: AuthType.USE_OPENAI,
-      env: { NODE_OPTIONS: '--require /tmp/evil.js' },
-    };
+    const plan = makePlan({ env: { NODE_OPTIONS: '--require /tmp/evil.js' } });
 
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).rejects.toThrow(/reserved environment variable: NODE_OPTIONS/);
-    // The evil value must not have leaked into the live process; the
-    // pre-existing value (if any) is untouched.
+    await expect(apply(plan, adapter)).rejects.toThrow(
+      /reserved environment variable: NODE_OPTIONS/,
+    );
+    // The evil value must not leak into the live process.
     expect(process.env['NODE_OPTIONS']).toBe(originalNodeOptions);
     expect(process.env['NODE_OPTIONS']).not.toBe('--require /tmp/evil.js');
-    expect(adapter.setValue).not.toHaveBeenCalledWith(
-      'env.NODE_OPTIONS',
-      expect.anything(),
-    );
+    expectNotSet(adapter, 'env.NODE_OPTIONS');
   });
 
   it('matches the env denylist case-insensitively (Path)', async () => {
-    const adapter = createAdapter();
-    const plan: ProviderInstallPlan = {
-      providerId: 'evil',
-      authType: AuthType.USE_OPENAI,
-      env: { Path: 'C:\\evil' },
-    };
+    const plan = makePlan({ env: { Path: 'C:\\evil' } });
 
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).rejects.toThrow(/reserved environment variable: Path/);
+    await expect(apply(plan)).rejects.toThrow(
+      /reserved environment variable: Path/,
+    );
   });
 
   it.each(['TMP', 'TEMP', 'tmp'])(
     'rejects the Windows temp-redirect env var %s',
     async (key) => {
-      const adapter = createAdapter();
-      const plan: ProviderInstallPlan = {
-        providerId: 'evil',
-        authType: AuthType.USE_OPENAI,
-        env: { [key]: 'C:\\evil-temp' },
-      };
+      const plan = makePlan({ env: { [key]: 'C:\\evil-temp' } });
 
-      await expect(
-        applyProviderInstallPlan(plan, { settings: adapter }),
-      ).rejects.toThrow(/reserved environment variable/);
+      await expect(apply(plan)).rejects.toThrow(
+        /reserved environment variable/,
+      );
     },
   );
 
   it('persists env, auth selection, selected model, and merged model providers', async () => {
+    const preserved = () => ({
+      id: 'preserved',
+      envKey: 'OTHER_API_KEY',
+      generationConfig: { contextWindowSize: 456 },
+    });
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [
         {
@@ -857,70 +845,42 @@ describe('applyProviderInstallPlan', () => {
           envKey: 'TEST_API_KEY',
           generationConfig: { contextWindowSize: 123 },
         },
-        {
-          id: 'preserved',
-          envKey: 'OTHER_API_KEY',
-          generationConfig: { contextWindowSize: 456 },
-        },
+        preserved(),
       ],
     });
     const reloadModelProviders = vi.fn();
     const syncAuthState = vi.fn();
     const refreshAuth = vi.fn(async () => undefined);
 
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'sk-test' },
-      modelSelection: { modelId: 'new-model' },
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
-          mergeStrategy: 'prepend-and-remove-owned',
-          ownsModel: (model) => model.envKey === 'TEST_API_KEY',
-        },
-      ],
-    };
+    const plan = modelsPlan(
+      [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
+      { ownsModel: (model) => model.envKey === 'TEST_API_KEY' },
+      {
+        env: { TEST_API_KEY: 'sk-test' },
+        modelSelection: { modelId: 'new-model' },
+      },
+    );
 
-    await applyProviderInstallPlan(plan, {
-      settings: adapter,
+    await apply(plan, adapter, {
       reloadModelProviders,
       syncAuthState,
       refreshAuth,
     });
 
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'env.TEST_API_KEY',
-      'sk-test',
-    );
+    expectSet(adapter, { 'env.TEST_API_KEY': 'sk-test' });
     expect(process.env['TEST_API_KEY']).toBe('sk-test');
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'new-model', envKey: 'TEST_API_KEY' },
-      {
-        id: 'preserved',
-        envKey: 'OTHER_API_KEY',
-        generationConfig: { contextWindowSize: 456 },
-      },
-    ]);
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'new-model');
-    // Id-only model selection must clear any stale baseUrl disambiguator
-    // (empty-string tombstone overrides a lower-scope value on merge).
-    expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', '');
+    const merged = [{ id: 'new-model', envKey: 'TEST_API_KEY' }, preserved()];
+    expectSet(adapter, {
+      'modelProviders.openai': merged,
+      'security.auth.selectedType': AuthType.USE_OPENAI,
+      'model.name': 'new-model',
+      // Id-only selection must clear any stale baseUrl disambiguator
+      // (empty-string tombstone overrides a lower-scope value on merge).
+      'model.baseUrl': '',
+    });
     expect(adapter.persist).toHaveBeenCalled();
     expect(reloadModelProviders).toHaveBeenCalledWith({
-      [AuthType.USE_OPENAI]: [
-        { id: 'new-model', envKey: 'TEST_API_KEY' },
-        {
-          id: 'preserved',
-          envKey: 'OTHER_API_KEY',
-          generationConfig: { contextWindowSize: 456 },
-        },
-      ],
+      [AuthType.USE_OPENAI]: merged,
     });
     expect(syncAuthState).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
@@ -934,38 +894,22 @@ describe('applyProviderInstallPlan', () => {
   it('can skip immediate auth refresh', async () => {
     const adapter = createAdapter();
     const refreshAuth = vi.fn(async () => undefined);
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'sk-test' },
-    };
+    const plan = makePlan({ env: { TEST_API_KEY: 'sk-test' } });
 
-    await applyProviderInstallPlan(plan, {
-      settings: adapter,
-      refreshAuth,
-      doRefreshAuth: false,
-    });
+    await apply(plan, adapter, { refreshAuth, doRefreshAuth: false });
 
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'env.TEST_API_KEY',
-      'sk-test',
-    );
+    expectSet(adapter, { 'env.TEST_API_KEY': 'sk-test' });
     expect(refreshAuth).not.toHaveBeenCalled();
   });
 
   it('prints a shadowing warning when an env key changes', async () => {
     process.env['SHADOW_KEY'] = 'old-value';
-    const adapter = createAdapter();
     const consoleError = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { SHADOW_KEY: 'new-value' },
-    };
+    const plan = makePlan({ env: { SHADOW_KEY: 'new-value' } });
 
-    await applyProviderInstallPlan(plan, { settings: adapter });
+    await apply(plan);
 
     expect(consoleError).toHaveBeenCalledWith(
       expect.stringContaining('SHADOW_KEY is also set'),
@@ -976,236 +920,146 @@ describe('applyProviderInstallPlan', () => {
   it('does not print a shadowing warning for same or empty env values', async () => {
     process.env['SHADOW_KEY'] = 'same-value';
     process.env['EMPTY_SHADOW_KEY'] = '';
-    const adapter = createAdapter();
     const consoleError = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: {
-        SHADOW_KEY: 'same-value',
-        EMPTY_SHADOW_KEY: 'filled-value',
-      },
-    };
+    const plan = makePlan({
+      env: { SHADOW_KEY: 'same-value', EMPTY_SHADOW_KEY: 'filled-value' },
+    });
 
-    await applyProviderInstallPlan(plan, { settings: adapter });
+    await apply(plan);
 
     expect(consoleError).not.toHaveBeenCalled();
     expect(process.env['SHADOW_KEY']).toBe('same-value');
     expect(process.env['EMPTY_SHADOW_KEY']).toBe('filled-value');
   });
 
-  it('uses patch ownsModel for merge filtering', async () => {
-    const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: [
+  it('uses patch ownsModel for merge filtering', () =>
+    expectMerged(
+      [
         { id: 'old-a', envKey: 'A' },
         { id: 'old-b', envKey: 'B' },
       ],
-    });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'new-a', envKey: 'A' }],
-          mergeStrategy: 'prepend-and-remove-owned',
-          ownsModel: (model) => model.envKey === 'A',
-        },
+      modelsPlan([{ id: 'new-a', envKey: 'A' }], {
+        ownsModel: (model) => model.envKey === 'A',
+      }),
+      [
+        { id: 'new-a', envKey: 'A' },
+        { id: 'old-b', envKey: 'B' },
       ],
-    };
+    ));
 
-    await applyProviderInstallPlan(plan, { settings: adapter });
-
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'new-a', envKey: 'A' },
-      { id: 'old-b', envKey: 'B' },
-    ]);
-  });
-
-  it('falls back to id+baseUrl identity when ownsModel is omitted', async () => {
-    const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: [
-        // Same id, different baseUrl → should be preserved (different identity)
+  it('falls back to id+baseUrl identity when ownsModel is omitted', () =>
+    expectMerged(
+      [
+        // Same id, different baseUrl → preserved (different identity)
         { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
-        // Same id+baseUrl as incoming → should be removed
+        // Same id+baseUrl as incoming → removed
         { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
-        // Different id, same baseUrl as incoming → should be preserved
+        // Different id, same baseUrl as incoming → preserved
         { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
       ],
-    });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' }],
-          mergeStrategy: 'prepend-and-remove-owned',
-          // ownsModel intentionally omitted — exercises isSameModelIdentity path
-        },
+      // ownsModel intentionally omitted — exercises isSameModelIdentity path
+      modelsPlan([{ id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' }]),
+      [
+        { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+        { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
+        { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
       ],
-    };
+    ));
 
-    await applyProviderInstallPlan(plan, { settings: adapter });
+  it('appends models with append merge strategy', () =>
+    expectMerged(
+      [
+        { id: 'existing-1', envKey: 'A' },
+        { id: 'existing-2', envKey: 'B' },
+      ],
+      modelsPlan([{ id: 'new-model', envKey: 'C' }], {
+        mergeStrategy: 'append',
+      }),
+      [
+        { id: 'existing-1', envKey: 'A' },
+        { id: 'existing-2', envKey: 'B' },
+        { id: 'new-model', envKey: 'C' },
+      ],
+    ));
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
-      { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
-      { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
-    ]);
-  });
+  it('replaces owned models with replace-owned strategy (appends new at end)', () =>
+    expectMerged(
+      [
+        { id: 'owned-1', envKey: 'A' },
+        { id: 'unrelated', envKey: 'B' },
+        { id: 'owned-2', envKey: 'A' },
+      ],
+      modelsPlan([{ id: 'new-a', envKey: 'A' }], {
+        mergeStrategy: 'replace-owned',
+        ownsModel: (model) => model.envKey === 'A',
+      }),
+      [
+        { id: 'unrelated', envKey: 'B' },
+        { id: 'new-a', envKey: 'A' },
+      ],
+    ));
 
   it.each([false, true])(
     'preserves the other API sibling when installing Responses (ownsModel=%s)',
     async (owned) => {
-      const baseUrl = 'https://gateway.test/v1';
-      const chat = { id: 'same', baseUrl, envKey: 'TEST_API_KEY' };
-      const responses = {
-        id: 'same',
-        baseUrl,
-        wireApi: 'responses' as const,
-        envKey: 'TEST_API_KEY',
-      };
-      const adapter = createAdapter({
-        openai: [chat, { ...responses, name: 'old' }],
-      });
-      vi.mocked(adapter.getValue).mockImplementation(
-        (key) =>
-          (
-            ({
-              'security.auth.selectedType': AuthType.USE_OPENAI,
-              'model.name': 'same',
-              'model.baseUrl': baseUrl,
-            }) as Record<string, unknown>
-          )[key],
+      const chat = { id: 'same', baseUrl: GATEWAY, envKey: 'TEST_API_KEY' };
+      const responses = { ...chat, wireApi: 'responses' as const };
+      const { adapter, syncAuthState } = await installResponses(
+        { openai: [chat, { ...responses, name: 'old' }] },
+        'same',
+        [responses],
+        'same',
+        owned ? { ownsModel: () => true } : {},
       );
-      const syncAuthState = vi.fn();
-      await applyProviderInstallPlan(
-        {
-          providerId: 'test',
-          authType: AuthType.USE_OPENAI_RESPONSES,
-          modelSelection: { modelId: 'same', baseUrl },
-          modelProviders: [
-            {
-              authType: AuthType.USE_OPENAI,
-              models: [responses],
-              mergeStrategy: 'prepend-and-remove-owned',
-              ...(owned ? { ownsModel: () => true } : {}),
-            },
-          ],
-        },
-        { settings: adapter, syncAuthState },
-      );
-      expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-        responses,
-        chat,
-      ]);
+      expectSet(adapter, { 'modelProviders.openai': [responses, chat] });
       expect(syncAuthState).toHaveBeenCalledWith(
         AuthType.USE_OPENAI_RESPONSES,
         'same',
-        baseUrl,
+        GATEWAY,
       );
     },
   );
 
   it('preserves a non-first canonical Responses selection across reinstall', async () => {
-    const baseUrl = 'https://gateway.test/v1';
     const models = ['first', 'chosen'].map((id) => ({
       id,
-      baseUrl,
+      baseUrl: GATEWAY,
       wireApi: 'responses' as const,
     }));
-    const adapter = createAdapter({ openai: models });
-    vi.mocked(adapter.getValue).mockImplementation(
-      (key) =>
-        (
-          ({
-            'security.auth.selectedType': AuthType.USE_OPENAI,
-            'model.name': 'chosen',
-            'model.baseUrl': baseUrl,
-          }) as Record<string, unknown>
-        )[key],
-    );
-    const syncAuthState = vi.fn();
-    await applyProviderInstallPlan(
-      {
-        providerId: 'test',
-        authType: AuthType.USE_OPENAI_RESPONSES,
-        modelSelection: { modelId: 'first', baseUrl },
-        modelProviders: [
-          {
-            authType: AuthType.USE_OPENAI,
-            models,
-            mergeStrategy: 'prepend-and-remove-owned',
-          },
-        ],
-      },
-      { settings: adapter, syncAuthState },
+    const { adapter, syncAuthState } = await installResponses(
+      { openai: models },
+      'chosen',
+      models,
+      'first',
     );
     // The reinstall still persists the merged providers map — preserving the
     // selection must not silently skip the install itself.
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'modelProviders.openai',
-      models,
-    );
-    expect(adapter.setValue).not.toHaveBeenCalledWith(
-      'model.name',
-      expect.anything(),
-    );
+    expectSet(adapter, { 'modelProviders.openai': models });
+    expectNotSet(adapter, 'model.name');
     expect(syncAuthState).not.toHaveBeenCalled();
   });
 
   it('keeps a non-first current model when reinstalling across an API route change', async () => {
-    const baseUrl = 'https://gateway.test/v1';
     const chatModels = ['glm-4.6', 'qwen3-max', 'deepseek-v3'].map((id) => ({
       id,
-      baseUrl,
+      baseUrl: GATEWAY,
       envKey: 'TEST_API_KEY',
     }));
-    const responsesModels = chatModels.map((model) => ({
-      ...model,
-      wireApi: 'responses' as const,
-    }));
-    const adapter = createAdapter({ openai: chatModels });
-    vi.mocked(adapter.getValue).mockImplementation(
-      (key) =>
-        (
-          ({
-            'security.auth.selectedType': AuthType.USE_OPENAI,
-            'model.name': 'qwen3-max',
-            'model.baseUrl': baseUrl,
-          }) as Record<string, unknown>
-        )[key],
-    );
-    const syncAuthState = vi.fn();
-    await applyProviderInstallPlan(
-      {
-        providerId: 'test',
-        authType: AuthType.USE_OPENAI_RESPONSES,
-        modelSelection: { modelId: 'glm-4.6', baseUrl },
-        modelProviders: [
-          {
-            authType: AuthType.USE_OPENAI,
-            models: responsesModels,
-            mergeStrategy: 'prepend-and-remove-owned',
-          },
-        ],
-      },
-      { settings: adapter, syncAuthState },
+    const { adapter, syncAuthState } = await installResponses(
+      { openai: chatModels },
+      'qwen3-max',
+      chatModels.map((model) => ({ ...model, wireApi: 'responses' as const })),
+      'glm-4.6',
     );
     // The plan still offers the user's chosen model on the new route: keep it
-    // instead of adopting the plan's first model, but still re-sync the live
-    // session onto the new wire.
-    expect(adapter.setValue).not.toHaveBeenCalledWith(
-      'model.name',
-      expect.anything(),
-    );
+    // over the plan's first model, but re-sync the live session onto the wire.
+    expectNotSet(adapter, 'model.name');
     expect(syncAuthState).toHaveBeenCalledWith(
       AuthType.USE_OPENAI_RESPONSES,
       'qwen3-max',
-      baseUrl,
+      GATEWAY,
     );
   });
 
@@ -1215,21 +1069,11 @@ describe('applyProviderInstallPlan', () => {
       envKey: 'TEST_API_KEY',
       wireApi: 'invalid' as ModelConfig['wireApi'],
     };
-    const adapter = createAdapter({ openai: [invalid] });
-    const result = await applyProviderInstallPlan(
-      {
-        providerId: 'test',
-        authType: AuthType.USE_OPENAI,
-        modelProviders: [
-          {
-            authType: AuthType.USE_OPENAI,
-            models: [{ id: 'new', envKey: 'TEST_API_KEY' }],
-            mergeStrategy: 'prepend-and-remove-owned',
-            ownsModel: (model) => model.envKey === 'TEST_API_KEY',
-          },
-        ],
-      },
-      { settings: adapter },
+    const result = await apply(
+      modelsPlan([{ id: 'new', envKey: 'TEST_API_KEY' }], {
+        ownsModel: (model) => model.envKey === 'TEST_API_KEY',
+      }),
+      createAdapter({ openai: [invalid] }),
     );
     expect(result.updatedModelProviders['openai']).toEqual([
       { id: 'new', envKey: 'TEST_API_KEY' },
@@ -1238,38 +1082,27 @@ describe('applyProviderInstallPlan', () => {
   });
 
   it('does not let an invalid api elsewhere in settings abort a non-OpenAI install', async () => {
-    const adapter = createAdapter({
-      openai: [
-        { id: 'm', envKey: 'A', wireApi: 'response' as ModelConfig['wireApi'] },
-      ],
-    });
-    vi.mocked(adapter.getValue).mockImplementation(
-      (key) =>
-        (
-          ({
-            'security.auth.selectedType': AuthType.USE_OPENAI,
-            'model.name': 'm',
-          }) as Record<string, unknown>
-        )[key],
+    const adapter = createAdapter(
+      {
+        openai: [
+          {
+            id: 'm',
+            envKey: 'A',
+            wireApi: 'response' as ModelConfig['wireApi'],
+          },
+        ],
+      },
+      { 'security.auth.selectedType': AuthType.USE_OPENAI, 'model.name': 'm' },
     );
     // The pre-install wire resolution scans every modelProviders entry, so an
     // invalid `wireApi` in an unrelated bucket would throw ahead of the plan's own
     // error contract. A non-OpenAI plan never consults it.
-    const plan: ProviderInstallPlan = {
-      providerId: 'anthropic',
-      authType: AuthType.USE_ANTHROPIC,
-      modelSelection: { modelId: 'm' },
-      modelProviders: [
-        {
-          authType: AuthType.USE_ANTHROPIC,
-          models: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
-          mergeStrategy: 'prepend-and-remove-owned',
-        },
-      ],
-    };
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).resolves.toMatchObject({
+    const plan = modelsPlan(
+      [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
+      { authType: AuthType.USE_ANTHROPIC },
+      { authType: AuthType.USE_ANTHROPIC, modelSelection: { modelId: 'm' } },
+    );
+    await expect(apply(plan, adapter)).resolves.toMatchObject({
       updatedModelProviders: {
         anthropic: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
       },
@@ -1280,42 +1113,16 @@ describe('applyProviderInstallPlan', () => {
     // The pre-install wire probe walks every bucket of the previous providers
     // map with the throwing resolver; an invalid `wireApi` in a bucket the plan
     // never touches must skip the probe, not refuse the install.
-    const adapter = createAdapter({
-      idealab: [
-        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
-      ],
-    });
-    vi.mocked(adapter.getValue).mockImplementation(
-      (key) =>
-        (
-          ({
-            'security.auth.selectedType': AuthType.USE_OPENAI,
-            'model.name': 'q1',
-            providerProtocol: { idealab: 'openai' },
-          }) as Record<string, unknown>
-        )[key],
+    const adapter = idealabAdapter({}, { 'model.name': 'q1' });
+    const plan = modelsPlan(
+      [{ id: 'q1', envKey: 'TEST_API_KEY', wireApi: 'responses' as const }],
+      undefined,
+      {
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelSelection: { modelId: 'q1' },
+      },
     );
-    const plan: ProviderInstallPlan = {
-      providerId: 'openai',
-      authType: AuthType.USE_OPENAI_RESPONSES,
-      modelSelection: { modelId: 'q1' },
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [
-            {
-              id: 'q1',
-              envKey: 'TEST_API_KEY',
-              wireApi: 'responses' as const,
-            },
-          ],
-          mergeStrategy: 'prepend-and-remove-owned',
-        },
-      ],
-    };
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).resolves.toMatchObject({
+    await expect(apply(plan, adapter)).resolves.toMatchObject({
       updatedModelProviders: {
         openai: [{ id: 'q1', envKey: 'TEST_API_KEY', wireApi: 'responses' }],
       },
@@ -1326,13 +1133,10 @@ describe('applyProviderInstallPlan', () => {
     // The voice-conflict probe rebuilds a registry over every bucket of the
     // prospective providers map, and the registry constructor validates each
     // entry. An invalid `wireApi` in a bucket the plan never touches must not
-    // refuse the install — least of all with a bare Error the daemon answers
-    // as a 500 instead of the 400 `model_purpose_conflict`.
+    // refuse the install, least of all with a bare Error the daemon answers as
+    // a 500 instead of the 400 `model_purpose_conflict`.
     const baseUrl = 'https://voice.example/v1';
-    const adapter = createAdapter({
-      idealab: [
-        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
-      ],
+    const adapter = idealabAdapter({
       openai: [
         {
           id: 'qwen3-asr-flash',
@@ -1342,24 +1146,8 @@ describe('applyProviderInstallPlan', () => {
         },
       ],
     });
-    vi.mocked(adapter.getValue).mockImplementation(
-      (key) =>
-        (
-          ({
-            'security.auth.selectedType': AuthType.USE_OPENAI,
-            providerProtocol: { idealab: 'openai' },
-          }) as Record<string, unknown>
-        )[key],
-    );
-    const plan = buildInstallPlan(customProvider, {
-      baseUrl,
-      apiKey: 'unused',
-      modelIds: ['qwen3-asr-flash'],
-      advancedConfig: { purpose: 'voice' },
-    });
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).resolves.toMatchObject({
+    const plan = asrPlan(baseUrl, { purpose: 'voice' });
+    await expect(apply(plan, adapter)).resolves.toMatchObject({
       updatedModelProviders: {
         openai: [{ id: 'qwen3-asr-flash', baseUrl, voiceOnly: true }],
       },
@@ -1370,37 +1158,9 @@ describe('applyProviderInstallPlan', () => {
     // Same map, but the plan reconnects the voice id at another endpoint: the
     // refusal must still be the `modelPurpose` ProviderInstallError the daemon
     // maps to `model_purpose_conflict`, not the registry's validation Error.
-    const adapter = createAdapter({
-      idealab: [
-        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
-      ],
-      openai: [
-        {
-          id: 'qwen3-asr-flash',
-          baseUrl: 'https://first.example/v1',
-          voiceOnly: true,
-          envKey: 'FIRST',
-        },
-      ],
-    });
-    vi.mocked(adapter.getValue).mockImplementation(
-      (key) =>
-        (
-          ({
-            'security.auth.selectedType': AuthType.USE_OPENAI,
-            providerProtocol: { idealab: 'openai' },
-          }) as Record<string, unknown>
-        )[key],
-    );
-    const plan = buildInstallPlan(customProvider, {
-      baseUrl: 'https://second.example/v1',
-      apiKey: 'unused',
-      modelIds: ['qwen3-asr-flash'],
-      advancedConfig: { purpose: 'voice' },
-    });
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).rejects.toMatchObject({
+    const adapter = idealabAdapter({ openai: [firstVoice()] });
+    const plan = asrPlan('https://second.example/v1', { purpose: 'voice' });
+    await expect(apply(plan, adapter)).rejects.toMatchObject({
       name: 'ProviderInstallError',
       step: 'modelPurpose',
     });
@@ -1408,42 +1168,35 @@ describe('applyProviderInstallPlan', () => {
   });
 
   it('retires a recorded model-list version when reinstalling on the Responses route', async () => {
+    const baseUrl = 'https://api.test.com/v1';
     const preset: ProviderConfig = {
       id: 'test',
       label: 'Test',
       description: 'Test',
       protocol: AuthType.USE_OPENAI,
-      baseUrl: 'https://api.test.com/v1',
+      baseUrl,
       envKey: 'TEST_API_KEY',
       models: [{ id: 'model-a' }],
       modelNamePrefix: 'Test',
     };
     const adapter = createAdapter();
-    const defaultPlan = buildInstallPlan(preset, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
-    });
+    const inputs = { baseUrl, apiKey: 'sk-test', modelIds: ['model-a'] };
+    const defaultPlan = buildInstallPlan(preset, inputs);
     expect(
       defaultPlan.providerState?.['providerMetadata.test']?.['version'],
     ).toBeDefined();
 
     const responsesPlan = buildInstallPlan(preset, {
-      baseUrl: 'https://api.test.com/v1',
-      apiKey: 'sk-test',
-      modelIds: ['model-a'],
+      ...inputs,
       wireApi: 'responses',
     });
-    await applyProviderInstallPlan(responsesPlan, { settings: adapter });
+    await apply(responsesPlan, adapter);
 
     // The drift check's template rebuild can never reproduce an api-stamped
-    // install's version, so the reinstall must retire the version the
-    // default-route install recorded — otherwise the next template change
-    // prompts a spurious update whose accept path duplicates every model.
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'providerMetadata.test.version',
-      undefined,
-    );
+    // install's version, so the reinstall retires the default route's one;
+    // otherwise the next template change prompts a spurious update whose
+    // accept path duplicates every model.
+    expectSet(adapter, { 'providerMetadata.test.version': undefined });
   });
 
   it('preserves existing custom provider models and selects the installed endpoint', async () => {
@@ -1451,27 +1204,16 @@ describe('applyProviderInstallPlan', () => {
     const otherBaseUrl = 'http://192.168.100.100:8000/v1';
     const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
     const otherEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, otherBaseUrl);
+    const other = { baseUrl: otherBaseUrl, envKey: otherEnvKey };
+    // model-b at another baseUrl: keep both and select the one just installed.
+    const stored = () => [
+      { id: 'model-b', name: 'model-b', ...other },
+      { id: 'model-a', name: 'model-a', baseUrl, envKey },
+      { id: 'shared-model', name: 'shared-model', ...other },
+    ];
     const syncAuthState = vi.fn();
-    const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: [
-        // Same model id, different baseUrl: keep both and select the one just
-        // installed.
-        {
-          id: 'model-b',
-          name: 'model-b',
-          baseUrl: otherBaseUrl,
-          envKey: otherEnvKey,
-        },
-        { id: 'model-a', name: 'model-a', baseUrl, envKey },
-        {
-          id: 'shared-model',
-          name: 'shared-model',
-          baseUrl: otherBaseUrl,
-          envKey: otherEnvKey,
-        },
-      ],
-    });
-    const plan = buildInstallPlan(customProvider, {
+    const adapter = createAdapter({ [AuthType.USE_OPENAI]: stored() });
+    const plan = customPlan({
       protocol: AuthType.USE_OPENAI,
       baseUrl,
       apiKey: 'sk-new',
@@ -1481,39 +1223,17 @@ describe('applyProviderInstallPlan', () => {
     expect(plan.modelProviders?.[0]?.ownsModel).toBeUndefined();
     expect(plan.modelSelection).toEqual({ modelId: 'model-b', baseUrl });
 
-    try {
-      await applyProviderInstallPlan(plan, {
-        settings: adapter,
-        syncAuthState,
-        doRefreshAuth: false,
-      });
-    } finally {
-      delete process.env[envKey];
-    }
+    preserveEnv(envKey);
+    await apply(plan, adapter, { syncAuthState, doRefreshAuth: false });
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      {
-        id: 'model-b',
-        name: 'model-b',
-        baseUrl,
-        envKey,
-      },
-      {
-        id: 'model-b',
-        name: 'model-b',
-        baseUrl: otherBaseUrl,
-        envKey: otherEnvKey,
-      },
-      { id: 'model-a', name: 'model-a', baseUrl, envKey },
-      {
-        id: 'shared-model',
-        name: 'shared-model',
-        baseUrl: otherBaseUrl,
-        envKey: otherEnvKey,
-      },
-    ]);
-    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'model-b');
-    expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', baseUrl);
+    expectSet(adapter, {
+      'modelProviders.openai': [
+        { id: 'model-b', name: 'model-b', baseUrl, envKey },
+        ...stored(),
+      ],
+      'model.name': 'model-b',
+      'model.baseUrl': baseUrl,
+    });
     expect(syncAuthState).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
       'model-b',
@@ -1523,137 +1243,49 @@ describe('applyProviderInstallPlan', () => {
 
   it('writes provider state and legacy credentials', async () => {
     const adapter = createAdapter();
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
+    const plan = makePlan({
       legacyCredentials: {
         apiKey: 'legacy-key',
         baseUrl: 'https://example.com/v1',
       },
       providerState: {
-        codingPlan: {
-          baseUrl: 'https://coding.example.com/v1',
-          version: 'v1',
-        },
+        codingPlan: { baseUrl: 'https://coding.example.com/v1', version: 'v1' },
       },
-    };
-
-    await applyProviderInstallPlan(plan, { settings: adapter });
-
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'security.auth.apiKey',
-      'legacy-key',
-    );
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'security.auth.baseUrl',
-      'https://example.com/v1',
-    );
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'codingPlan.baseUrl',
-      'https://coding.example.com/v1',
-    );
-    expect(adapter.setValue).toHaveBeenCalledWith('codingPlan.version', 'v1');
-  });
-
-  it('appends models with append merge strategy', async () => {
-    const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: [
-        { id: 'existing-1', envKey: 'A' },
-        { id: 'existing-2', envKey: 'B' },
-      ],
     });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'new-model', envKey: 'C' }],
-          mergeStrategy: 'append',
-        },
-      ],
-    };
 
-    await applyProviderInstallPlan(plan, { settings: adapter });
+    await apply(plan, adapter);
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'existing-1', envKey: 'A' },
-      { id: 'existing-2', envKey: 'B' },
-      { id: 'new-model', envKey: 'C' },
-    ]);
-  });
-
-  it('replaces owned models with replace-owned strategy (appends new at end)', async () => {
-    const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: [
-        { id: 'owned-1', envKey: 'A' },
-        { id: 'unrelated', envKey: 'B' },
-        { id: 'owned-2', envKey: 'A' },
-      ],
+    expectSet(adapter, {
+      'security.auth.apiKey': 'legacy-key',
+      'security.auth.baseUrl': 'https://example.com/v1',
+      'codingPlan.baseUrl': 'https://coding.example.com/v1',
+      'codingPlan.version': 'v1',
     });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'new-a', envKey: 'A' }],
-          mergeStrategy: 'replace-owned',
-          ownsModel: (model) => model.envKey === 'A',
-        },
-      ],
-    };
-
-    await applyProviderInstallPlan(plan, { settings: adapter });
-
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'unrelated', envKey: 'B' },
-      { id: 'new-a', envKey: 'A' },
-    ]);
   });
 
   it('rolls back process.env on error', async () => {
     process.env['TEST_API_KEY'] = 'old-value';
     const adapter = createAdapter();
-    const refreshAuth = vi.fn(async () => {
-      throw new Error('network error');
-    });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'new-value' },
-    };
+    const plan = makePlan({ env: { TEST_API_KEY: 'new-value' } });
 
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter, refreshAuth }),
-    ).rejects.toThrow('network error');
+    await failRefresh(plan, adapter, 'network error');
 
     expect(process.env['TEST_API_KEY']).toBe('old-value');
     expect(adapter.restore).toHaveBeenCalled();
   });
 
   it('deletes env var on rollback if it did not exist before', async () => {
-    const adapter = createAdapter();
-    const refreshAuth = vi.fn(async () => {
-      throw new Error('fail');
-    });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { BRAND_NEW_KEY: 'value' },
-    };
+    const plan = makePlan({ env: { BRAND_NEW_KEY: 'value' } });
 
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter, refreshAuth }),
-    ).rejects.toThrow('fail');
+    await failRefresh(plan, createAdapter(), 'fail');
 
     expect(process.env['BRAND_NEW_KEY']).toBeUndefined();
   });
 
   // -- Rollback safety nets -------------------------------------------------
-  // The catch path in applyProviderInstallPlan has three deliberate
-  // safety nets that were previously untested. These tests pin them down so
-  // a future refactor that "simplifies" the catch can't silently regress.
+  // The catch path in applyProviderInstallPlan has three deliberate safety
+  // nets, previously untested; these pin them down so a refactor that
+  // "simplifies" the catch can't silently regress.
 
   it('restores runtime model providers when refreshAuth rejects after reloadModelProviders ran', async () => {
     const previousProviders = {
@@ -1661,34 +1293,18 @@ describe('applyProviderInstallPlan', () => {
     };
     const adapter = createAdapter(previousProviders);
     const reloadModelProviders = vi.fn();
-    const refreshAuth = vi.fn(async () => {
-      throw new Error('refreshAuth rejected');
+    const plan = modelsPlan(
+      [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
+      { ownsModel: (model) => model.envKey === 'TEST_API_KEY' },
+      { env: { TEST_API_KEY: 'sk-new' } },
+    );
+
+    await failRefresh(plan, adapter, 'refreshAuth rejected', {
+      reloadModelProviders,
     });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'sk-new' },
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
-          mergeStrategy: 'prepend-and-remove-owned',
-          ownsModel: (model) => model.envKey === 'TEST_API_KEY',
-        },
-      ],
-    };
 
-    await expect(
-      applyProviderInstallPlan(plan, {
-        settings: adapter,
-        reloadModelProviders,
-        refreshAuth,
-      }),
-    ).rejects.toThrow('refreshAuth rejected');
-
-    // Two reload calls: the success-path one with the patched providers,
-    // then a rollback one that hands back the snapshot we took *before*
-    // applying any patches.
+    // Two reloads: the success-path one with the patched providers, then the
+    // rollback one handing back the snapshot taken *before* any patch.
     expect(reloadModelProviders).toHaveBeenCalledTimes(2);
     expect(reloadModelProviders).toHaveBeenLastCalledWith(previousProviders);
   });
@@ -1699,20 +1315,12 @@ describe('applyProviderInstallPlan', () => {
     adapter.backup.mockImplementation(() => {
       throw new Error('backup failed');
     });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'new-value' },
-    };
+    const plan = makePlan({ env: { TEST_API_KEY: 'new-value' } });
 
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter }),
-    ).rejects.toThrow('backup failed');
+    await expect(apply(plan, adapter)).rejects.toThrow('backup failed');
 
-    // backup() throwing inside the try must still hand control to the
-    // catch path so env vars are restored. (Before this commit's
-    // "backup inside try" fix the throw escaped uncaught and env vars
-    // leaked.)
+    // A backup() throw inside the try must still reach the env rollback (before
+    // the "backup inside try" fix it escaped uncaught and env vars leaked).
     expect(process.env['TEST_API_KEY']).toBe('old-value');
   });
 
@@ -1722,18 +1330,9 @@ describe('applyProviderInstallPlan', () => {
     adapter.restore.mockImplementation(() => {
       throw new Error('restore failed');
     });
-    const refreshAuth = vi.fn(async () => {
-      throw new Error('original error');
-    });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'during-install' },
-    };
+    const plan = makePlan({ env: { TEST_API_KEY: 'during-install' } });
 
-    await expect(
-      applyProviderInstallPlan(plan, { settings: adapter, refreshAuth }),
-    ).rejects.toThrow('original error');
+    await failRefresh(plan, adapter, 'original error');
 
     // restore() throwing must not mask the original error and must not skip
     // the env-var rollback loop that runs after it.
@@ -1743,32 +1342,18 @@ describe('applyProviderInstallPlan', () => {
 
   it('annotates the rethrown error with the failing step and preserves the original cause', async () => {
     process.env['TEST_API_KEY'] = 'old';
-    const adapter = createAdapter();
-    const refreshAuth = vi.fn(async () => {
-      throw new Error('endpoint unreachable');
-    });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'new' },
-    };
+    const refreshAuth = rejecting('endpoint unreachable');
+    const plan = makePlan({ env: { TEST_API_KEY: 'new' } });
 
-    let caught: unknown;
-    try {
-      await applyProviderInstallPlan(plan, {
-        settings: adapter,
-        refreshAuth,
-      });
-    } catch (err) {
-      caught = err;
-    }
+    const caught: unknown = await apply(plan, createAdapter(), {
+      refreshAuth,
+    }).catch((err: unknown) => err);
 
     expect(caught).toBeInstanceOf(Error);
-    // ProviderInstallError is a class, so instanceof works at runtime.
-    expect(caught).toBeInstanceOf(ProviderInstallError);
+    expect(caught).toBeInstanceOf(ProviderInstallError); // a class at runtime
     const err = caught as ProviderInstallError & { cause?: Error };
-    // Step + authType are structured properties (not baked into the
-    // user-facing message, which stays the underlying error text).
+    // Step + authType are structured properties; the user-facing message stays
+    // the underlying error text.
     expect(err.step).toBe('refreshAuth');
     expect(err.authType).toBe('openai');
     expect(err.message).toBe('endpoint unreachable');
@@ -1786,28 +1371,14 @@ describe('applyProviderInstallPlan', () => {
     const adapter = createAdapter(previousProviders);
     let reloadCalls = 0;
     const reloadModelProviders = vi.fn(() => {
-      reloadCalls += 1;
-      if (reloadCalls === 2) {
-        // The rollback-time reload (the second call) explodes.
-        throw new Error('reload restore failed');
-      }
+      // The rollback-time reload (the second call) explodes.
+      if (++reloadCalls === 2) throw new Error('reload restore failed');
     });
-    const refreshAuth = vi.fn(async () => {
-      throw new Error('original error');
-    });
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'during' },
-    };
+    const plan = makePlan({ env: { TEST_API_KEY: 'during' } });
 
-    await expect(
-      applyProviderInstallPlan(plan, {
-        settings: adapter,
-        reloadModelProviders,
-        refreshAuth,
-      }),
-    ).rejects.toThrow('original error');
+    await failRefresh(plan, adapter, 'original error', {
+      reloadModelProviders,
+    });
 
     // The rethrow must still carry the original error, env vars must still
     // be rolled back, and the broken rollback reload must not mask anything.

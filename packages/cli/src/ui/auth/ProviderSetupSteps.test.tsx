@@ -7,8 +7,14 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { AuthType, customProvider } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  customProvider,
+  qwencloudStandardProvider,
+  qwencloudTokenPlanProvider,
+} from '@qwen-code/qwen-code-core';
 import type { ModelSpec } from '@qwen-code/qwen-code-core';
+import { setLanguageAsync } from '../../i18n/index.js';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -188,9 +194,11 @@ describe('ProviderSetupSteps', () => {
 
   const createModelIdsFlow = ({
     modelIds = 'MiniMax-M3, MiniMax-M2.7',
+    explicitModelIds = [],
     submitModelIds = vi.fn(),
   }: {
     modelIds?: string;
+    explicitModelIds?: string[];
     submitModelIds?: ReturnType<typeof vi.fn>;
   } = {}): ProviderSetupFlow => {
     const noop = vi.fn();
@@ -226,6 +234,7 @@ describe('ProviderSetupSteps', () => {
         apiKey: '',
         apiKeyError: null,
         modelIds,
+        explicitModelIds,
         modelIdsError: null,
         thinkingEnabled: false,
         modalityEnabled: false,
@@ -531,6 +540,7 @@ describe('ProviderSetupSteps', () => {
     const flow = createModelIdsFlow({
       modelIds: 'custom-model, MiniMax-M3, MiniMax-M2.7',
       submitModelIds,
+      explicitModelIds: ['MiniMax-M2.7'],
     });
     enableDiscovery(flow);
     const { lastFrame, unmount } = renderWithProviders(
@@ -779,7 +789,8 @@ describe('ProviderSetupSteps', () => {
 
   it('falls back to built-ins after an unavailable catalog', async () => {
     discoverProviderModelsMock.mockResolvedValue(null);
-    const flow = createModelIdsFlow();
+    const submitModelIds = vi.fn();
+    const flow = createModelIdsFlow({ submitModelIds });
     enableDiscovery(flow);
 
     const { lastFrame, unmount } = renderWithProviders(
@@ -793,6 +804,10 @@ describe('ProviderSetupSteps', () => {
     );
     expect(frame).not.toContain('Other models from the provider');
     expect(frame).toContain('MiniMax-M2.7');
+    pressKey('return', '\r');
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['MiniMax-M3', 'MiniMax-M2.7'],
+    });
     unmount();
   });
 
@@ -809,7 +824,7 @@ describe('ProviderSetupSteps', () => {
     expect(signal.aborted).toBe(true);
   });
 
-  it('submits served recommendations ahead of unserved defaults on a partial catalog', async () => {
+  it('does not submit undiscovered defaults as custom models', async () => {
     let resolveDiscovery!: (models: ModelSpec[]) => void;
     discoverProviderModelsMock.mockReturnValue(
       new Promise<ModelSpec[]>((resolve) => {
@@ -817,8 +832,7 @@ describe('ProviderSetupSteps', () => {
       }),
     );
     const submitModelIds = vi.fn();
-    // Defaults are pre-selected; the catalog serves MiniMax-M3 but not the
-    // built-in MiniMax-M2.7, which the step demotes into the free-form input.
+    // The account's catalog omits a preselected built-in model.
     const flow = createModelIdsFlow({ submitModelIds });
     enableDiscovery(flow);
 
@@ -834,13 +848,101 @@ describe('ProviderSetupSteps', () => {
 
     pressKey('return', '\r');
 
-    // The no-edit submit must lead with a catalog-served model: models[0]
-    // becomes modelSelection and is written as model.name on first-time setup.
     expect(submitModelIds).toHaveBeenCalledWith({
-      modelIds: ['MiniMax-M3', 'MiniMax-M2.7'],
+      modelIds: ['MiniMax-M3'],
     });
     unmount();
   });
+
+  it('preserves saved and manually entered models absent from discovery', async () => {
+    discoverProviderModelsMock.mockResolvedValue([{ id: 'MiniMax-M3' }]);
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const provider = createModelIdsFlow().state.provider!;
+    let flow: ProviderSetupFlow | undefined;
+    const Harness = () => {
+      flow = useProviderSetupFlow(onSubmit);
+      return <ProviderSetupSteps flow={flow} />;
+    };
+    const { lastFrame, unmount } = renderWithProviders(<Harness />);
+    try {
+      await act(async () => {
+        flow?.start(
+          { ...provider, supportsModelDiscovery: true },
+          undefined,
+          undefined,
+          ['MiniMax-M2.7', 'saved-model'],
+        );
+      });
+      await act(async () => {
+        flow?.submitApiKey('sk-test');
+      });
+      await act(async () => {});
+      expect(lastFrame()).toContain('MiniMax-M2.7, saved-model');
+      expect(lastFrame()).not.toContain('MiniMax-M2.5');
+
+      await act(async () => {
+        pressLatestKey('x', 'MiniMax-M2.5, ');
+      });
+      await act(async () => {
+        pressLatestKey('return', '\r');
+      });
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ id: provider.id }),
+        expect.objectContaining({
+          modelIds: [
+            'MiniMax-M3',
+            'MiniMax-M2.5',
+            'MiniMax-M2.7',
+            'saved-model',
+          ],
+        }),
+      );
+    } finally {
+      unmount();
+    }
+  });
+
+  it.each([
+    {
+      provider: qwencloudStandardProvider,
+      key: 'sk-sp-dummy',
+      errorText: '无效的 API Key。按量付费 Key',
+    },
+    {
+      provider: qwencloudTokenPlanProvider,
+      key: 'sk-dummy',
+      errorText: '无效的 API Key。Token Plan API Key',
+    },
+  ])(
+    'translates $provider.id key validation errors into Chinese',
+    async ({ provider, key, errorText }) => {
+      let flow: ProviderSetupFlow | undefined;
+      const ApiKeyFlowHarness = () => {
+        flow = useProviderSetupFlow(async () => {});
+        return <ProviderSetupSteps flow={flow} />;
+      };
+      const { lastFrame, unmount } = renderWithProviders(<ApiKeyFlowHarness />);
+
+      try {
+        await setLanguageAsync('zh');
+        await act(async () => {
+          flow?.start(provider);
+        });
+        await act(async () => {
+          flow?.selectBaseUrl(flow.state.baseUrl);
+        });
+        await act(async () => {
+          expect(flow?.submitApiKey(key)).toBe(false);
+        });
+
+        expect(flow?.state.step).toBe('apiKey');
+        expect(lastFrame()).toContain(errorText);
+      } finally {
+        unmount();
+        await setLanguageAsync('en');
+      }
+    },
+  );
 
   it('clears the model-ids error on edit after an empty discovery submit', async () => {
     discoverProviderModelsMock.mockResolvedValue([{ id: 'served-model' }]);

@@ -9,10 +9,17 @@ set -eo pipefail
 
 step="${1:?usage: run-release-step.sh <step>}"
 
+commit_release_version() {
+  git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
+  if git diff --staged --quiet; then
+    echo "No version changes to commit"
+  else
+    git commit -m "chore(release): ${RELEASE_TAG}"
+  fi
+}
+
 publish_package() {
   local directory="$1"
-  local published_marker="${2:-}"
-  local marker_value="${3:-}"
   (
     cd "${directory}"
     local package_name
@@ -25,10 +32,12 @@ publish_package() {
       echo "::notice::${package_name}@${RELEASE_VERSION} already published; skipping"
       exit 0
     fi
+    # npm, not pnpm: pnpm's packer writes 0644 for every entry outside `bin`, so
+    # the generated CLI's `vendor/ripgrep/*/rg` lost the exec bit that
+    # copy_bundle_assets.js restores on purpose — a fresh install then could not
+    # spawn the bundled ripgrep at all (#12668). npm keeps the working-tree mode.
+    # Only this generated package needs it; the workspace loop stays on pnpm.
     npm publish --provenance "${publish_args[@]}"
-    if [[ -n "${published_marker}" ]]; then
-      echo "${marker_value}" >> "${published_marker}"
-    fi
   )
 }
 
@@ -121,14 +130,48 @@ case "${step}" in
     npm run release:version "${RELEASE_VERSION}"
     ;;
 
+  commit-release-branch)
+    commit_release_version
+    ;;
+
+  pack-release)
+    handoff="${RUNNER_TEMP:?}/release-publish-build"
+    rm -rf -- "$handoff"
+    mkdir -p "$handoff"
+    "$0" pack-build
+    mv "${RUNNER_TEMP}/release-build.tgz" "$handoff/"
+    tar -czf "$handoff/audio-prebuilds.tgz" packages/audio-capture/prebuilds
+    release_commit="$(git rev-parse HEAD)"
+    if [[ "$release_commit" != "${RELEASE_SHA:?}" ]]; then
+      git bundle create "$handoff/version.bundle" "${RELEASE_SHA}..refs/heads/${BRANCH_NAME:?}"
+    fi
+    echo "release_commit=$release_commit" >> "${GITHUB_OUTPUT:?}"
+    ;;
+
+  restore-release)
+    handoff="${RUNNER_TEMP:?}/release-publish-build"
+    [[ "${RELEASE_COMMIT:?}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+    [[ "${RELEASE_SHA:?}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+    branch="release/${RELEASE_TAG:?}"
+    git check-ref-format "refs/heads/$branch"
+    if [[ "$RELEASE_COMMIT" == "$RELEASE_SHA" ]]; then
+      git switch -c "$branch" "$RELEASE_SHA"
+    else
+      git bundle verify "$handoff/version.bundle"
+      git fetch "$handoff/version.bundle" "refs/heads/$branch:refs/heads/$branch"
+      [[ "$(git rev-parse "$branch")" == "$RELEASE_COMMIT" ]] || exit 1
+      [[ "$(git rev-list --parents -n 1 "$RELEASE_COMMIT")" == "$RELEASE_COMMIT $RELEASE_SHA" ]] || exit 1
+      git switch "$branch"
+    fi
+    tar -xzf "$handoff/release-build.tgz"
+    tar -xzf "$handoff/audio-prebuilds.tgz"
+    test -s dist/cli.js
+    test -s dist/review-sources.sha256
+    ;;
+
   push-release-branch)
     release_branch_name="${BRANCH_NAME:?}"
-    git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
-    if git diff --staged --quiet; then
-      echo "No version changes to commit"
-    else
-      git commit -m "chore(release): ${RELEASE_TAG}"
-    fi
+    commit_release_version
     if [[ "${IS_DRY_RUN}" == "false" ]]; then
       # Keep the write credential unavailable until the push step needs it.
       export GH_TOKEN="${CI_BOT_PAT}"
@@ -170,6 +213,11 @@ case "${step}" in
       exit 1
     }
     npm run prepare:package
+    # Last check before the publish step: the tarball the registry will serve
+    # must carry the exec bit on every spawned vendored binary (#12668). The gate
+    # rides the workflow-pinned checkout, not the selected release ref, which may
+    # predate it; `dist` still resolves against the release ref's package.
+    node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist
     ;;
 
   build-archives)
@@ -181,25 +229,17 @@ case "${step}" in
     ;;
 
   publish-packages)
-    if [[ "${PUBLISH_EXTERNAL_CONTEXT_MEM0}" == "true" ]]; then
-      publish_package 'integrations/external-context-mem0'
+    package_names="$(node "$(dirname "$0")/../../scripts/release-packages.mjs")"
+    publish_args=(--access public "--tag=${NPM_TAG}" --no-git-checks --provenance)
+    while IFS= read -r name; do
+      publish_args+=("--filter=${name}")
+    done <<< "${package_names}"
+    if [[ "${IS_DRY_RUN}" == "true" ]]; then
+      # Exercise packing and lifecycle checks even for an existing version.
+      publish_args+=(--dry-run --force)
     fi
-    if [[ "${PUBLISH_AUDIO_CAPTURE}" == "true" ]]; then
-      publish_package 'packages/audio-capture'
-    fi
+    corepack pnpm -r publish "${publish_args[@]}"
     publish_package 'dist'
-    publish_package 'packages/channels/base'
-
-    publish_marker="$(mktemp)"
-    # Explicit allowlist: new channel packages require release approval.
-    for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do
-      echo "::group::Publishing @qwen-code/channel-${channel}"
-      publish_package "packages/channels/${channel}" "${publish_marker}" "${channel}"
-      echo "::endgroup::"
-    done
-    if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${publish_marker}" ]]; then
-      echo "::warning::Every channel package was already published; nothing shipped"
-    fi
     ;;
 
   verify-archives)
@@ -281,6 +321,8 @@ case "${step}" in
         "quality:${QUALITY_RESULT}" \
         "integration_none:${INTEGRATION_NONE_RESULT}" \
         "integration_docker:${INTEGRATION_DOCKER_RESULT}" \
+        "audio_capture_prebuilds:${AUDIO_PREBUILDS_RESULT}" \
+        "build_release:${BUILD_RELEASE_RESULT}" \
         "publish:${PUBLISH_RESULT}"; do
         name="${job%%:*}"
         result="${job#*:}"
@@ -379,6 +421,54 @@ BODY
       echo "::warning::Autofix dispatch failed; scheduled autofix can still pick up issue #${issue_number}."
       exit 1
     fi
+    ;;
+
+  reconcile-failure)
+    # Reached from a success-gated sibling job because notify-failure itself is
+    # skipped once a later attempt passes, leaving the issue it filed open for
+    # good (#15705). Bot authorship is a hard requirement: a human may have
+    # filed the same title to track the flakiness, and closing their issue
+    # would discard that follow-up.
+    #
+    # Shared with the VSCode companion and Chrome extension release workflows
+    # (#15840), which file their own issues: they pass FAILURE_TITLE_PREFIX and
+    # RELEASE_VERSION because their titles and version outputs differ from
+    # release.yml's.
+    release_version="${RELEASE_VERSION:-${RELEASE_TAG:-unknown}}"
+    title_prefix="${FAILURE_TITLE_PREFIX:-Release Failed for }"
+    existing_issue="$(
+      gh issue list --repo "${GH_REPO}" \
+        --state open \
+        --search "\"${title_prefix}${release_version}\" in:title" \
+        --limit 30 \
+        --json number,url,labels,author,title \
+      | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
+        '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "github-actions[bot]") ][0] // empty'
+    )"
+    if [[ -z "${existing_issue}" ]]; then
+      echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
+      exit 0
+    fi
+    issue_number="$(jq -r '.number' <<< "${existing_issue}")"
+    issue_url="$(jq -r '.url' <<< "${existing_issue}")"
+    body_file="$(mktemp)"
+    cat > "${body_file}" <<BODY
+The release completed successfully on a later attempt of this run, so the failure this issue reported is no longer current.
+
+Release tag: ${release_version}
+Run: ${DETAILS_URL} (attempt ${RUN_ATTEMPT:-unknown})
+
+Closing as not planned. Reopen if the ${release_version} artifacts later prove incomplete.
+BODY
+    gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" || {
+      echo "::warning::Failed to comment on ${issue_url}; closing regardless."
+    }
+    # Removed one at a time: `gh issue edit --remove-label` fails the whole call
+    # when any label is absent, and an absent label must not block the close.
+    for label in 'status/ready-for-agent' 'autofix/approved' 'autofix/in-progress'; do
+      gh issue edit "${issue_number}" --repo "${GH_REPO}" --remove-label "${label}" || true
+    done
+    gh issue close "${issue_number}" --repo "${GH_REPO}" --reason 'not planned'
     ;;
 
   *)

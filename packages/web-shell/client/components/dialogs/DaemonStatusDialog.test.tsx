@@ -6,6 +6,9 @@ import type { DaemonMetricsSeriesBucket } from '@qwen-code/web-shell/daemon-reac
 import { I18nProvider } from '../../i18n';
 import { getDaemonToken, persistDaemonToken } from '../../config/daemon';
 
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const summaryReport = {
@@ -40,6 +43,7 @@ const summaryReport = {
     maxPendingPromptsPerSession: 5,
     listenerMaxConnections: null,
     eventRingSize: 1024,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     promptDeadlineMs: 120_000,
     writerIdleTimeoutMs: null,
     channelIdleTimeoutMs: 60_000,
@@ -109,6 +113,11 @@ const fullReport = {
         pendingPermissionCount: 2,
         hasActivePrompt: true,
         lastEventId: 42,
+        eventRingCount: 0,
+        eventRingBytes: 0,
+        eventRingEvictedEvents: 0,
+        eventRingEvictedBytes: 0,
+        availableCommandsSnapshotBytes: 0,
       },
     ],
     acpConnections: [{ connectionId: 'conn-1' }],
@@ -196,6 +205,7 @@ let fullState: HookState = {
   error: undefined,
 };
 const seenDetails: Array<string | undefined> = [];
+const seenAutoLoads: Array<boolean | undefined> = [];
 const workspaceState = {
   baseUrl: 'http://localhost:4170',
   status: 'connected' as const,
@@ -203,8 +213,9 @@ const workspaceState = {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
-  useStatusReport: (options: { detail?: string } = {}) => {
+  useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
     seenDetails.push(options.detail);
+    seenAutoLoads.push(options.autoLoad);
     if (options.detail === 'full') {
       return { ...fullState, data: fullState.report, reload: fullReload };
     }
@@ -216,7 +227,13 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   },
 }));
 
-const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
+vi.mock('../RemoteAccessSettingsCard', () => ({
+  RemoteAccessSettingsCard: () => null,
+}));
+
+const { DaemonConnectionsSettings, DaemonStatusDialog } = await import(
+  './DaemonStatusDialog'
+);
 const { StandaloneContext } = await import('../../config/standalone');
 
 let container: HTMLDivElement | null = null;
@@ -226,15 +243,35 @@ function mount(
   language: 'en' | 'zh-CN' = 'en',
   onChangeTarget?: (daemonOrigin: string, token?: string) => void,
   standalone = true,
+  availability?: ReturnType<typeof offlineDaemon>['availability'],
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <StandaloneContext.Provider value={standalone}>
-        <I18nProvider language={language}>
-          <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+      <DaemonAvailabilityContext.Provider value={availability}>
+        <StandaloneContext.Provider value={standalone}>
+          <I18nProvider language={language}>
+            <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+          </I18nProvider>
+        </StandaloneContext.Provider>
+      </DaemonAvailabilityContext.Provider>,
+    );
+  });
+}
+
+function mountConnections(
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void,
+): void {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root!.render(
+      <StandaloneContext.Provider value>
+        <I18nProvider language="en">
+          <DaemonConnectionsSettings onAddConnection={onAddConnection} />
         </I18nProvider>
       </StandaloneContext.Provider>,
     );
@@ -265,9 +302,12 @@ function openDiagnostics(): void {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   summaryState = { report: summaryReport, loading: false, error: undefined };
   fullState = { report: fullReport, loading: false, error: undefined };
   seenDetails.length = 0;
+  seenAutoLoads.length = 0;
   summaryReload.mockReset();
   summaryReload.mockImplementation(async () => undefined);
   fullReload.mockReset();
@@ -283,6 +323,143 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it.each([false, true])(
+    'shows outage and connection repair (cached=%s)',
+    async (cached) => {
+      const report = cached ? summaryReport : undefined;
+      const { availability } = offlineDaemon();
+      try {
+        await availability.check(true);
+        summaryState.report = report;
+        fullState.report = undefined;
+        mount('zh-CN', undefined, true, availability);
+        expect(container!.textContent).toContain('无法连接服务。');
+        expect(container!.querySelector('form')).not.toBeNull();
+      } finally {
+        availability.dispose();
+      }
+    },
+  );
+
+  it('does not load status reports for the Connections settings page', () => {
+    vi.useFakeTimers();
+    mountConnections();
+
+    expect(seenAutoLoads).toEqual([false, false]);
+    act(() => vi.advanceTimersByTime(15_000));
+    expect(summaryReload).not.toHaveBeenCalled();
+    expect(fullReload).not.toHaveBeenCalled();
+  });
+
+  it('rejects a mixed-content target before passing its token to navigation', () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(
+      window,
+      'location',
+    )!;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: new URL('https://shell.example/'),
+    });
+    const onAddConnection = vi.fn();
+    try {
+      mountConnections(onAddConnection);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'http://remote.example:4173');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const token = typeToken('secret');
+      act(() => {
+        token
+          .closest('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      expect(onAddConnection).not.toHaveBeenCalled();
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'HTTPS page cannot connect',
+      );
+      expect(container!.textContent).toContain('Allow remote connections');
+      expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
+  });
+
+  it('adds a new remote origin without replacing the current target', () => {
+    const onAddConnection = vi.fn(() => true);
+    mountConnections(onAddConnection);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, 'secret');
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+      container!
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+
+    expect(onAddConnection).toHaveBeenCalledWith(
+      'https://remote.example',
+      'secret',
+    );
+    expect(container!.textContent).toContain('Add connection');
+  });
+
+  it('lists, switches, and forgets connected computers', () => {
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify(['https://remote.example:4170']),
+    );
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+
+    const connection = container!.querySelector<HTMLButtonElement>(
+      'button[title="https://remote.example:4170"]',
+    )!;
+    expect(connection.textContent).toContain('remote.example:4170');
+    act(() => connection.click());
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      undefined,
+    );
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Forget https://remote.example:4170"]',
+        )!
+        .click();
+    });
+    expect(container!.textContent).not.toContain('remote.example:4170');
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-remote-connections') || 'null',
+      ),
+    ).toEqual([]);
+  });
+
   it('shows and switches the daemon connection target', () => {
     const onChangeTarget = vi.fn();
     mount('en', onChangeTarget);
@@ -455,6 +632,7 @@ describe('DaemonStatusDialog', () => {
   // a failed probe keeps the old token instead of navigating.
   it.each([
     [401, 'rejected'],
+    [403, 'HTTP 403'],
     [503, 'did not accept'],
   ])(
     'keeps the stored credential when a same-target probe returns %i',
@@ -469,10 +647,11 @@ describe('DaemonStatusDialog', () => {
         await submitConnect(token);
         expect(fetchMock).toHaveBeenCalledWith(
           'http://localhost:4170/capabilities',
-          expect.objectContaining({
-            headers: { Authorization: 'Bearer bad-token' },
-          }),
+          expect.anything(),
         );
+        expect(
+          new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers),
+        ).toEqual(new Headers({ Authorization: 'Bearer bad-token' }));
         expect(onChangeTarget).not.toHaveBeenCalled();
         expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
         expect(
@@ -501,7 +680,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');
@@ -538,7 +717,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');
@@ -1452,6 +1631,11 @@ describe('DaemonStatusDialog', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 1,
+              eventRingCount: 0,
+              eventRingBytes: 0,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
             },
           ],
         },

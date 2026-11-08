@@ -81,7 +81,10 @@ export interface RunReviewResult {
   downgraded: boolean;
   downgradedFrom: string | null;
   remediation: string[];
-  /** The FIXes compose-review withheld because the wall would refuse them. */
+  /**
+   * The repairs compose-review named and withheld: a FIX the wall would
+   * refuse, or a selection-drift note, whose repair is not a mid-round one.
+   */
   waivedFixes: string[];
   composedPath: string | null;
   /**
@@ -882,7 +885,7 @@ export const runCommand: CommandModule = {
         type: 'boolean',
         default: false,
         describe:
-          'Continue an interrupted review of this PR when its on-disk state still matches, instead of starting over (PR targets only) — same meaning as `/review <pr> --resume`. Falls back to a fresh review when nothing can be resumed.',
+          'Continue an interrupted review of this PR when its on-disk state still matches, instead of starting over (PR targets only) — same meaning as `/review <pr> --resume`. Falls back to a fresh review when nothing can be resumed. Not for a re-review after new commits — that is a plain run whose delta the incremental check scopes at high effort.',
       })
       .option('json', {
         type: 'boolean',

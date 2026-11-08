@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import {
   useCallback,
   useEffect,
@@ -10,9 +11,23 @@ import {
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
   getDaemonToken,
+  isDaemonMixedContent,
   navigateToDaemon,
   persistDaemonToken,
 } from '../config/daemon';
+import {
+  completeRemoteConnectionAdd,
+  isRemoteConnectionAddActive,
+  leaveRemoteConnectionAdd,
+} from '../config/remote-connections';
+import {
+  isRemoteWorkspaceAddActive,
+  leaveRemoteWorkspaceAdd,
+} from '../config/remote-workspace-add';
+import {
+  openHostedWorkspace,
+  useWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -26,6 +41,8 @@ import {
 } from './ui/card';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Spinner } from './ui/spinner';
+import { DaemonConnectionHelp } from './DaemonConnectionHelp';
 
 // A probe must give up well before the SDK's own 30s fetch timeout
 // (DaemonClient DEFAULT_FETCH_TIMEOUT_MS) so the gate keeps retrying while the
@@ -48,6 +65,7 @@ interface AuthCopy {
   enterToken: string;
   policyBlocked: string;
   invalidAddress: string;
+  mixedContent: string;
   addressChanged: string;
   confirmTarget: string;
   remoteHint: string;
@@ -59,55 +77,72 @@ interface AuthCopy {
   retry: string;
   hint: string;
   local: string;
+  remoteAddCancel: string;
+  connectionAddCancel: string;
+  pairingFailed: string;
 }
 
 // This gate renders before the app (and therefore before its I18nProvider), so
 // it carries its own copy table instead of calling useI18n.
+const EN_COPY: AuthCopy = {
+  pairingFailed:
+    'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
+  heading: 'Connect to Qwen Code',
+  connecting: 'Connecting…',
+  starting: 'Daemon is starting…',
+  unreachable: 'Cannot reach the daemon. Retrying…',
+  remoteUnreachable:
+    'Cannot reach the daemon. Retrying… The browser cannot distinguish a network, certificate, or cross-origin failure. See remote connection setup below.',
+  notReady: 'Daemon is not ready. Retrying…',
+  startFailed: 'Daemon failed to start.',
+  invalidToken:
+    'Invalid or expired token. Copy the current token from the server’s remote connection settings or startup output.',
+  enterToken:
+    'Enter the bearer token from the server’s remote connection settings or startup output.',
+  policyBlocked:
+    'The server or proxy refused the request (HTTP 403). Check its access rules, Host policy, and allowed page origins in remote connection settings.',
+  invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+  mixedContent:
+    'This HTTPS page cannot connect to a remote HTTP daemon. Use an HTTPS address for the remote service.',
+  addressChanged:
+    'Connection paused. Select Connect to use the entered address.',
+  confirmTarget:
+    'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
+  remoteHint:
+    'The token is sent to the address shown above. Enter only a token issued by that daemon.',
+  switchUnavailable:
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
+  addressLabel: 'Daemon address',
+  tokenLabel: 'Bearer token (optional)',
+  connect: 'Connect',
+  local: 'Return to local workspaces',
+  remoteAddCancel: 'Cancel adding workspace',
+  connectionAddCancel: 'Cancel adding connection',
+  retry: 'Retry',
+  hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
+};
+
 const COPY: Record<WebShellLanguage, AuthCopy> = {
-  en: {
-    heading: 'Connect to Qwen Code',
-    connecting: 'Connecting…',
-    starting: 'Daemon is starting…',
-    unreachable: 'Cannot reach the daemon. Retrying…',
-    remoteUnreachable:
-      'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
-    notReady: 'Daemon is not ready. Retrying…',
-    startFailed: 'Daemon failed to start.',
-    invalidToken:
-      'Invalid or expired token. Enter the token from the daemon terminal.',
-    enterToken: 'Enter the bearer token from the daemon terminal.',
-    policyBlocked:
-      'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
-    invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
-    addressChanged:
-      'Connection paused. Select Connect to use the entered address.',
-    confirmTarget:
-      'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
-    remoteHint:
-      'The token is sent to the address shown above. Enter only a token issued by that daemon.',
-    switchUnavailable:
-      'Browser storage is unavailable, so the token could not be carried to that daemon.',
-    addressLabel: 'Daemon address',
-    tokenLabel: 'Bearer token (optional)',
-    connect: 'Connect',
-    local: 'Return to local workspaces',
-    retry: 'Retry',
-    hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
-  },
+  en: EN_COPY,
   'zh-CN': {
+    pairingFailed:
+      '配对失败或二维码已过期。请扫描新的二维码，或输入 daemon 令牌。',
     heading: '连接到 Qwen Code',
     connecting: '正在连接…',
     starting: '守护进程正在启动…',
     unreachable: '无法访问守护进程，正在重试…',
     remoteUnreachable:
-      '无法访问守护进程，正在重试… 请检查地址、网络、HTTPS 证书，以及 --allow-origin 是否允许当前页面来源。',
+      '无法连接守护进程，正在重试… 浏览器无法区分网络、证书或跨域失败，请查看下方的远程连接配置说明。',
     notReady: '守护进程尚未就绪，正在重试…',
     startFailed: '守护进程启动失败。',
-    invalidToken: '令牌无效或已过期，请输入守护进程终端中显示的令牌。',
-    enterToken: '请输入守护进程终端中显示的 bearer token。',
+    invalidToken:
+      '令牌无效或已过期，请从服务器远程连接设置或启动输出复制当前 token。',
+    enterToken: '请输入服务器远程连接设置或启动输出中的 bearer token。',
     policyBlocked:
-      '访问被守护进程的 Origin 或 Host 策略拦截。请直接打开守护进程地址，或检查 --allow-origin 以允许跨域访问。',
+      '服务或代理拒绝了请求（HTTP 403），请检查访问规则、Host 策略，以及远程连接设置是否允许当前页面来源。',
     invalidAddress: 'Daemon 地址无效。请输入 HTTP 或 HTTPS origin。',
+    mixedContent:
+      '当前 HTTPS 页面无法连接远端 HTTP 服务，请使用远端服务的 HTTPS 地址。',
     addressChanged: '连接已暂停。点击“连接”以使用填写的地址。',
     confirmTarget:
       '此页面指向一个本浏览器从未连接过的守护进程。仅在你信任它时再连接。',
@@ -117,9 +152,14 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     tokenLabel: 'Bearer token（可选）',
     connect: '连接',
     local: '返回本地工作区',
+    remoteAddCancel: '取消添加工作区',
+    connectionAddCancel: '取消添加连接',
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
+  // Not translated yet — same partial-catalog policy as the ru table in
+  // i18n.tsx (#13391): ru reuses the EN copy.
+  ru: EN_COPY,
 };
 
 /** `Retry-After` in milliseconds (delta-seconds or HTTP-date), or undefined. */
@@ -142,6 +182,7 @@ export function StandaloneAuth({
   theme = WebShellThemeId.Dark,
   invalidTarget = false,
   unconfirmedTarget = false,
+  pairingFailed = false,
   onChangeTarget = navigateToDaemon,
   children,
 }: {
@@ -155,10 +196,20 @@ export function StandaloneAuth({
   invalidTarget?: boolean;
   /** The daemon came from a link to an origin this browser has not used. */
   unconfirmedTarget?: boolean;
-  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
+  pairingFailed?: boolean;
+  onChangeTarget?: (
+    daemonOrigin: string,
+    token?: string,
+    options?: {
+      continueFlow?: 'workspace' | 'connection';
+    },
+  ) => boolean | void;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
+  const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
+  const remoteConnectionAddActive = isRemoteConnectionAddActive();
+  const hosts = useWorkspaceHosts();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
@@ -166,15 +217,30 @@ export function StandaloneAuth({
   const [confirming, setConfirming] = useState(
     unconfirmedTarget && !invalidTarget,
   );
+  // A failed pairing exchange parks the gate on the rescan copy only when
+  // there is no credential left to try; with one (a stored device token) the
+  // boot probe still runs, and the rescan copy surfaces if the daemon rejects
+  // it. Session storage outlives a daemon restart, so "a credential exists"
+  // is not "a credential worked".
+  const awaitingPairing = pairingFailed && !initialToken;
   const [status, setStatus] = useState(
     invalidTarget
       ? copy.invalidAddress
       : confirming
         ? copy.confirmTarget
-        : copy.connecting,
+        : awaitingPairing
+          ? copy.pairingFailed
+          : copy.connecting,
   );
-  const [busy, setBusy] = useState(!invalidTarget && !confirming);
-  const [needsToken, setNeedsToken] = useState(false);
+  const [busy, setBusy] = useState(
+    !awaitingPairing && !invalidTarget && !confirming,
+  );
+  // Focus the token field only when entering a token is the pending step: an
+  // invalid or unconfirmed target asks for the address (or a trust decision)
+  // first, and the token input's later autoFocus would otherwise win focus.
+  const [needsToken, setNeedsToken] = useState(
+    awaitingPairing && !invalidTarget && !confirming,
+  );
   // Every probe — the first one, a manual retry, and each auto-retry — is one
   // bump of this counter, so exactly one effect run owns the in-flight request
   // and aborts its predecessor on cleanup.
@@ -208,6 +274,12 @@ export function StandaloneAuth({
 
   const connect = useCallback(
     async (candidate: string) => {
+      if (isDaemonMixedContent(baseUrl)) {
+        setBusy(false);
+        setNeedsToken(false);
+        setStatus(copyRef.current.mixedContent);
+        return;
+      }
       const controller = new AbortController();
       controllerRef.current = controller;
       if (operatorProbeRef.current) {
@@ -232,7 +304,12 @@ export function StandaloneAuth({
         timerRef.current = setTimeout(() => setAttempt((n) => n + 1), delayMs);
       };
       try {
-        const response = await fetch(`${baseUrl}/capabilities`, {
+        const response = await createDaemonRestRequest(
+          baseUrl,
+          candidate,
+          undefined,
+          true,
+        )('/capabilities', {
           headers: candidate ? { Authorization: `Bearer ${candidate}` } : {},
           signal: controller.signal,
         });
@@ -240,6 +317,12 @@ export function StandaloneAuth({
         if (response.ok) {
           persistDaemonToken(candidate, baseUrl);
           confirmDaemonTarget(baseUrl);
+          if (
+            remoteConnectionAddActive &&
+            completeRemoteConnectionAdd(baseUrl)
+          ) {
+            return;
+          }
           setAccepted({ token: candidate || undefined });
         } else if (response.status === 401) {
           setBusy(false);
@@ -251,10 +334,20 @@ export function StandaloneAuth({
           // is not what this 401 rejected and must survive it.
           if (candidate && candidate === initialCandidateRef.current)
             setToken((current) => (current === candidate ? '' : current));
+          // A boot credential rejected after a failed pairing exchange points
+          // at the rescan recovery, not the terminal-token copy a phone user
+          // cannot act on; a rejected hand-typed token keeps the token copy.
+          // An empty submit on the rescan screen keeps the rescan copy too:
+          // "enter the daemon token" would drop the one instruction the phone
+          // user can act on, and no later state change would restore it.
           setStatus(
             candidate
-              ? copyRef.current.invalidToken
-              : copyRef.current.enterToken,
+              ? pairingFailed && candidate === initialCandidateRef.current
+                ? copyRef.current.pairingFailed
+                : copyRef.current.invalidToken
+              : pairingFailed
+                ? copyRef.current.pairingFailed
+                : copyRef.current.enterToken,
           );
         } else if (response.status === 403) {
           setBusy(false);
@@ -304,16 +397,57 @@ export function StandaloneAuth({
         clearTimeout(timeout);
       }
     },
-    [baseUrl],
+    [baseUrl, pairingFailed, remoteConnectionAddActive],
   );
 
   useEffect(() => {
-    if (invalidTarget || confirming) return undefined;
+    if (invalidTarget || confirming || (awaitingPairing && attempt === 0))
+      return undefined;
     void connect(candidateRef.current);
     return retireProbe;
-  }, [connect, attempt, invalidTarget, confirming, retireProbe]);
+  }, [
+    connect,
+    attempt,
+    invalidTarget,
+    confirming,
+    awaitingPairing,
+    retireProbe,
+  ]);
 
   if (accepted) return children(accepted.token);
+  // A credential supplied at boot (the desktop `#token=` URL, `serve --open`,
+  // or a per-tab stored token) almost always authenticates on the first
+  // probe. Painting the credential form during that round trip flashes a login
+  // screen at startup, so hold it back until the probe asks for input.
+  const verifyingBootCredential =
+    busy &&
+    attempt === 0 &&
+    !invalidTarget &&
+    !confirming &&
+    !awaitingPairing &&
+    Boolean(initialToken);
+  if (verifyingBootCredential) {
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        data-web-shell-gate
+        className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
+          theme === WebShellThemeId.Light
+            ? AppStyles.themeLight
+            : `${AppStyles.themeDark} dark`
+        }`}
+      >
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+        >
+          <Spinner aria-hidden="true" />
+          <span>{copy.connecting}</span>
+        </div>
+      </div>
+    );
+  }
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
   const changingTarget = invalidTarget || normalizedAddress !== baseUrl;
   return (
@@ -361,11 +495,24 @@ export function StandaloneAuth({
                 setStatus(copy.invalidAddress);
                 return;
               }
+              if (isDaemonMixedContent(normalizedAddress)) {
+                retireProbe();
+                setBusy(false);
+                setStatus(copy.mixedContent);
+                return;
+              }
               if (changingTarget) {
-                const switched = onChangeTarget(
-                  normalizedAddress,
-                  token.trim() || getDaemonToken(normalizedAddress),
-                );
+                const candidate =
+                  token.trim() || getDaemonToken(normalizedAddress);
+                const switched = remoteWorkspaceAddActive
+                  ? onChangeTarget(normalizedAddress, candidate, {
+                      continueFlow: 'workspace',
+                    })
+                  : remoteConnectionAddActive
+                    ? onChangeTarget(normalizedAddress, candidate, {
+                        continueFlow: 'connection',
+                      })
+                    : onChangeTarget(normalizedAddress, candidate);
                 if (switched === false) {
                   setBusy(false);
                   setStatus(copy.switchUnavailable);
@@ -429,7 +576,21 @@ export function StandaloneAuth({
                     : copy.retry}
             </Button>
           </form>
-          {(invalidTarget || baseUrl !== window.location.origin) && (
+          {normalizedAddress &&
+            normalizedAddress !== window.location.origin && (
+              <DaemonConnectionHelp
+                language={language}
+                expanded={
+                  status === copy.remoteUnreachable ||
+                  status === copy.policyBlocked ||
+                  status === copy.mixedContent
+                }
+              />
+            )}
+          {(remoteWorkspaceAddActive ||
+            remoteConnectionAddActive ||
+            invalidTarget ||
+            baseUrl !== window.location.origin) && (
             <Button
               variant="outline"
               onClick={() => {
@@ -441,12 +602,42 @@ export function StandaloneAuth({
                 // and mount the app on it.
                 retireProbe();
                 setConfirming(true);
+                if (remoteWorkspaceAddActive && leaveRemoteWorkspaceAdd()) {
+                  return;
+                }
+                if (remoteConnectionAddActive && leaveRemoteConnectionAdd()) {
+                  return;
+                }
                 onChangeTarget(window.location.origin);
               }}
             >
-              {copy.local}
+              {remoteWorkspaceAddActive
+                ? copy.remoteAddCancel
+                : remoteConnectionAddActive
+                  ? copy.connectionAddCancel
+                  : copy.local}
             </Button>
           )}
+          {hosts
+            .filter(
+              (host) =>
+                host.origin !== baseUrl &&
+                host.origin !== window.location.origin,
+            )
+            .map((host) => (
+              <Button
+                key={host.origin}
+                variant="outline"
+                onClick={() => {
+                  // See the local-return button: leaving a target must retire
+                  // its probe loop before navigation is committed.
+                  retireProbe();
+                  openHostedWorkspace(host.origin);
+                }}
+              >
+                {host.origin}
+              </Button>
+            ))}
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">

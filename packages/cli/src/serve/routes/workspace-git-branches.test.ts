@@ -266,6 +266,22 @@ afterEach(() => {
 });
 
 describe('workspace Git branch routes against a real repo (R10 #2)', () => {
+  it('redacts the main checkout path from a linked-worktree Git error', async () => {
+    const dir = makeRepo();
+    const mainBranch = git(dir, 'branch', '--show-current').trim();
+    const worktree = path.join(dir, '.qwen', 'worktrees', 'linked');
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    git(dir, 'worktree', 'add', '-q', '-b', 'linked', worktree);
+
+    const response = await request(appWithWorkspace(worktree))
+      .post('/workspace/git/checkout')
+      .send({ ref: mainBranch });
+
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(JSON.stringify(response.body)).toContain('<workspace>');
+  });
+
   it('rejects a commit --all when write-tree cannot snapshot the index', async () => {
     const dir = makeRepo();
     fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
@@ -658,7 +674,15 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
             res as never,
             { stdout: '', stderr },
             'test-route',
-            sendBridgeError,
+            (_response, error) => {
+              out.status = 500;
+              const message =
+                error instanceof Error ? error.message : String(error);
+              out.body = {
+                error: message,
+                message,
+              };
+            },
             cwd,
           );
           return out;
@@ -679,6 +703,26 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         expect(message).toContain('<workspace>/config');
         expect(message).not.toContain(mainGit);
         expect(message).not.toContain(root);
+
+        const managed = path.join(
+          root,
+          'main',
+          '.qwen',
+          'worktrees',
+          'dirty-fix',
+        );
+        const managedGit = path.join(mainGit, 'worktrees', 'dirty-fix');
+        fs.mkdirSync(managedGit, { recursive: true });
+        fs.mkdirSync(managed, { recursive: true });
+        fs.writeFileSync(path.join(managed, '.git'), `gitdir: ${managedGit}\n`);
+        const wedged = classifyAt(
+          managed,
+          `fatal: Unable to create '${managedGit}/index.lock': File exists.`,
+        );
+        expect(wedged.body['message']).toBe(
+          "fatal: Unable to create '<workspace>/index.lock': File exists.",
+        );
+        expect(wedged.body['error']).not.toBe('dirty_working_tree');
 
         // A cwd BELOW the worktree root must not disable the redaction:
         // the .git file lives at the git root, which is probed instead.

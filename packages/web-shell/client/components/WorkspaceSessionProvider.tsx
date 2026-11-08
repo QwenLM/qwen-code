@@ -15,6 +15,11 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
 import {
+  WebShellNavigationBoundary,
+  useWebShellNavigation,
+  type WebShellUrlNavigationOptions,
+} from '../navigation';
+import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
@@ -26,6 +31,7 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
 
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
@@ -50,6 +56,8 @@ function withChrome(
 }
 
 interface WorkspaceSessionProviderProps {
+  viewHidden?: boolean;
+  urlNavigation?: WebShellUrlNavigationOptions;
   sessionId?: string;
   workspaceId?: string;
   workspaceCwd?: string;
@@ -64,6 +72,36 @@ interface WorkspaceSessionProviderProps {
 }
 
 export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
+  if (!props.urlNavigation)
+    return <ResolvedWorkspaceSessionProvider {...props} />;
+  return (
+    <WebShellNavigationBoundary
+      options={props.urlNavigation}
+      externalTarget={{
+        sessionId: props.sessionId,
+        workspaceId: props.workspaceId,
+        workspaceCwd: props.workspaceCwd,
+        sessionContext: props.sessionContext,
+      }}
+      onSessionIdChange={props.webShellProps.onSessionIdChange}
+    >
+      {(target, onSessionIdChange) => (
+        <ResolvedWorkspaceSessionProvider
+          {...props}
+          sessionId={target.sessionId}
+          workspaceId={target.workspaceId}
+          workspaceCwd={target.workspaceCwd}
+          sessionContext={target.sessionContext}
+          webShellProps={{ ...props.webShellProps, onSessionIdChange }}
+        />
+      )}
+    </WebShellNavigationBoundary>
+  );
+}
+
+function ResolvedWorkspaceSessionProvider(
+  props: WorkspaceSessionProviderProps,
+) {
   const {
     sessionId,
     workspaceId,
@@ -150,6 +188,7 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
 }
 
 function WorkspaceSessionProviderWorkspace({
+  viewHidden,
   sessionId,
   workspaceId,
   workspaceCwd,
@@ -162,8 +201,10 @@ function WorkspaceSessionProviderWorkspace({
   chromeLanguage,
   webShellProps: appProps,
 }: WorkspaceSessionProviderProps) {
+  const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const workspaceActions = useWorkspaceActions();
   const [usePrimaryNewSession, setUsePrimaryNewSession] = useState(false);
   const [registeredWorkspace, setRegisteredWorkspace] = useState<{
@@ -297,7 +338,11 @@ function WorkspaceSessionProviderWorkspace({
         theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
@@ -356,6 +401,7 @@ function WorkspaceSessionProviderWorkspace({
         actionLabel={t('session.new')}
         theme={surfaceTheme(webShellProps.theme)}
         onAction={() => {
+          navigation?.beginSessionNavigation();
           setUsePrimaryNewSession(true);
           webShellProps.onSessionIdChange?.(undefined, undefined);
         }}
@@ -390,18 +436,24 @@ function WorkspaceSessionProviderWorkspace({
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
     >
-      <App
-        {...appProps}
-        historyPageSize={historyPageSize}
-        restartSseOnPrompt={restartSseOnPrompt}
-        initialSelectedWorkspaceCwd={
-          !lockWorkspaceCwd && targetWorkspace ? targetWorkspace.cwd : undefined
-        }
-        lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
-        lockedWorkspaceCapability={
-          lockWorkspaceCwd ? targetWorkspace : undefined
-        }
-      />
+      {!viewHidden && (
+        <App
+          {...appProps}
+          historyPageSize={historyPageSize}
+          restartSseOnPrompt={restartSseOnPrompt}
+          initialSelectedWorkspaceCwd={
+            !lockWorkspaceCwd && targetWorkspace
+              ? targetWorkspace.cwd
+              : undefined
+          }
+          lockedWorkspaceCwd={
+            lockWorkspaceCwd ? targetWorkspace?.cwd : undefined
+          }
+          lockedWorkspaceCapability={
+            lockWorkspaceCwd ? targetWorkspace : undefined
+          }
+        />
+      )}
     </DaemonSessionProvider>
   );
 }
@@ -427,8 +479,10 @@ function StandaloneSessionGate({
 }: WorkspaceSessionProviderProps & {
   attachedSessionId?: string;
 }) {
+  const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const [attempt, setAttempt] = useState(0);
   const [resolution, setResolution] = useState<StandaloneResolution>(() =>
     sessionId ? { status: 'loading' } : { status: 'ready' },
@@ -541,7 +595,11 @@ function StandaloneSessionGate({
         theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
@@ -600,6 +658,7 @@ function StandaloneSessionGate({
         onAction={
           webShellProps.onSessionIdChange
             ? () => {
+                navigation?.beginSessionNavigation();
                 webShellProps.onSessionIdChange?.(
                   undefined,
                   undefined,

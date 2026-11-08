@@ -61,6 +61,7 @@ import {
 } from './index.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import type { ContentListUnion } from '@google/genai';
 import { GenerateContentResponse } from '@google/genai';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 import {
@@ -68,6 +69,7 @@ import {
   DEFAULT_TIMEOUT,
   DISABLED_REQUEST_TIMEOUT_MS,
 } from '../openaiContentGenerator/constants.js';
+import { streamOf, userText } from '../../test-utils/model-fixtures.js';
 
 function makeCliConfig(
   sessionId = '',
@@ -83,10 +85,13 @@ function makeCliConfig(
   } as unknown as Config;
 }
 
-function makeGeneratorConfig(): ContentGeneratorConfig {
+function makeGeneratorConfig(
+  overrides: Partial<ContentGeneratorConfig> = {},
+): ContentGeneratorConfig {
   return {
     model: 'gpt-5',
     apiKey: 'test-key',
+    ...overrides,
   } as ContentGeneratorConfig;
 }
 
@@ -112,33 +117,29 @@ describe('OpenAIResponsesContentGenerator', () => {
     vi.unstubAllEnvs();
   });
 
-  it('delegates generateContent to the pipeline', async () => {
-    const expected = new GenerateContentResponse();
-    mockExecute.mockResolvedValue(expected);
-    const result = await generator.generateContent(
-      { model: 'gpt-5', contents: [] },
-      'prompt-1',
-    );
-    expect(result).toBe(expected);
-    expect(mockExecute).toHaveBeenCalledWith(
-      { model: 'gpt-5', contents: [] },
-      'prompt-1',
-      undefined,
-    );
-  });
+  type Req = Parameters<typeof generator.generateContent>[0];
+  // generateContent delegates to the pipeline's execute, generateContentStream
+  // to its connectStream; both forward the prompt id and abort signal.
+  const viaExecute = {
+    pipe: mockExecute,
+    call: (req: Req) => generator.generateContent(req, 'prompt-1'),
+    make: () => new GenerateContentResponse(),
+  };
+  const viaStream = {
+    pipe: mockConnectStream,
+    call: (req: Req) => generator.generateContentStream(req, 'prompt-1'),
+    make: () => streamOf(new GenerateContentResponse()),
+  };
 
-  it('delegates generateContentStream to the pipeline', async () => {
-    async function* fakeStream() {
-      yield new GenerateContentResponse();
-    }
-    const stream = fakeStream();
-    mockConnectStream.mockResolvedValue(stream);
-    const result = await generator.generateContentStream(
-      { model: 'gpt-5', contents: [] },
-      'prompt-1',
-    );
-    expect(result).toBe(stream);
-    expect(mockConnectStream).toHaveBeenCalledWith(
+  it.each([
+    ['generateContent', viaExecute],
+    ['generateContentStream', viaStream],
+  ])('delegates %s to the pipeline', async (_, path) => {
+    const expected = path.make();
+    path.pipe.mockResolvedValue(expected);
+    const result = await path.call({ model: 'gpt-5', contents: [] });
+    expect(result).toBe(expected);
+    expect(path.pipe).toHaveBeenCalledWith(
       { model: 'gpt-5', contents: [] },
       'prompt-1',
       undefined,
@@ -151,97 +152,76 @@ describe('OpenAIResponsesContentGenerator', () => {
     );
 
     await expect(
-      generator.generateContentStream(
-        { model: 'gpt-5', contents: [] },
-        'prompt-1',
-      ),
+      viaStream.call({ model: 'gpt-5', contents: [] }),
     ).rejects.toThrow('Responses API error 500');
   });
 
-  it('forwards a real abortSignal from request.config to the pipeline', async () => {
-    const expected = new GenerateContentResponse();
-    mockExecute.mockResolvedValue(expected);
-    const { signal } = new AbortController();
-    await generator.generateContent(
-      { model: 'gpt-5', contents: [], config: { abortSignal: signal } },
-      'prompt-1',
-    );
-    expect(mockExecute).toHaveBeenCalledWith(
-      expect.anything(),
-      'prompt-1',
-      signal,
-    );
-  });
+  it.each([
+    ['', viaExecute],
+    [' stream', viaStream],
+  ])(
+    'forwards a real abortSignal from request.config to the pipeline%s',
+    async (_, path) => {
+      path.pipe.mockResolvedValue(path.make());
+      const { signal } = new AbortController();
+      await path.call({
+        model: 'gpt-5',
+        contents: [],
+        config: { abortSignal: signal },
+      });
+      expect(path.pipe).toHaveBeenCalledWith(
+        expect.anything(),
+        'prompt-1',
+        signal,
+      );
+    },
+  );
 
-  it('forwards a real abortSignal from request.config to the pipeline stream', async () => {
-    async function* fakeStream() {
-      yield new GenerateContentResponse();
-    }
-    mockConnectStream.mockResolvedValue(fakeStream());
-    const { signal } = new AbortController();
-    await generator.generateContentStream(
-      { model: 'gpt-5', contents: [], config: { abortSignal: signal } },
-      'prompt-1',
-    );
-    expect(mockConnectStream).toHaveBeenCalledWith(
-      expect.anything(),
-      'prompt-1',
-      signal,
-    );
-  });
-
-  it('normalizes a null abortSignal to undefined for the pipeline', async () => {
-    const expected = new GenerateContentResponse();
-    mockExecute.mockResolvedValue(expected);
-    await generator.generateContent(
-      {
+  it.each([
+    ['', viaExecute],
+    [' stream', viaStream],
+  ])(
+    'normalizes a null abortSignal to undefined for the pipeline%s',
+    async (_, path) => {
+      path.pipe.mockResolvedValue(path.make());
+      await path.call({
         model: 'gpt-5',
         contents: [],
         config: { abortSignal: null },
-      } as unknown as Parameters<typeof generator.generateContent>[0],
-      'prompt-1',
-    );
-    expect(mockExecute).toHaveBeenCalledWith(
-      expect.anything(),
-      'prompt-1',
-      undefined,
-    );
-  });
-
-  it('normalizes a null abortSignal to undefined for the pipeline stream', async () => {
-    async function* fakeStream() {
-      yield new GenerateContentResponse();
-    }
-    mockConnectStream.mockResolvedValue(fakeStream());
-    await generator.generateContentStream(
-      {
-        model: 'gpt-5',
-        contents: [],
-        config: { abortSignal: null },
-      } as unknown as Parameters<typeof generator.generateContentStream>[0],
-      'prompt-1',
-    );
-    expect(mockConnectStream).toHaveBeenCalledWith(
-      expect.anything(),
-      'prompt-1',
-      undefined,
-    );
-  });
+      } as unknown as Req);
+      expect(path.pipe).toHaveBeenCalledWith(
+        expect.anything(),
+        'prompt-1',
+        undefined,
+      );
+    },
+  );
 
   describe('embedContent', () => {
+    const embedHi = (gen = generator) =>
+      gen.embedContent({
+        model: 'text-embedding-ada-002',
+        contents: [userText('hi')],
+      });
+
+    /** Embeds 'hi' through a fresh generator built from `config`. */
+    function embedWith(config: ContentGeneratorConfig, cli = makeCliConfig()) {
+      mockEmbeddingsCreate.mockResolvedValue({ data: [{ embedding: [0.1] }] });
+      return embedHi(new OpenAIResponsesContentGenerator(config, cli));
+    }
+
     it('extracts text from an array of Content and embeds it', async () => {
       mockEmbeddingsCreate.mockResolvedValue({
         data: [{ embedding: [0.1, 0.2] }],
       });
       const result = await generator.embedContent({
         model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hello world' }] }],
+        contents: [userText('hello world')],
       });
-      // `generator` (from the outer beforeEach) is built with
-      // makeGeneratorConfig()'s model 'gpt-5', which does not contain
-      // 'embed' -- asserts the fallback branch of the model selection
-      // (`model.includes('embed') ? model : 'text-embedding-ada-002'`),
-      // previously untested by any embedContent assertion.
+      // `generator` uses model 'gpt-5', which lacks 'embed': covers the
+      // fallback branch of `model.includes('embed') ? model :
+      // 'text-embedding-ada-002'`, previously untested by any embedContent
+      // assertion.
       expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           input: 'hello world',
@@ -255,109 +235,68 @@ describe('OpenAIResponsesContentGenerator', () => {
       mockEmbeddingsCreate.mockResolvedValue({
         data: [{ embedding: [0.1] }],
       });
-      const embedModelGenerator = new OpenAIResponsesContentGenerator(
-        { ...makeGeneratorConfig(), model: 'text-embedding-3-small' },
+      await new OpenAIResponsesContentGenerator(
+        makeGeneratorConfig({ model: 'text-embedding-3-small' }),
         makeCliConfig(),
-      );
-      await embedModelGenerator.embedContent({
+      ).embedContent({
         model: 'request-model-that-does-not-embed',
-        contents: [{ role: 'user', parts: [{ text: 'hello world' }] }],
+        contents: [userText('hello world')],
       });
       expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'text-embedding-3-small' }),
       );
     });
 
-    it('extracts text from a single non-array Content', async () => {
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.3] }],
-      });
+    it.each<[string, ContentListUnion, string]>([
+      [
+        'extracts text from a single non-array Content',
+        userText('solo'),
+        'solo',
+      ],
+      [
+        'joins an array of string contents for embedding',
+        ['first text', 'second text'],
+        'first text second text',
+      ],
+      [
+        'extracts a plain string content directly',
+        'plain string',
+        'plain string',
+      ],
+    ])('%s', async (_, contents, input) => {
+      mockEmbeddingsCreate.mockResolvedValue({ data: [{ embedding: [0.3] }] });
       await generator.embedContent({
         model: 'text-embedding-ada-002',
-        contents: { role: 'user', parts: [{ text: 'solo' }] },
+        contents,
       });
       expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
-        expect.objectContaining({ input: 'solo' }),
-      );
-    });
-
-    it('joins an array of string contents for embedding', async () => {
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.3] }],
-      });
-      await generator.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: ['first text', 'second text'],
-      });
-      expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
-        expect.objectContaining({ input: 'first text second text' }),
-      );
-    });
-
-    it('extracts a plain string content directly', async () => {
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.4] }],
-      });
-      await generator.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: 'plain string',
-      });
-      expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
-        expect.objectContaining({ input: 'plain string' }),
+        expect.objectContaining({ input }),
       );
     });
 
     it('throws when the embeddings API returns an empty data array', async () => {
       mockEmbeddingsCreate.mockResolvedValue({ data: [] });
-      await expect(
-        generator.embedContent({
-          model: 'text-embedding-ada-002',
-          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        }),
-      ).rejects.toThrow(/Embedding error/);
+      await expect(embedHi()).rejects.toThrow(/Embedding error/);
     });
 
     it('wraps and rethrows on API failure', async () => {
       mockEmbeddingsCreate.mockRejectedValue(new Error('network down'));
-      await expect(
-        generator.embedContent({
-          model: 'text-embedding-ada-002',
-          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        }),
-      ).rejects.toThrow(/Embedding error: network down/);
+      await expect(embedHi()).rejects.toThrow(/Embedding error: network down/);
     });
 
     it('redacts proxy credentials from a thrown error message', async () => {
-      // The sibling openaiContentGenerator already redacts here; this
-      // generator's embedContent skipped it, leaking a configured proxy's
-      // credentials into the error surfaced to the caller/logs on failure.
+      // The sibling openaiContentGenerator already redacted here; this one
+      // leaked a configured proxy's credentials into the surfaced error.
       mockEmbeddingsCreate.mockRejectedValue(
         new Error('connect ECONNREFUSED http://user:secret@proxy.local:8080'),
       );
-      await expect(
-        generator.embedContent({
-          model: 'text-embedding-ada-002',
-          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        }),
-      ).rejects.toThrow(/<redacted>@proxy\.local:8080/);
+      await expect(embedHi()).rejects.toThrow(/<redacted>@proxy\.local:8080/);
     });
 
     it('applies SDK client defaults and configured credentials', async () => {
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.1] }],
-      });
-      const configuredGenerator = new OpenAIResponsesContentGenerator(
-        {
-          ...makeGeneratorConfig(),
-          baseUrl: 'https://api.openai.com/',
-          timeout: 0,
-        },
-        makeCliConfig(),
+      await embedWith(
+        makeGeneratorConfig({ baseUrl: 'https://api.openai.com/', timeout: 0 }),
       );
-      await configuredGenerator.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
       expect(mockOpenAIConstructor).toHaveBeenCalledWith(
         expect.objectContaining({
           apiKey: 'test-key',
@@ -369,15 +308,7 @@ describe('OpenAIResponsesContentGenerator', () => {
     });
 
     it('applies the repository default timeout when none is configured', async () => {
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.1] }],
-      });
-
-      await generator.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
-
+      await embedWith(makeGeneratorConfig());
       expect(mockOpenAIConstructor).toHaveBeenCalledWith(
         expect.objectContaining({
           baseURL: undefined,
@@ -388,66 +319,29 @@ describe('OpenAIResponsesContentGenerator', () => {
 
     it('uses apiKeyEnvKey when no direct API key is configured', async () => {
       vi.stubEnv('TEST_EMBED_KEY', 'env-key');
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.1] }],
-      });
-      const generatorWithEnvKey = new OpenAIResponsesContentGenerator(
-        {
-          model: 'gpt-5',
-          apiKeyEnvKey: 'TEST_EMBED_KEY',
-        } as ContentGeneratorConfig,
-        makeCliConfig(),
-      );
-
-      await generatorWithEnvKey.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
-
+      await embedWith({
+        model: 'gpt-5',
+        apiKeyEnvKey: 'TEST_EMBED_KEY',
+      } as ContentGeneratorConfig);
       expect(mockOpenAIConstructor).toHaveBeenCalledWith(
         expect.objectContaining({ apiKey: 'env-key' }),
       );
     });
 
     it('passes configured maxRetries to the embeddings SDK client', async () => {
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.1] }],
-      });
-      const generatorWithRetries = new OpenAIResponsesContentGenerator(
-        { ...makeGeneratorConfig(), maxRetries: 0 },
-        makeCliConfig(),
-      );
-
-      await generatorWithRetries.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
-
+      await embedWith(makeGeneratorConfig({ maxRetries: 0 }));
       expect(mockOpenAIConstructor).toHaveBeenCalledWith(
         expect.objectContaining({ maxRetries: 0 }),
       );
     });
 
     it('applies customHeaders to the embeddings SDK client', async () => {
-      // The streaming pipeline (responses-pipeline.ts) applies
-      // config.customHeaders to every request; embedContent's own SDK
-      // client construction skipped it, so a header configured for the
-      // streaming path (e.g. a proxy auth header) silently never reached
-      // embedding calls.
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.1] }],
-      });
-      const generatorWithHeaders = new OpenAIResponsesContentGenerator(
-        {
-          ...makeGeneratorConfig(),
-          customHeaders: { 'X-Proxy-Auth': 'token' },
-        },
-        makeCliConfig(),
+      // The streaming pipeline applies config.customHeaders to every request;
+      // embedContent's own SDK client skipped them, so a header set for
+      // streaming (e.g. proxy auth) never reached embedding calls.
+      await embedWith(
+        makeGeneratorConfig({ customHeaders: { 'X-Proxy-Auth': 'token' } }),
       );
-      await generatorWithHeaders.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
       expect(mockOpenAIConstructor).toHaveBeenCalledWith(
         expect.objectContaining({
           defaultHeaders: { 'X-Proxy-Auth': 'token' },
@@ -456,24 +350,15 @@ describe('OpenAIResponsesContentGenerator', () => {
     });
 
     it('expands a ${session_id} customHeader per request instead of sending the baked-in literal', async () => {
-      // Issue #11936: defaultHeaders is fixed once at client construction, so
-      // a placeholder in it can only be corrected by a per-request fetch
+      // Issue #11936: defaultHeaders is fixed at client construction, so a
+      // placeholder in it can only be corrected by a per-request fetch
       // wrapper -- the same one the Chat wire installs on its client.
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.1] }],
-      });
-      const generatorWithPlaceholder = new OpenAIResponsesContentGenerator(
-        {
-          ...makeGeneratorConfig(),
+      await embedWith(
+        makeGeneratorConfig({
           customHeaders: { 'x-opencode-session': '${session_id}' },
-        },
+        }),
         makeCliConfig('session-embed', true),
       );
-
-      await generatorWithPlaceholder.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
 
       const clientOptions = mockOpenAIConstructor.mock.calls.at(-1)![0] as {
         fetch?: (input: string, init?: RequestInit) => Promise<Response>;
@@ -494,17 +379,7 @@ describe('OpenAIResponsesContentGenerator', () => {
     it.each(['https://api.openai.com/v1', 'https://api.openai.com/v1/'])(
       'does not append a second /v1 to %s',
       async (baseUrl) => {
-        mockEmbeddingsCreate.mockResolvedValue({
-          data: [{ embedding: [0.1] }],
-        });
-        const generatorWithV1 = new OpenAIResponsesContentGenerator(
-          { ...makeGeneratorConfig(), baseUrl },
-          makeCliConfig(),
-        );
-        await generatorWithV1.embedContent({
-          model: 'text-embedding-ada-002',
-          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        });
+        await embedWith(makeGeneratorConfig({ baseUrl }));
         expect(mockOpenAIConstructor).toHaveBeenCalledWith(
           expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
         );

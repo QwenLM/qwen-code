@@ -6,6 +6,14 @@
 
 export const LIVE_HOST_PROTOCOL_VERSION = 9 as const;
 export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host' as const;
+export const LIVE_WEB_HOST_BUNDLE_ID =
+  'com.alibaba.qwen-code.web-shell' as const;
+
+/**
+ * Which kind of audio endpoint holds the Host lease. Fixed by the ingress
+ * route (`/live/host` vs `/live/web`), never trusted from the hello.
+ */
+export type LiveHostKind = 'native' | 'browser';
 
 export type LiveVisualSource = 'screen' | 'camera';
 export type LiveVisualMode = 'on-demand' | 'live-feed';
@@ -115,6 +123,7 @@ export interface LiveStatus {
   blocker?: LiveBlocker;
   message?: string;
   callId?: string;
+  coordinator?: LiveSessionLocator;
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
@@ -142,6 +151,7 @@ export interface LiveStatus {
   host?: {
     version?: string;
     protocolVersion?: number;
+    kind?: LiveHostKind;
   };
 }
 
@@ -151,6 +161,8 @@ export type LivePermissionState = 'granted' | 'denied' | 'not_determined';
 
 export interface LiveHostHello {
   type: 'host.hello';
+  /** Optional; when present it must match the ingress route's kind. */
+  kind?: LiveHostKind;
   displayCaptureV1?: true;
   protocolVersion: number;
   hostVersion: string;
@@ -170,6 +182,12 @@ export interface LiveHostHello {
     audioOutput: boolean;
     globalShortcut: boolean;
     appshot: boolean;
+    /**
+     * A browser Host sets this when it can answer `host.capture_visual` from a
+     * screen the user shares with it. Absent on Hosts that predate the field
+     * and on every native Host, which captures through Appshot instead.
+     */
+    screenShare?: boolean;
   };
 }
 
@@ -290,7 +308,28 @@ export type LiveLanguageResult =
       uiLanguageV1?: LiveLanguageState;
     };
 
+export type LiveScreenFeedPhase =
+  | 'starting'
+  | 'streaming'
+  | 'stopped'
+  | 'error';
+
+export type LiveScreenFeedMessage =
+  | {
+      type: 'host.screen_feed_start';
+      epoch: number;
+      feedId: string;
+    }
+  | { type: 'host.screen_feed_stop'; epoch: number; feedId: string }
+  | {
+      type: 'host.screen_feed_frame';
+      epoch: number;
+      feedId: string;
+      image: string;
+    };
+
 export type LiveHostMessage =
+  | LiveScreenFeedMessage
   | LiveHostHello
   | LiveHostAction
   | LiveHostMemoryAction
@@ -304,7 +343,15 @@ export type LiveHostMessage =
 
 export type LiveDaemonMessage =
   | {
+      type: 'host.screen_feed_state';
+      epoch: number;
+      feedId: string;
+      phase: LiveScreenFeedPhase;
+      message?: string;
+    }
+  | {
       type: 'host.welcome';
+      screenFeedV1?: true;
       protocolVersion: typeof LIVE_HOST_PROTOCOL_VERSION;
       daemonInstanceNonce: string;
       daemonShutdownV1?: true;

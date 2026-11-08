@@ -7,35 +7,35 @@
  */
 
 /**
- * OpenTUI footer + responding indicator — visual-parity restore of the ink
- * `Footer` status line and `LoadingIndicator`, ported back from the pre-batch
- * `feat/opentui-migrate` implementation the batched merge dropped.
+ * OpenTUI footer and responding indicator. Status output comes from the same
+ * execution hook as Ink; native text handles the final wrapping and styles.
  *
  * The mode segment is labelled by `formatApprovalModeName`, the mapping the rest
- * of the UI already uses, and stays dim: the composer carries the mode's colour
- * on its prefix glyph and border.
+ * of the UI already uses, and carries the mode's indicator colour on the label
+ * while its cycle shortcut stays secondary — the split ink's
+ * `AutoAcceptIndicator` renders.
  */
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import nodePath from 'node:path';
 import wrapAnsi from 'wrap-ansi';
 import { useTerminalDimensions } from '@opentui/react';
-import {
-  ApprovalMode,
-  uiTelemetryService,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import type {
+  StatusLineState,
+  useStatusLineState,
+} from '../hooks/useStatusLine.js';
 import { t } from '../../i18n/index.js';
+import type { VimMode } from '../contexts/VimModeContext.js';
 import {
   SPINNER_FRAMES,
   SPINNER_INTERVAL_MS,
   WAITING_SPINNER_FRAME,
 } from '../constants.js';
 import { usePhraseCycler } from '../hooks/usePhraseCycler.js';
-import { useGitBranchName } from '../hooks/useGitBranchName.js';
+import { useWorkflowMode } from '../hooks/use-workflow-mode.js';
 import { useTimer } from '../hooks/useTimer.js';
 import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
-import { fmtTokens } from '../components/stats-helpers.js';
 import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
 import {
   contextUsageLabel,
@@ -45,7 +45,35 @@ import {
 } from '../utils/formatters.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
+import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import { C } from './theme.js';
+import { statusLineStyledText } from './status-line-text.js';
+
+/** One coloured run of the footer's bottom hint row. */
+interface HintPart {
+  text: string;
+  color: string;
+}
+
+/**
+ * ink's `getApprovalModeIndicatorColor` (components/approvalModeVisuals.ts),
+ * read off the mapped palette instead of the ink theme: ink returns raw theme
+ * strings, and a CSS colour name opentui cannot parse degrades to magenta.
+ */
+function approvalModeColor(mode: ApprovalMode): string {
+  switch (mode) {
+    case ApprovalMode.PLAN:
+      return C.green;
+    case ApprovalMode.AUTO_EDIT:
+      return C.yellow;
+    case ApprovalMode.AUTO:
+      return C.purple;
+    case ApprovalMode.YOLO:
+      return C.red;
+    default:
+      return C.dim;
+  }
+}
 
 /**
  * Owns its frame timer so the high-frequency tick re-renders ONLY this 1-cell
@@ -160,12 +188,16 @@ export function OpenTuiLoadingIndicator({
 
 export interface OpenTuiFooterProps {
   config: Config;
+  settings: LoadedSettings;
+  statusLine: ReturnType<typeof useStatusLineState>;
+  sessionStats: StatusLineState['sessionStats'];
+  activeWorktree: StatusLineState['activeWorktree'];
   streaming: boolean;
   queueLength?: number;
-  sessionName?: string | null;
   approvalMode?: ApprovalMode;
   /** `!` shell mode: takes the hint slot over the steer/approval segments. */
   shellModeActive?: boolean;
+  vimMode?: VimMode;
   /** Armed two-press quit warning: takes the bottom hint slot and gates the
    * status line off, as it does in ink. */
   exitHint?: string | null;
@@ -174,62 +206,81 @@ export interface OpenTuiFooterProps {
 /** The status line (ink `Footer` parity). */
 export function OpenTuiFooter({
   config,
+  settings,
+  statusLine,
+  sessionStats,
+  activeWorktree,
   streaming,
   queueLength = 0,
-  sessionName = null,
   approvalMode,
   shellModeActive = false,
+  vimMode,
   exitHint = null,
 }: OpenTuiFooterProps) {
+  const workflowMode = useWorkflowMode(config);
   const { width } = useTerminalDimensions();
-  const targetDir = config.getTargetDir();
-  const gitBranch = useGitBranchName(targetDir) ?? '';
-  const footerModel = config.getModel();
-  const promptTokenCount = uiTelemetryService.getLastPromptTokenCount();
-  const contextWindowSize =
-    config.getContentGeneratorConfig()?.contextWindowSize;
+  const generationConfig = config.getContentGeneratorConfig();
+  const promptTokenCount = sessionStats.lastPromptTokenCount;
+  const contextWindowSize = generationConfig?.contextWindowSize;
   // Original status-line parity: the context indicator only appears once tokens
   // have been used, never bare.
   const contextLabel =
-    contextWindowSize && promptTokenCount > 0
-      ? ` · ${fmtTokens(contextWindowSize)} ${formatPercentageUsed(
+    contextWindowSize &&
+    promptTokenCount > 0 &&
+    !statusLine.hideContextIndicator
+      ? `${formatPercentageUsed(
           promptTokenCount / contextWindowSize,
         )}${contextUsageLabel(width)}`
       : '';
-  const footerLine1 =
-    `➜ ${nodePath.basename(targetDir)}` +
-    (sessionName ? ` · ${sessionName}` : '') +
-    (gitBranch ? ` · git:(${gitBranch})` : '') +
-    (footerModel ? ` · ${footerModel}` : '') +
-    contextLabel;
-  // ink's AutoAcceptIndicator prefixes the default mode with a pause glyph and
-  // suffixes the cycle shortcut; formatApprovalModeName is shared with the
-  // dialogs and carries neither. Windows gets the bare-Tab wording because
-  // some terminals there cannot tell Shift+Tab from Tab.
+  const sandboxLabel = formatExecutionSandbox(config);
+  // ink's AutoAcceptIndicator prefixes the default mode with a pause glyph,
+  // colours the label with the mode's indicator colour and keeps the cycle
+  // shortcut in text.secondary; formatApprovalModeName is shared with the
+  // dialogs and carries none of the three. Windows gets the bare-Tab wording
+  // because some terminals there cannot tell Shift+Tab from Tab.
   const cycleText =
     process.platform === 'win32'
       ? t('(tab to cycle)')
       : t('(shift + tab to cycle)');
   const pausePrefix = approvalMode === ApprovalMode.DEFAULT ? '⏸ ' : '';
-  const modeLabel = approvalMode
-    ? `${pausePrefix}${formatApprovalModeName(approvalMode)} ${cycleText}`
-    : null;
-  const modeHint = shellModeActive
-    ? 'shell mode enabled (esc to disable)'
-    : [streaming ? t('Enter to steer · Ctrl+Q to queue') : null, modeLabel]
-        .filter((segment): segment is string => segment !== null)
-        .join(' · ');
+  const modeHint: HintPart[] = vimMode
+    ? [{ text: `-- ${vimMode} --`, color: C.dim }]
+    : shellModeActive
+      ? [{ text: 'shell mode enabled (esc to disable)', color: C.dim }]
+      : [
+          ...(streaming
+            ? [
+                { text: t('Enter to steer · Ctrl+Q to queue'), color: C.dim },
+                // ink's leftBottomContent puts ' · ' between its own segments,
+                // but only where two of them are actually present.
+                ...(approvalMode ? [{ text: ' · ', color: C.dim }] : []),
+              ]
+            : []),
+          ...(approvalMode
+            ? [
+                {
+                  text: `${pausePrefix}${formatApprovalModeName(approvalMode)}`,
+                  color: approvalModeColor(approvalMode),
+                },
+                { text: ` ${cycleText}`, color: C.dim },
+              ]
+            : []),
+        ];
   const queuedHint =
     queueLength > 0
       ? `⏳ ${t('{{count}} queued', { count: String(queueLength) })}`
       : null;
-  const hintSegments = [modeHint || null, queuedHint].filter(
-    (segment): segment is string => segment !== null,
-  );
   // ink renders the badge as a sibling text node beginning with a literal
-  // space, so it joins the hint with one space — unlike the ' · ' that ink's
-  // leftBottomContent puts between its own segments.
-  const footerLine2 = hintSegments.join(' ');
+  // space, so it joins the hint with one space.
+  const hintParts: HintPart[] = [
+    ...modeHint,
+    ...(queuedHint
+      ? [
+          ...(modeHint.length > 0 ? [{ text: ' ', color: C.dim }] : []),
+          { text: queuedHint, color: C.dim },
+        ]
+      : []),
+  ];
 
   // ink renders these two rows under different wrap policies: the status line
   // is `wrap="wrap"` inside a two-line `overflow="hidden"` box, so a narrow
@@ -237,10 +288,28 @@ export function OpenTuiFooter({
   // it; the hint row is `wrap="truncate"`, so it cannot grow the footer
   // mid-turn (#8667/#8666).
   const rowBudget = Math.max(0, width - 4);
-  const statusLines = wrapAnsi(footerLine1, Math.max(1, rowBudget), {
+  const contextWidth =
+    isNarrowWidth(width) || !contextLabel
+      ? 0
+      : getCachedStringWidth(contextLabel) + 1;
+  const statusWidth = Math.max(1, rowBudget - contextWidth);
+  const statusLines = wrapAnsi(statusLine.lines.join('\n'), statusWidth, {
     trim: false,
     hard: true,
-  }).split('\n');
+  })
+    .split('\n')
+    .slice(0, 2);
+  // One truncated line in ink; cut part by part against the remaining budget so
+  // the coloured mode label survives narrowing instead of being dropped whole.
+  const hintRow: HintPart[] = [];
+  let hintBudget = Math.max(0, rowBudget - contextWidth);
+  for (const part of hintParts) {
+    if (hintBudget <= 0) break;
+    const text = truncateToWidth(part.text, hintBudget);
+    if (text) hintRow.push({ text, color: part.color });
+    hintBudget -= getCachedStringWidth(text);
+    if (text.length !== part.text.length) break;
+  }
 
   // ink gives the armed quit warning the footer's bottom hint slot and gates
   // its status line off while the warning is up, so the warning reads directly
@@ -264,11 +333,66 @@ export function OpenTuiFooter({
 
   return (
     <box flexDirection="column" paddingLeft={2} paddingRight={2} flexShrink={0}>
-      <text fg={C.dim}>{statusLines[0]}</text>
-      {statusLines[1] && <text fg={C.dim}>{statusLines[1]}</text>}
-      {footerLine2 && (
-        <text fg={C.dim}>{truncateToWidth(footerLine2, rowBudget)}</text>
-      )}
+      {sandboxLabel && <text fg={C.dim}>{sandboxLabel}</text>}
+      <box
+        flexDirection={isNarrowWidth(width) ? 'column' : 'row'}
+        justifyContent="space-between"
+      >
+        <box flexDirection="column" width={statusWidth}>
+          {statusLine.lines.length > 0 &&
+            statusLines.map((line, index) => (
+              <text
+                key={index}
+                content={statusLineStyledText(line, {
+                  color:
+                    !statusLine.respectUserColors && statusLine.useThemeColors
+                      ? C.accent
+                      : undefined,
+                  dim:
+                    !statusLine.respectUserColors && !statusLine.useThemeColors,
+                })}
+              />
+            ))}
+          {activeWorktree &&
+            !settings.merged.ui?.hideBuiltinWorktreeIndicator && (
+              <text attributes={2}>
+                {truncateToWidth(
+                  `⎇ ${activeWorktree.branch} (${activeWorktree.slug})`,
+                  statusWidth,
+                )}
+              </text>
+            )}
+          {workflowMode?.requested && (
+            <text fg={workflowMode.effective ? C.accent : C.yellow}>
+              {truncateToWidth(
+                workflowMode.effective
+                  ? 'Workflow mode: on'
+                  : 'Workflow mode: on (unavailable)',
+                statusWidth,
+              )}
+            </text>
+          )}
+          {hintRow.length > 0 && (
+            <box flexDirection="row">
+              {hintRow.map((part, i) => (
+                <text key={`${i}`} fg={part.color}>
+                  {part.text}
+                </text>
+              ))}
+            </box>
+          )}
+        </box>
+        {contextLabel && (
+          <text
+            fg={
+              promptTokenCount > (contextWindowSize ?? Infinity) ? C.red : C.dim
+            }
+            flexShrink={0}
+          >
+            {contextLabel}
+          </text>
+        )}
+      </box>
     </box>
   );
 }

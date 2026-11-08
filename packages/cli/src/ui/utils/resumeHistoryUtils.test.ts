@@ -10,12 +10,16 @@ import {
   buildResumedHistoryItems,
   stripSuppressOnRestore,
   expandCollapsedHistory,
+  computeResumedPromptCountSeed,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
+import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
+import { computeApiTruncationIndex } from './historyMapping.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
   AnyDeclarativeTool,
   Config,
+  ChatRecord,
   ConversationRecord,
   FindingsResultDisplay,
   GoalSnapshotV2,
@@ -394,13 +398,21 @@ describe('resumeHistoryUtils', () => {
     it('prefers recorded displayText over the augmented parts', () => {
       const items = buildUserItems({
         type: 'user',
+        promptId: 'prompt-1',
         message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
         systemPayload: {
           displayText: 'my prompt',
           hookContext: 'injected hook context',
         },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          promptId: 'prompt-1',
+        },
+      ]);
     });
 
     it('does not fall back to hidden text when displayText is empty', () => {
@@ -466,7 +478,11 @@ describe('resumeHistoryUtils', () => {
         },
       });
       expect(items).toEqual([
-        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt\nbare injected context',
+        },
       ]);
     });
 
@@ -730,7 +746,56 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 50);
 
     expect(items).toEqual([
-      { id: 51, type: 'user', text: '[User message with attachments]' },
+      {
+        id: 51,
+        type: 'user',
+        text: '[User message with attachments]',
+      },
+    ]);
+  });
+
+  it('restores a Mod’s own prompt as the row naming the Mod, asUser or not', () => {
+    const framed = (text: string) => ({
+      parts: [
+        { text: `<qwen:mod-prompt mod="lint">\n${text}\n</qwen:mod-prompt>` },
+      ],
+    });
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          provenance: 'mod_prompt',
+          promptId: 'prompt-2',
+          message: framed('List the TODOs'),
+          systemPayload: {
+            displayText: 'List the TODOs',
+            hookContext: '',
+            mod: 'lint',
+          },
+        },
+        {
+          type: 'user',
+          provenance: 'mod_prompt',
+          message: { parts: [{ text: 'Say done' }] },
+          systemPayload: {
+            displayText: 'Say done',
+            hookContext: '',
+            mod: 'lint',
+            asUser: true,
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([
+      { id: 31, type: 'notification', text: 'Mod lint: List the TODOs' },
+      { id: 32, type: 'notification', text: 'Mod lint: Say done' },
     ]);
   });
 
@@ -765,7 +830,13 @@ describe('resumeHistoryUtils', () => {
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'raw @file prompt',
+      },
+    ]);
   });
 
   it('projects the user turn when legacy @-command metadata has no userText', () => {
@@ -1048,7 +1119,7 @@ describe('resumeHistoryUtils', () => {
           description: 'Mocked description',
           args: { target: 'a' },
           resultDisplay: undefined,
-          status: ToolCallStatus.Success,
+          status: ToolCallStatus.Error,
           confirmationDetails: undefined,
         },
       ],
@@ -1134,6 +1205,7 @@ describe('resumeHistoryUtils', () => {
         {
           type: 'system',
           subtype: 'slash_command',
+          promptId: 'session########3',
           systemPayload: {
             phase: 'invocation',
             rawCommand: '/filecmd',
@@ -1155,7 +1227,13 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 20);
 
     expect(items).toEqual([
-      { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
+      {
+        id: 21,
+        type: 'user',
+        text: '/filecmd',
+        sentToModel: true,
+        promptId: 'session########3',
+      },
       {
         id: 22,
         type: 'gemini',
@@ -1494,6 +1572,120 @@ describe('resumeHistoryUtils', () => {
     });
   });
 
+  it('does not render an unpaired sibling as successful when only selected A has a real result', () => {
+    const messages = [
+      {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'h11a-edit',
+                name: 'edit',
+                args: {
+                  file_path: '/test/workspace/owned-a.txt',
+                  old_string: 'H11A_ORIGINAL_BYTES',
+                  new_string: 'H11A_EDITED_BYTES',
+                },
+              },
+            },
+            {
+              functionCall: {
+                id: 'h11a-edit-b',
+                name: 'edit',
+                args: {
+                  file_path: '/test/workspace/owned-b.txt',
+                  old_string: 'H11A_B_ORIGINAL_BYTES',
+                  new_string: 'H11A_B_EDITED_BYTES',
+                },
+              },
+            },
+          ],
+        },
+      },
+      {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'h11a-edit',
+                name: 'edit',
+                response: {
+                  output:
+                    'The file: /test/workspace/owned-a.txt has been updated. Showing lines 1-2 of 2 from the edited file:\n\n---\n\nH11A_EDITED_BYTES\n\n\nH11A_REAL_EDIT_A_NEW2',
+                },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'h11a-edit',
+          status: 'success',
+          resultDisplay: {
+            fileDiff:
+              'Index: owned-a.txt\n===================================================================\n--- owned-a.txt\tCurrent\n+++ owned-a.txt\tProposed\n@@ -1,1 +1,1 @@\n-H11A_ORIGINAL_BYTES\n+H11A_EDITED_BYTES\n',
+            fileName: 'owned-a.txt',
+            filePath: '/test/workspace/owned-a.txt',
+            originalContent: 'H11A_ORIGINAL_BYTES\n',
+            newContent: 'H11A_EDITED_BYTES\n',
+            diffStat: {
+              model_added_lines: 1,
+              model_removed_lines: 1,
+              model_added_chars: 17,
+              model_removed_chars: 19,
+              user_added_lines: 0,
+              user_removed_lines: 0,
+              user_added_chars: 0,
+              user_removed_chars: 0,
+            },
+          },
+          executionStatus: 'success',
+          artifacts: [
+            {
+              title: 'owned-a.txt',
+              kind: 'file',
+              storage: 'workspace',
+              workspacePath: 'owned-a.txt',
+              mimeType: 'text/plain',
+              sizeBytes: 18,
+              updateOnly: true,
+            },
+          ],
+        },
+      },
+    ] as unknown as ConversationRecord['messages'];
+    const items = buildResumedHistoryItems(
+      { conversation: { messages } } as ResumedSessionData,
+      makeConfig({ edit: mockTool }),
+      10,
+    );
+    const groups = items.filter(
+      (item): item is Extract<HistoryItem, { type: 'tool_group' }> =>
+        item.type === 'tool_group',
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0].tools).toHaveLength(2);
+    const selected = groups[0].tools.find(
+      (tool) => tool.callId === 'h11a-edit',
+    );
+    const sibling = groups[0].tools.find(
+      (tool) => tool.callId === 'h11a-edit-b',
+    );
+    expect(selected?.status).toBe(ToolCallStatus.Success);
+    expect(selected?.resultDisplay).toEqual(
+      messages[1].toolCallResult?.resultDisplay,
+    );
+    expect(sibling?.status).toBe(ToolCallStatus.Error);
+    expect(sibling?.resultDisplay).toBeUndefined();
+    expect(sibling?.detailedDisplay).toBeUndefined();
+    expect(sibling?.args).toEqual(
+      messages[0].message?.parts?.[1].functionCall?.args,
+    );
+  });
+
   describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
     type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
     const firstTool = (items: HistoryItem[]) =>
@@ -1592,6 +1784,51 @@ describe('resumeHistoryUtils', () => {
       });
       const tool = firstTool(items);
       expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('preserves a recorded cancellation and never exposes raw read output as detailed success', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          status: 'cancelled',
+          resultDisplay: 'Cancelled',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'RAW_CANCELLED_READ_MUST_NOT_SURFACE' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Canceled);
+      expect(tool?.resultDisplay).toBe('Cancelled');
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('keeps a legacy recorded result without status successful', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Legacy read',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'LEGACY_RECORDED_READ' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Success);
+      expect(tool?.resultDisplay).toBe('Legacy read');
+      expect(tool?.detailedDisplay).toBe('LEGACY_RECORDED_READ');
     });
 
     it('does NOT populate detailedDisplay for errored tools (matches live path)', () => {
@@ -1991,4 +2228,310 @@ describe('expandCollapsedHistory', () => {
       );
     });
   });
+});
+
+describe('resumed identity survives a synthetic display string', () => {
+  // The fixture makes identity and positional alignment disagree after a
+  // media-only turn, using the real UI and API resume builders.
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  const model = (text: string) =>
+    rec({ type: 'assistant', message: { role: 'model', parts: [{ text }] } });
+
+  function truncationIndexForLastUserTurn(messages: ChatRecord[]): number {
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const userItems = ui.filter((item) => item.type === 'user');
+    return computeApiTruncationIndex(
+      ui,
+      userItems[userItems.length - 1]!.id,
+      api,
+    );
+  }
+
+  const leadingTurns = (): ChatRecord[] => [
+    rec({
+      type: 'user',
+      promptId: 's########0',
+      message: { role: 'user', parts: [{ text: 'hello' }] },
+    }),
+    model('r0'),
+    rec({
+      type: 'user',
+      promptId: 's########1',
+      message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
+    }),
+    model('r1'),
+  ];
+
+  it('resolves it identically when the record carries attachments', () => {
+    // Identity is independent of the synthetic attachment display text.
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'run the tests' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('lands an identified target past a goal_runtime record that inflates the walk', () => {
+    // goal_runtime has API content but no UI item, shifting positional order.
+    expect(
+      truncationIndexForLastUserTurn([
+        rec({
+          type: 'user',
+          promptId: 's########0',
+          message: { role: 'user', parts: [{ text: 'first prompt' }] },
+        }),
+        model('r0'),
+        rec({
+          type: 'user',
+          subtype: 'goal_runtime',
+          message: { role: 'user', parts: [{ text: 'goal tick' }] },
+        }),
+        model('rX'),
+        rec({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'target prompt' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(6);
+  });
+
+  it('still resolves a placeholder-texted turn that follows an attachment-only turn', () => {
+    // Attachment-only and placeholder turns are counted differently by the
+    // legacy positional mapper.
+    expect(
+      truncationIndexForLastUserTurn([
+        leadingTurns()[0]!,
+        model('r0'),
+        rec({
+          type: 'user',
+          promptId: 's########1',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+              } as unknown as Part,
+            ],
+          },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('resolves an attachment-only target by identity', () => {
+    const messages = [
+      leadingTurns()[0]!,
+      model('r0'),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+            } as unknown as Part,
+          ],
+        },
+        systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+      }),
+      model('r1'),
+      rec({
+        type: 'user',
+        promptId: 's########2',
+        message: { role: 'user', parts: [{ text: 'run the tests' }] },
+      }),
+      model('r2'),
+    ];
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const attachmentItem = ui.find(
+      (item) =>
+        item.type === 'user' && item.text === '[User message with attachments]',
+    )!;
+    expect(computeApiTruncationIndex(ui, attachmentItem.id, api)).toBe(2);
+  });
+});
+
+describe('resumed promptId attachment', () => {
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  it('rewinds a legacy placeholder prompt through its source record', () => {
+    const messages: ChatRecord[] = [
+      'hello',
+      'response hello',
+      '[Old inline media cleared: image/png]',
+      'response colliding',
+      'world',
+      'response world',
+    ].map((text, index) => ({
+      uuid: `legacy-${index}`,
+      parentUuid: index === 0 ? null : `legacy-${index - 1}`,
+      sessionId: 's',
+      timestamp: '2026-10-09T00:00:00.000Z',
+      cwd: '/workspace',
+      version: '0.10.5',
+      type: index % 2 === 0 ? 'user' : 'assistant',
+      message: {
+        role: index % 2 === 0 ? 'user' : 'model',
+        parts: [{ text }],
+      },
+    }));
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 0);
+    const api = buildApiHistoryFromConversation(sessionData.conversation);
+    const target = ui.find((item) => item.type === 'user' && item.id === 3)!;
+
+    expect(target).toMatchObject({
+      text: '[Old inline media cleared: image/png]',
+    });
+    expect('promptId' in target).toBe(false);
+    const cut = computeApiTruncationIndex(ui, target.id, api);
+    expect(cut).toBe(2);
+    expect(api.slice(0, cut).map((entry) => entry.parts?.[0]?.text)).toEqual([
+      'hello',
+      'response hello',
+    ]);
+  });
+
+  it('attaches recorded prompt identities to resumed user items', () => {
+    const sessionData = {
+      conversation: {
+        messages: [
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'first prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r0' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r1' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########2',
+            message: { role: 'user', parts: [{ text: 'third prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r2' }] },
+          }),
+        ],
+      },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const userItems = ui.filter(
+      (item): item is HistoryItem & { promptId?: string } =>
+        item.type === 'user',
+    );
+    expect(userItems).toHaveLength(3);
+    // Duplicates are carried through verbatim rather than deduplicated:
+    // refusing an ambiguous id is the resolver's job (historyMapping), not
+    // the builder's.
+    expect(userItems.map((item) => item.promptId)).toEqual([
+      's########0',
+      's########0',
+      's########2',
+    ]);
+  });
+});
+
+describe('computeResumedPromptCountSeed', () => {
+  it('keeps seeding from zero when history is empty', () => {
+    expect(computeResumedPromptCountSeed([], 's')).toBe(0);
+  });
+
+  it.each([0, 12])(
+    'does not reuse retained snapshot turn %i without surviving user turns',
+    (turn) => {
+      const snapshotRecord: ChatRecord = {
+        uuid: 'retained-snapshots',
+        parentUuid: null,
+        sessionId: 's',
+        timestamp: '2026-10-08T00:00:00.000Z',
+        cwd: '/workspace',
+        version: '0.25.0',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: {
+          snapshots: [
+            `s########${turn}`,
+            'other-session########99',
+            's########invalid',
+            `s########${'9'.repeat(400)}`,
+            's########9007199254740992',
+            `s########${Number.MAX_SAFE_INTEGER}`,
+          ].map((promptId) => ({
+            promptId,
+            timestamp: '2026-10-08T00:00:00.000Z',
+            trackedFileBackups: {},
+          })),
+        },
+      };
+
+      expect(computeResumedPromptCountSeed([snapshotRecord], 's')).toBe(
+        turn + 1,
+      );
+    },
+  );
 });

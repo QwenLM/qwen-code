@@ -105,6 +105,7 @@ async function withPinnedClock(body: () => Promise<void>): Promise<void> {
 async function mount(
   node: ReactNode,
   stdout: NodeJS.WriteStream,
+  options: { debug?: boolean } = {},
 ): Promise<Instance> {
   let app!: Instance;
   await act(async () => {
@@ -113,6 +114,7 @@ async function mount(
       interactive: true,
       maxFps: 1_000,
       patchConsole: false,
+      ...options,
     });
     // Register before the flush so a mount that throws out of the commit phase
     // is still unmounted by `afterEach`.
@@ -485,6 +487,12 @@ describe('ink useBoxMetrics loop guard', () => {
     // the frame asserted below becomes the #185 error instead of the box.
     let renders = 0;
     const { stdout, lastFrame } = createTestStdout();
+    // Flushed unthrottled on purpose: this assertion samples an intermediate
+    // frame, but the cascade settles on the blank box, so under the 1ms
+    // render throttle a cascade that completes inside one window flushes only
+    // blank states and no `fallback` frame is ever written. Debug mode writes
+    // every commit synchronously, which keeps the last non-blank frame
+    // `fallback` however fast the machine is.
     await mount(
       <HasMeasuredGatedBox
         onRender={() => {
@@ -492,6 +500,7 @@ describe('ink useBoxMetrics loop guard', () => {
         }}
       />,
       stdout,
+      { debug: true },
     );
 
     // What the frame pins is the arming's existence, and only that: this fixture

@@ -48,6 +48,29 @@ async function putObject(
   return { sha256, objectPath };
 }
 
+/** Backdate `p`'s atime and mtime by `ageMs`. */
+async function age(p: string, ageMs: number): Promise<void> {
+  const when = new Date(Date.now() - ageMs);
+  await fs.utimes(p, when, when);
+}
+
+/** Recovery on the shared store, no upload cache, with `options`. */
+const sweep = (options: Parameters<typeof runStartupRecoveryOnce>[2]) =>
+  runStartupRecoveryOnce(store, undefined, options);
+
+/** Runs `fn` with a fresh temp dir, removed afterwards. */
+async function withTempDir(
+  prefix: string,
+  fn: (dir: string) => Promise<void>,
+): Promise<void> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  try {
+    await fn(dir);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
 describe('runStartupRecoveryOnce', () => {
   it('removes expired .part files, keeps recent ones', async () => {
     const downloads = path.join(store.getOmniRootDir(), 'downloads');
@@ -56,8 +79,7 @@ describe('runStartupRecoveryOnce', () => {
     const newPart = path.join(downloads, 'new.part');
     await fs.writeFile(oldPart, 'x');
     await fs.writeFile(newPart, 'y');
-    const old = new Date(Date.now() - 72 * 3600_000);
-    await fs.utimes(oldPart, old, old);
+    await age(oldPart, 72 * 3600_000);
 
     await runStartupRecoveryOnce(store);
 
@@ -74,10 +96,8 @@ describe('runStartupRecoveryOnce', () => {
     await fs.writeFile(justYounger, 'y');
     // Straddle the retention cutoff by a minute either side — pins the
     // comparison direction (mtime < cutoff → remove), not the exact value.
-    const older = new Date(Date.now() - 48 * 3600_000 - 60_000);
-    const younger = new Date(Date.now() - 48 * 3600_000 + 60_000);
-    await fs.utimes(justOlder, older, older);
-    await fs.utimes(justYounger, younger, younger);
+    await age(justOlder, 48 * 3600_000 + 60_000);
+    await age(justYounger, 48 * 3600_000 - 60_000);
 
     await runStartupRecoveryOnce(store);
 
@@ -89,8 +109,7 @@ describe('runStartupRecoveryOnce', () => {
     const downloads = path.join(store.getOmniRootDir(), 'downloads');
     const dirPart = path.join(downloads, 'stale-dir.part');
     await fs.mkdir(dirPart, { recursive: true });
-    const old = new Date(Date.now() - 72 * 3600_000);
-    await fs.utimes(dirPart, old, old);
+    await age(dirPart, 72 * 3600_000);
 
     await runStartupRecoveryOnce(store);
 
@@ -104,8 +123,7 @@ describe('runStartupRecoveryOnce', () => {
     const fresh = path.join(shard, '.tmp-inflight');
     await fs.writeFile(aged, 'partial');
     await fs.writeFile(fresh, 'partial');
-    const old = new Date(Date.now() - 2 * 3600_000);
-    await fs.utimes(aged, old, old);
+    await age(aged, 2 * 3600_000);
 
     await runStartupRecoveryOnce(store);
 
@@ -132,29 +150,26 @@ describe('runStartupRecoveryOnce', () => {
     await fs.writeFile(objectPath, 'tampered-bytes'); // break hash==name
     const degradationCache = new OmniDegradationCache(store.getOmniRootDir());
     const otherSha = 'b'.repeat(64);
+    const put = (
+      source: string,
+      fingerprint: string,
+      degradedSha256: string,
+      disclosure: string,
+    ) =>
+      degradationCache.put(source, fingerprint, {
+        degradedSha256,
+        extension: '.jpg',
+        disclosure,
+        mimeType: 'image/jpeg',
+      });
     // Entry where the corrupt object is the SOURCE…
-    await degradationCache.put(sha256, 'fp-source', {
-      degradedSha256: otherSha,
-      extension: '.jpg',
-      disclosure: 'd1',
-      mimeType: 'image/jpeg',
-    });
+    await put(sha256, 'fp-source', otherSha, 'd1');
     // …entry where it is the DERIVATIVE…
-    await degradationCache.put(otherSha, 'fp-derived', {
-      degradedSha256: sha256,
-      extension: '.jpg',
-      disclosure: 'd2',
-      mimeType: 'image/jpeg',
-    });
+    await put(otherSha, 'fp-derived', sha256, 'd2');
     // …and an unrelated entry that must survive the cascade.
-    await degradationCache.put(otherSha, 'fp-unrelated', {
-      degradedSha256: otherSha,
-      extension: '.jpg',
-      disclosure: 'd3',
-      mimeType: 'image/jpeg',
-    });
+    await put(otherSha, 'fp-unrelated', otherSha, 'd3');
 
-    await runStartupRecoveryOnce(store, undefined, { degradationCache });
+    await sweep({ degradationCache });
 
     await expect(fs.access(objectPath)).rejects.toThrow();
     expect(await degradationCache.get(sha256, 'fp-source')).toBeNull();
@@ -181,22 +196,18 @@ describe('runStartupRecoveryOnce', () => {
 
     // …then a second store with its OWN root must get its own scan (a
     // process-global latch would silently skip it).
-    const qwenDir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-recov2-'));
-    try {
+    await withTempDir('omni-recov2-', async (qwenDir2) => {
       const store2 = new OmniObjectStore(qwenDir2);
       await store2.ensureLayout();
       const { objectPath } = await putObject('other-root', qwenDir2, store2);
       const orphan = path.join(path.dirname(objectPath), '.tmp-orphan2');
       await fs.writeFile(orphan, 'x');
-      const old = new Date(Date.now() - 2 * 3600_000);
-      await fs.utimes(orphan, old, old);
+      await age(orphan, 2 * 3600_000);
 
       await runStartupRecoveryOnce(store2);
 
       await expect(fs.access(orphan)).rejects.toThrow();
-    } finally {
-      await fs.rm(qwenDir2, { recursive: true, force: true });
-    }
+    });
   });
 
   it('verifies exactly `limit` objects per run and rotates coverage across days', async () => {
@@ -223,7 +234,7 @@ describe('runStartupRecoveryOnce', () => {
     // Fake only Date: the verifier pipes streams, which need real timers.
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2025-06-01T12:00:00Z'));
-    await runStartupRecoveryOnce(store, undefined, { sampleVerifyLimit: 3 });
+    await sweep({ sampleVerifyLimit: 3 });
     const day1Deleted = await missing();
     expect(day1Deleted).toHaveLength(3);
 
@@ -232,7 +243,7 @@ describe('runStartupRecoveryOnce', () => {
     for (const p of day1Deleted) await fs.writeFile(p, 'tampered-again');
     resetRecoveryLatchForTests();
     vi.setSystemTime(new Date('2025-06-02T12:00:00Z'));
-    await runStartupRecoveryOnce(store, undefined, { sampleVerifyLimit: 3 });
+    await sweep({ sampleVerifyLimit: 3 });
     const day2Deleted = await missing();
     expect(day2Deleted).toHaveLength(3);
     for (const p of day2Deleted) {
@@ -279,10 +290,7 @@ describe('runStartupRecoveryOnce', () => {
 
   describe('staging sweep (storage design §6.1: uncommitted work is deleted)', () => {
     /** Age a staging entry past the multi-process grace window (1h). */
-    async function ageEntry(p: string): Promise<void> {
-      const when = new Date(Date.now() - 2 * 3600_000);
-      await fs.utimes(p, when, when);
-    }
+    const ageEntry = (p: string) => age(p, 2 * 3600_000);
 
     it('deletes every stale staging entry, including nested artifact trees and stray files', async () => {
       const stagingDir = store.getStagingDir();
@@ -316,28 +324,23 @@ describe('runStartupRecoveryOnce', () => {
     });
 
     it('removes a symlink ENTRY regardless of age without following it', async () => {
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-stage-'));
-      const victim = path.join(outside, 'victim.bin');
-      await fs.writeFile(victim, 'external');
-      try {
-        const stagingDir = store.getStagingDir();
-        const link = path.join(stagingDir, 'planted-link');
+      await withTempDir('omni-stage-', async (outside) => {
+        const victim = path.join(outside, 'victim.bin');
+        await fs.writeFile(victim, 'external');
+        const link = path.join(store.getStagingDir(), 'planted-link');
         await fs.symlink(outside, link);
 
         await runStartupRecoveryOnce(store);
 
         await expect(fs.lstat(link)).rejects.toThrow();
         await expect(fs.readFile(victim, 'utf8')).resolves.toBe('external');
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
 
     it('a symlinked staging ROOT is never swept', async () => {
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-stage-'));
-      const victim = path.join(outside, 'victim.bin');
-      await fs.writeFile(victim, 'external');
-      try {
+      await withTempDir('omni-stage-', async (outside) => {
+        const victim = path.join(outside, 'victim.bin');
+        await fs.writeFile(victim, 'external');
         const stagingDir = store.getStagingDir();
         await fs.rm(stagingDir, { recursive: true, force: true });
         await fs.symlink(outside, stagingDir);
@@ -346,69 +349,44 @@ describe('runStartupRecoveryOnce', () => {
 
         await expect(fs.readFile(victim, 'utf8')).resolves.toBe('external');
         expect((await fs.lstat(stagingDir)).isSymbolicLink()).toBe(true);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
   });
 
   describe('quarantine sweep (retention window + size budget)', () => {
-    async function makeQuarantineEntry(
-      name: string,
+    /** A quarantine entry named `letter` ×16 holding `content`, aged
+     * `ageMs`. */
+    async function quarantine(
+      letter: string,
       content: string,
       ageMs: number,
     ): Promise<string> {
-      const dir = path.join(store.getQuarantineDir(), name);
+      const dir = path.join(store.getQuarantineDir(), letter.repeat(16));
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(path.join(dir, 'artifact.bin'), content);
       await fs.writeFile(path.join(dir, 'reason.json'), '{}');
-      const when = new Date(Date.now() - ageMs);
-      await fs.utimes(dir, when, when);
+      await age(dir, ageMs);
       return dir;
     }
 
     it('removes entries past the retention window, keeps younger ones', async () => {
-      const expired = await makeQuarantineEntry(
-        'aaaaaaaaaaaaaaaa',
-        'old',
-        8 * 86_400_000,
-      );
-      const fresh = await makeQuarantineEntry(
-        'bbbbbbbbbbbbbbbb',
-        'new',
-        1 * 86_400_000,
-      );
+      const expired = await quarantine('a', 'old', 8 * 86_400_000);
+      const fresh = await quarantine('b', 'new', 1 * 86_400_000);
 
-      await runStartupRecoveryOnce(store, undefined, {
-        quarantineRetentionDays: 7,
-      });
+      await sweep({ quarantineRetentionDays: 7 });
 
       await expect(fs.lstat(expired)).rejects.toThrow();
       await expect(fs.lstat(fresh)).resolves.toBeDefined();
     });
 
     it('removes oldest entries first when over the size budget', async () => {
-      const oldest = await makeQuarantineEntry(
-        'aaaaaaaaaaaaaaaa',
-        'x'.repeat(100),
-        3 * 3600_000,
-      );
-      const middle = await makeQuarantineEntry(
-        'bbbbbbbbbbbbbbbb',
-        'y'.repeat(100),
-        2 * 3600_000,
-      );
-      const newest = await makeQuarantineEntry(
-        'cccccccccccccccc',
-        'z'.repeat(100),
-        1 * 3600_000,
-      );
+      const oldest = await quarantine('a', 'x'.repeat(100), 3 * 3600_000);
+      const middle = await quarantine('b', 'y'.repeat(100), 2 * 3600_000);
+      const newest = await quarantine('c', 'z'.repeat(100), 1 * 3600_000);
 
       // ~300 bytes of artifacts (+ reason.json) against a 250-byte budget:
       // dropping the single oldest entry brings the area back under.
-      await runStartupRecoveryOnce(store, undefined, {
-        quarantineMaxBytes: 250,
-      });
+      await sweep({ quarantineMaxBytes: 250 });
 
       await expect(fs.lstat(oldest)).rejects.toThrow();
       await expect(fs.lstat(middle)).resolves.toBeDefined();
@@ -416,8 +394,8 @@ describe('runStartupRecoveryOnce', () => {
     });
 
     it('keeps everything when under both retention and budget', async () => {
-      const a = await makeQuarantineEntry('aaaaaaaaaaaaaaaa', 'a', 3600_000);
-      const b = await makeQuarantineEntry('bbbbbbbbbbbbbbbb', 'b', 7200_000);
+      const a = await quarantine('a', 'a', 3600_000);
+      const b = await quarantine('b', 'b', 7200_000);
 
       await runStartupRecoveryOnce(store);
 
@@ -426,110 +404,93 @@ describe('runStartupRecoveryOnce', () => {
     });
 
     it('a symlinked quarantine ENTRY is never traversed, sized, or deleted', async () => {
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-quar-'));
-      const victim = path.join(outside, 'victim.bin');
-      await fs.writeFile(victim, 'x'.repeat(10_000));
-      const old = new Date(Date.now() - 30 * 86_400_000);
-      await fs.utimes(outside, old, old);
-      await fs.utimes(victim, old, old);
-      try {
+      await withTempDir('omni-quar-', async (outside) => {
+        const victim = path.join(outside, 'victim.bin');
+        await fs.writeFile(victim, 'x'.repeat(10_000));
+        await age(outside, 30 * 86_400_000);
+        await age(victim, 30 * 86_400_000);
         const link = path.join(store.getQuarantineDir(), 'dddddddddddddddd');
         await fs.symlink(outside, link);
 
         // Aggressive limits: if the sweep treated the link as an entry it
         // would be expired AND over budget — external bytes must survive.
-        await runStartupRecoveryOnce(store, undefined, {
-          quarantineRetentionDays: 1,
-          quarantineMaxBytes: 1,
-        });
+        await sweep({ quarantineRetentionDays: 1, quarantineMaxBytes: 1 });
 
         await expect(fs.readFile(victim, 'utf8')).resolves.toBe(
           'x'.repeat(10_000),
         );
         expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
 
     it('a symlinked quarantine ROOT is never swept', async () => {
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-quar-'));
-      const victimDir = path.join(outside, 'eeeeeeeeeeeeeeee');
-      await fs.mkdir(victimDir);
-      await fs.writeFile(path.join(victimDir, 'victim.bin'), 'external');
-      const old = new Date(Date.now() - 30 * 86_400_000);
-      await fs.utimes(victimDir, old, old);
-      try {
+      await withTempDir('omni-quar-', async (outside) => {
+        const victimDir = path.join(outside, 'eeeeeeeeeeeeeeee');
+        await fs.mkdir(victimDir);
+        await fs.writeFile(path.join(victimDir, 'victim.bin'), 'external');
+        await age(victimDir, 30 * 86_400_000);
         const quarantineDir = store.getQuarantineDir();
         await fs.rm(quarantineDir, { recursive: true, force: true });
         await fs.symlink(outside, quarantineDir);
 
-        await runStartupRecoveryOnce(store, undefined, {
-          quarantineRetentionDays: 1,
-        });
+        await sweep({ quarantineRetentionDays: 1 });
 
         await expect(
           fs.readFile(path.join(victimDir, 'victim.bin'), 'utf8'),
         ).resolves.toBe('external');
         expect((await fs.lstat(quarantineDir)).isSymbolicLink()).toBe(true);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
   });
 
   describe('symlink containment (recovery must never leave the omni root)', () => {
-    /** External dir with a victim file whose NAME makes recovery want to
-     * delete it through every code path: hash-mismatched "object", expired
-     * ".part", and aged ".tmp-*". Returns the paths for survival checks. */
-    async function makeVictims(): Promise<{
-      outside: string;
-      victims: string[];
-    }> {
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-outside-'));
-      const old = new Date(Date.now() - 72 * 3600_000);
-      // Name shaped like a store object (64-hex sha) whose hash will NOT
-      // match its content → the sampler would delete it if it reached it.
-      const fakeObject = path.join(outside, `${'a'.repeat(64)}.mp4`);
-      const expiredPart = path.join(outside, 'victim.part');
-      const agedTmp = path.join(outside, '.tmp-victim');
-      for (const p of [fakeObject, expiredPart, agedTmp]) {
-        await fs.writeFile(p, 'external-bytes-recovery-must-not-touch');
-        await fs.utimes(p, old, old);
+    const EXTERNAL = 'external-bytes-recovery-must-not-touch';
+
+    /** Writes each victim with EXTERNAL bytes, aged 72h. */
+    async function plantVictims(victims: string[]): Promise<string[]> {
+      for (const p of victims) {
+        await fs.writeFile(p, EXTERNAL);
+        await age(p, 72 * 3600_000);
       }
-      return { outside, victims: [fakeObject, expiredPart, agedTmp] };
+      return victims;
     }
+
+    /** Victim files in `outside` whose NAMES make recovery want to delete
+     * them through every code path: hash-mismatched "object", expired
+     * ".part", and aged ".tmp-*". Returns the paths for survival checks. */
+    const makeVictims = (outside: string) =>
+      plantVictims([
+        // Name shaped like a store object (64-hex sha) whose hash will NOT
+        // match its content → the sampler would delete it if it reached it.
+        path.join(outside, `${'a'.repeat(64)}.mp4`),
+        path.join(outside, 'victim.part'),
+        path.join(outside, '.tmp-victim'),
+      ]);
 
     async function expectAllSurvive(victims: string[]): Promise<void> {
       for (const p of victims) {
         await expect(fs.access(p)).resolves.toBeUndefined();
-        await expect(fs.readFile(p, 'utf8')).resolves.toBe(
-          'external-bytes-recovery-must-not-touch',
-        );
+        await expect(fs.readFile(p, 'utf8')).resolves.toBe(EXTERNAL);
       }
     }
 
     it('a symlinked SHARD under objects/sha256 is never traversed', async () => {
-      const { outside, victims } = await makeVictims();
-      try {
+      await withTempDir('omni-outside-', async (outside) => {
+        const victims = await makeVictims(outside);
         const objectsDir = store.getObjectsDir();
         await fs.mkdir(objectsDir, { recursive: true });
         // The reviewer's repro: shard name → symlink escaping the store.
         await fs.symlink(outside, path.join(objectsDir, 'aa'));
 
-        await runStartupRecoveryOnce(store, undefined, {
-          sampleVerifyLimit: 100,
-        });
+        await sweep({ sampleVerifyLimit: 100 });
 
         await expectAllSurvive(victims);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
 
     it('a symlinked downloads/ directory is never swept', async () => {
-      const { outside, victims } = await makeVictims();
-      try {
+      await withTempDir('omni-outside-', async (outside) => {
+        const victims = await makeVictims(outside);
         const downloads = path.join(store.getOmniRootDir(), 'downloads');
         await fs.rm(downloads, { recursive: true, force: true });
         await fs.symlink(outside, downloads);
@@ -539,25 +500,22 @@ describe('runStartupRecoveryOnce', () => {
         await expectAllSurvive(victims);
         // The symlink itself must also survive (nothing rm'd through it).
         expect((await fs.lstat(downloads)).isSymbolicLink()).toBe(true);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
 
     it('a symlinked objects/sha256 ROOT is never traversed', async () => {
-      const { outside, victims } = await makeVictims();
-      try {
+      await withTempDir('omni-outside-', async (outside) => {
+        const victims = await makeVictims(outside);
         // Give the external dir a shard-shaped inner layout so a traversal
         // WOULD find the victims if the root guard were missing.
         const innerShard = path.join(outside, 'aa');
         await fs.mkdir(innerShard);
-        const old = new Date(Date.now() - 72 * 3600_000);
         const innerNames: string[] = [];
         for (const name of await fs.readdir(outside)) {
           const src = path.join(outside, name);
           if ((await fs.lstat(src)).isFile()) {
             await fs.copyFile(src, path.join(innerShard, name));
-            await fs.utimes(path.join(innerShard, name), old, old);
+            await age(path.join(innerShard, name), 72 * 3600_000);
             innerNames.push(name);
           }
         }
@@ -566,9 +524,7 @@ describe('runStartupRecoveryOnce', () => {
         await fs.rm(objectsDir, { recursive: true, force: true });
         await fs.symlink(outside, objectsDir);
 
-        await runStartupRecoveryOnce(store, undefined, {
-          sampleVerifyLimit: 100,
-        });
+        await sweep({ sampleVerifyLimit: 100 });
 
         await expectAllSurvive(victims);
         // Pin the EXACT surviving set — reading back "whatever remains"
@@ -576,16 +532,13 @@ describe('runStartupRecoveryOnce', () => {
         for (const name of innerNames) {
           await expect(
             fs.readFile(path.join(innerShard, name), 'utf8'),
-          ).resolves.toBe('external-bytes-recovery-must-not-touch');
+          ).resolves.toBe(EXTERNAL);
         }
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
 
     it('a symlinked CANDIDATE inside a real shard is never hashed or deleted', async () => {
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-outside-'));
-      try {
+      await withTempDir('omni-outside-', async (outside) => {
         const victim = path.join(outside, 'victim.bin');
         await fs.writeFile(victim, 'external-candidate-bytes');
         // Real object pins the shard dir; the symlink poses as a second
@@ -595,9 +548,7 @@ describe('runStartupRecoveryOnce', () => {
         const link = path.join(shard, `${'b'.repeat(64)}.mp4`);
         await fs.symlink(victim, link);
 
-        await runStartupRecoveryOnce(store, undefined, {
-          sampleVerifyLimit: 100,
-        });
+        await sweep({ sampleVerifyLimit: 100 });
 
         // External target intact, and the link itself not removed either
         // (a hash of external bytes must never have happened).
@@ -605,40 +556,30 @@ describe('runStartupRecoveryOnce', () => {
           'external-candidate-bytes',
         );
         expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
 
-    /** Build a full omni-shaped layout inside an external dir: victims in
+    /** Build a full omni-shaped layout inside `outside`: victims in
      * downloads/, in an objects/sha256 shard, and .tmp orphans — so if a
      * root-level or intermediate-level symlink is followed, EVERY sweep
      * finds deletable-looking targets. */
-    async function makeOmniShapedVictimTree(): Promise<{
-      outside: string;
-      victims: string[];
-    }> {
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-outside-'));
-      const old = new Date(Date.now() - 72 * 3600_000);
+    async function makeOmniShapedVictimTree(
+      outside: string,
+    ): Promise<string[]> {
       const downloads = path.join(outside, 'downloads');
       const shard = path.join(outside, 'objects', 'sha256', 'aa');
       await fs.mkdir(downloads, { recursive: true });
       await fs.mkdir(shard, { recursive: true });
-      const victims = [
+      return plantVictims([
         path.join(downloads, 'movie.mp4.part'),
         path.join(shard, `${'a'.repeat(64)}.pdf`),
         path.join(shard, '.tmp-orphan'),
-      ];
-      for (const p of victims) {
-        await fs.writeFile(p, 'external-bytes-recovery-must-not-touch');
-        await fs.utimes(p, old, old);
-      }
-      return { outside, victims };
+      ]);
     }
 
     it('a symlinked OMNI ROOT is never swept (intermediate components must be real)', async () => {
-      const { outside, victims } = await makeOmniShapedVictimTree();
-      try {
+      await withTempDir('omni-outside-', async (outside) => {
+        const victims = await makeOmniShapedVictimTree(outside);
         const root = store.getOmniRootDir();
         await fs.rm(root, { recursive: true, force: true });
         // The reviewer's probe: a repo ships `.qwen/omni` itself as a
@@ -646,20 +587,16 @@ describe('runStartupRecoveryOnce', () => {
         // component and would pass through this link.
         await fs.symlink(outside, root);
 
-        await runStartupRecoveryOnce(store, undefined, {
-          sampleVerifyLimit: 100,
-        });
+        await sweep({ sampleVerifyLimit: 100 });
 
         await expectAllSurvive(victims);
         expect((await fs.lstat(root)).isSymbolicLink()).toBe(true);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
 
     it('a symlinked objects/ INTERMEDIATE directory is never traversed', async () => {
-      const { outside, victims } = await makeOmniShapedVictimTree();
-      try {
+      await withTempDir('omni-outside-', async (outside) => {
+        const victims = await makeOmniShapedVictimTree(outside);
         // Link the `objects/` level (the parent of `objects/sha256`): the
         // sha256-root guard lstats only `objects/sha256` — resolved through
         // this link it IS a real directory, so only an explicit
@@ -668,15 +605,11 @@ describe('runStartupRecoveryOnce', () => {
         await fs.rm(objectsParent, { recursive: true, force: true });
         await fs.symlink(path.join(outside, 'objects'), objectsParent);
 
-        await runStartupRecoveryOnce(store, undefined, {
-          sampleVerifyLimit: 100,
-        });
+        await sweep({ sampleVerifyLimit: 100 });
 
         await expectAllSurvive(victims);
         expect((await fs.lstat(objectsParent)).isSymbolicLink()).toBe(true);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
+      });
     });
   });
 });

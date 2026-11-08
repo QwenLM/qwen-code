@@ -25,9 +25,20 @@ export default defineConfig({
             // YAML-parse workflow suites still do.
             'scripts/tests/qwen-*-workflow.test.js',
             'scripts/tests/serve-ab-workflow.test.js',
+            // Drives a bash script that manages process groups.
+            'scripts/tests/rocketmq-lite-broker-script.test.js',
+            // Drives a fixture repository through extension-less `#!/bin/sh`
+            // stubs joined onto PATH with ':'; cmd.exe resolves through
+            // PATHEXT and would run the real corepack/node instead.
+            'scripts/tests/ci-build-cache.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
+    // Several suites spawn the real `corepack pnpm`; on a cold per-run cache
+    // every worker would download the pinned pnpm concurrently, and a losing
+    // install poisons the shared cache for the rest of the run (#12436).
+    // Warm it once here, before any worker forks.
+    globalSetup: ['scripts/tests/corepack-warmup.js'],
     // Several tests in install-script.test.js shell out to `node` to run
     // create-standalone-package.js, which on Windows runs a full
     // tar+gzip pass under antivirus inspection. Real runtimes observed on

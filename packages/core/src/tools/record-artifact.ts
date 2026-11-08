@@ -43,9 +43,9 @@ export interface RecordArtifactParams {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
-const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, notebook, CSV, and office documents it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, JSON, and plain text, and for files produced outside write_file. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
+const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. write_file, edit, and notebook_edit already record artifact-like workspace files (csv, html, sql, py, md, json, images, pdf, notebooks, and office documents), so do not call record_artifact again for those paths. Do call it when a shell command created or rewrote such a file, and for other formats such as plain text. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
 
-Provide exactly one locator: workspacePath, managedId, or url. Do not use the old "path" field. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.
+Provide exactly one locator: workspacePath, managedId, or url. Do not use the old "path" field.
 
 For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the path and verifies it stays inside the workspace. A regular file is stored as one workspace-root-relative canonical workspacePath. A directory is never stored as an artifact; each recordable file inside it is recorded separately. Word, Excel, PowerPoint, and other office documents use kind "document". A successful file result includes status=available, the canonical workspacePath, and resolvedPath. A successful directory result lists the expanded files instead of "Recorded artifact". If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
 
@@ -84,7 +84,12 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   }
 
   override getDescription(): string {
-    return `Recording artifact ${this.params.title}`;
+    const workspacePath = this.params.workspacePath;
+    const filename =
+      typeof workspacePath === 'string'
+        ? workspacePath.split('/').at(-1)
+        : undefined;
+    return `Recording artifact ${filename || this.params.title}`;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -109,15 +114,38 @@ class RecordArtifactInvocation extends BaseToolInvocation<
         return this.expandDirectoryLocator(locator);
       }
 
+      const callerTitle = this.params.title.trim();
+      const filename = path.posix.basename(locator.workspacePath);
+      // A filename can be 255 bytes; a stored title stops at 200 characters.
+      const title = isRecordableDerivedChild(filename, locator.workspacePath)
+        ? filename
+        : callerTitle;
+      const { derivedFromTitle: _callerMarker, ...callerMetadata } =
+        this.params.metadata ?? {};
+      const callerDescription = trimOptional(this.params.description);
+      const derivedDescription =
+        !callerDescription && callerTitle !== title ? callerTitle : undefined;
+      // The marker is extra JSON. A bag that already fills the store cap
+      // cannot carry it, and ingest would drop the record after success.
+      const markDerived =
+        derivedDescription !== undefined &&
+        !metadataExceedsBudget(callerMetadata, 'derivedFromTitle');
+      const description =
+        callerDescription || (markDerived ? derivedDescription : undefined);
+      const metadata = markDerived
+        ? { ...callerMetadata, derivedFromTitle: true }
+        : Object.keys(callerMetadata).length > 0
+          ? callerMetadata
+          : undefined;
       const artifact: ToolArtifact = {
-        title: this.params.title.trim(),
+        title,
         kind: this.params.kind,
         storage: 'workspace',
-        description: trimOptional(this.params.description),
+        ...(description ? { description } : {}),
         workspacePath: locator.workspacePath,
         mimeType: trimOptional(this.params.mimeType),
         sizeBytes: this.params.sizeBytes ?? locator.sizeBytes,
-        metadata: this.params.metadata,
+        metadata,
       };
       return {
         llmContent: formatWorkspaceSuccess(artifact.title, locator),
@@ -274,7 +302,8 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
         properties: {
           title: {
             type: 'string',
-            description: 'Concise title shown in the client artifact list.',
+            description:
+              'Concise title for a link or managed artifact. A workspace file is recorded and shown under its filename; if this title differs and description is empty, it is kept as the description.',
           },
           kind: {
             type: 'string',
@@ -767,8 +796,9 @@ function formatDirectoryExpansion(
 
 function metadataExceedsBudget(
   metadata: Record<string, string | number | boolean | null> | undefined,
+  key: 'expandedFromDirectory' | 'derivedFromTitle' = 'expandedFromDirectory',
 ): boolean {
-  const withMarker = { ...metadata, expandedFromDirectory: true };
+  const withMarker = { ...metadata, [key]: true };
   return Buffer.byteLength(JSON.stringify(withMarker), 'utf8') > 4096;
 }
 

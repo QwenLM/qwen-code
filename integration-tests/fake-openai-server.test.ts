@@ -24,6 +24,8 @@ type StreamToolCallDelta = {
 type StreamChunk = {
   choices: Array<{
     delta: {
+      content?: string | null;
+      reasoning_content?: string | null;
       tool_calls?: StreamToolCallDelta[];
     };
   }>;
@@ -124,6 +126,72 @@ describe('fake OpenAI server', () => {
     expect(payload.choices[0]?.delta.content).toBe(
       '{"error":{"message":"overloaded"}}',
     );
+  });
+
+  it('streams reasoning as reasoning_content deltas ahead of the content', async () => {
+    server = await startFakeOpenAIServer(({ requestIndex }) =>
+      requestIndex === 0
+        ? { reasoningChunks: ['Thinking ', 'about it'], content: 'the answer' }
+        : { content: 'no reasoning here' },
+    );
+
+    const streamed = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const frames = (await streamed.text())
+      .split('\n\n')
+      .filter((frame) => frame.startsWith('data: {'))
+      .map((frame) => JSON.parse(frame.replace(/^data: /, '')) as StreamChunk);
+    const deltas = frames.flatMap((frame) => frame.choices ?? []);
+    const reasoning = deltas
+      .map((choice) => choice.delta.reasoning_content)
+      .filter((text): text is string => typeof text === 'string');
+    expect(reasoning).toEqual(['Thinking ', 'about it']);
+    // The thought has to precede the text it explains: the converter builds
+    // the thought part from the delta that carries it.
+    const reasoningAt = deltas.findIndex(
+      (choice) => choice.delta.reasoning_content !== undefined,
+    );
+    const contentAt = deltas.findIndex(
+      (choice) => typeof choice.delta.content === 'string',
+    );
+    expect(reasoningAt).toBeLessThan(contentAt);
+
+    const plain = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    expect(await plain.text()).not.toContain('reasoning_content');
+  });
+
+  it('serves joined reasoning on the non-streaming path', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      reasoningChunks: ['a', 'b'],
+      content: 'answer',
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const payload = (await response.json()) as {
+      choices: Array<{ message: { reasoning_content?: string } }>;
+    };
+    expect(payload.choices[0]?.message.reasoning_content).toBe('ab');
   });
 
   it('holds a streamed response until the caller releases it', async () => {
