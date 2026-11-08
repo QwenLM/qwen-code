@@ -651,12 +651,15 @@ export function buildReadFileDescription(
   const preamble = `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. For text files, the tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. `;
   const trailer = ` For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. Jupyter notebooks return structured cell content with outputs.`;
 
+  // SVG is XML, so a text-only model can still read it as text; only the raster
+  // formats (PNG, JPG, GIF, WEBP, BMP) need image input or a vision bridge.
+  // Advertise SVG on both arms and reserve the placeholder note for raster ones.
   const images = imagesReadable
     ? 'images (PNG, JPG, GIF, WEBP, SVG, BMP), '
-    : '';
+    : 'SVG images (as text), ';
   const imageNote = imagesReadable
     ? ''
-    : ' Reading an image returns a placeholder instead of the picture: the selected model is not configured to accept image input.';
+    : ' Reading a raster image (PNG, JPG, GIF, WEBP, BMP) returns a placeholder instead of the picture: the selected model is not configured to accept image input.';
 
   const nouns: string[] = [];
   const formats: string[] = [];

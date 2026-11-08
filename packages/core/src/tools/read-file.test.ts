@@ -1133,10 +1133,11 @@ describe('ReadFileTool', () => {
       } as unknown as Config);
     }
 
-    it('omits images and notes the placeholder when image is absent and no bridge', () => {
+    it('omits raster images, keeps SVG, and notes the placeholder when image is absent and no bridge', () => {
       visionBridgeMocks.shouldRunVisionBridge.mockReturnValue(false);
       const description = textOnlyTool({}).schema.description;
       expect(description).not.toContain('images (PNG');
+      expect(description).toContain('SVG');
       expect(description).toContain('returns a placeholder');
       expect(description).not.toContain('audio, video');
     });
