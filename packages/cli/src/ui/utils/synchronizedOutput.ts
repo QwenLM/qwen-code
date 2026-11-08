@@ -4,8 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
+
 export const BEGIN_SYNCHRONIZED_UPDATE = '\u001B[?2026h';
 export const END_SYNCHRONIZED_UPDATE = '\u001B[?2026l';
+
+/**
+ * DECSET 2026 shipped in Windows Terminal 1.23. Before it the host advertises
+ * WT_SESSION but silently drops the mode, so emitting the wrappers there only
+ * adds bytes to frames the terminal still paints non-atomically.
+ */
+const WINDOWS_TERMINAL_SYNCHRONIZED_OUTPUT_MIN_BUILD = 26100;
 
 export interface SynchronizedOutputStatsSnapshot {
   synchronizedOutputFrameCount: number;
@@ -31,8 +40,35 @@ export function resetSynchronizedOutputStats(): void {
   synchronizedOutputStats.synchronizedOutputEndCount = 0;
 }
 
+/**
+ * Windows Terminal publishes no variable carrying its own version. Two signals
+ * stand in for it:
+ * - native (`win32`): the Windows build in `os.release()` (`10.0.26100`).
+ * - WSL: the host build embedded in the kernel release
+ *   (`4.4.0-26100-Microsoft`). WSL1 kernels (`4.19.104-microsoft-standard`)
+ *   carry no build number and stay undetected.
+ * Anything older than the cutoff keeps the legacy path.
+ */
+export function windowsBuildNumber(
+  osRelease: string,
+  platform: NodeJS.Platform = process.platform,
+): number | undefined {
+  const release = osRelease.trim();
+  const raw =
+    platform === 'win32'
+      ? /^\d+\.\d+\.(\d+)(?:\.|$)/.exec(release)?.[1]
+      : /^\d+\.\d+\.\d+-(\d+)-[a-z]/i.exec(release)?.[1];
+  if (raw === undefined) {
+    return undefined;
+  }
+  const build = Number.parseInt(raw, 10);
+  return Number.isFinite(build) ? build : undefined;
+}
+
 export function terminalSupportsSynchronizedOutput(
   env: NodeJS.ProcessEnv = process.env,
+  osRelease?: string,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (
     env['QWEN_CODE_DISABLE_SYNCHRONIZED_OUTPUT'] === '1' ||
@@ -48,8 +84,22 @@ export function terminalSupportsSynchronizedOutput(
     return true;
   }
 
+  // A multiplexer or SSH hop can drop DECSET 2026 even when the outer host
+  // supports it, so those exclusions win over the host detection below.
   if (env['TMUX'] || env['SSH_TTY'] || env['SSH_CLIENT']) {
     return false;
+  }
+
+  // Windows Terminal publishes no version variable; the host build comes from
+  // os.release() on both the native and WSL paths.
+  if (env['WT_SESSION']) {
+    const build = osRelease
+      ? windowsBuildNumber(osRelease, platform)
+      : undefined;
+    return (
+      build !== undefined &&
+      build >= WINDOWS_TERMINAL_SYNCHRONIZED_OUTPUT_MIN_BUILD
+    );
   }
 
   const termProgram = env['TERM_PROGRAM'];
@@ -74,7 +124,15 @@ export function installSynchronizedOutput(
   stdout: NodeJS.WriteStream = process.stdout,
   env: NodeJS.ProcessEnv = process.env,
 ): () => void {
-  if (installed || !stdout.isTTY || !terminalSupportsSynchronizedOutput(env)) {
+  // The Windows build (native release or WSL host kernel) is only consulted for
+  // Windows Terminal; other terminals skip the syscall.
+  const osRelease =
+    env['WT_SESSION'] && !env['TMUX'] ? os.release() : undefined;
+  if (
+    installed ||
+    !stdout.isTTY ||
+    !terminalSupportsSynchronizedOutput(env, osRelease)
+  ) {
     return () => {};
   }
 
