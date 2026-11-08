@@ -155,7 +155,6 @@ jobs:
           RELEASE_CLOBBER: '${{ inputs.clobber }}'
           RELEASE_DRAFT: '${{ inputs.draft }}'
           RELEASE_DRY_RUN: '${{ inputs.dry_run }}'
-          RELEASE_ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
           RELEASE_TAG: '${{ steps.version.outputs.tag }}'
           RELEASE_VERSION: '${{ steps.version.outputs.version }}'
@@ -166,30 +165,39 @@ jobs:
             [ "$RELEASE_DRY_RUN" = 'true' ] ||
             [ "$RELEASE_DRAFT" = 'true' ] ||
             [ "$RELEASE_PRERELEASE" = 'true' ] ||
-            [ "$RELEASE_CLOBBER" = 'true' ] ||
-            [ "$RELEASE_ELECTRON_BRIDGE" = 'true' ];
+            [ "$RELEASE_CLOBBER" = 'true' ];
           }; then
             exit 0
           fi
 
-          release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)" || exit 0
+          if ! release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)"; then
+            echo "::notice::Already-published check stopped: release '$RELEASE_TAG' could not be inspected."
+            exit 0
+          fi
           if ! jq -e '.isDraft == false and .isPrerelease == false' <<< "$release" >/dev/null 2>&1; then
+            echo "::notice::Already-published check stopped: release '$RELEASE_TAG' is not a published stable release."
             exit 0
           fi
 
           directory="$(mktemp -d)"
           trap 'rm -rf "$directory"' EXIT
           if ! gh release download "$FEED_TAG" --dir "$directory" --pattern 'desktop-latest.json' >/dev/null 2>&1; then
+            echo "::notice::Already-published check stopped: the GitHub stable feed '$FEED_TAG' has no readable desktop-latest.json."
             exit 0
           fi
-          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/desktop-latest.json" >/dev/null 2>&1; then
+          github_feed_version="$(jq -r '.version // "(unreadable)"' "$directory/desktop-latest.json" 2>/dev/null || echo '(unreadable)')"
+          if [ "$github_feed_version" != "$RELEASE_VERSION" ]; then
+            echo "::notice::Already-published check stopped: the GitHub stable feed is '$github_feed_version', expected $RELEASE_VERSION."
             exit 0
           fi
 
-          if ! curl -fsSL --connect-timeout 15 --max-time 300 "$ALIYUN_OSS_PUBLIC_BASE_URL/desktop/latest/desktop-latest.json" -o "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+          if ! curl -fsSL --retry 2 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 60 "$ALIYUN_OSS_PUBLIC_BASE_URL/desktop/latest/desktop-latest.json" -o "$directory/oss-desktop-latest.json" >/dev/null; then
+            echo '::notice::Already-published check stopped: the OSS mirror feed could not be downloaded.'
             exit 0
           fi
-          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+          oss_feed_version="$(jq -r '.version // "(unreadable)"' "$directory/oss-desktop-latest.json" 2>/dev/null || echo '(unreadable)')"
+          if [ "$oss_feed_version" != "$RELEASE_VERSION" ]; then
+            echo "::notice::Already-published check stopped: the OSS mirror feed is '$oss_feed_version', expected $RELEASE_VERSION."
             exit 0
           fi
 
@@ -381,6 +389,7 @@ jobs:
             glibc_floor: '2.43'
             rpm: 'true'
             epel: 'false'
+            display: 'xvfb'
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
             tauri_config: 'src-tauri/rpm-fedora44.conf.json'
@@ -389,11 +398,12 @@ jobs:
           # legacy 4.0 API, and Tauri needs libwebkit2gtk-4.1.so.0.
           - name: 'Linux x64 (rpm, RHEL 10)'
             os: 'ubuntu-22.04'
-            container: 'quay.io/centos/centos@sha256:99b8fe27dd4958b5dc2630ce35f5f6a7ff7bf9b2b1a72078102fde50d3277550'
+            container: 'quay.io/centos/centos@sha256:511d358446140e9c4ba16451affb103a14237cbf40059b18adeaef6e3080a72b'
             artifact_suffix: 'linux-x64-rpm-rhel10'
             glibc_floor: '2.39'
             rpm: 'true'
             epel: 'true'
+            display: 'weston'
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
             tauri_config: 'src-tauri/rpm-rhel10.conf.json'
@@ -474,9 +484,9 @@ jobs:
           if [ '${{ matrix.epel }}' = 'true' ]; then
             dnf install -y dnf-plugins-core
             dnf config-manager --set-enabled crb
-            epel_rpm="$RUNNER_TEMP/epel-release-latest-10.noarch.rpm"
-            curl -fsSL --connect-timeout 15 --max-time 120 -o "$epel_rpm" 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm'
-            echo '8090214eb8b95617118478304aa5a8f796d4c19c625bc09e0c740cce0e682a34  '"$epel_rpm" | sha256sum -c -
+            epel_rpm="$RUNNER_TEMP/epel-release-10-9.el10_3.noarch.rpm"
+            curl -fsSL --connect-timeout 15 --max-time 120 -o "$epel_rpm" 'https://dl.fedoraproject.org/pub/epel/10/Everything/x86_64/Packages/e/epel-release-10-9.el10_3.noarch.rpm'
+            echo 'f567aa5c3cde55f579ba5c41c79df97da692a391efddd14b123a4eec0824fbc0  '"$epel_rpm" | sha256sum -c -
             dnf install -y "$epel_rpm"
           fi
           dnf install -y --setopt=install_weak_deps=False \
@@ -484,7 +494,29 @@ jobs:
             rpm cpio \
             libappindicator-gtk3-devel librsvg2-devel \
             gtk3 mesa-libgbm libdrm at-spi2-core dbus-x11 xdg-utils \
-            xorg-x11-server-Xvfb webkit2gtk4.1-devel
+            webkit2gtk4.1-devel
+          # Fedora 44 still ships Xvfb; RHEL 10 removed it from every
+          # repository (BaseOS, AppStream, CRB, extras and EPEL 10 carry no
+          # such build). `matrix.display` names the server each rpm root can
+          # install, so a leg added later picks one instead of inheriting an
+          # arm by accident. An unknown value fails closed: the weston arm
+          # needs the EPEL bootstrap above, so guessing it would be wrong on
+          # every root that has no EPEL.
+          case '${{ matrix.display }}' in
+            xvfb)
+              dnf install -y --setopt=install_weak_deps=False xorg-x11-server-Xvfb
+              ;;
+            weston)
+              # weston (EPEL) provides a headless Wayland display and Xwayland
+              # (AppStream) bridges it to X11 for WebKitGTK. The smoke step
+              # below starts both.
+              dnf install -y --setopt=install_weak_deps=False weston xorg-x11-server-Xwayland
+              ;;
+            *)
+              echo "matrix.display must be 'xvfb' or 'weston', got '${{ matrix.display }}'" >&2
+              exit 1
+              ;;
+          esac
 
       - name: 'Install Qwen Code dependencies'
         shell: 'bash'
@@ -813,7 +845,48 @@ jobs:
         shell: 'bash'
         run: |
           set -euo pipefail
-          xvfb-run -a npm run smoke:packaged -- src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop
+          executable='src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop'
+          # A timed-out wait must fail here: `[ -S ... ] && break` is exempt
+          # from `set -e`, so falling through would blame the app instead.
+          wait_for_socket() {
+            for _ in $(seq 1 50); do
+              [ -S "$1" ] && return 0
+              sleep 0.2
+            done
+            echo "::error::$2 never created $1 within 10s" >&2
+            return 1
+          }
+          # WebKitGTK needs a real display: GTK3 has no headless backend.
+          # Fedora keeps Xvfb; RHEL 10 removed it, so there the display is a
+          # headless weston compositor with Xwayland on top.
+          if command -v xvfb-run >/dev/null 2>&1; then
+            xvfb-run -a npm run smoke:packaged -- "$executable"
+          else
+            command -v weston >/dev/null 2>&1 || {
+              echo '::error::weston is not installed'; exit 1;
+            }
+            command -v Xwayland >/dev/null 2>&1 || {
+              echo '::error::Xwayland is not installed'; exit 1;
+            }
+            export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-runtime"
+            mkdir -p "$XDG_RUNTIME_DIR"
+            chmod 700 "$XDG_RUNTIME_DIR"
+            # Xwayland reads its compositor from its own environment, so the
+            # socket name has to be exported before it is launched.
+            export WAYLAND_DISPLAY=qwen-smoke
+            weston --backend=headless-backend.so --socket=qwen-smoke --idle-time=0 &
+            weston_pid=$!
+            trap 'kill ${xwayland_pid:-} $weston_pid 2>/dev/null || true' EXIT
+            wait_for_socket "$XDG_RUNTIME_DIR/qwen-smoke" weston
+            Xwayland :33 -rootless -wm -1 &
+            xwayland_pid=$!
+            wait_for_socket /tmp/.X11-unix/X33 Xwayland
+            export DISPLAY=:33
+            # GTK3 prefers Wayland when both are exported, which would leave
+            # the X11 bridge above unused; pin the app to that display.
+            export GDK_BACKEND=x11
+            npm run smoke:packaged -- "$executable"
+          fi
 
       - name: 'Collect artifacts'
         shell: 'bash'

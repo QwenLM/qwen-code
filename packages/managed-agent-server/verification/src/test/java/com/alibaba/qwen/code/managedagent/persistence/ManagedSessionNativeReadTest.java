@@ -49,6 +49,7 @@ class ManagedSessionNativeReadTest {
     private static final String TOKEN = "csi-original-writer-token-for-test";
     private static final byte[] BYTES = "original resource".getBytes(StandardCharsets.UTF_8);
     private FaultSource source;
+    private StoreLockTrace trace;
     private JdbcTemplate jdbc;
     private TransactionTemplate transactions;
     private ManagedSessionStore store;
@@ -65,16 +66,17 @@ class ManagedSessionNativeReadTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         Flyway.configure().dataSource(raw).locations("classpath:db/managed-schema").load().migrate();
         source = new FaultSource(raw);
-        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
-        var manager = new DataSourceTransactionManager(source);
+        trace = new StoreLockTrace(source);
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(trace);
+        var manager = new DataSourceTransactionManager(trace);
         transactions = new TransactionTemplate(manager);
         reservations = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
         registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
                 "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
         reservations.register(registration);
-        var request = WorkspaceCsiRuntimeConstructionFixture.create(source, registration);
+        var request = WorkspaceCsiRuntimeConstructionFixture.create(trace, registration);
         session = request.getIsolationKey();
-        bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        bindings = new JdbcRuntimeBindingRepository(trace, new AesGcmSecretProtector("test", new byte[32]));
         binding = bindings.findOrCreate(request);
         binding = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
         reservation = reservations.reserve(registration, bindings, binding, UUID.randomUUID().toString());
@@ -103,9 +105,39 @@ class ManagedSessionNativeReadTest {
     }
 
     @Test
+    void csiRenewAndRejectedCommitReuseOnlyTheirOwnTransactionLocks() {
+        trace.clear();
+        transactions.execute(status -> store.renewWriter("tenant", session, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 300_000L)));
+        assertRootAndHeadCounts(1, 1);
+        trace.clear();
+        var request = JournalLockContractTest.genesis();
+        assertThatThrownBy(() -> transactions.execute(status -> store.commit("tenant", session, TOKEN, request)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
+        assertRootAndHeadCounts(1, 1);
+        assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.ROLLBACK);
+    }
+
+    private void assertRootAndHeadCounts(int rootCount, int headCount) {
+        trace.assertRootBeforeHead("tenant", session);
+        trace.assertOneTransaction("tenant", session);
+        assertThat(trace.successful("tenant", session).stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(headCount);
+        assertThat(trace.successful("tenant", session).stream().filter(event -> event.sql()
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(rootCount);
+    }
+
+    @Test
     void readsBeforeActivationAndRetainsDistinctOriginalHistory() {
+        trace.clear();
         assertThat(read().bytes()).isEqualTo(BYTES);
         assertThat(read().bytes()).isEqualTo(BYTES);
+        trace.assertRootBeforeHead("tenant", session);
+        var heads = trace.successful("tenant", session).stream().filter(StoreLockTrace.Event::mappedHead).toList();
+        assertThat(heads).hasSize(4);
+        assertThat(heads.stream().map(event -> event.connection() + ":" + event.transaction()).distinct()).hasSize(4);
+        assertThat(trace.successful("tenant", session).stream().filter(event -> event.sql()
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(4);
         var history = readReceipts();
         assertThat(history).hasSize(2);
         assertThat(history).allSatisfy(row -> {

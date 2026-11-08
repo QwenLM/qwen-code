@@ -34,6 +34,15 @@ describe('main CI failure issue workflow', () => {
   // rather than like this file's indentation.
   const oneLine = (script) =>
     script.replace(/\\\n/g, '\n').replace(/\s+/g, ' ');
+  // The infra exclusion names steps by their `name:` in ci.yml, and nothing
+  // else joins the two files: renaming the gate step there leaves the jq
+  // filter matching nothing, so an infrastructure failure counts as a real one
+  // and files a main-CI issue. Derive the name from the workflow rather than
+  // re-typing it here and in the fixture.
+  const ciYml = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+  const linuxAggregateStep = ciYml.jobs.test_ubuntu.steps.find((step) =>
+    String(step.run ?? '').includes('BUILD_RESULT'),
+  )?.name;
 
   it('watches main failures and Managed Agent PR failures', () => {
     expect(workflow).toContain('workflow_run:');
@@ -71,7 +80,7 @@ describe('main CI failure issue workflow', () => {
     ]);
     expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
     expect(workflow).toContain(
-      "github.event.workflow_run.conclusion == 'failure'",
+      'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion)',
     );
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
@@ -80,7 +89,7 @@ describe('main CI failure issue workflow', () => {
     // that would admit unrelated contributor-triggered runs.
     expect(jobs.analyze.if).toBe(
       "${{ github.repository == 'QwenLM/qwen-code' && " +
-        "github.event.workflow_run.conclusion == 'failure' && " +
+        'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion) && ' +
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
@@ -91,15 +100,22 @@ describe('main CI failure issue workflow', () => {
     );
     // Only a watched workflow ever raises the event, so a schedule-arm name
     // missing from the watch list is dead — and the pin above, updated in
-    // the same edit, would not notice.
+    // the same edit, would not notice. Target the schedule arm's fromJSON
+    // (the one keyed on workflow.name); the conclusion gate now also uses
+    // fromJSON, so the first match is no longer the schedule list.
     const scheduledNames = JSON.parse(
-      /fromJSON\('(\[[^']*\])'\)/.exec(jobs.analyze.if)[1],
+      /fromJSON\('(\[[^']*\])'\), github\.event\.workflow\.name/.exec(
+        jobs.analyze.if,
+      )[1],
     );
     for (const name of scheduledNames) {
       expect(Object.keys(watchedFiles), name).toContain(name);
     }
   });
 
+  // This matrix pins the TRIGGER gate only. A cancelled run now passes the
+  // gate (a job timeout concludes cancelled, #16272); whether it is actually
+  // reported is decided by the live-step timeout classifier, tested below.
   it.each([
     ['SDK Java', 'workflow_dispatch', 'main', 'failure', true],
     ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
@@ -107,8 +123,10 @@ describe('main CI failure issue workflow', () => {
     ['SDK Java', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'success', false],
-    ['tui-parity', 'schedule', 'main', 'cancelled', false],
+    ['tui-parity', 'schedule', 'main', 'cancelled', true],
+    ['E2E Tests', 'push', 'main', 'cancelled', true],
     ['tui-parity', 'schedule', 'main', 'skipped', false],
+    ['tui-parity', 'schedule', 'main', 'timed_out', false],
     ['tui-parity', 'schedule', 'feature', 'failure', false],
     ['tui-parity', 'pull_request', 'feature', 'failure', false],
     ['tui-parity', 'workflow_dispatch', 'feature', 'failure', false],
@@ -119,7 +137,7 @@ describe('main CI failure issue workflow', () => {
     ['Qwen Code CI', 'pull_request', 'feature', 'failure', false],
     ['Managed Agent gate', 'pull_request_review', 'feature', 'success', false],
   ])(
-    'routes %s / %s / %s / %s to reporting: %s',
+    'admits %s / %s / %s / %s at the trigger gate: %s',
     (name, event, branch, conclusion, expected) => {
       const evaluate = new Function(
         'github',
@@ -458,6 +476,7 @@ fi
             EVENT_NAME: '',
             HEAD_BRANCH: '',
             HEAD_SHA: '',
+            RUN_CONCLUSION: 'failure',
             ...overrides,
           },
         });
@@ -477,6 +496,223 @@ fi
         rmSync(tmp, { recursive: true, force: true });
       }
     };
+
+    // #16272 / review on #16280: a cancelled run reaches the live step (the
+    // trigger admits cancelled) and is classified by positive annotation
+    // evidence: a timeout reports (even with a coexisting shutdown annotation),
+    // a concurrency supersede (shutdown / higher-priority / operation-canceled,
+    // no timeout) is skipped, and neither / unreadable fails open to reporting.
+    // The stub resolves the requested check-run id (job id 91234 != check-run
+    // id 9001, so a URL built from the wrong variable 404s) and applies the
+    // caller's --jq with real jq, so both the id extraction and the message
+    // projection are exercised (review R1-7).
+    const classifyCancel = (messages, { unreadable = false } = {}) => {
+      const fixture = JSON.stringify(
+        (messages ?? []).map((m) => ({ message: m })),
+      );
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  ${unreadable ? 'exit 1' : ''}
+  id="$(printf '%s' "$*" | grep -oE 'check-runs/[0-9]+' | head -1 | cut -d/ -f2)"
+  [[ "$id" == 9001 ]] || exit 1
+  filter=''
+  args=("$@")
+  for ((i=0;i<\${#args[@]};i++)); do
+    if [[ "\${args[i]}" == --jq ]]; then filter="\${args[i+1]}"; fi
+  done
+  printf '%s' '${fixture}' | jq -r "$filter"
+  exit 0
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      return detect('1', { RUN_CONCLUSION: 'cancelled' }, { ghScript });
+    };
+
+    it('pins the RUN_CONCLUSION env input of the live step', () => {
+      expect(live.env.RUN_CONCLUSION).toBe(
+        '${{ github.event.workflow_run.conclusion }}',
+      );
+    });
+
+    it('reports a cancelled run backed by a job execution-time timeout', () => {
+      const resolved = classifyCancel([
+        'The job has exceeded the maximum execution time of 1h0m0s',
+      ]);
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('execution-time timeout');
+    });
+
+    it('reports a timeout even when a shutdown annotation coexists on the job', () => {
+      const resolved = classifyCancel([
+        'The job has exceeded the maximum execution time of 1h0m0s',
+        'The runner has received a shutdown signal.',
+      ]);
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('execution-time timeout');
+    });
+
+    it('skips a concurrency cancellation carrying the operation-canceled annotation', () => {
+      const resolved = classifyCancel(['The operation was canceled.']);
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('skips a concurrency cancellation carrying the runner shutdown annotation', () => {
+      const resolved = classifyCancel([
+        'The runner has received a shutdown signal.',
+      ]);
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('skips a concurrency cancellation carrying the higher-priority annotation', () => {
+      const resolved = classifyCancel([
+        'Canceling since a higher priority waiting request is queued.',
+      ]);
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('skips a PR-triggered cancellation without trusting contributor annotations', () => {
+      const resolved = detect(
+        '1',
+        {
+          RUN_CONCLUSION: 'cancelled',
+          EVENT_NAME: 'pull_request',
+          HEAD_BRANCH: 'feature',
+        },
+        { ghScript: '#!/usr/bin/env bash\nexit 1' },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('PR-triggered cancellation');
+    });
+
+    it('fails open and reports when the annotations cannot be read', () => {
+      // Two cancelled jobs, because with a single one the fall-through prints
+      // the same `unknown` as the guard: only a second, readable job can see
+      // the guard removed (it would then classify concurrency and skip a real
+      // timeout, review R3-4).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  id="$(printf '%s' "$*" | grep -oE 'check-runs/[0-9]+' | head -1 | cut -d/ -f2)"
+  [[ "$id" == 9001 ]] || { printf '%s\\n' 'The runner has received a shutdown signal.'; exit 0; }
+  exit 1
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"},{"id":91235,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9002"}],"total_count":2}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
+    });
+
+    it('fails open and reports an unclassifiable cancellation annotation', () => {
+      const resolved = classifyCancel(['Some unrelated annotation.']);
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
+    });
+
+    it('skips a cancelled run that ran no job (displaced while queued)', () => {
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[],"total_count":0}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      // Nothing ran, so the notice must not name an annotation this path never
+      // fetched (review R3-2).
+      expect(resolved.stdout).toContain('cancelled before any job ran a step');
+      expect(resolved.stdout).not.toContain('concurrency supersede');
+    });
+
+    it('skips a cancelled job that stopped before its first step', () => {
+      // A maintainer cancelling a queued run, or a schedule displaced before
+      // any step starts, leaves conclusion `cancelled` with `steps: []` and an
+      // annotation neither pattern matches. Reporting it would file a
+      // "Main CI failed" issue for a run in which nothing ran (review R1-2).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  printf '%s\\n' 'The run was canceled by @someone.'
+  exit 0
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('cancelled before any job ran a step');
+    });
+
+    it('reports a cancelled run that also carries a failed job', () => {
+      // A job fails, then the next push entering the concurrency group cancels
+      // the rest of the run: the run concludes `cancelled` while that job still
+      // concludes `failure`. Reading only cancelled jobs would call this a
+      // supersede and drop the regression (review R3-1).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  printf '%s\\n' 'The operation was canceled.'
+  exit 0
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"failure","steps":[{"name":"Build"}],"check_run_url":""},{"id":91235,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":2}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
+    });
+
+    it('fails open when the jobs pages cannot be certified complete', () => {
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  printf '%s\\n' 'The operation was canceled.'
+  exit 0
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":2}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
+    });
 
     it('skips reporting when the run has moved on to a later attempt', () => {
       // Measured on run 39237270547: attempt 1 failed on the host lock,
@@ -590,9 +826,9 @@ fi
       );
     });
     it('reports a push run whose successor cannot report its result', () => {
-      // The job gate admits only failures, so a successor that ended
-      // cancelled/timed_out/skipped never re-enters this workflow. Crediting
-      // its mere existence would drop the only report of a real regression.
+      // The gate admits failure and cancelled runs, but a successor that ended
+      // skipped never re-enters this workflow. Crediting its mere existence
+      // would drop the only report of a real regression.
       const resolved = detect(
         '1',
         {
@@ -600,12 +836,149 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        { mainTip: 'new-head', successor: 'completed cancelled' },
+        { mainTip: 'new-head', successor: 'completed skipped' },
       );
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
-      expect(resolved.stdout).toContain('completed cancelled');
-      expect(resolved.stdout).toContain('does not report');
+      expect(resolved.stdout).toContain('completed skipped');
+      expect(resolved.stdout).toContain('does not own this result');
       expect(resolved.summary).toBe('');
+    });
+
+    it('lets a timeout-backed cancelled successor own the result (no duplicate)', () => {
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('the newer push run owns its result');
+    });
+    it('lets a fail-open cancelled successor own the result (no duplicate)', () => {
+      // The successor's own gate reports a `timeout` and also fails open on an
+      // unclassifiable `unknown`. Crediting only `timeout` filed one incident
+      // twice: the successor reported the tip and this run reported its head.
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'Some unrelated annotation.'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('the newer push run owns its result');
+    });
+    it('evaluates the successor jq projection end to end, including the id and attempt fields', () => {
+      // The deferral reads successor_id/successor_attempt out of this line's
+      // --jq projection, so the stub must hand back raw JSON and let real jq
+      // apply the caller's filter — a pre-formatted 'completed cancelled 555 1'
+      // would stay green even if `\(.id // "")` were dropped, while production
+      // would then bind the attempt number as the id and classify run 1
+      // (#16280 R5-5).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then
+  filter=''
+  args=("$@")
+  for ((i=0;i<\${#args[@]};i++)); do
+    if [[ "\${args[i]}" == --jq ]]; then filter="\${args[i+1]}"; fi
+  done
+  printf '%s\\n' '{"workflow_runs":[{"status":"completed","conclusion":"cancelled","id":555,"run_attempt":1}]}' | jq -r "$filter"
+  exit 0
+fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s'
+  exit 0
+fi
+exit 1
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('the newer push run owns its result');
+      // Shape pin on the projection itself: both fields the deferral binds
+      // must survive any edit to the jq expression.
+      expect(live.run).toContain('\\(.id // "")');
+      expect(live.run).toContain('\\(.run_attempt // "")');
+    });
+    it('reports this run when the cancelled successor cannot be read', () => {
+      // `unreadable` is a failed read of the successor, not its verdict: the
+      // successor's own gate may have read the same run as concurrency and
+      // skipped, so deferring here would drop the only report of the regression.
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  exit 1
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('does not own this result');
+    });
+    it('does not let a concurrency-cancelled successor swallow the report', () => {
+      // Same shape as the timeout case but the successor's cancelled job carries
+      // a supersede annotation, so the classifier says concurrency and the
+      // == 'timeout' comparison must be false: the older run still reports.
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'The operation was canceled.'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('does not own this result');
     });
     it('reports a push run whose successor has not settled, flagged provisional', () => {
       // A running successor proves nothing yet, and this job cannot wait for
@@ -1955,8 +2328,10 @@ fi
     expect(downloadStep.env.RUN_ATTEMPT).toBe(
       '${{ github.event.workflow_run.run_attempt }}',
     );
-    // Counted over the whole workflow: both projections read the file this one
-    // fetch wrote, so the payload must be fetched exactly once.
+    // The download step's two projections share this one fetch of the event's
+    // jobs. The cancellation classifier fetches jobs too, but through the shared
+    // classify-cancelled-run.sh with parameterized run/attempt (#16272), so it
+    // does not use this literal; that script's fetch is pinned below instead.
     expect(
       (
         workflow.match(
@@ -1964,13 +2339,23 @@ fi
         ) ?? []
       ).length,
     ).toBe(1);
+    // Pin the full fetch (query + --paginate), not a URL fragment: a substring
+    // pin would survive dropping ?per_page=100 or --paginate (#16280 R2-4).
+    const classifierScript = readFileSync(
+      '.github/scripts/ci/classify-cancelled-run.sh',
+      'utf8',
+    );
+    expect(classifierScript).toContain(
+      'actions/runs/${run_id}/attempts/${attempt}/jobs?per_page=100"',
+    );
+    expect(classifierScript).toContain('--paginate > "${pages}"');
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands the reader whole TSV lines so every log download 404s. Renaming
     // the array on one side loses failing-test details while the job/step
     // summary still renders.
     expect(download).toContain(
-      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null )',
+      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id\' "${jobs_json}" 2>/dev/null )',
     );
     expect(download).toContain(
       'for job_id in ${job_ids[@]+"${job_ids[@]}"}; do',
@@ -1980,7 +2365,7 @@ fi
     // before a failure summary is rendered, and the `2>/dev/null` that keeps the
     // resulting jq parse error out of the log.
     expect(download).toContain(
-      'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
+      'jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
     );
     // Keep the TSV job details in the analysis payload. The span ends at the
     // first analysis redirect, so the later comment invocation cannot satisfy it.
@@ -2232,8 +2617,11 @@ printf '%s\\n' '{"jobs":[]}'
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
       expect(infraScript).toContain(
-        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
+        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass" or . == "Require the build and every Linux test shard to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
       );
+      // The literal above is only correct while it matches ci.yml's step name.
+      expect(linuxAggregateStep, 'test_ubuntu gate step missing').toBeTruthy();
+      expect(infraScript).toContain(linuxAggregateStep);
       expect(infraScript).toContain(
         'gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations"',
       );
@@ -2361,12 +2749,17 @@ printf '%s\\n' '{"jobs":[]}'
       expect(out).toContain('infra_only=true');
     });
 
-    it.each([
-      ['No space left on device', 'true'],
-      ['AssertionError: expected the daemon to answer', 'false'],
-    ])(
-      'classifies the shard behind a failed macOS aggregate: %s',
-      (message, expected) => {
+    it.each(
+      [
+        ['macOS', 'Require every macOS test group to pass'],
+        ['Linux', linuxAggregateStep],
+      ].flatMap(([lane, gate]) => [
+        [lane, gate, 'No space left on device', 'true'],
+        [lane, gate, 'AssertionError: expected the daemon to answer', 'false'],
+      ]),
+    )(
+      'classifies the shard behind a failed %s aggregate (%s): %s',
+      (_lane, gate, message, expected) => {
         const out = classify(
           [
             failedJob(1001, 9001, [
@@ -2374,7 +2767,7 @@ printf '%s\\n' '{"jobs":[]}'
             ]),
             failedJob(1002, 9002, [
               {
-                name: 'Require every macOS test group to pass',
+                name: gate,
                 conclusion: 'failure',
               },
             ]),
@@ -2403,6 +2796,25 @@ printf '%s\\n' '{"jobs":[]}'
         {
           9001: 'AssertionError: expected the daemon to answer',
           9002: 'Process completed with exit code 1.',
+        },
+      );
+      expect(out).toContain('infra_only=false');
+    });
+
+    it('files when a demoted lock wait sits beside a suite failure', () => {
+      // The demoted sdk-java wait emits its own warning without the pinned
+      // `lock not acquired within` signature, so a code failure on a
+      // contended host must file an issue rather than rerun as infra.
+      const out = classify(
+        [
+          failedJob(1001, 9001, [
+            { name: 'Run Java SDK tests (self-hosted)', conclusion: 'failure' },
+          ]),
+        ],
+        {
+          9001:
+            '::warning::sdk-java host lock wait exhausted after 30 minutes; Maven cache write-back skipped; the suite result above is unaffected\n' +
+            'AssertionError: expected the suite to pass',
         },
       );
       expect(out).toContain('infra_only=false');
@@ -2864,5 +3276,122 @@ fi
       'pull-requests': 'read',
     });
     expect(privilegedJobs[0][1].needs).toEqual(['analyze', 'rerun_infra']);
+  });
+});
+
+describe('cancelled-run classifier (real script)', () => {
+  // Runs .github/scripts/ci/classify-cancelled-run.sh itself against a stubbed
+  // gh, so the verdict precedence is measured in the shipped script rather
+  // than re-implemented here (#16280 R5-1).
+  const script = readFileSync(
+    '.github/scripts/ci/classify-cancelled-run.sh',
+    'utf8',
+  );
+  const cancelledJob = (id, checkId) => ({
+    id,
+    conclusion: 'cancelled',
+    check_run_url: `https://api.github.com/repos/QwenLM/qwen-code/check-runs/${checkId}`,
+    steps: [{ name: 'Run tests', conclusion: 'cancelled' }],
+  });
+  const classify = (jobs, annotations, unreadableIds = []) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'cancel-classify-'));
+    try {
+      const bin = join(tmp, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'args="$*"',
+          'if [[ "${args}" == *"/jobs?per_page=100"* ]]; then',
+          '  cat "${JOBS_JSON}"',
+          '  exit 0',
+          'fi',
+          'id="$(printf \'%s \' "$@" | grep -oE \'check-runs/[0-9]+\' | cut -d/ -f2)"',
+          'if [[ -f "${ANN_DIR}/${id}.fail" ]]; then exit 1; fi',
+          'jq -r \'.[].message\' "${ANN_DIR}/${id}.json" 2>/dev/null || true',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const annDir = join(tmp, 'annotations');
+      mkdirSync(annDir);
+      for (const [id, message] of Object.entries(annotations)) {
+        writeFileSync(
+          join(annDir, `${id}.json`),
+          JSON.stringify([{ message }]),
+        );
+      }
+      for (const id of unreadableIds) {
+        writeFileSync(join(annDir, `${id}.fail`), '');
+      }
+      const jobsJson = join(tmp, 'jobs.json');
+      writeFileSync(
+        jobsJson,
+        JSON.stringify({ total_count: jobs.length, jobs }),
+      );
+      const result = spawnSync(
+        'bash',
+        ['-c', script, 'classify-cancelled-run.sh', '123', '1'],
+        {
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            REPO: 'QwenLM/qwen-code',
+            JOBS_JSON: jobsJson,
+            ANN_DIR: annDir,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  };
+
+  it('keeps a confirmed timeout when a sibling annotation read fails', () => {
+    // R5-1: the old early-exit downgraded this run to unreadable and buried
+    // the timeout evidence this PR exists to surface.
+    expect(
+      classify(
+        [cancelledJob(1001, 9001), cancelledJob(1002, 9002)],
+        { 9001: 'The job exceeded the maximum execution time of 360 minutes' },
+        [9002],
+      ),
+    ).toBe('timeout');
+  });
+
+  it('still reports unreadable when no timeout was confirmed', () => {
+    expect(classify([cancelledJob(1001, 9001)], {}, [9001])).toBe('unreadable');
+  });
+
+  it('does not certify a supersede over an unread sibling', () => {
+    // The unread job could have carried the timeout annotation, so a
+    // concurrency verdict from the readable job is not certifiable.
+    expect(
+      classify(
+        [cancelledJob(1001, 9001), cancelledJob(1002, 9002)],
+        { 9001: 'The runner has received a shutdown signal' },
+        [9002],
+      ),
+    ).toBe('unreadable');
+  });
+
+  it('keeps the readable verdicts unchanged', () => {
+    expect(
+      classify([cancelledJob(1001, 9001), cancelledJob(1002, 9002)], {
+        9001: 'The job exceeded the maximum execution time of 360 minutes',
+        9002: 'The runner has received a shutdown signal',
+      }),
+    ).toBe('timeout');
+    expect(
+      classify([cancelledJob(1001, 9001)], {
+        9001: 'Canceling since a higher priority run is waiting',
+      }),
+    ).toBe('concurrency');
+    expect(
+      classify([cancelledJob(1001, 9001)], { 9001: 'Some unrelated note' }),
+    ).toBe('unknown');
   });
 });

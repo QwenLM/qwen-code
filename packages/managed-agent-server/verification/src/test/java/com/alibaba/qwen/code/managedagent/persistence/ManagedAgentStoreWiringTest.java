@@ -59,6 +59,9 @@ class ManagedAgentStoreWiringTest {
         if (!"extensionPackages".equals(missing)) {
             runner = runner.withBean(ExtensionPackages.class, () -> mock(ExtensionPackages.class));
         }
+        if (!"modelConfigs".equals(missing)) {
+            runner = runner.withBean(ManagedSessionModelConfigs.class, () -> mock(ManagedSessionModelConfigs.class));
+        }
         return runner;
     }
 
@@ -75,6 +78,8 @@ class ManagedAgentStoreWiringTest {
                     .isSameAs(context.getBean(WorktreeFiles.class));
             assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "extensionPackages"))
                     .isSameAs(context.getBean(ExtensionPackages.class));
+            assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "modelConfigs"))
+                    .isSameAs(context.getBean(ManagedSessionModelConfigs.class));
             for (String name : List.of("lifecycle", "definitions", "sessionWorktrees", "journalEventTransport")) {
                 assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, name)).as(name).isNull();
             }
@@ -83,7 +88,7 @@ class ManagedAgentStoreWiringTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"worktreeFiles", "creationSkills", "extensionPackages"})
+    @ValueSource(strings = {"worktreeFiles", "creationSkills", "extensionPackages", "modelConfigs"})
     void missingRequiredCollaboratorsStillFailSpringStartup(String missing) {
         runner(missing).run(context -> {
             assertThat(context).hasFailed();
@@ -91,6 +96,7 @@ class ManagedAgentStoreWiringTest {
             String type = switch (missing) {
                 case "worktreeFiles" -> WorktreeFiles.class.getName();
                 case "creationSkills" -> ManagedSessionSkills.class.getName();
+                case "modelConfigs" -> ManagedSessionModelConfigs.class.getName();
                 default -> ExtensionPackages.class.getName();
             };
             assertThat(context.getStartupFailure()).hasStackTraceContaining(type);
@@ -119,7 +125,7 @@ class ManagedAgentStoreWiringTest {
                 Clock.systemUTC(), events -> {}, mock(ManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties(), mock(HarnessRules.class));
         for (String name : List.of("worktreeFiles", "creationSkills", "extensionPackages", "lifecycle",
-                "definitions", "sessionWorktrees", "journalEventTransport", "configRecords")) {
+                "definitions", "sessionWorktrees", "journalEventTransport", "configRecords", "modelConfigs")) {
             for (Object owner : com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreOwners(store, name)) {
                 var field = owner.getClass().getDeclaredField(name);
                 assertThat(Modifier.isFinal(field.getModifiers())).as(name).isTrue();

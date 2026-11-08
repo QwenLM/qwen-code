@@ -3,7 +3,20 @@ export {
   getWorkspaceScopeDirName,
   resolvePath,
 } from './paths.js';
-export { PollingChannelBase } from './PollingChannelBase.js';
+export {
+  appendChannelEvent,
+  channelEventFilePath,
+  channelEventScopeDir,
+  CHANNEL_EVENT_MAX_READ,
+  CHANNEL_EVENT_TYPES,
+  readChannelEvents,
+} from './channel-events.js';
+export type { ChannelEventQuery, ChannelEventType } from './channel-events.js';
+export {
+  PollingChannelBase,
+  MIN_POLL_INTERVAL_MS,
+  MAX_POLL_INTERVAL_MS,
+} from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
@@ -14,6 +27,7 @@ export {
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
@@ -31,7 +45,10 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
+export {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -52,6 +69,31 @@ export {
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
 export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
+export {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
+} from './bound-session-delivery.js';
+export {
+  BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS,
+  BOUND_ACTION_VARIABLE_MAX_CODE_POINTS,
+  BOUND_EVENT_PLATFORMS,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
+  boundActionTemplateEntries,
+  buildBoundEventPrompt,
+  isBoundActionKey,
+  renderBoundActionTemplate,
+  resolveBoundActionTemplate,
+  validateBoundActionEntries,
+} from './bound-session-prompt.js';
+export type {
+  BoundActionKeyVocabulary,
+  BoundActionTemplateSource,
+  BoundActionValues,
+  BoundEventPlatform,
+  BoundEventPromptParts,
+} from './bound-session-prompt.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -111,7 +153,7 @@ export {
   truncateCodePoints,
   truncateUtf16Units,
 } from './sanitize.js';
-export { isTerminalTaskLifecycleType } from './types.js';
+export { isTerminalTaskLifecycleType, PR_BINDING_ROLES } from './types.js';
 export {
   CHANNEL_OUTPUT_MODE_FIELD,
   DEFAULT_CHANNEL_OUTPUT_MODE,
@@ -128,10 +170,12 @@ export type {
 } from './background-output-coordinator.js';
 export type {
   Attachment,
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigFieldOption,
   ChannelConfigNestedFieldDescriptor,
   ChannelConfigNumberFieldDescriptor,
   ChannelConfigObjectFieldDescriptor,
@@ -165,6 +209,10 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrBindingEntry,
+  PrBindingRole,
+  PrBindingsSnapshot,
+  PrBindingSummary,
   PrivatePolicy,
   GroupSenderPolicy,
   ObservedChannelIdentity,

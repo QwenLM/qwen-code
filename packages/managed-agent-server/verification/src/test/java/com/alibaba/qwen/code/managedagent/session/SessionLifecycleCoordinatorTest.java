@@ -1099,7 +1099,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, completed_at, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'FAILED', FALSE, 1, 2, 2, 1)",
@@ -1143,7 +1143,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, completed_at, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'COMPLETED', TRUE, 1, 2, 2, 1)",
@@ -1385,7 +1385,7 @@ class SessionLifecycleCoordinatorTest {
         // nothing but a keyed cancel can move it.
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', '" + initialTurnStatus + "', TRUE, 1, 2, 1)",
@@ -1471,7 +1471,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1544,7 +1544,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1606,7 +1606,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1653,7 +1653,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1721,7 +1721,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",

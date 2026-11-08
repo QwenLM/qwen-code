@@ -32,7 +32,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -557,8 +557,9 @@ class RuntimeBrokerServiceTest {
                     ((Map<?, ?>) settled.getResult().get("capture"))
                             .get("captureStatus"));
             // The main row settles on the detached evidence; the process
-            // row it admitted stays active — and THIS path runs no sweep,
-            // so it keeps the mount, unlike the drain's excluded set.
+            // row it admitted stays active — the observe-only sweep stops
+            // nothing and cannot prove its exit, so the un-excluded re-read
+            // keeps the mount, unlike the drain's excluded set.
             assertTrue(fixture.executionRepository.hasActiveByRuntimeSession(
                     prepared.getBindingId(), prepared.getRuntimeGeneration(),
                     "holder"));

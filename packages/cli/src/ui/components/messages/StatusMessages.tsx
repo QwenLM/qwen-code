@@ -9,8 +9,10 @@ import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import stringWidth from 'string-width';
 import { theme } from '../../semantic-colors.js';
+import type { HistoryItemInfo } from '../../types.js';
 import { ICON } from '../../constants.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
+import { t } from '../../../i18n/index.js';
 
 interface StatusMessageProps {
   text: string;
@@ -22,6 +24,7 @@ interface StatusMessageProps {
 }
 
 interface StatusTextProps {
+  presentation?: HistoryItemInfo['presentation'];
   text: string;
   linkUrl?: string;
   linkText?: string;
@@ -67,23 +70,42 @@ export const InfoMessage: React.FC<StatusTextProps> = ({
   text,
   linkUrl,
   linkText,
-}) => (
-  <StatusMessage
-    text={text}
-    prefix={ICON.CIRCLE_FILLED}
-    prefixColor={theme.text.primary}
-    textColor={theme.text.primary}
-    footer={
-      linkUrl && (
-        <Link url={linkUrl}>
-          <Text color={theme.text.link} underline>
-            {linkText ?? linkUrl}
-          </Text>
-        </Link>
-      )
-    }
-  />
-);
+  presentation,
+}) =>
+  presentation === 'subscription-success' ? (
+    <Box flexDirection="column">
+      {text.split('\n').map((line, index) =>
+        index < 2 ? (
+          <Box key={index} flexDirection="row">
+            <Box width={2} flexShrink={0}>
+              <Text color={theme.status.success}>✓</Text>
+            </Box>
+            <Text color={theme.text.primary}>{line.slice(2)}</Text>
+          </Box>
+        ) : (
+          <Box key={index} paddingLeft={2}>
+            <Text color={theme.text.secondary}>{line.trimStart()}</Text>
+          </Box>
+        ),
+      )}
+    </Box>
+  ) : (
+    <StatusMessage
+      text={text}
+      prefix={ICON.CIRCLE_FILLED}
+      prefixColor={theme.text.primary}
+      textColor={theme.text.primary}
+      footer={
+        linkUrl && (
+          <Link url={linkUrl}>
+            <Text color={theme.text.link} underline>
+              {linkText ?? linkUrl}
+            </Text>
+          </Link>
+        )
+      }
+    />
+  );
 
 // Not a notice this session made about itself, so it does not wear the plain
 // info bullet. The sender label already lives in the text (formatPeerDisplay).
@@ -119,7 +141,12 @@ export const ErrorMessage: React.FC<StatusTextProps & { hint?: string }> = ({
   hint,
 }) => (
   <StatusMessage
-    text={text}
+    text={
+      text ===
+      'Your login credentials are no longer valid. Run /auth to sign in again.'
+        ? t(text)
+        : text
+    }
     prefix="✕"
     prefixColor={theme.status.error}
     textColor={theme.status.error}

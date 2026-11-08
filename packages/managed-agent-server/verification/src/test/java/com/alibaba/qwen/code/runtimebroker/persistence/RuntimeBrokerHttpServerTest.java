@@ -20,7 +20,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
-import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.Test;
@@ -223,13 +223,42 @@ public class RuntimeBrokerHttpServerTest {
                         "runtimeSessionId", "runtime", "turnKind", "bootstrap"));
                 for (var response : List.of(warmed, acquired)) {
                     assertEquals(200, response.statusCode(), response.body());
-                    var actual = JSON.parseObject(response.body()).getJSONObject("scope");
+                    var body = JSON.parseObject(response.body());
+                    assertEquals("static", body.getJSONObject("runtime").getString("provisionerKind"));
+                    var actual = body.getJSONObject("scope");
                     assertEquals(scope.getTenantId(), actual.getString("tenantId"));
                     assertEquals(scope.getWorkspaceId(), actual.getString("workspaceId"));
                     assertEquals(scope.getWorkspaceGeneration(), actual.getString("workspaceGeneration"));
                     assertEquals(capability, actual.getString("capabilityDigest"));
                     assertEquals(scope.getIsolationClass(), actual.getString("isolationClass"), response.body());
                 }
+            }
+        }
+    }
+
+    @Test
+    void recoveryAcquireReportsTheOriginalBindingProvider() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "generation", "/workspace", "capability", "session");
+        try (Fixture fixture = new Fixture(false, null, scope)) {
+            RuntimeSessionRecord owner = fixture.service.acquire("harness", "runtime", "bootstrap")
+                    .toCompletableFuture().join();
+            HttpResponse<String> response = fixture.post("/tool-sessions:acquire", Map.of(
+                    "protocolVersion", 1, "requestId", "recover", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime", "turnKind", "bootstrap",
+                    "recoveryBindingId", owner.getBindingId(),
+                    "recoveryGeneration", Long.toString(owner.getRuntimeGeneration())));
+            assertEquals(200, response.statusCode(), response.body());
+            var runtime = JSON.parseObject(response.body()).getJSONObject("runtime");
+            assertEquals(owner.getBindingId(), runtime.getString("bindingId"));
+            assertEquals(Long.toString(owner.getRuntimeGeneration()), runtime.getString("generation"));
+            assertEquals("static", runtime.getString("provisionerKind"));
+            for (RuntimeSessionRecord foreign : List.of(
+                    new RuntimeSessionRecord(owner.getSession(), "missing", owner.getRuntimeGeneration(),
+                            owner.getState(), owner.getVersion(), owner.getLastActiveAt()),
+                    new RuntimeSessionRecord(owner.getSession(), owner.getBindingId(), owner.getRuntimeGeneration() + 1,
+                            owner.getState(), owner.getVersion(), owner.getLastActiveAt()))) {
+                assertEquals("workspace_close_identity_unverified", assertThrows(RuntimeBrokerException.class,
+                        () -> fixture.service.runtimeProvisionerKind(foreign)).getCode());
             }
         }
     }

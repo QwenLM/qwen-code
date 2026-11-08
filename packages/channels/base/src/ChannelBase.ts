@@ -1,6 +1,7 @@
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
@@ -36,6 +37,8 @@ import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
+import { appendChannelEvent } from './channel-events.js';
+import type { ChannelEventInput } from './channel-events.js';
 import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
@@ -205,6 +208,12 @@ interface ChannelMemoryReadToken {
 
 interface PreflightInboundOptions {
   deferPairingRequests?: boolean;
+  /**
+   * Admit a group message that only fails the group's mention requirement.
+   * For private deliveries: the requirement keeps ambient chatter out of
+   * public replies. Every other group, sender and pairing check still runs.
+   */
+  waiveGroupMention?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -255,6 +264,12 @@ export interface ChannelBaseOptions {
   bridgeRecovery?: () => Promise<void> | undefined;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
+  /**
+   * Daemon-backed delivery into PR-bound sessions the channel does not own.
+   * Only the daemon channel worker provides it; adapters must treat its
+   * absence as "feature unavailable" and keep channel-session routing.
+   */
+  boundSessions?: ChannelBoundSessions;
   observedContacts?: {
     observe(
       channelName: string,
@@ -323,6 +338,13 @@ export interface ChannelLoopController {
     channelName: string,
     target: SessionTarget,
   ): Promise<ChannelLoop[]>;
+  /**
+   * List every loop in a chat regardless of sender, thread or route. Optional:
+   * `listForTarget` needs the creator's exact target, which chat-wide state
+   * changes (the bot was removed from a group, a group's active messages were
+   * disabled) cannot supply.
+   */
+  listForChat?(channelName: string, chatId: string): Promise<ChannelLoop[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
   nextFireTime?(job: ChannelLoop): Date;
@@ -491,6 +513,7 @@ export abstract class ChannelBase {
   // re-post once per still-pending request, but never per trigger.
   private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
+  protected readonly boundSessions?: ChannelBoundSessions;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -1438,6 +1461,7 @@ export abstract class ChannelBase {
         ),
     );
     this.loopController = options?.loopController;
+    this.boundSessions = options?.boundSessions;
     this.observedContacts = options?.observedContacts;
     this.bridgeRecovery = options?.bridgeRecovery;
 
@@ -3142,6 +3166,17 @@ export abstract class ChannelBase {
     return this.activePrompts.get(sessionId)?.sourceLabel;
   }
 
+  /**
+   * True while the session's live turn is an unattended one (loop or webhook
+   * task). Base delivers such a turn once, in full, through pushProactive and
+   * never calls onResponseComplete, so an adapter whose sink flushes streamed
+   * chunks would post the same text twice. Adapters without an inbound anchor
+   * (QQ) gate on this; the base chunk bookkeeping still runs either way.
+   */
+  protected isProactivePromptTurn(sessionId: string): boolean {
+    return this.activePrompts.get(sessionId)?.loopPrompt === true;
+  }
+
   protected getInboundErrorSourceLabel(envelope: Envelope): string | undefined {
     return this.inboundErrorSourceLabels.get(envelope);
   }
@@ -3885,6 +3920,9 @@ export abstract class ChannelBase {
   }
 
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
+    // A tagged (automated) sender's text is prose, so it never takes a
+    // command/bang bypass: it binds a named turn like any other message.
+    if (envelope.senderTag) return false;
     const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
     const bangText = envelope.text.trimStart();
@@ -4853,6 +4891,25 @@ export abstract class ChannelBase {
     }
 
     return `Loop ${job.id}: ${job.cron}`;
+  }
+
+  /**
+   * Disable every enabled loop in a chat. Adapters call this when the chat can
+   * no longer receive proactive messages (the bot was removed from a group, or
+   * a group's active messages were disabled), so orphaned loops stop burning
+   * unattended turns. Needs the chat-scoped controller lookup; returns how many
+   * jobs were disabled.
+   */
+  protected async disableLoopJobsForChat(chatId: string): Promise<number> {
+    if (!this.loopController?.listForChat) return 0;
+    const jobs = await this.loopController.listForChat(this.name, chatId);
+    let disabled = 0;
+    for (const job of jobs) {
+      if (job.enabled && (await this.loopController.disable(job.id))) {
+        disabled++;
+      }
+    }
+    return disabled;
   }
 
   private async listLoopsFromTool(
@@ -6318,7 +6375,7 @@ export abstract class ChannelBase {
     );
   }
 
-  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+  protected groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
     return (
       this.groupConfigFor(target.chatId)?.senders ??
       this.groupConfigFor('*')?.senders ??
@@ -6368,7 +6425,10 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
-    if (!this.applyMessageRoute(envelope)) return false;
+    if (!this.applyMessageRoute(envelope)) {
+      this.recordPreflightRejected('message_route', envelope);
+      return false;
+    }
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -6376,9 +6436,12 @@ export abstract class ChannelBase {
       options.deferPairingRequests === true &&
       groupResult.reason === 'pairing_trigger_required' &&
       (envelope.isMentioned || envelope.isReplyToBot);
-    if (!groupResult.allowed && !deferredGroupPairing) {
+    const waivedGroupMention =
+      options.waiveGroupMention === true &&
+      groupResult.reason === 'mention_required';
+    if (!groupResult.allowed && !deferredGroupPairing && !waivedGroupMention) {
       if (groupResult.pairing !== undefined) {
-        this.logPreflightRejected('group_pairing_required');
+        this.logPreflightRejected('group_pairing_required', envelope);
         return this.onGroupPairingRequired(
           envelope.chatId,
           groupResult.pairing,
@@ -6398,17 +6461,23 @@ export abstract class ChannelBase {
       if (groupResult.reason === 'mention_required') {
         // This is the expected high-frequency drop path for group bots.
         this.recordPendingGroupHistory(envelope);
+        // Journaled but not logged: the operator needs the reason, the log
+        // must not gain a line per ambient comment.
+        this.recordPreflightRejected('group_mention_required', envelope);
       } else if (groupResult.reason === 'pairing_trigger_required') {
         return false;
       } else {
-        this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
+        this.logPreflightRejected(
+          `group_${groupResult.reason ?? 'denied'}`,
+          envelope,
+        );
       }
       return false;
     }
 
     const dmResult = this.dmGate.check(envelope);
     if (!dmResult.allowed) {
-      this.logPreflightRejected(`dm_${dmResult.reason ?? 'denied'}`);
+      this.logPreflightRejected(`dm_${dmResult.reason ?? 'denied'}`, envelope);
       return false;
     }
 
@@ -6427,7 +6496,7 @@ export abstract class ChannelBase {
     const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
-        this.logPreflightRejected('sender_pairing_required');
+        this.logPreflightRejected('sender_pairing_required', envelope);
         return this.onPairingRequired(
           envelope.chatId,
           result.pairing,
@@ -6446,6 +6515,7 @@ export abstract class ChannelBase {
       }
       this.logPreflightRejected(
         senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+        envelope,
       );
       return false;
     }
@@ -6454,13 +6524,46 @@ export abstract class ChannelBase {
     return true;
   }
 
-  protected logPreflightRejected(reason: string): void {
+  /**
+   * Logs a preflight rejection and journals it. `envelope` supplies the
+   * identifiers an operator needs to find the message the skip refers to; it
+   * is optional because some adapters reject before an envelope exists.
+   */
+  protected logPreflightRejected(reason: string, envelope?: Envelope): void {
     process.stderr.write(
       `[Channel:${this.name}] preflight rejected reason=${sanitizeLogText(
         reason,
         80,
       )}\n`,
     );
+    this.recordPreflightRejected(reason, envelope);
+  }
+
+  /**
+   * Journals a preflight rejection without a stderr line, for the drop paths
+   * that are expected to be frequent.
+   */
+  protected recordPreflightRejected(reason: string, envelope?: Envelope): void {
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'skipped',
+      reason,
+      ...(envelope
+        ? {
+            repository: envelope.chatId,
+            thread: envelope.threadId,
+            messageId: envelope.messageId,
+            actor: envelope.senderId,
+            ...(envelope.messageRoute
+              ? { detail: { route: envelope.messageRoute } }
+              : {}),
+          }
+        : {}),
+    });
+  }
+
+  protected recordChannelEvent(event: ChannelEventInput): void {
+    appendChannelEvent(this.name, this.config.cwd, event);
   }
 
   protected logDebugPayload(platform: string, payload: unknown): void {
@@ -6536,6 +6639,17 @@ export abstract class ChannelBase {
     envelope: Envelope,
     process: () => Promise<void> = () => this.processInbound(envelope),
   ): Promise<void> {
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'accepted',
+      repository: envelope.chatId,
+      thread: envelope.threadId,
+      messageId: envelope.messageId,
+      actor: envelope.senderId,
+      ...(envelope.messageRoute
+        ? { detail: { route: envelope.messageRoute } }
+        : {}),
+    });
     if (this.namedSessions && !(await this.prepareNamedTurnBinding(envelope))) {
       return;
     }
@@ -6699,6 +6813,21 @@ export abstract class ChannelBase {
     this.preflightedEnvelopes.add(envelope);
   }
 
+  /**
+   * Whether a message with this text passes the channel's message routes the
+   * way preflight would route it. Has no side effects.
+   */
+  protected admitsMessageRoute(text: string): boolean {
+    return (
+      this.messageRoutes.size === 0 ||
+      matchMessageRoute(
+        text,
+        this.messageRoutes,
+        this.config.defaultMessageRoute,
+      ) !== undefined
+    );
+  }
+
   private applyMessageRoute(envelope: Envelope): boolean {
     if (this.routedEnvelopes.has(envelope)) return true;
     if (
@@ -6751,9 +6880,13 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    const parsed = this.parseCommand(envelope.text);
+    // Automated senders (see Envelope.senderTag) get prose treatment: their
+    // command-shaped text reaches the model instead of this channel's local
+    // commands and memory intents.
+    const automated = envelope.senderTag !== undefined;
+    const parsed = automated ? null : this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
-      parsed?.command === 'btw'
+      automated || parsed?.command === 'btw'
         ? null
         : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
@@ -6761,6 +6894,7 @@ export abstract class ChannelBase {
       this.deletePendingChannelMemoryMutation(envelope);
     }
     if (
+      !automated &&
       !memoryIntent &&
       parsed?.command !== 'btw' &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
@@ -6845,7 +6979,9 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = envelope.text.trimStart();
+    // An automated sender's text is never a shell command (Envelope.senderTag),
+    // so it skips both the refusal and the execution arms below.
+    const bangText = automated ? '' : envelope.text.trimStart();
     if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`
@@ -7014,8 +7150,17 @@ export abstract class ChannelBase {
       }
 
       const recognizedSlashCommand =
+        !automated &&
         this.isSlashCommand(envelope.text) &&
         this.isRecognizedCommand(envelope.text, sessionId);
+      // Adapter-tagged automated sender (Envelope.senderTag): rendered here,
+      // after prompt sanitization, because a line-leading `[tag]` inside `text`
+      // would be peeled by unwrapStartOfLineTags. Self-prefixing adapters
+      // (`alreadyPrefixed`) render the tag themselves.
+      const senderTagBar =
+        !envelope.alreadyPrefixed && envelope.senderTag?.trim()
+          ? `[${sanitizeSenderName(envelope.senderTag)}] `
+          : '';
       // Prepend referenced (quoted) message text for reply context
       let promptText = envelope.text;
 
@@ -7048,7 +7193,7 @@ export abstract class ChannelBase {
         const who = sanitizeSenderName(
           envelope.senderName || envelope.senderId || 'unknown',
         );
-        promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+        promptText = `${senderTagBar}[${who}] ${sanitizePromptText(promptText)}`;
         // Render the non-bot mention marker AFTER sanitization (like the
         // [Replying to:] wrapper below). Inside `text` it would pass through
         // sanitizePromptText, which strips brackets only on content <=64 chars
@@ -7067,6 +7212,10 @@ export abstract class ChannelBase {
             promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
           }
         }
+      } else if (senderTagBar) {
+        // No sender attribution to attach the tag to (per-user 1:1 DM), so the
+        // tag opens the prompt on its own.
+        promptText = `${senderTagBar}${promptText}`;
       }
 
       if (envelope.referencedText) {
@@ -7484,15 +7633,21 @@ export abstract class ChannelBase {
         // bridge only after the latest recovery has restored session routing.
         await this.waitForBridgeRecovery();
         const promptBridge = this.bridge;
+        let turnNotice = '';
+        const onTurnNotice = (sid: string, notice: string) => {
+          if (sid === sessionId) turnNotice = notice;
+        };
         promptBridge.on('textChunk', onChunk);
+        promptBridge.on('turnNotice', onTurnNotice);
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
+        let answerDelivered = false;
         try {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
-          const response = await promptBridge.prompt(sessionId, promptToSend, {
+          let response = await promptBridge.prompt(sessionId, promptToSend, {
             ...(this.config.outputMode === 'per_task'
               ? {
                   outputMode: 'per_task' as const,
@@ -7517,6 +7672,11 @@ export abstract class ChannelBase {
           // If cancelled, skip sending the response
           if (!promptState.cancelled && response) {
             promptState.deliveryStarted = true;
+            if (turnNotice) {
+              response = response.slice(turnNotice.length + 2);
+            }
+          }
+          if (!promptState.cancelled && response) {
             const segment = this.ensureOutputSegment(sessionId, promptState);
             if (segment && taskResultPartial) segment.partial = true;
             await this.onResponseComplete(
@@ -7525,8 +7685,34 @@ export abstract class ChannelBase {
               sessionId,
               segment,
             );
+            answerDelivered = true;
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
+            }
+          }
+          if (!promptState.cancelled && turnNotice) {
+            // Keep notices out of stream buffers and let the answer consume
+            // adapter-specific reply metadata (such as DingTalk mentions) first.
+            try {
+              await this.sendResponseMessage(
+                envelope.chatId,
+                turnNotice,
+                sessionId,
+                sourceLabel,
+              );
+            } catch (err) {
+              // The prompt result is `turnNotice || body`, so on an empty body
+              // the notice is the turn's only delivery: rethrow instead of
+              // reporting a completed turn the user never received.
+              if (!answerDelivered) throw err;
+              // The answer is already delivered, so the turn's outcome is fixed
+              // (see the deliveryStarted invariant below): log the failed
+              // notice instead of letting it rewrite completed into failed.
+              // The notice was sliced out of the answer above, so this line is
+              // the only remaining record of what the user never received.
+              process.stderr.write(
+                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)} (dropped notice: ${sanitizeLogText(turnNotice, 200)})\n`,
+              );
             }
           }
           // Once delivery started the turn's outcome is fixed — don't let a
@@ -7604,6 +7790,7 @@ export abstract class ChannelBase {
           throw err;
         } finally {
           promptBridge.off('textChunk', onChunk);
+          promptBridge.off('turnNotice', onTurnNotice);
           promptBridge.off('responseBoundary', onResponseBoundary);
           // Identity guard: a turn that wedged past /clear's bounded wait gets
           // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
