@@ -28,6 +28,9 @@ import {
   tildeifyPath,
   expandHomeDir,
   getProjectHash,
+  boundProjectIdentifier,
+  PROJECT_DIR_NAME_MAX,
+  sanitizeCwd,
   realpathNearestExisting,
   realpathNearestExistingAsync,
   _resetValidatePathCacheForTest,
@@ -972,4 +975,41 @@ describe('expandHomeDir', () => {
       ['relative/path', path.normalize('relative/path')],
     ],
   ]);
+});
+
+describe('boundProjectIdentifier', () => {
+  it('renames an identifier the filesystem would refuse', () => {
+    const longRoot = path.join(
+      path.resolve('workspace'),
+      ...'abcde'.split('').map((letter) => letter.repeat(50)),
+    );
+    expect(Buffer.byteLength(sanitizeCwd(longRoot), 'utf8')).toBeGreaterThan(
+      PROJECT_DIR_NAME_MAX,
+    );
+
+    const bounded = boundProjectIdentifier(longRoot);
+    expect(Buffer.byteLength(bounded, 'utf8')).toBeLessThanOrEqual(
+      PROJECT_DIR_NAME_MAX,
+    );
+    expect(bounded).toContain(getProjectHash(longRoot).slice(0, 16));
+    expect(bounded.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
+  });
+
+  it('keeps an identifier the filesystem already accepts', () => {
+    // Only an identifier mkdir would reject is renamed; renaming a 239-255
+    // byte one would orphan the sessions already filed under its old name.
+    const base = path.resolve('w');
+    const prefix = sanitizeCwd(base).length + 1;
+    for (const bytes of [239, 254, 255]) {
+      const root = path.join(base, 'a'.repeat(bytes - prefix));
+      expect(boundProjectIdentifier(root)).toBe(sanitizeCwd(root));
+    }
+  });
+
+  it('gives distinct long project paths distinct identifiers', () => {
+    const base = path.resolve('workspace');
+    expect(
+      boundProjectIdentifier(path.join(base, 'a'.repeat(200), 'one')),
+    ).not.toBe(boundProjectIdentifier(path.join(base, 'a'.repeat(200), 'two')));
+  });
 });

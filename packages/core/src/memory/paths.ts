@@ -9,10 +9,10 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
+  boundProjectIdentifier,
   QWEN_DIR,
   realpathNearestExisting,
   resolvePath,
-  sanitizeCwd,
 } from '../utils/paths.js';
 import {
   getImportedProjectMemoryRoot,
@@ -153,10 +153,14 @@ export function getAutoMemoryRoot(projectRoot: string): string {
     const projectKey = useWorkspaceRoot
       ? path.resolve(projectRoot)
       : (findGitRoot(projectRoot) ?? path.resolve(projectRoot));
+    // `projects/<key>/auto-memory` joins the key as one component, so it hits
+    // the same NAME_MAX ceiling the chats directory does. Bounding only
+    // Storage.getProjectDir() would leave auto memory failing with
+    // ENAMETOOLONG for exactly the long roots that fix repairs.
     result = path.join(
       memoryBaseDir,
       'projects',
-      sanitizeCwd(projectKey),
+      boundProjectIdentifier(projectKey),
       AUTO_MEMORY_DIRNAME,
     );
   }

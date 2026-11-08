@@ -392,6 +392,51 @@ export function sanitizeCwd(cwd: string): string {
 }
 
 /**
+ * The longest a single path component may be, in bytes. `sanitizeCwd` maps
+ * every non-alphanumeric to '-', so a project identifier can easily outgrow
+ * what the filesystem accepts (NAME_MAX, 255 bytes on ext4/APFS/NTFS) and
+ * every `mkdir` below it then fails with ENAMETOOLONG.
+ */
+export const PROJECT_DIR_NAME_MAX = 255;
+/** 16 hex chars of the project hash, plus the '-' that joins them. */
+const PROJECT_DIR_HASH_SUFFIX_BYTES = 17;
+const PROJECT_DIR_READABLE_BUDGET =
+  PROJECT_DIR_NAME_MAX - PROJECT_DIR_HASH_SUFFIX_BYTES;
+
+/**
+ * Bound a project identifier to one filesystem path component.
+ *
+ * Every directory named after a project root goes through this: the chats
+ * directory (`Storage.getProjectDir`) and the managed-memory root
+ * (`getAutoMemoryRoot`) each join the sanitized root as a single component,
+ * and both fail the same way when it is too long. Bounding one and not the
+ * other leaves whichever was missed permanently unusable for exactly the
+ * projects this exists to repair.
+ *
+ * Only an identifier the filesystem would refuse is renamed, so existing
+ * sessions keep their directory. Past the limit a readable prefix is kept and
+ * part of the project hash appended, which also keeps two long roots from
+ * colliding on that prefix.
+ */
+export function boundProjectIdentifier(projectRoot: string): string {
+  const projectId = sanitizeCwd(projectRoot);
+  if (Buffer.byteLength(projectId, 'utf8') <= PROJECT_DIR_NAME_MAX) {
+    return projectId;
+  }
+  const hash = getProjectHash(projectRoot);
+  return `${truncateToBudget(projectId, PROJECT_DIR_READABLE_BUDGET)}-${hash.slice(0, 16)}`;
+}
+
+/** Truncate on a character boundary so the result never splits a code point. */
+function truncateToBudget(id: string, budget: number): string {
+  let end = id.length;
+  while (end > 0 && Buffer.byteLength(id.slice(0, end), 'utf8') > budget) {
+    end--;
+  }
+  return id.slice(0, end);
+}
+
+/**
  * Checks if a path is a subpath of another path.
  * @param parentPath The parent path.
  * @param childPath The child path.
