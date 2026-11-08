@@ -828,6 +828,40 @@ function parseRequestedSessionSource(
   return source;
 }
 
+/**
+ * Key for the worktree ownership lock (`acquireWorktreeOwnershipOp`) of a
+ * sidecar's recorded checkout. Best-effort canonical: the reset route keys
+ * by the fully validated realpath, which agrees whenever the checkout still
+ * exists. A missing checkout falls back to the raw sidecar path, and the
+ * restore never attests it.
+ */
+function ownershipLockKeyForWorktree(recordedPath: string): string {
+  try {
+    return fs.realpathSync(recordedPath);
+  } catch {
+    return recordedPath;
+  }
+}
+
+/**
+ * Refuses a restore whose worktree checks would act on a checkout this
+ * request does not hold the ownership lock for: a reset of that checkout
+ * could move its ownership, or roll back its supersede link, while the
+ * restore reads it. A plain error, so the restore fails closed (500) like
+ * the untyped integrity failures there; a later restore re-reads the sidecar
+ * and takes the right lock.
+ */
+function assertWorktreeOwnershipLockHeld(
+  heldKey: string | undefined,
+  checkoutKey: string,
+): void {
+  if (heldKey !== checkoutKey) {
+    throw new Error(
+      'Worktree ownership lock does not cover the restored checkout',
+    );
+  }
+}
+
 export type ResolveSubagentSessionRuntime = (
   res: Response,
   route: string,
@@ -4080,6 +4114,7 @@ export function registerSessionRoutes(
       let suppressWorktreeContextRestore = false;
       let deferRestoreAskUserQuestionPrompt = false;
       let releaseWorktreeRestore: (() => void) | undefined;
+      let heldWorktreeOwnershipLockKey: string | undefined;
       try {
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
@@ -4188,17 +4223,9 @@ export function registerSessionRoutes(
                 isPart4AWorktreeRestore &&
                 sidecarBeforeRestore.state === 'valid'
               ) {
-                // Best-effort canonical key for the ownership lock: the
-                // reset route keys by the fully validated realpath, which
-                // agrees whenever the checkout still exists. A missing
-                // checkout falls back to the raw sidecar path and fails
-                // closed later in the restore's own validation.
-                const recordedPath = sidecarBeforeRestore.session.worktreePath;
-                try {
-                  part4AWorktreeKey = fs.realpathSync(recordedPath);
-                } catch {
-                  part4AWorktreeKey = recordedPath;
-                }
+                part4AWorktreeKey = ownershipLockKeyForWorktree(
+                  sidecarBeforeRestore.session.worktreePath,
+                );
               }
             } else {
               suppressWorktreeContextRestore = isChannelRestore;
@@ -4212,6 +4239,7 @@ export function registerSessionRoutes(
             if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
               releaseWorktreeRestore =
                 await acquireWorktreeOwnershipOp(part4AWorktreeKey);
+              heldWorktreeOwnershipLockKey = part4AWorktreeKey;
               if (isChannelRestore) {
                 // A reset moved this session's worktree ownership to a
                 // replacement: never restore the superseded session — tell
@@ -4224,6 +4252,17 @@ export function registerSessionRoutes(
                     restoredStorageSessionId,
                   ),
                 );
+                if (
+                  sidecarUnderLock.state === 'valid' &&
+                  sidecarUnderLock.session.workspaceCwd !== undefined
+                ) {
+                  assertWorktreeOwnershipLockHeld(
+                    heldWorktreeOwnershipLockKey,
+                    ownershipLockKeyForWorktree(
+                      sidecarUnderLock.session.worktreePath,
+                    ),
+                  );
+                }
                 if (
                   sidecarUnderLock.state === 'valid' &&
                   sidecarUnderLock.session.supersededBy !== undefined
@@ -4536,6 +4575,14 @@ export function registerSessionRoutes(
                 throw new Error('Worktree sidecar is missing or invalid');
               }
               const sidecar = sidecarResult.session;
+              // The ownership lock was keyed by the read before the bridge
+              // restore. A sidecar that was missing, legacy or invalid then,
+              // or that now names another checkout, reaches here without
+              // this checkout's lock.
+              assertWorktreeOwnershipLockHeld(
+                heldWorktreeOwnershipLockKey,
+                ownershipLockKeyForWorktree(sidecar.worktreePath),
+              );
               // Defense in depth alongside the pre-load check: a superseded
               // session is never restored, whatever path raced us here.
               if (sidecar.supersededBy !== undefined) {
@@ -4594,6 +4641,12 @@ export function registerSessionRoutes(
               } catch {
                 throw new Error('Worktree checkout is missing or inaccessible');
               }
+              // Again on the path the checks below act on, in case the
+              // checkout appeared since the key was derived from the raw path.
+              assertWorktreeOwnershipLockHeld(
+                heldWorktreeOwnershipLockKey,
+                realTarget,
+              );
               const contained = candidateRoots.some((root) => {
                 try {
                   const realRoot = fs.realpathSync(root);
