@@ -1742,6 +1742,8 @@ export interface WebShellProps {
   compactThinking?: boolean;
   /** Let the host own pending Edit diff previews instead of the inline tool row. */
   hostOwnsEditDiffPreview?: boolean;
+  /** Let the host render managed artifact previews instead of the built-in panel. */
+  hostOwnsArtifactPreview?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
   /** Markdown table rendering mode. Defaults to basic. */
@@ -3669,6 +3671,7 @@ export function App({
   composerPlaceholders,
   compactThinking = false,
   hostOwnsEditDiffPreview = false,
+  hostOwnsArtifactPreview = false,
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
@@ -4060,8 +4063,12 @@ export function App({
     ],
   );
   const mainChatCustomization = useMemo(
-    () => ({ ...customization, hostOwnsEditDiffPreview }),
-    [customization, hostOwnsEditDiffPreview],
+    () => ({
+      ...customization,
+      hostOwnsEditDiffPreview,
+      hostOwnsArtifactPreview,
+    }),
+    [customization, hostOwnsEditDiffPreview, hostOwnsArtifactPreview],
   );
   const CustomFooter = renderFooter;
   const CustomComposerHeader = renderComposerHeader;
