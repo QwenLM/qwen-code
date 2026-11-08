@@ -440,6 +440,26 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
+  it('does not let a << inside a shell comment start heredoc consumption that hides a read', () => {
+    // The comment's <<'EOF' must not be treated as a heredoc start: finding the
+    // later real heredoc's EOF line would otherwise delete the gh api read in
+    // between, leaving a single API command and crediting the read's URL to the
+    // redirected creation. The visible output comes from the read → ambiguous.
+    const entry = shellResult(
+      "gh pr comment 42 --body hi >/dev/null\n# Use <<'EOF' for the note\ngh api repos/o/r/issues/comments/111 --jq .html_url\ncat >/dev/null <<'EOF'\nplain note\nEOF",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a creation when a trailing comment merely mentions <<', () => {
+    const entry = shellResult(
+      "gh pr comment 42 --body hi\n# note about <<'EOF' usage",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments -X POST -f body='--method GET' --jq '.id'",

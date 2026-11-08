@@ -155,6 +155,19 @@ function stripHeredocBodies(command: string): string {
       i++;
       continue;
     }
+    // A word-initial `#` begins a shell comment: copy it verbatim to the end of
+    // the line WITHOUT interpreting a `<<` inside it as a heredoc. Otherwise a
+    // comment such as `# Use <<'EOF' for the note` would start heredoc
+    // consumption and, on finding a later real heredoc's delimiter line, delete
+    // the commands in between (including a real read), corrupting the origin
+    // check. Segmentation drops the comment itself later.
+    if (ch === '#' && (i === 0 || /[\s;|&]/.test(command[i - 1]!))) {
+      while (i < command.length && command[i] !== '\n' && command[i] !== '\r') {
+        result += command[i];
+        i++;
+      }
+      continue;
+    }
     // A herestring (<<<) is not a heredoc; consume all three so the trailing
     // two are not re-read as a `<<` heredoc on the next iteration.
     if (ch === '<' && command[i + 1] === '<' && command[i + 2] === '<') {
