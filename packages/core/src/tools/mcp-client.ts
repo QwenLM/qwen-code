@@ -495,25 +495,28 @@ function createBearerTokenGetter(
 ): BearerTokenGetter {
   let cached = initialToken;
   let dueAt = refreshAfter(cached);
-  const adopt = (fresh: OAuthToken) => {
+  // A read may return the snapshot it took when it started, so one that
+  // finishes after a later read was adopted (e.g. across a re-authentication)
+  // could put an older token back. A read's result is therefore adopted only
+  // if nothing was adopted since the read started. Expiry cannot decide this:
+  // a refresh may return a token that expires sooner than the one it replaces.
+  let adoptions = 0;
+  const adopt = (fresh: OAuthToken, adoptionsAtStart: number) => {
+    if (adoptions !== adoptionsAtStart) {
+      return;
+    }
+    adoptions += 1;
     cached = fresh;
     dueAt = refreshAfter(fresh);
   };
-  // A read that outlived the wait still lands in the shared storage, and the
-  // server may have revoked the old token by then: pick the result up here
-  // rather than keep sending the old one until the retry delay is over. A
-  // failed read changes nothing, and the token already cached keeps its retry
-  // delay. Expiry does not tell which token is newer (a refresh may return a
-  // shorter lifetime), and no ordering is needed: a read that loses a race with
-  // a re-authentication returns the stored credentials, which are the newest.
-  const adoptLate = (fresh: OAuthToken | null) => {
-    if (fresh && fresh.accessToken !== cached?.accessToken) {
-      adopt(fresh);
-    }
-  };
+  const usableToken = () =>
+    cached && (!cached.expiresAt || Date.now() < cached.expiresAt)
+      ? cached.accessToken
+      : null;
   return async () => {
     if (Date.now() >= dueAt) {
       let timer: NodeJS.Timeout | undefined;
+      const adoptionsAtStart = adoptions;
       try {
         const read = authProvider.getValidOAuthToken(
           mcpServerName,
@@ -527,14 +530,26 @@ function createBearerTokenGetter(
           read,
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
-              read.then(adoptLate, () => undefined);
+              // A read that outlived the wait still lands in the shared
+              // storage, and the server may have revoked the old token by
+              // then: pick the result up rather than keep sending the old
+              // one until the retry delay is over. A failed read changes
+              // nothing.
+              read.then(
+                (late) => {
+                  if (late) {
+                    adopt(late, adoptionsAtStart);
+                  }
+                },
+                () => undefined,
+              );
               reject(new Error('token refresh timed out'));
             }, OAUTH_REFRESH_WAIT_MS);
           }),
         ]);
         if (fresh) {
-          adopt(fresh);
-          return fresh.accessToken;
+          adopt(fresh, adoptionsAtStart);
+          return cached?.accessToken ?? fresh.accessToken;
         }
       } catch (error) {
         debugLogger.warn(
@@ -545,17 +560,18 @@ function createBearerTokenGetter(
       }
       // No new token (no refresh token, refresh failed or timed out, storage
       // unreadable): keep using the cached one while the server would still
-      // accept it, and don't retry on every request meanwhile.
-      if (cached && (!cached.expiresAt || Date.now() < cached.expiresAt)) {
-        dueAt = Math.min(
-          Date.now() + OAUTH_REFRESH_RETRY_MS,
-          cached.expiresAt ?? Infinity,
-        );
-        return cached.accessToken;
-      }
-      return null;
+      // accept it, and don't retry on every request meanwhile, also once
+      // nothing usable is left. A still-usable token is asked about again
+      // when it expires.
+      const token = usableToken();
+      const retryAt = Date.now() + OAUTH_REFRESH_RETRY_MS;
+      dueAt =
+        token && cached?.expiresAt
+          ? Math.min(retryAt, cached.expiresAt)
+          : retryAt;
+      return token;
     }
-    return cached?.accessToken ?? null;
+    return usableToken();
   };
 }
 

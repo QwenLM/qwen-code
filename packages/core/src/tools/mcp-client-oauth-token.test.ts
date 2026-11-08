@@ -612,6 +612,77 @@ describe('createTransport OAuth bearer token per request', () => {
     },
   );
 
+  it('does not let a late read put back a token older than one adopted since', async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const { handler } = stubAuthorizationServer();
+    const sent = stubMcpNetwork();
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+
+    // Another process already refreshed, but this read of storage is slow (a
+    // locked keychain) and returns its snapshot long after the wait.
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    const snapshot: OAuthCredentials = {
+      ...storage.creds!,
+      token: {
+        ...storage.creds!.token,
+        accessToken: 'access-other-process',
+        expiresAt: Date.now() + HOUR_MS,
+      },
+    };
+    storage.getCredentials.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => setTimeout(() => resolve(snapshot), 40_000)),
+    );
+    const dueRequest = send(transport);
+    await vi.advanceTimersByTimeAsync(5000);
+    await dueRequest;
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+
+    // A re-authentication replaces the credentials and drops the shared read;
+    // the next attempt picks the new credentials up.
+    storage.creds = {
+      ...snapshot,
+      token: { ...snapshot.token, accessToken: 'access-reauth' },
+    };
+    clearInflightTokenReadsForTest();
+    vi.setSystemTime(Date.now() + 31 * 1000);
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-reauth');
+
+    // The slow read finally returns its older snapshot.
+    await vi.advanceTimersByTimeAsync(35_000);
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-reauth');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('backs off a failing refresh also once the cached token has expired', async () => {
+    const { handler } = stubAuthorizationServer();
+    handler.mockImplementation(
+      async () => new Response('unavailable', { status: 503 }),
+    );
+    const sent = stubMcpNetwork();
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+
+    vi.setSystemTime(Date.now() + 61 * 60 * 1000);
+    await send(transport);
+    await send(transport);
+    await send(transport);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(sent.map((r) => r.authorization)).toEqual([null, null, null]);
+
+    // Once the back-off is over the next request tries again.
+    vi.setSystemTime(Date.now() + 31 * 1000);
+    await send(transport);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(storage.deleteCredentials).not.toHaveBeenCalled();
+  });
+
   it('never asks again for a token without an expiry', async () => {
     const { handler } = stubAuthorizationServer();
     const sent = stubMcpNetwork();
