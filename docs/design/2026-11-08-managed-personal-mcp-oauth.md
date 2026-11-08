@@ -69,6 +69,8 @@ Enable only after proving that other actors' execution processes cannot read the
 
 ## Verification and review carryover
 
+Compatibility with the newly landed Session resource diagnostics remains incomplete: its persisted-resource reader currently accepts only v1 effective bundles. A v2 personal-binding configuration therefore reports `configCoverage: partial` with `invalid_resource`. Complete v2 resource diagnostics are follow-up scope and are not claimed as qualified by this delivery.
+
 Run affected compiler/protocol, Hosted selection/recovery, HTTP token and WebShell authorization/install tests and TypeScript builds/typechecks. Verify callback replay, browser nonce, cross-actor prompt/approval/resume, old-client writes, token changes on surviving connections, refresh/revoke races, worker replacement and unknown tool outcomes. Public API/SurfaceRegistry gates, real MySQL, a controllable OAuth provider and real process/isolation acceptance require matching CI/deployment evidence. The shared local Java budget remains exhausted across the split.
 
 Keep original #16500 review links and prior deferrals visible. Review carryover includes changed-pin binding reuse policy, abandoned refresh leases requiring explicit reauthorization, revoked bindings requiring explicit removal, complete error-response documentation and provider/network qualification. Moving code does not resolve those discussions or assert full audit convergence. Logs and metrics contain only operation/phase/outcome identifiers, never grants, codes or tokens.

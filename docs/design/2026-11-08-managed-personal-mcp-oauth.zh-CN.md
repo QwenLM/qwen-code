@@ -69,6 +69,8 @@ provider 条目声明 `issuer`、`resource-uri`、`resource-metadata-uri`、`aut
 
 ## 验证与评审承接
 
+与新合入 Session 资源诊断的兼容仍不完整：当前持久化资源读取器仅接受 v1 effective bundle，v2 个人绑定配置会显示 `configCoverage: partial`，原因为 `invalid_resource`。完整 v2 资源诊断属于后续范围，本次交付不声称已通过该项验收。
+
 运行受影响的编译器/协议、Hosted 选择/恢复、HTTP token、WebShell 授权/安装测试及 TypeScript build/typecheck。验证 callback 重放、浏览器 nonce、跨 actor prompt/审批/恢复、旧客户端写入、存续连接上的 token 变化、刷新/撤销竞态、worker 替换和未知工具结果。公共 API/SurfaceRegistry 门禁、真实 MySQL、可控 OAuth provider 和真实进程/隔离验收需要匹配 head 的 CI/部署证据。拆分继续共用已耗尽的本地 Java 预算。
 
 保留原 #16500 的评审链接和延期事项。承接事项包括 pin 改变后的绑定复用策略、遗留 refresh lease 需要显式重新授权、已撤销绑定需要显式移除、完整错误响应文档，以及 provider/网络验收。移动代码不解决这些讨论，也不代表完整审查已收敛。日志和指标只记录 operation/阶段/结果标识，不记录 grant、code 或 token。
