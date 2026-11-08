@@ -1114,7 +1114,7 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
   );
 });
 
-test('disagreeing resource labels are reported as ambiguous, not missing', async (t) => {
+test('a multi-identity orphan pile is swept and its offline registrations deleted', async (t) => {
   const f = await fixture(t);
   f.addOrphanContainer({
     'qwen.pool': 'trial',
@@ -1126,12 +1126,119 @@ test('disagreeing resource labels are reported as ambiguous, not missing', async
     'qwen.slot': '1',
     'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
   });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-cafe1234',
+    status: 'offline',
+  });
   const manager = createManager(f.config, { command: f.command });
-  await assert.rejects(manager.cycle(1), /labels disagree/);
+  await manager.cycle(1);
+  const removed = f.calls
+    .filter((c) => c.program === 'docker' && c.args[0] === 'rm')
+    .map((c) => c.args[c.args.length - 1]);
+  assert.ok(removed.includes('container-orphan-0'));
+  assert.ok(removed.includes('container-orphan-1'));
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'the offline registration owned by the pile is deleted by name',
+  );
   assert.equal(
-    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'the slot replenishes after the sweep',
+  );
+});
+
+test('an orphan pile never deletes a registration GitHub still reports online', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234', status: 'online' });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    !f.calls.some((c) => c.program === 'gh' && c.args.includes('DELETE')),
+    'an online registration may belong to a live runner outside this host',
+  );
+});
+
+test('a foreign label in the pile keeps the slot blocked before any deletion', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-other-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-cafe1234',
+    status: 'offline',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /no unambiguous slot identity/);
+  await assert.rejects(manager.cycle(1), /no unambiguous slot identity/);
+  assert.ok(
+    !f.calls.some((c) => c.program === 'gh' && c.args.includes('DELETE')),
+    "never sweeps registrations by name when the pile may be another pool's",
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
     0,
-    'an ambiguous identity still deletes nothing',
+  );
+});
+
+test('a rejected sweep deletion keeps the pile state for the next cycle', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-cafe1234',
+    status: 'offline',
+  });
+  f.setFailDelete(true);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /deletion was rejected/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+    'no replacement while the pile registration survives',
+  );
+  f.setFailDelete(false);
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'the retry finishes the sweep and replenishes',
   );
 });
 

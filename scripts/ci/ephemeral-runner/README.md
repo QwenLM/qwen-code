@@ -177,8 +177,14 @@ remove unrelated runners or run a global Docker prune.
 
 A container or network whose slot state was lost is reconciled from its
 `qwen.instance` label, so an interrupted `docker create` no longer wedges the
-slot permanently. Resources whose label does not identify this pool and slot,
-or that disagree about the identity, still block it for manual reconciliation.
+slot permanently. When the leftovers carry several identities — a wedged
+Docker can pile up multiple never-started containers per slot — they are all
+orphans of this slot (cycles are serial), so the manager deletes the resources
+and then sweeps the slot's registrations by name. The sweep only runs when
+every leftover resource carries this slot's identity prefix, and it only
+deletes registrations GitHub already reports offline; an online registration
+may belong to a live runner outside this host's view. A foreign or missing
+instance label still blocks the slot for manual reconciliation.
 The label carries the instance name, not the registration's display name, so
 recovery matches registrations under both the bare display name written by
 older versions and the current suffixed one; an ambiguous match still blocks
