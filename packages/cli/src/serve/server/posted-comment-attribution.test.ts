@@ -460,6 +460,17 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
+  it('does not treat a # after an escaped space as a comment that hides a heredoc', () => {
+    // In `tee review\ #1.md` the space is escaped, so #1.md is part of the
+    // filename word (not a comment) and <<'EOF' is a real heredoc. The body is
+    // data printed by tee — no creation runs, so nothing is attributed.
+    const entry = shellResult(
+      "tee review\\ #1.md <<'EOF'\ngh pr comment 42 --body hi\nhttps://github.com/o/r/pull/42#issuecomment-111\nEOF",
+      'gh pr comment 42 --body hi\nhttps://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments -X POST -f body='--method GET' --jq '.id'",

@@ -124,6 +124,26 @@ function stripShellComment(segment: string): string {
 }
 
 /**
+ * Whether position `i` sits at an unescaped shell word boundary, where a `#`
+ * would begin a comment. The preceding character must be whitespace or a
+ * separator, and must not itself be escaped: in `tee review\ #1.md` the space
+ * is escaped (odd number of preceding backslashes), so `#1.md` stays part of
+ * the filename word and is not a comment.
+ */
+function isUnescapedWordBoundary(command: string, i: number): boolean {
+  if (i === 0) return true;
+  const prev = command[i - 1]!;
+  if (!/[\s;|&]/.test(prev)) return false;
+  let backslashes = 0;
+  let k = i - 2;
+  while (k >= 0 && command[k] === '\\') {
+    backslashes++;
+    k--;
+  }
+  return backslashes % 2 === 0;
+}
+
+/**
  * Remove heredoc bodies before segmentation. A heredoc body is data written to
  * a file/stdin, not shell structure: a quote character in the body (e.g. the
  * apostrophe in `it's quoted`) must not open a shell quote that swallows the
@@ -160,8 +180,10 @@ function stripHeredocBodies(command: string): string {
     // comment such as `# Use <<'EOF' for the note` would start heredoc
     // consumption and, on finding a later real heredoc's delimiter line, delete
     // the commands in between (including a real read), corrupting the origin
-    // check. Segmentation drops the comment itself later.
-    if (ch === '#' && (i === 0 || /[\s;|&]/.test(command[i - 1]!))) {
+    // check. Segmentation drops the comment itself later. The boundary must be
+    // unescaped, so the `#` in `tee review\ #1.md` (part of the filename) does
+    // not hide the real heredoc that follows it.
+    if (ch === '#' && isUnescapedWordBoundary(command, i)) {
       while (i < command.length && command[i] !== '\n' && command[i] !== '\r') {
         result += command[i];
         i++;
