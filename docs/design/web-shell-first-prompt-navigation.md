@@ -98,11 +98,19 @@ Call sites:
   change, and signal `sessionCatalogController.promptAdmitted`. Failures are
   reported with a toast regardless of the current owner and mark the catalog
   admission uncertain; the draft text is left intact.
-- `!cmd` shell flow: dispatch through `detachedSession.shellCommand`.
+- `!cmd` shell flow: dispatch through `detachedSession.shellCommand`, then
+  detach the client.
 - `/goal` and Goals dialog: `createGoalForAllocatedSession` already targets
-  the session by id, so a detached allocation proceeds; the local transcript
-  echo is skipped when detached.
-- `ensureAgentMentionSession`: consumes `sessionId` only.
+  the session by id, so a detached allocation proceeds; the client is
+  detached immediately (the id-based dispatch never uses it), and the local
+  transcript echo is skipped when detached.
+- `ensureAgentMentionSession`: consumes `sessionId` only and detaches the
+  client immediately; the mention posts by id through workspace routes.
+
+Every receiver of an unbound client must release it: the client is a live
+daemon-side registration, and `POST /session/:id/detach` is the only release.
+Prompt and shell detach after their dispatch settles; goal and mention
+detach at allocation because their dispatch never touches the client.
 
 ### `sendDetachedPrompt` action
 
@@ -136,9 +144,16 @@ New admission-only action in `actions.ts`, typed in `types.ts`:
 
 ## Constraints and risks
 
-- The detached client is short-lived: it exists only between create and
-  admission, then detaches. Event streaming for the turn is picked up when
-  the user opens the session (or via background-turn live state).
+- The detached client is short-lived in every flow: prompt and shell detach
+  after dispatch settles, goal and mention detach immediately after
+  allocation. Event streaming for the turn is picked up when the user opens
+  the session (or via background-turn live state).
+- Background-turn notification parity is a follow-up: the provider's
+  `turnNotifications.admit` is gated on the current session and its observer
+  only watches the active session's events, so a detached first prompt does
+  not register a "turn finished in the background" notification. The prompt
+  itself is delivered and runs; wiring notification parity needs its own
+  change to the admission gate and scope lifetime.
 - `registerAcceptedAttachmentSources` self-guards on `sessionRef.current` and
   is a no-op for the detached client; source decoration is best-effort.
 - Slash-command attachment classification with an unloaded command snapshot

@@ -86,10 +86,17 @@ Web Shell 的新聊天是草稿态：首条 prompt 提交时才真正创建 daem
   发出 host 的 `submit` 会话变更、调用
   `sessionCatalogController.promptAdmitted`。失败无论当前 owner 是谁都
   toast 报错，并将 catalog 准入标记为不确定；草稿文本保留。
-- `!cmd` shell 流：通过 `detachedSession.shellCommand` 派发。
+- `!cmd` shell 流：通过 `detachedSession.shellCommand` 派发，随后 detach
+  客户端。
 - `/goal` 与 Goals 对话框：`createGoalForAllocatedSession` 本就按 id 定位
-  会话，detached 分配直接继续；detached 时跳过本地 transcript 回显。
-- `ensureAgentMentionSession`：只消费 `sessionId`。
+  会话，detached 分配直接继续；客户端立即 detach（按 id 派发根本不使用
+  它）；detached 时跳过本地 transcript 回显。
+- `ensureAgentMentionSession`：只消费 `sessionId`，并立即 detach 客户端；
+  mention 通过 workspace 级路由按 id 发送。
+
+每个收到 unbound 客户端的调用方都必须释放它：客户端是 daemon 侧的活注册，
+`POST /session/:id/detach` 是唯一的释放方式。prompt 与 shell 在派发落定后
+detach；goal 与 mention 在分配时即 detach，因为它们的派发不经过客户端。
 
 ### `sendDetachedPrompt` action
 
@@ -120,8 +127,13 @@ Web Shell 的新聊天是草稿态：首条 prompt 提交时才真正创建 daem
 
 ## 约束与风险
 
-- detached 客户端是短命的：只存在于 create 与准入之间，随后 detach。
-  turn 的事件流在用户打开会话时接上（或经 background-turn live state）。
+- detached 客户端在每条流里都是短命的：prompt 与 shell 在派发落定后
+  detach，goal 与 mention 在分配后立即 detach。turn 的事件流在用户打开
+  会话时接上（或经 background-turn live state）。
+- 后台 turn 通知的对等性是后续工作：provider 的 `turnNotifications.admit`
+  受当前会话门禁限制，其观察器只观察当前会话的事件，因此 detached 首条
+  prompt 不会登记"后台 turn 完成"通知。prompt 本身已交付并运行；通知对等
+  需要单独改动准入门禁与 scope 生命周期。
 - `registerAcceptedAttachmentSources` 自带 `sessionRef.current` 守卫，
   对 detached 客户端是 no-op；source 装饰本就是尽力而为。
 - 命令快照未加载时的斜杠命令附件分类会从 detached 客户端读

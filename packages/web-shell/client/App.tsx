@@ -18721,6 +18721,12 @@ export function App({
           const allocation = await ensureSessionForPrompt();
           allocatedSessionId = allocation?.sessionId;
           detachedGoalSession = allocation?.detachedSession !== undefined;
+          // Goal control dispatches by id through workspace routes and never
+          // uses this client; release it so the registration does not hold
+          // off the daemon's idle cleanup.
+          if (allocation?.detachedSession) {
+            void allocation.detachedSession.detach().catch(() => undefined);
+          }
         }
         if (!detachedGoalSession) {
           const currentSessionId = connectionRef.current.sessionId;
@@ -22000,6 +22006,12 @@ export function App({
   const ensureAgentMentionSession = useCallback(async () => {
     const existing = connectionRef.current.sessionId;
     const allocated = existing ? undefined : await ensureSessionForPrompt();
+    // The mention posts by id through workspace routes and never uses this
+    // client; release it so the registration does not hold off the daemon's
+    // idle cleanup.
+    if (allocated?.detachedSession) {
+      void allocated.detachedSession.detach().catch(() => undefined);
+    }
     const sessionId =
       existing ?? allocated?.sessionId ?? connectionRef.current.sessionId;
     if (!sessionId) return undefined;
@@ -24630,6 +24642,13 @@ export function App({
                         const allocatedSessionId = allocation?.sessionId;
                         const detachedGoalSession =
                           allocation?.detachedSession !== undefined;
+                        // Same release obligation as the /goal command: the
+                        // goal dispatches by id, the client is not needed.
+                        if (allocation?.detachedSession) {
+                          void allocation.detachedSession
+                            .detach()
+                            .catch(() => undefined);
+                        }
                         if (!detachedGoalSession) {
                           const currentSessionId =
                             connectionRef.current.sessionId;

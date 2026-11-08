@@ -51,9 +51,21 @@ test('first prompt still runs when switching sessions during creation', async ({
   releaseCreate();
 
   // The submitted prompt must still reach the newly created session.
-  await expect
-    .poll(() => daemon.promptRequests().length, { timeout: 10_000 })
-    .toBe(1);
+  try {
+    await expect
+      .poll(() => daemon.promptRequests().length, { timeout: 10_000 })
+      .toBe(1);
+  } catch (error) {
+    await testInfo.attach('daemon-requests-on-failure', {
+      body: JSON.stringify(
+        daemon.requests.map(({ method, path }) => ({ method, path })),
+        null,
+        2,
+      ),
+      contentType: 'application/json',
+    });
+    throw error;
+  }
   const promptRequest = daemon.promptRequests()[0];
   expect(promptRequest.path).toBe(`/session/${scenario.sessionId}/prompt`);
   expect(JSON.stringify(promptRequest.body)).toContain(promptText);
