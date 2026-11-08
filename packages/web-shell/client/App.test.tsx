@@ -707,6 +707,7 @@ const {
     refreshModels: vi.fn().mockResolvedValue(undefined),
     setDaemonActivePrompt: vi.fn(),
     sendPrompt: vi.fn().mockResolvedValue(undefined),
+    sendDetachedPrompt: vi.fn().mockResolvedValue({ promptId: 'prompt-1' }),
     continueSession: vi.fn().mockResolvedValue(undefined),
     btwSessionStream: vi.fn(
       async function* (): AsyncGenerator<DaemonSessionBtwStreamEvent> {
@@ -27672,6 +27673,84 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('dispatches the first prompt detached when the user switches sessions during creation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    mockSessionActions.sendDetachedPrompt.mockImplementationOnce(
+      async (
+        _session: unknown,
+        _text: string,
+        options?: { onAdmitted?: (admission: { promptId: string }) => void },
+      ) => {
+        options?.onAdmitted?.({ promptId: 'prompt-1' });
+        return { promptId: 'prompt-1' };
+      },
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('run while I am away');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+
+    // The user clicks another session while the create is still in flight.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await create.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+    });
+
+    const [detachedSessionArg, detachedPromptArg] = mockSessionActions
+      .sendDetachedPrompt.mock.calls[0] as [{ sessionId: string }, string];
+    expect(detachedSessionArg.sessionId).toBe('session-1');
+    expect(detachedPromptArg).toBe('run while I am away');
+    // The attached dispatch path never runs, and the navigation target is
+    // not replaced by the created session.
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockConnection.sessionId).toBe('session-2');
+    expect(sessionCatalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/workspace',
+      'session-1',
+    );
+    // Naming goes through the created client, not the current-session action.
+    expect(detachedClient.updateMetadata).toHaveBeenCalledWith({
+      displayName: 'run while I am away',
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
   it('discards an armed /clear carry when a shrink-fold lands on a split pane', async () => {
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
@@ -47172,6 +47251,8 @@ describe('App session callbacks', () => {
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen',
       approvalMode: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     expect(mockSessionActions.setModel).not.toHaveBeenCalled();
     await vi.waitFor(() => {
@@ -47225,6 +47306,8 @@ describe('App session callbacks', () => {
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen3-max',
       approvalMode: 'yolo',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -47265,6 +47348,8 @@ describe('App session callbacks', () => {
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen-default',
       approvalMode: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 

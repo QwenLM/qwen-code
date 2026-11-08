@@ -654,6 +654,7 @@ export function createDaemonSessionActions({
     text: string,
     hasAttachments: boolean,
     signal?: AbortSignal,
+    isCurrent: () => boolean = () => sessionRef.current === session,
   ): boolean | Promise<boolean> {
     const trimmed = text.trim();
     if (!trimmed.startsWith('/')) return false;
@@ -685,7 +686,7 @@ export function createDaemonSessionActions({
       return (
         signal ? Promise.race([request, rejectOnAbort(signal)]) : request
       ).then((status) => {
-        if (sessionRef.current !== session)
+        if (!isCurrent())
           throw new Error('Session changed before prompt submission');
         const mapped = mapSupportedCommands(status);
         commands = mapped.commands;
@@ -1864,6 +1865,86 @@ export function createDaemonSessionActions({
       return { promptId: accepted.promptId };
     },
 
+    async sendDetachedPrompt(session, text, options) {
+      // Admission-only dispatch to a session created for a first prompt whose
+      // submitter navigated away during creation. Nothing here may write the
+      // transcript store, prompt status, or connection: they belong to the
+      // session the user navigated to. The daemon keeps the session and runs
+      // the turn after this client detaches.
+      try {
+        const normalizedImages: Array<{ data: string; mimeType: string }> = (
+          options?.images ?? []
+        ).map((img) => ({
+          data: img.data,
+          mimeType:
+            img.mimeType || img.mediaType || img.media_type || 'image/*',
+        }));
+        const normalizedFiles = normalizePromptFiles(options?.files);
+        const classification = discardsSlashCommandAttachments(
+          session,
+          text,
+          normalizedImages.length > 0 || normalizedFiles.length > 0,
+          undefined,
+          // The detached client is owned by this dispatch; no session switch
+          // can supersede it, and its command snapshot must never publish to
+          // the current connection (the setConnection guard below stays
+          // keyed on sessionRef).
+          () => true,
+        );
+        const discardAttachments =
+          typeof classification === 'boolean'
+            ? classification
+            : await classification;
+        const uploaded = await promptContentWithUploadedAttachments(
+          session,
+          text,
+          normalizedImages,
+          normalizedFiles,
+          discardAttachments,
+        );
+        const inputAnnotations =
+          options?.inputAnnotations && options.inputAnnotations.length > 0
+            ? options.inputAnnotations
+            : undefined;
+        const promptRequest: Record<string, unknown> = {
+          prompt: uploaded.content,
+          eventDetailMode: getEventDetailMode(),
+        };
+        if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+          promptRequest['_meta'] = {
+            ...(typeof options?.submittedPrompt === 'string'
+              ? { 'qwen.submittedPrompt': options.submittedPrompt }
+              : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
+          };
+        }
+        if (options?.retry) {
+          promptRequest['retry'] = true;
+        }
+        options?.onAdmissionStarted?.();
+        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        try {
+          accepted = await session.submitPrompt(
+            promptRequest as Parameters<typeof session.submitPrompt>[0],
+          );
+        } catch (error) {
+          if (isDefinitePromptAdmissionRejection(error)) {
+            await removeUploadedAttachments(session, uploaded.references);
+          }
+          throw error;
+        }
+        options?.onAdmitted?.({ promptId: accepted.promptId });
+        return { promptId: accepted.promptId };
+      } finally {
+        await session.detach().catch((error: unknown) => {
+          console.warn(
+            '[DaemonSessionActions] detach after detached prompt failed:',
+            error,
+          );
+        });
+      }
+    },
+
     async cancel() {
       const session = requireSessionForAction(
         addNotice,
@@ -2547,6 +2628,8 @@ export function createDaemonSessionActions({
       sourceType?: string;
       worktree?: { slug?: string };
       branch?: { name: string };
+      keepOnNavigation?: boolean;
+      navigationOutcome?: { bound: boolean };
     }) {
       let targetSessionContext: DaemonProductSessionContext | undefined;
       let rawCreateStarted = false;
@@ -2708,6 +2791,16 @@ export function createDaemonSessionActions({
             getWorkspaceSelectionKey() !== workspaceSelectionAtStart) &&
           getConnection().sessionId !== nextSession.sessionId;
         if (manualSessionClearRef.current || userMovedAway) {
+          if (options?.keepOnNavigation) {
+            // A submitted prompt owns this session even though the user
+            // navigated away: hand the client back unbound so the caller can
+            // dispatch without hijacking the navigation. Binding here would
+            // replace the session the user just opened.
+            if (options.navigationOutcome) {
+              options.navigationOutcome.bound = false;
+            }
+            return nextSession;
+          }
           try {
             await withActionTimeout(
               nextSession.detach(),

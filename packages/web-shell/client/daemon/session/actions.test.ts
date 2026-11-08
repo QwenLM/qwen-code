@@ -2968,7 +2968,10 @@ describe('createDaemonSessionActions', () => {
       expect(submitPrompt).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(4_999);
       await pending;
-      expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith('session-b');
+      expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith(
+        'session-b',
+        undefined,
+      );
       expect(attachSession).toHaveBeenCalledOnce();
       expect(submitPrompt).toHaveBeenCalledOnce();
       expect(vi.getTimerCount()).toBe(0);
@@ -3212,13 +3215,14 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
-  it('stops first-prompt preparation before callbacks after workspace navigation', async () => {
+  it('continues first-prompt preparation detached after workspace navigation', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
     let selectedWorkspaceCwd = '/workspace';
-    const { actions, getConnection, replaceConnection } = createActionsHarness({
-      createDetachedSession: vi.fn(() => deferred.promise),
-    });
+    const { actions, sessionRef, getConnection, replaceConnection } =
+      createActionsHarness({
+        createDetachedSession: vi.fn(() => deferred.promise),
+      });
     const attachSession = vi.spyOn(actions, 'attachSession');
     const clearSession = vi.spyOn(actions, 'clearSession');
     const onSessionCreated = vi.fn();
@@ -3240,13 +3244,152 @@ describe('createDaemonSessionActions', () => {
     replaceConnection(navigatedConnection);
     deferred.resolve(nextSession as unknown as DaemonSessionClient);
 
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-    expect(nextSession.detach).toHaveBeenCalledOnce();
-    expect(onSessionCreated).not.toHaveBeenCalled();
-    expect(onSessionAllocated).not.toHaveBeenCalled();
+    // The submitted prompt keeps its session: preparation resolves with the
+    // unbound client for admission-only dispatch instead of aborting, and
+    // the navigation target is never replaced.
+    await expect(pending).resolves.toMatchObject({
+      detachedSession: nextSession,
+    });
+    expect(nextSession.detach).not.toHaveBeenCalled();
+    expect(onSessionAllocated).toHaveBeenCalledWith('session-b');
+    expect(onSessionCreated).toHaveBeenCalledWith('session-b', nextSession);
     expect(attachSession).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBeUndefined();
     expect(getConnection()).toBe(navigatedConnection);
+  });
+
+  it('returns the created client unbound when a prompt create survives navigation', async () => {
+    const nextSession = createMockSession('session-b');
+    const deferred = createDeferred<DaemonSessionClient>();
+    const { actions, sessionRef, getConnection, replaceConnection } =
+      createActionsHarness({
+        connection: { status: 'connected' },
+        createDetachedSession: vi.fn(() => deferred.promise),
+      });
+    const navigationOutcome = { bound: true };
+    const outcome = actions.createSession({
+      keepOnNavigation: true,
+      navigationOutcome,
+    });
+    const navigatedConnection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-c',
+      sessionContext: { kind: 'workspace', cwd: '/other-workspace' },
+    };
+    replaceConnection(navigatedConnection);
+    deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+    await expect(outcome).resolves.toBe(nextSession);
+    expect(navigationOutcome.bound).toBe(false);
+    expect(nextSession.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBeUndefined();
+    expect(getConnection()).toBe(navigatedConnection);
+  });
+
+  it('dispatches a detached prompt admission-only and detaches the client', async () => {
+    const session = createMockSession('session-b');
+    const { actions, store, setPromptStatus, getConnection } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-c' },
+      });
+    const onAdmitted = vi.fn();
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      'background prompt',
+      { submittedPrompt: 'background prompt', onAdmitted },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.submitPrompt).toHaveBeenCalledOnce();
+    const request = session.submitPrompt.mock.calls[0]?.[0] as {
+      prompt: Array<{ type: string; text: string }>;
+      _meta?: Record<string, unknown>;
+    };
+    expect(request.prompt[0]).toMatchObject({
+      type: 'text',
+      text: 'background prompt',
+    });
+    expect(request._meta).toEqual({
+      'qwen.submittedPrompt': 'background prompt',
+    });
+    expect(onAdmitted).toHaveBeenCalledWith({ promptId: 'prompt-1' });
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(setPromptStatus).not.toHaveBeenCalled();
+    expect(getConnection().sessionId).toBe('session-c');
+  });
+
+  it('detaches the client when detached admission fails', async () => {
+    const session = createMockSession('session-b');
+    session.submitPrompt.mockRejectedValue(new Error('admission failed'));
+    const { actions, store } = createActionsHarness();
+
+    await expect(
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'background prompt',
+      ),
+    ).rejects.toThrow('admission failed');
+
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('admits concurrent detached dispatches sharing one client', async () => {
+    // Two draft submissions dedupe onto one creation; both prompts own the
+    // same detached client. The daemon FIFO-queues the second admission.
+    const session = createMockSession('session-b');
+    const { actions, store } = createActionsHarness();
+
+    const [first, second] = await Promise.all([
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'prompt one',
+      ),
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'prompt two',
+      ),
+    ]);
+
+    expect(first).toEqual({ promptId: 'prompt-1' });
+    expect(second).toEqual({ promptId: 'prompt-1' });
+    expect(session.submitPrompt).toHaveBeenCalledTimes(2);
+    expect(session.detach).toHaveBeenCalledTimes(2);
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('classifies slash attachments through the detached client when commands are unloaded', async () => {
+    const session = createMockSession('session-b');
+    session.supportedCommands.mockResolvedValue(
+      supportedCommandsStatus('session-b', 'custom'),
+    );
+    const { actions, store, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          features: ['session_attachments'],
+        } as DaemonCapabilities,
+      },
+    });
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      '/custom',
+      { images: [{ data: 'aGVsbG8=', mimeType: 'image/png' }] },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.supportedCommands).toHaveBeenCalledOnce();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(session.submitPrompt).toHaveBeenCalledOnce();
+    // The detached client's command snapshot never publishes to the
+    // connection the user navigated to.
+    expect(getConnection().commands).toBeUndefined();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
   it('does not restore a detached session after the session was cleared', async () => {
