@@ -1043,7 +1043,9 @@ describe('SessionTranscriptReader', () => {
       await writeRawTranscript(
         jsonLine({ ...record('u3', null, 'numeric value'), timestamp: 123 }),
       );
+      const builds = countBuilds(file);
       expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      expect(builds.count).toBe(1);
     });
 
     it('serves a frozen prefix while appending and rejects replacement during the read', async () => {
