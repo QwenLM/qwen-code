@@ -1284,7 +1284,7 @@ test('identical failures past the time threshold raise one stall alert; recovery
 });
 
 test('a changing error restarts the stall clock instead of alerting early', async (t) => {
-  const { f, alerts, clock, messages } = await stallHarness(t, { random: 0.5 });
+  const { f, clock, messages } = await stallHarness(t, { random: 0.5 });
   let failures = 0;
   const command = (program, args, options) => {
     if (program === 'docker' && args[0] === 'info' && failures < 6) {
@@ -1521,7 +1521,7 @@ test('the shipped example config pins the documented stall threshold', async () 
 });
 
 test('a slot that keeps stalling after the alert never alerts again', async (t) => {
-  const { f, alerts, clock, messages } = await stallHarness(t);
+  const { f, alerts, clock } = await stallHarness(t);
   let cycles = 0;
   const command = (program, args, options) => {
     if (program === 'docker' && args[0] === 'info') {
@@ -1557,7 +1557,7 @@ test('a slot that keeps stalling after the alert never alerts again', async (t) 
 });
 
 test('a recovered slot that stalls again raises a second alert', async (t) => {
-  const { f, alerts, clock, messages } = await stallHarness(t);
+  const { f, alerts, clock } = await stallHarness(t);
   // Six failing cycles carry the first episode past the alert, the seventh
   // completes so the slot recovers, and every later cycle fails again.
   const RECOVER_AT = 7;
@@ -1611,7 +1611,7 @@ test('a recovered slot that stalls again raises a second alert', async (t) => {
 });
 
 test('a changed failure message re-arms the stall alert for the new episode', async (t) => {
-  const { f, alerts, clock, messages } = await stallHarness(t);
+  const { f, alerts, clock } = await stallHarness(t);
   // The slot never recovers: it alerts on one failure message, the message
   // changes, and the new episode has to alert again on its own clock. Only the
   // new-episode reset clears the latch here, so this is the case that pins it.
