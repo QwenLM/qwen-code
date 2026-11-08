@@ -4567,19 +4567,116 @@ export function commandContainsGitAmend(command: string): boolean {
   return classifyGitAmend(command) !== 'none';
 }
 
-/** git subcommands that can move HEAD before a later `--amend` reads it, so
- * the commit the exemption certifies is no longer the one the amend rewrites
- * (#16075 review, R14-1). */
-const AMEND_HEAD_MOVING_SUBCOMMANDS = new Set([
-  'reset',
-  'checkout',
-  'switch',
-  'rebase',
-  'merge',
-  'cherry-pick',
-  'revert',
-  'pull',
+/**
+ * git subcommands proven never to move HEAD, in any invocation form (#16075
+ * maintainer stopgap, R15-2). The previous eight-entry denylist of movers was
+ * incomplete by construction: `git update-ref HEAD HEAD~1 && git commit
+ * --amend` rewrote the session commit's PARENT while the guard still exempted
+ * it (witnessed with real git). An allowlist inverts the failure mode — any
+ * subcommand not proven neutral (update-ref, am, bisect, stash,
+ * symbolic-ref, replace, …) counts as a HEAD movement, so a following amend
+ * is hard-denied instead of silently exempt.
+ *
+ * Membership audit: read-only commands never write refs; add/apply write only
+ * the index/worktree; hash-object/fsck/verify-* write only objects;
+ * branch/tag/config/remote/notes write only their own refs (git refuses to
+ * force-update or delete the checked-out branch, and remote set-head touches
+ * the remote-tracking HEAD ref, not HEAD itself); fetch/push refuse to
+ * update the branch currently checked out (receive.denyCurrentBranch /
+ * fetch's checked-out refusal), so HEAD's commit cannot move.
+ */
+const AMEND_HEAD_NEUTRAL_SUBCOMMANDS = new Set([
+  'add',
+  'apply',
+  'blame',
+  'branch',
+  'cat-file',
+  'check-attr',
+  'check-ignore',
+  'check-mailmap',
+  'check-ref-format',
+  'cherry',
+  'config',
+  'count-objects',
+  'describe',
+  'diff',
+  'diff-files',
+  'diff-index',
+  'diff-tree',
+  'fetch',
+  'for-each-ref',
+  'fsck',
+  'grep',
+  'hash-object',
+  'help',
+  'log',
+  'ls-files',
+  'ls-remote',
+  'ls-tree',
+  'merge-base',
+  'name-rev',
+  'notes',
+  'patch-id',
+  'push',
+  'range-diff',
+  'remote',
+  'rev-list',
+  'rev-parse',
+  'shortlog',
+  'show',
+  'show-branch',
+  'show-ref',
+  'status',
+  'stripspace',
+  'tag',
+  'var',
+  'verify-commit',
+  'verify-pack',
+  'verify-tag',
+  'version',
+  'whatchanged',
 ]);
+
+/**
+ * The subcommand word of a direct git invocation, or null when it cannot be
+ * proven statically. Mirrors the global-flag/redirect walk of
+ * `isGitAmendInvocationAt`; an alias, a glob, or an expansion in the
+ * subcommand position means any program may run, so the caller must fail
+ * closed (#16075 review, R15-2).
+ */
+function amendGitSubcommandWord(tokens: string[]): string | null {
+  if (AMEND_GLOB_WORD.test(tokens[0] ?? '')) return null;
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      index++;
+      break;
+    }
+    if (AMEND_REDIRECT_TOKEN.test(token)) {
+      index +=
+        AMEND_REDIRECT_WORD.test(token) && index + 1 < tokens.length ? 2 : 1;
+      continue;
+    }
+    if (!token.startsWith('-')) break;
+    if (
+      AMEND_GIT_ALIAS_CONFIG.test(token.replace(/^--config-env=/, '')) ||
+      (AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) &&
+        index + 1 < tokens.length &&
+        AMEND_GIT_ALIAS_CONFIG.test(tokens[index + 1]!))
+    ) {
+      return null;
+    }
+    index +=
+      AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length
+        ? 2
+        : 1;
+  }
+  const word = tokens[index];
+  if (word === undefined) return null;
+  if (AMEND_GLOB_WORD.test(word) || /[$`]/.test(word)) return null;
+  return word;
+}
 
 /** One compound segment that directly invokes `git commit --amend`, with the
  * cwd it runs under. */
@@ -4987,35 +5084,46 @@ function walkAmendSegments(
       prevTerminator = terminator;
       continue;
     }
-    if (
-      tokens.length > 0 &&
-      amendExecutableBasename(tokens[0]!) === 'git' &&
-      tokens.slice(1).some((token) => AMEND_HEAD_MOVING_SUBCOMMANDS.has(token))
-    ) {
-      headMayMove = true;
-    }
-    if (tokens.length > 0 && isGitAmendInvocationAt(tokens, 0)) {
-      if (headMayMove) {
-        return { kind: 'untrackable', headMayMove: true };
+    if (tokens.length > 0 && amendExecutableBasename(tokens[0]!) === 'git') {
+      // The amend segment is checked FIRST: the HEAD-movement allowlist
+      // below applies only to PRECEDING git segments. Keying it off the
+      // amending segment itself would poison every bare amend (`commit` is
+      // not a neutral subcommand), and scanning its argument words once
+      // matched a mover name inside an unquoted commit message.
+      if (isGitAmendInvocationAt(tokens, 0)) {
+        if (headMayMove) {
+          return { kind: 'untrackable', headMayMove: true };
+        }
+        if (poisoned()) {
+          return untrackable();
+        }
+        amendSegments.push({ segment, cwd: effectiveCwd });
+        prevTerminator = terminator;
+        continue;
       }
-      if (poisoned()) {
+      // A direct git invocation the recognizer cannot classify (an expansion
+      // in an invocation-deciding position, a defined alias) is not a nested
+      // payload: it may assemble an amend of ANY repository, so the cwd-only
+      // answer must not exempt it. Unattributable, not a proven HEAD move:
+      // it routes to approval (#16075 maintainer stopgap).
+      if (
+        nestedAmendPayloads(tokenize(stripUnquotedComments(segment)), names)
+          .unclassifiable
+      ) {
         return untrackable();
       }
-      amendSegments.push({ segment, cwd: effectiveCwd });
-      prevTerminator = terminator;
-      continue;
-    }
-    // A direct git invocation the recognizer cannot classify (an expansion
-    // in an invocation-deciding position, a defined alias) is not a nested
-    // payload: it may assemble an amend of ANY repository, so the cwd-only
-    // answer must not exempt it.
-    if (
-      tokens.length > 0 &&
-      amendExecutableBasename(tokens[0]!) === 'git' &&
-      nestedAmendPayloads(tokenize(stripUnquotedComments(segment)), names)
-        .unclassifiable
-    ) {
-      return untrackable();
+      // R15-2 allowlist: a preceding git segment whose subcommand is not
+      // proven HEAD-neutral may move HEAD off the registered commit before
+      // the amend reads it (`git update-ref HEAD HEAD~1 && git commit
+      // --amend` rewrites the PARENT — witnessed data loss). Anything not
+      // provably safe counts as a movement; the following amend hard-denies.
+      const subcommand = amendGitSubcommandWord(tokens);
+      if (
+        subcommand === null ||
+        !AMEND_HEAD_NEUTRAL_SUBCOMMANDS.has(subcommand)
+      ) {
+        headMayMove = true;
+      }
     }
     prevTerminator = terminator;
   }

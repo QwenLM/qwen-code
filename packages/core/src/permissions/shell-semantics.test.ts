@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  amendSegmentsForExemption,
   classifyGitAmend,
   commandContainsGitAmend,
   extractShellOperations,
@@ -1273,4 +1274,32 @@ describe('commandContainsGitAmend IFS splitting is literal (#16075 R15-3)', () =
       expect(commandContainsGitAmend(command)).toBe(false);
     },
   );
+});
+
+// ── #16075 R15-2: HEAD-movement allowlist shape ───────────────────────────
+describe('amendSegmentsForExemption HEAD-movement allowlist (#16075 R15-2)', () => {
+  it('tags a non-neutral preceding git segment as a HEAD movement', () => {
+    expect(
+      amendSegmentsForExemption(
+        'git update-ref HEAD HEAD~1 && git commit --amend --no-edit',
+        CWD,
+      ),
+    ).toEqual({ kind: 'untrackable', headMayMove: true });
+  });
+
+  it('keeps a neutral preceding git segment trackable', () => {
+    const analysis = amendSegmentsForExemption(
+      'git status && git commit --amend --no-edit',
+      CWD,
+    );
+    expect(analysis.kind).toBe('segments');
+  });
+
+  it('does not poison a bare amend with its own subcommand', () => {
+    const analysis = amendSegmentsForExemption(
+      'git commit --amend --no-edit',
+      CWD,
+    );
+    expect(analysis.kind).toBe('segments');
+  });
 });

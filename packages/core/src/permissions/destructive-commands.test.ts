@@ -752,6 +752,86 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
     expect(result!.blocked).toBe(true);
   });
 
+  // ── R15-2: HEAD-movement allowlist (maintainer stopgap) ─────────────────
+  // The eight-entry mover denylist missed update-ref/am/bisect/stash/…:
+  // `git update-ref HEAD HEAD~1 && git commit --amend` rewrites the session
+  // commit's PARENT (witnessed with real git: the old HEAD is no longer an
+  // ancestor afterwards) while the guard exempted it. The allowlist inverts
+  // the failure mode — only proven HEAD-neutral subcommands keep the
+  // exemption alive; anything else counts as a movement and hard-denies.
+  it.each([
+    'git update-ref HEAD HEAD~1 && git commit --amend --no-edit',
+    'git reset --soft HEAD~1 && git commit --amend --no-edit',
+    'git checkout HEAD~1 && git commit --amend --no-edit',
+    'git symbolic-ref HEAD refs/heads/other && git commit --amend --no-edit',
+    'git stash && git commit --amend --no-edit',
+    'git bisect start && git commit --amend --no-edit',
+    'git am --abort && git commit --amend --no-edit',
+    'git replace HEAD HEAD~1 && git commit --amend --no-edit',
+    // Global flags must not hide the subcommand from the allowlist.
+    'git --no-pager update-ref HEAD HEAD~1 && git commit --amend --no-edit',
+    'git -c core.pager=cat update-ref HEAD HEAD~1 && git commit --amend --no-edit',
+  ])('blocks an amend after a non-neutral HEAD movement: %s', (command) => {
+    const result = isDestructiveCommand(command, 'amend the commit', repoA.dir);
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it.each([
+    'git status && git commit --amend --no-edit',
+    'git log -1 && git commit --amend --no-edit',
+    'git diff && git commit --amend --no-edit',
+    'git add f.txt && git commit --amend --no-edit',
+    'git rev-parse HEAD && git commit --amend --no-edit',
+    'git --no-pager show --stat && git commit --amend --no-edit',
+    'git -c core.pager=cat log && git commit --amend --no-edit',
+    'git branch && git commit --amend --no-edit',
+    'git tag && git commit --amend --no-edit',
+    'git config --list && git commit --amend --no-edit',
+    'git remote -v && git commit --amend --no-edit',
+    'git fetch --dry-run && git commit --amend --no-edit',
+  ])(
+    'keeps the exemption after a proven HEAD-neutral git segment: %s',
+    (command) => {
+      expect(
+        isDestructiveCommand(command, 'amend the commit', repoA.dir),
+      ).toBeNull();
+    },
+  );
+
+  it('keeps the neutral-segment exemption scoped to the registered repo', () => {
+    // status is neutral, but the amend still targets B's unregistered HEAD.
+    const result = isDestructiveCommand(
+      'git status && git commit --amend --no-edit',
+      'amend the commit',
+      repoB.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('does not read a mover name inside the amend message as a HEAD move', () => {
+    // The allowlist applies to PRECEDING segments only; argument words of
+    // the amend itself are data, not subcommands.
+    expect(
+      isDestructiveCommand(
+        'git commit --amend -m reset checkout',
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it('routes an unresolvable preceding subcommand to approval', () => {
+    // `git $SUB` cannot be classified: unattributable (ask), consistent with
+    // the stopgap's treatment of unclassifiable git invocations.
+    expectAsk(
+      'git $SUB && git commit --amend --no-edit',
+      'amend the commit',
+      repoA.dir,
+    );
+  });
+
   it('allows an amend relocated to the repo whose HEAD is registered', () => {
     // cwd=B (unregistered), but -C targets A: the exemption follows the
     // target, not the cwd.
