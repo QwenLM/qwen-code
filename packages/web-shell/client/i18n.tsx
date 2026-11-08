@@ -2125,6 +2125,41 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
+  'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.off': 'Delivery off',
+  'scheduledTasks.delivery.hint':
+    'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
+  'scheduledTasks.delivery.unavailable':
+    'This daemon does not support Channel delivery changes.',
+  'scheduledTasks.delivery.discardChanges': 'Discard delivery changes',
+  'scheduledTasks.delivery.perRun':
+    'A new session every run does not support Channel delivery. Choose a persistent session or turn delivery off before saving.',
+  'scheduledTasks.delivery.required':
+    'Choose a Channel and enter a destination ID.',
+  'scheduledTasks.delivery.whitespace':
+    'This ID has leading or trailing whitespace, which will be sent as part of the destination.',
+  'scheduledTasks.delivery.trimWhitespace': 'Remove surrounding whitespace',
+  'scheduledTasks.delivery.loading': 'Loading Channels…',
+  'scheduledTasks.delivery.loadingContacts': 'Loading suggested destinations…',
+  'scheduledTasks.delivery.channelsFailed':
+    'Could not load Channels. Close and reopen the form to retry; existing delivery is preserved.',
+  'scheduledTasks.delivery.noChannels':
+    'No Channels are configured in this workspace. Configure one in Channels first.',
+  'scheduledTasks.delivery.targetUnavailable':
+    'This Channel is unavailable in this workspace. The saved destination is preserved; you can choose another Channel or turn delivery off.',
+  'scheduledTasks.delivery.notObserved':
+    'This destination is not in the recent suggestions. Its ID is preserved; contact discovery is not required for delivery.',
+  'scheduledTasks.delivery.suggestion': 'Suggested destination',
+  'scheduledTasks.delivery.manual': 'Enter a destination ID below',
+  'scheduledTasks.delivery.contactsFailed':
+    'Could not load suggestions. You can still enter a destination ID; existing delivery is preserved.',
+  'scheduledTasks.delivery.suggestionsHint':
+    'Suggestions come from recently observed contacts. You can also enter a known user or chat ID supported by the Channel.',
+  'scheduledTasks.delivery.type': 'Destination type',
+  'scheduledTasks.delivery.id': 'Destination ID',
+  'scheduledTasks.delivery.user': 'User',
+  'scheduledTasks.delivery.chat': 'Chat',
+  'scheduledTasks.delivery.cardPrefix': 'Delivery:',
   'scheduledTasks.gate': 'Gate command (optional)',
   'scheduledTasks.gatePlaceholder':
     'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
@@ -7065,6 +7100,39 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
+  'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.off': '不投递',
+  'scheduledTasks.delivery.hint':
+    '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
+  'scheduledTasks.delivery.unavailable': '此 daemon 不支持修改频道投递配置。',
+  'scheduledTasks.delivery.discardChanges': '放弃投递修改',
+  'scheduledTasks.delivery.perRun':
+    '每次新会话不支持频道投递。请在保存前选择固定会话，或关闭投递。',
+  'scheduledTasks.delivery.required': '请选择频道并输入目标 ID。',
+  'scheduledTasks.delivery.whitespace':
+    '此 ID 的首尾含有空白字符，它们会作为目标 ID 的一部分原样发送。',
+  'scheduledTasks.delivery.trimWhitespace': '去除首尾空白',
+  'scheduledTasks.delivery.loading': '正在加载频道…',
+  'scheduledTasks.delivery.loadingContacts': '正在加载目标候选…',
+  'scheduledTasks.delivery.channelsFailed':
+    '无法加载频道。请关闭并重新打开表单重试；已有投递配置会保留。',
+  'scheduledTasks.delivery.noChannels':
+    '此工作区尚未配置频道。请先在频道页面中配置。',
+  'scheduledTasks.delivery.targetUnavailable':
+    '此频道在当前工作区不可用。已保存的目标会保留；你可以选择其他频道或关闭投递。',
+  'scheduledTasks.delivery.notObserved':
+    '此目标不在最近的候选中。其 ID 会保留；联系人发现不是投递的必要条件。',
+  'scheduledTasks.delivery.suggestion': '目标候选',
+  'scheduledTasks.delivery.manual': '在下方输入目标 ID',
+  'scheduledTasks.delivery.contactsFailed':
+    '无法加载候选。你仍可输入目标 ID；已有投递配置会保留。',
+  'scheduledTasks.delivery.suggestionsHint':
+    '候选来自最近观察到的联系人。你也可以输入频道支持的已知用户或群 ID。',
+  'scheduledTasks.delivery.type': '目标类型',
+  'scheduledTasks.delivery.id': '目标 ID',
+  'scheduledTasks.delivery.user': '用户',
+  'scheduledTasks.delivery.chat': '群聊',
+  'scheduledTasks.delivery.cardPrefix': '投递：',
   'scheduledTasks.gate': '闸门命令（可选）',
   'scheduledTasks.gatePlaceholder':
     '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
