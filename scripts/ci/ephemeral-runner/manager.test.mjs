@@ -48,6 +48,7 @@ async function fixture(t) {
   let failNetworkRemove = false;
   let keepContainerAfterRemove = false;
   let loseJit = false;
+  let failDelete = false;
   const labelsFromArgs = (args) => {
     const labels = {};
     for (let i = 0; i < args.length; i += 1) {
@@ -82,10 +83,19 @@ async function fixture(t) {
         return JSON.stringify({ runner, encoded_jit_config: 'jit-secret' });
       }
       if (args.includes('DELETE')) {
+        if (failDelete) {
+          const error = new Error('gh failed (exit 1, HTTP 422)');
+          error.status = 422;
+          throw error;
+        }
         runner = undefined;
         return '';
       }
       return JSON.stringify(runner ? [runner] : []);
+    }
+    if (args[0] === 'inspect') {
+      const entry = containers.get(args[args.length - 1]);
+      return `${entry?.labels['qwen.instance'] ?? ''}\n`;
     }
     if (args[0] === 'ps') {
       const matched = [...containers.entries()].filter(([, entry]) =>
@@ -114,6 +124,8 @@ async function fixture(t) {
     }
     if (args[0] === 'network' && args[1] === 'inspect') {
       const entry = networks.get(args[args.length - 1]);
+      if (args.some((value) => String(value).includes('qwen.instance')))
+        return `${entry?.labels['qwen.instance'] ?? ''}\n`;
       return `${entry?.labels['qwen.slot'] ?? ''}\n`;
     }
     if (args[0] === 'info') return `${dir}\n`;
@@ -155,6 +167,17 @@ async function fixture(t) {
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
     },
+    setFailDelete: (v) => {
+      failDelete = v;
+    },
+    setRunner: (value) => {
+      runner = value;
+    },
+    addOrphanContainer(labels) {
+      const id = `container-orphan-${containers.size}`;
+      containers.set(id, { labels });
+      return id;
+    },
   };
 }
 
@@ -193,8 +216,13 @@ test('creates a new runner and container per job and keeps GitHub token out of D
       '/repos/owner/repo/actions/runners/2',
     ],
   );
-  assert.equal(JSON.parse(requests[0].options.input).name, 'ecs-qwen-trial-01');
-  assert.equal(JSON.parse(requests[1].options.input).name, 'ecs-qwen-trial-01');
+  const registeredNames = requests.map((c) => JSON.parse(c.options.input).name);
+  assert.ok(
+    registeredNames.every((name) =>
+      /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name),
+    ),
+  );
+  assert.notEqual(registeredNames[0], registeredNames[1]);
   assert.notEqual(
     creates[0].args.find((arg) => arg.startsWith('qwen.instance=')),
     creates[1].args.find((arg) => arg.startsWith('qwen.instance=')),
@@ -429,7 +457,7 @@ test('rejects same-name runner with a different ID without deleting it', async (
   const f = await fixture(t);
   const state = {
     name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
-    runnerName: 'ecs-qwen-trial-01',
+    runnerName: 'ecs-qwen-trial-01-deadbeef',
     runnerId: 42,
     uncertain: false,
   };
@@ -841,6 +869,15 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
       },
     },
     {
+      label: 'malformed name suffix',
+      state: {
+        name: validName,
+        runnerName: 'ecs-qwen-trial-01-not-hex!',
+        runnerId: 42,
+        uncertain: false,
+      },
+    },
+    {
       label: 'zero runner id',
       state: { name: validName, runnerId: 0, uncertain: false },
     },
@@ -861,6 +898,40 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
       item.label,
     );
   }
+});
+
+test('loads the bare runnerName that main wrote before the suffix', async (t) => {
+  const f = await fixture(t);
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+      runnerName: 'ecs-qwen-trial-01',
+      runnerId: 42,
+      uncertain: false,
+    }),
+  );
+  f.setRunner({ id: 42, name: 'ecs-qwen-trial-01' });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/42'),
+    ),
+    'the legacy registration is deleted, not wedged by validation',
+  );
+  const request = f.calls.find(
+    (c) =>
+      c.program === 'gh' &&
+      c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+  );
+  assert.match(
+    JSON.parse(request.options.input).name,
+    /^ecs-qwen-trial-01-[0-9a-f]{8}$/,
+    'the replacement registers under a suffixed name',
+  );
 });
 
 test('backs off on a failed container even after the startup window', async (t) => {
@@ -948,4 +1019,231 @@ test('starts through a symlink and reports invalid configuration', async (t) => 
   );
   assert.equal(result.status, 1);
   assert.match(result.stderr, /^manager: /);
+});
+
+test('an orphaned container is reclaimed from its instance label', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'replenishes instead of wedging on the orphan',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+  );
+});
+
+test('an orphaned container with an unidentifiable label still blocks replacement', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-other-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /manual reconciliation/);
+  await assert.rejects(manager.cycle(1), /manual reconciliation/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+  );
+});
+
+test('label recovery deletes the orphaned suffixed registration', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'the registration is deleted even though its display name is suffixed',
+  );
+});
+
+test('disagreeing resource labels are reported as ambiguous, not missing', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /labels disagree/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    0,
+    'an ambiguous identity still deletes nothing',
+  );
+});
+
+test('a rejected runner deletion keeps slot state so the next cycle retries it', async (t) => {
+  const f = await fixture(t);
+  const manager = createManager(f.config, { command: f.command });
+  f.setFailDelete(true);
+  await assert.rejects(manager.cycle(1), /deletion was rejected/);
+  const state = JSON.parse(
+    await readFile(join(f.config.stateDir, 'slot-1.json'), 'utf8'),
+  );
+  assert.equal(state.runnerId, 1, 'retains the identity that must be deleted');
+  await assert.rejects(manager.cycle(1), /deletion was rejected/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'does not register a replacement while the old registration survives',
+  );
+  f.setFailDelete(false);
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    2,
+  );
+});
+
+test('a rejected JIT request reconciles a leftover registration instead of orphaning it', async (t) => {
+  const f = await fixture(t);
+  let rejectedName;
+  let rejected = false;
+  const command = (program, args, options) => {
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig') &&
+      !rejected
+    ) {
+      rejected = true;
+      rejectedName = JSON.parse(options.input).name;
+      f.setRunner({ id: 77, name: rejectedName });
+      const error = new Error('gh failed (exit 1, HTTP 422)');
+      error.status = 422;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, { command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 422);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'deletes the registration that would reject every later request',
+  );
+  await manager.cycle(1);
+});
+
+test('a registration retry uses a fresh unique name untouched by a leftover', async (t) => {
+  const f = await fixture(t);
+  const names = [];
+  let rejections = 0;
+  const command = (program, args, options) => {
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      const name = JSON.parse(options.input).name;
+      names.push(name);
+      if (rejections === 0) {
+        rejections += 1;
+        // A leftover registration still owns the previous display name; the
+        // rejected request cannot delete it, so it stays on GitHub.
+        f.setRunner({ id: 77, name });
+        const error = new Error('gh failed (exit 1, HTTP 422)');
+        error.status = 422;
+        return Promise.reject(error);
+      }
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, { command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 422);
+  await manager.cycle(1);
+  assert.equal(names.length, 2);
+  assert.ok(
+    names.every((name) => /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name)),
+  );
+  assert.notEqual(
+    names[0],
+    names[1],
+    'retry must not reuse the name a leftover registration still owns',
+  );
+});
+
+test('repeated identical failures raise a stall alert and a recovery resets it', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let failures = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info' && failures < 3) {
+      failures += 1;
+      return Promise.reject(new Error('docker unavailable'));
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertRetries: 3 },
+    {
+      command,
+      sleep: async () => {
+        if (failures >= 3) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  const alerts = messages.filter((message) => message.includes('STALL ALERT'));
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /slot 1: .*3 consecutive identical failures/);
+  assert.match(alerts[0], /docker unavailable/);
+});
+
+test('rejects an invalid stall alert threshold', async (t) => {
+  const f = await fixture(t);
+  for (const stallAlertRetries of [0, -1, 1.5, '3'])
+    assert.throws(
+      () => createManager({ ...f.config, stallAlertRetries }),
+      /Invalid manager configuration/,
+    );
 });

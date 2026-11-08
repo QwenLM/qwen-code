@@ -7120,6 +7120,7 @@ describe('createAcpSessionBridge', () => {
       compactedReplay: [],
       liveJournal: [],
       lastEventId: 0,
+      replayProjectionWatermark: 0,
       eventEpoch: expect.any(String),
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
@@ -12609,88 +12610,113 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('lets a summary load coalesce onto an in-flight full restore', async () => {
-    const load = deferred<LoadSessionResponse>();
-    const handle = makeChannel({ loadSessionImpl: () => load.promise });
-    const bridge = makeBridge({
-      channelFactory: async () => handle.channel,
-      maxJournalEvents: 2,
-    });
+  it.each([undefined, 10])(
+    'lets a summary load coalesce onto an in-flight full restore with page size %s',
+    async (historyPageSize) => {
+      const load = deferred<LoadSessionResponse>();
+      const handle = makeChannel({
+        loadSessionImpl: () => load.promise,
+        extMethodImpl: (_method, params) => ({
+          v: 1,
+          sessionId: params['sessionId'],
+          events: ['root-before', 'root-after'].map((text) => ({
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+            },
+          })),
+          hasMore: false,
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxJournalEvents: 2,
+      });
 
-    const first = bridge.loadSession({
-      sessionId: 'coalesce-live-replay-mode',
-      workspaceCwd: WS_A,
-      historyReplay: 'response',
-      liveReplayMode: 'full',
-    });
-    await vi.waitFor(() => {
-      expect(handle.agent.loadSessionCalls).toHaveLength(1);
-    });
+      const first = bridge.loadSession({
+        sessionId: 'coalesce-live-replay-mode',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        liveReplayMode: 'full',
+        historyPageSize,
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.loadSessionCalls).toHaveLength(1);
+      });
 
-    // Flood the in-flight restore's journals past the two-entry cap: root
-    // frames around a burst of nested subagent chunks. The full journal
-    // truncates and evicts the early root frame; the summary journal keeps
-    // both root frames marker-free.
-    await handle.agentConnection.sessionUpdate({
-      sessionId: 'coalesce-live-replay-mode',
-      update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'root-before' },
-      },
-    });
-    for (const text of ['nested-a', 'nested-b', 'nested-c']) {
+      // Flood the in-flight restore's journals past the two-entry cap: root
+      // frames around a burst of nested subagent chunks. The full journal
+      // truncates and evicts the early root frame; the summary journal keeps
+      // both root frames marker-free.
       await handle.agentConnection.sessionUpdate({
         sessionId: 'coalesce-live-replay-mode',
         update: {
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text },
-          _meta: { parentToolCallId: 'agent-1' },
+          content: { type: 'text', text: 'root-before' },
         },
       });
-    }
-    await handle.agentConnection.sessionUpdate({
-      sessionId: 'coalesce-live-replay-mode',
-      update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'root-after' },
-      },
-    });
+      for (const text of ['nested-a', 'nested-b', 'nested-c']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: 'coalesce-live-replay-mode',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            _meta: { parentToolCallId: 'agent-1' },
+          },
+        });
+      }
+      await handle.agentConnection.sessionUpdate({
+        sessionId: 'coalesce-live-replay-mode',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'root-after' },
+        },
+      });
 
-    // The two journals can diverge under cap pressure (each evicts
-    // independently against the shared caps), so the summary waiter shares
-    // the in-flight full restore only because once the restore settles the
-    // bridge recomputes the waiter's own-mode replay fields from the
-    // registered entry — the owner's projected fields are never reused or
-    // filtered down for a waiter of a different mode.
-    const second = bridge.loadSession({
-      sessionId: 'coalesce-live-replay-mode',
-      workspaceCwd: WS_A,
-      historyReplay: 'response',
-      liveReplayMode: 'summary',
-    });
+      // The two journals can diverge under cap pressure (each evicts
+      // independently against the shared caps), so the summary waiter shares
+      // the in-flight full restore only because once the restore settles the
+      // bridge recomputes the waiter's own-mode replay fields from the
+      // registered entry — the owner's projected fields are never reused or
+      // filtered down for a waiter of a different mode.
+      const second = bridge.loadSession({
+        sessionId: 'coalesce-live-replay-mode',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize,
+      });
 
-    load.resolve({});
-    const [r1, r2] = await Promise.all([first, second]);
-    expect(r1.attached).toBe(false);
-    expect(r2.attached).toBe(true);
-    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+      load.resolve({});
+      const [r1, r2] = await Promise.all([first, second]);
+      expect(r1.attached).toBe(false);
+      expect(r2.attached).toBe(true);
+      expect(r1.replayProjectionWatermark).toBe(0);
+      expect(r2).not.toHaveProperty('replayProjectionWatermark');
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
 
-    // The owner's full-mode view carries the truncation marker; the
-    // coalesced summary waiter must NOT inherit it — its re-projected
-    // journal retains the root frames, excludes the nested frames, and
-    // never truncated.
-    expect(r1.liveJournal).toContainEqual(
-      expect.objectContaining({ type: 'history_truncated' }),
-    );
-    expect(r2.liveJournal).not.toContainEqual(
-      expect.objectContaining({ type: 'history_truncated' }),
-    );
-    const waiterJournal = JSON.stringify(r2.liveJournal);
-    expect(waiterJournal).toContain('root-before');
-    expect(waiterJournal).toContain('root-after');
-    expect(waiterJournal).not.toContain('nested-');
-    await bridge.shutdown();
-  });
+      // The owner's full-mode view carries the truncation marker; the
+      // coalesced summary waiter must NOT inherit it — its re-projected
+      // journal retains the root frames, excludes the nested frames, and
+      // never truncated.
+      expect(r1.liveJournal).toContainEqual(
+        expect.objectContaining({ type: 'history_truncated' }),
+      );
+      expect(r2.liveJournal).not.toContainEqual(
+        expect.objectContaining({ type: 'history_truncated' }),
+      );
+      const waiterReplay = JSON.stringify(
+        historyPageSize === undefined ? r2.liveJournal : r2.compactedReplay,
+      );
+      expect(waiterReplay).toContain('root-before');
+      expect(waiterReplay).toContain('root-after');
+      expect(waiterReplay).not.toContain('nested-');
+      if (historyPageSize !== undefined) expect(r2.liveJournal).toEqual([]);
+      await bridge.shutdown();
+    },
+  );
 
   it('rejects a full load joining an in-flight summary restore', async () => {
     const load = deferred<LoadSessionResponse>();
