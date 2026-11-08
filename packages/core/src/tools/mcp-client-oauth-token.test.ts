@@ -573,36 +573,44 @@ describe('createTransport OAuth bearer token per request', () => {
     expect(storage.deleteCredentials).not.toHaveBeenCalled();
   });
 
-  it('adopts a refresh that finishes after the wait, without waiting out the retry delay', async () => {
-    vi.useRealTimers();
-    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
-    const authServer =
-      stubAuthorizationServer().handler.getMockImplementation()!;
-    // Answers 7s in: after the 5s wait, before the 10s request bound.
-    const tokenRequest = vi.fn(async (url: string, init?: RequestInit) => {
-      await new Promise((resolve) => setTimeout(resolve, 7000));
-      return authServer(url, init);
-    });
-    vi.stubGlobal('fetch', tokenRequest);
-    const sent = stubMcpNetwork();
-    const transport = await transportFor({
-      httpUrl: 'https://mcp.example/mcp',
-    });
+  // The cached token expires 4 minutes after the refresh; a 60s refreshed
+  // token expires sooner than that and must be adopted all the same.
+  it.each([
+    { lifetime: 'a longer', expiresIn: 3600 },
+    { lifetime: 'a shorter', expiresIn: 60 },
+  ])(
+    'adopts a refresh that finishes after the wait with $lifetime lifetime, without waiting out the retry delay',
+    async ({ expiresIn }) => {
+      vi.useRealTimers();
+      vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+      const authServer =
+        stubAuthorizationServer(expiresIn).handler.getMockImplementation()!;
+      // Answers 7s in: after the 5s wait, before the 10s request bound.
+      const tokenRequest = vi.fn(async (url: string, init?: RequestInit) => {
+        await new Promise((resolve) => setTimeout(resolve, 7000));
+        return authServer(url, init);
+      });
+      vi.stubGlobal('fetch', tokenRequest);
+      const sent = stubMcpNetwork();
+      const transport = await transportFor({
+        httpUrl: 'https://mcp.example/mcp',
+      });
 
-    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
-    const dueRequest = send(transport);
-    await vi.advanceTimersByTimeAsync(5000);
-    await dueRequest;
-    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+      vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+      const dueRequest = send(transport);
+      await vi.advanceTimersByTimeAsync(5000);
+      await dueRequest;
+      expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
 
-    // The refresh completes while the cache is backing off for 30s. The old
-    // token may be revoked by now, so the next request must not reuse it.
-    await vi.advanceTimersByTimeAsync(2100);
-    expect(storage.saveToken).toHaveBeenCalledOnce();
-    await send(transport);
-    expect(sent.at(-1)?.authorization).toBe('Bearer access-1');
-    expect(tokenRequest).toHaveBeenCalledOnce();
-  });
+      // The refresh completes while the cache is backing off for 30s. The old
+      // token may be revoked by now, so the next request must not reuse it.
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(storage.saveToken).toHaveBeenCalledOnce();
+      await send(transport);
+      expect(sent.at(-1)?.authorization).toBe('Bearer access-1');
+      expect(tokenRequest).toHaveBeenCalledOnce();
+    },
+  );
 
   it('never asks again for a token without an expiry', async () => {
     const { handler } = stubAuthorizationServer();

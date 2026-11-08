@@ -502,13 +502,12 @@ function createBearerTokenGetter(
   // A read that outlived the wait still lands in the shared storage, and the
   // server may have revoked the old token by then: pick the result up here
   // rather than keep sending the old one until the retry delay is over. A
-  // failed read changes nothing, and a result that is not newer than the cache
-  // (another request got there first) is dropped.
+  // failed read changes nothing, and the token already cached keeps its retry
+  // delay. Expiry does not tell which token is newer (a refresh may return a
+  // shorter lifetime), and no ordering is needed: a read that loses a race with
+  // a re-authentication returns the stored credentials, which are the newest.
   const adoptLate = (fresh: OAuthToken | null) => {
-    if (
-      fresh &&
-      (fresh.expiresAt ?? Infinity) > (cached?.expiresAt ?? Infinity)
-    ) {
+    if (fresh && fresh.accessToken !== cached?.accessToken) {
       adopt(fresh);
     }
   };
