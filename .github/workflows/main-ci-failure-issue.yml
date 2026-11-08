@@ -628,9 +628,10 @@ jobs:
         # empty issue.
         # A timed-out dispatch that resolves to an open PR is not rerun and is
         # not filed (see `destination`), so the comment is its only record and
-        # the body must be built for it too. Superseded runs are excluded: they
-        # never reach `cancellation_kind == 'timeout'`.
-        if: "${{ success() && (steps.destination.outputs.file_issue == 'true' || steps.destination.outputs.rerun_pending == 'true' || (steps.live.outputs.cancellation_kind == 'timeout' && steps.destination.outputs.pr_number != '')) }}"
+        # the body must be built for it too. Any run that resolves to a PR needs
+        # the body for the same reason: `report_pr` is the only writer for an
+        # open PR's failure, whether or not it timed out.
+        if: "${{ success() && (steps.destination.outputs.file_issue == 'true' || steps.destination.outputs.rerun_pending == 'true' || steps.destination.outputs.pr_number != '') }}"
         env:
           WORKFLOW_NAME: '${{ github.event.workflow.name }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
