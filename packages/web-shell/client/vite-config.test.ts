@@ -15,8 +15,10 @@ import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
   createDevelopmentMiddleware,
+  daemonProxyFailure,
   MANAGED_AGENT_JAVA_ROUTE_PROXY,
   MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
+  probeAddress,
   probeHostname,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
@@ -325,7 +327,9 @@ describe('Web Shell daemon proxy failure', () => {
     (options.configure as (proxy: EventEmitter) => void)(proxy);
     proxy.emit(
       'error',
-      new Error('connect ECONNREFUSED 127.0.0.1:4170'),
+      Object.assign(new Error('connect ECONNREFUSED'), {
+        code: 'ECONNREFUSED',
+      }),
       {} as IncomingMessage,
       res,
     );
@@ -349,7 +353,9 @@ describe('Web Shell daemon proxy failure', () => {
     // readDaemonError surfaces `error` to the operator; the sentence with
     // the target and errno must live there, not under a machine token.
     expect(body.error).toContain('ECONNREFUSED');
-    expect(body.error).toContain('4170');
+    // The fixture error names no address, so only the target clause can
+    // supply it.
+    expect(body.error).toContain('http://127.0.0.1:4170');
   });
 
   it('leaves an already-answered response alone', () => {
@@ -371,6 +377,79 @@ describe('Web Shell daemon proxy failure', () => {
 
     expect(() => emitProxyError(res)).not.toThrow();
   });
+
+  // A daemon that accepts the connection and then resets it is present, so
+  // neither the token nor the sentence may claim nothing was listening.
+  it.each(['ECONNRESET', 'ETIMEDOUT', 'EPIPE'])(
+    'does not call a present-but-broken daemon unreachable (%s)',
+    (code) => {
+      const failure = daemonProxyFailure(
+        'http://127.0.0.1:4170',
+        Object.assign(new Error(`read ${code}`), { code }),
+      );
+
+      expect(failure.code).toBe('daemon_proxy_error');
+      expect(failure.error).not.toContain('No daemon answered');
+      expect(failure.error).toContain('http://127.0.0.1:4170');
+      expect(failure.error).toContain(code);
+    },
+  );
+
+  it.each(['ENOTFOUND', 'EHOSTUNREACH'])(
+    'still reports an absent daemon as unreachable (%s)',
+    (code) => {
+      const failure = daemonProxyFailure(
+        'http://daemon.internal:4170',
+        Object.assign(new Error(`getaddrinfo ${code}`), { code }),
+      );
+
+      expect(failure.code).toBe('daemon_unreachable');
+      expect(failure.error).toContain('No daemon answered');
+    },
+  );
+});
+
+describe('Web Shell daemon probe address', () => {
+  // http-proxy dials the protocol default when the URL carries no port, so
+  // the probe must not fall back to 4170 and report a healthy daemon while
+  // every proxied request fails on port 80.
+  it.each([
+    ['http://127.0.0.1', { host: '127.0.0.1', port: 80 }],
+    ['https://daemon.internal', { host: 'daemon.internal', port: 443 }],
+    ['http://127.0.0.1:4170', { host: '127.0.0.1', port: 4170 }],
+    // Pinned at the call site, not only inside probeHostname.
+    ['http://[::1]:51840', { host: '::1', port: 51840 }],
+  ])('probes %s on the authority the proxy dials', (target, expected) => {
+    expect(probeAddress(target)).toEqual(expected);
+  });
+});
+
+describe('Web Shell empty daemon URL', () => {
+  // Launchers export QWEN_DAEMON_URL empty when no daemon is configured; the
+  // dev server must still boot instead of throwing Invalid URL at load.
+  it.each(['', '   '])(
+    'falls back to the default target for %j',
+    async (value) => {
+      vi.stubEnv('QWEN_DAEMON_URL', value);
+      onTestFinished(() => vi.unstubAllEnvs());
+      vi.resetModules();
+      onTestFinished(() => vi.resetModules());
+
+      const reloaded = await import('../vite.config');
+      const config = (
+        reloaded.default as unknown as (env: ConfigEnv) => UserConfig
+      )({
+        command: 'serve',
+        mode: 'test',
+        isSsrBuild: false,
+        isPreview: false,
+      });
+
+      expect((config.server?.proxy?.['/session'] as ProxyOptions).target).toBe(
+        'http://127.0.0.1:4170',
+      );
+    },
+  );
 });
 
 describe('Web Shell daemon probe hostname', () => {
