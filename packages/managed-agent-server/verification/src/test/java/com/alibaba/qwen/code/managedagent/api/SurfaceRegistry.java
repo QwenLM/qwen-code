@@ -29,6 +29,14 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_LIST)),
     INTERNAL_MEMORY_QUERY(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/memory:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_MEMORY_QUERY)),
+    PUBLIC_SESSION_RESOURCES(Method.GET, "/v1/agents/sessions/{sessionId}/resources",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_RESOURCES)),
+    WEBSHELL_SESSION_RESOURCES(Method.POST, "/api/agent/web-shell/v1/session-resources/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_RESOURCES)),
+    PUBLIC_SESSION_AGENT_TRACE(Method.GET, "/v1/agents/sessions/{sessionId}/agent-trace",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
+    WEBSHELL_SESSION_AGENT_TRACE(Method.POST, "/api/agent/web-shell/v1/session-agent-trace/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
     WEBSHELL_WORKTREE_OPTIONS(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/options",
             Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
     WEBSHELL_WORKTREE_QUERY(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/query",
@@ -710,6 +718,7 @@ public enum SurfaceRegistry {
      */
     public enum Capability {
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
+        SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,

@@ -42,6 +42,15 @@ export interface JavaManagedAgentProviderOptions
   saveArtifact?: ManagedArtifactSave;
 }
 
+function requireDiagnosticSnapshot<
+  T extends { schemaVersion: 1; sessionId: string },
+>(snapshot: T, sessionId: string): T {
+  if (snapshot?.schemaVersion !== 1 || snapshot.sessionId !== sessionId) {
+    throw new Error('Managed diagnostics identity mismatch');
+  }
+  return snapshot;
+}
+
 type JavaCommandOperation = Awaited<
   ReturnType<JavaManagedAgentClient['respondAction']>
 >;
@@ -391,6 +400,23 @@ export function createJavaManagedAgentProvider(
         if (snapshot.operation?.operationId !== operationId)
           throw new Error('Managed MCP operation identity mismatch');
         return snapshot;
+      },
+    },
+    diagnostics: {
+      async getResources(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticResources(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listAgentTrace(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listDiagnosticAgentTrace(
+            { sessionId, cursor: request.cursor, limit: request.limit },
+            request.signal,
+          ),
+          sessionId,
+        );
       },
     },
     tasks: {
@@ -1061,6 +1087,9 @@ function toSessionSummary(
         : {}),
       ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
+      ...(session.capabilities?.diagnostics === true
+        ? { diagnostics: true }
+        : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
         sessionActive &&
