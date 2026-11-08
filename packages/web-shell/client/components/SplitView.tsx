@@ -135,6 +135,12 @@ export interface SplitViewProps {
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  /** Reconciles a rename made from a pane title (see `ChatPane`). */
+  onSessionRenameConfirmed?: (
+    workspaceCwd: string | undefined,
+    sessionId: string,
+    displayName: string,
+  ) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
   modelManagement?: WebShellModelManagementOptions;
@@ -194,6 +200,7 @@ export function SplitView({
   onPendingPanesChange,
   onExit,
   onError,
+  onSessionRenameConfirmed,
   onImageIngestionNotice,
   onSlashCommand,
   modelManagement,
@@ -1061,6 +1068,7 @@ export function SplitView({
                       }
                       isMaximized={isMaximized}
                       onError={onError}
+                      onSessionRenameConfirmed={onSessionRenameConfirmed}
                       onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
                       modelManagement={modelManagement}

@@ -3077,6 +3077,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'rename.empty':
     'Please enter a session name, for example /rename project debugging, or use /rename --auto.',
   'rename.success': (v) => `Session renamed to ${v?.name ?? ''}`,
+  'sessionTitle.rename': 'Rename',
   'local.reset': 'Reset current conversation',
   'local.resume': 'Resume a previous session',
   'local.skills': 'View available skills',
@@ -7937,6 +7938,7 @@ const ZH: Messages = {
   'rename.empty':
     '请输入会话名称，例如 /rename 项目调试，或使用 /rename --auto。',
   'rename.success': (v) => `会话已重命名为 ${v?.name ?? ''}`,
+  'sessionTitle.rename': '重命名',
   'local.reset': '重置当前对话',
   'local.resume': '恢复历史会话',
   'local.skills': '查看可用 skills',
