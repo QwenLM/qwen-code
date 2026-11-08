@@ -14,6 +14,7 @@ import type {
   DaemonAuthStatusSnapshot,
   DaemonSubscriptionActivation,
   DaemonCapabilities,
+  DaemonChannelDelivery,
   DaemonChannelEvent,
   DaemonChannelEventsQuery,
   DaemonChannelEventsSnapshot,
@@ -252,6 +253,21 @@ export interface DaemonChannelsResource {
   snapshot: DaemonChannelsSnapshot;
 }
 
+export interface DaemonChannelObservedContacts {
+  users: Array<{
+    channelName: string;
+    id: string;
+    label: string;
+    lastObservedAt: string;
+  }>;
+  groups: Array<{
+    channelName: string;
+    id: string;
+    label: string;
+    lastObservedAt: string;
+  }>;
+}
+
 export interface DaemonChannelPairingActions {
   list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
   approve(
@@ -318,6 +334,7 @@ export interface DaemonScheduledTask {
    * the capability says whether POST and PATCH accept it. */
   gate?: string | null;
   gateStatus?: DaemonScheduledTaskGateStatus | null;
+  delivery?: DaemonChannelDelivery;
   createdAt: number;
   lastFiredAt: number | null;
   /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
@@ -365,6 +382,7 @@ export interface DaemonCreateScheduledTaskRequest {
   /** Gate command; only to a daemon advertising `scheduled_task_gate`, and
    * only on a recurring task. */
   gate?: string;
+  delivery?: DaemonChannelDelivery;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -382,6 +400,8 @@ export interface DaemonUpdateScheduledTaskRequest {
   groupId?: string | null;
   /** Null (or '') removes the gate. */
   gate?: string | null;
+  /** Null explicitly removes delivery; omission preserves it. */
+  delivery?: DaemonChannelDelivery | null;
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -581,6 +601,9 @@ export interface DaemonWorkspaceActions
 
   // Channels
   loadChannels(): Promise<DaemonChannelsResource>;
+  listChannelObservedContacts(
+    workspaceId?: string,
+  ): Promise<DaemonChannelObservedContacts>;
   upsertChannel(
     name: string,
     request: DaemonChannelUpsertRequest,

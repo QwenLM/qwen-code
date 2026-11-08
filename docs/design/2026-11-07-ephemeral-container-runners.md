@@ -60,13 +60,15 @@ The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains ten s
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
-labels; no central manager is needed. Display names use `ecs-qwen-<poolId>-<slot>`
-with two-digit slots, for example `ecs-qwen-hz4-ephemeral-01`. Replenishment
-reuses the display name after cleaning the previous runner, while the GitHub
-runner ID, container and internal UUID are new for each job. The UUID remains
-in state and diagnostic filenames. The `ecs-qwen-` prefix preserves CI worker
-caps and timeouts; recovery still accepts earlier UUID-based runner names,
-including old `qwen-` identities.
+labels; no central manager is needed. Display names use
+`ecs-qwen-<poolId>-<slot>-<suffix>` with two-digit slots and an
+eight-hex-character suffix, for example `ecs-qwen-hz4-ephemeral-01-1a2b3c4d`.
+Replenishment picks a fresh suffix for every registration, so a leftover
+registration still owning an earlier name can never reject a replacement with
+HTTP 422, while the GitHub runner ID, container and internal UUID are new for
+each job. The UUID remains in state and diagnostic filenames. The `ecs-qwen-`
+prefix preserves CI worker caps and timeouts; recovery still accepts the
+suffixed form, earlier UUID-based runner names, and old `qwen-` identities.
 
 systemd starts the manager at boot when enabled and restarts unexpected exits
 after ten seconds (`Restart=always`). An explicit service stop remains stopped.
@@ -114,6 +116,32 @@ fails, the failure is recorded and retried instead of endlessly requesting new
 identities. Host failures cannot clean up immediately, so recovery must reclaim
 before accepting new work.
 
+Retrying is only safe when each attempt can still reach the resource it must
+reclaim. Two self-perpetuating stalls were observed on hz4 on 2026-11-08 and are
+now closed. First, killing the `docker create` client on its command timeout
+does not stop the daemon, so a container could appear after cleanup had already
+deleted the slot state; cleanup then refused to touch an unidentifiable
+container, and the only code that could delete it sat behind that refusal. Such
+resources are now identified by their `qwen.instance` label, which must match
+this pool and slot and be unambiguous; anything else still blocks the slot.
+Second, a rejected JIT request deleted the local slot state while a leftover
+registration kept owning the display name, so every retry was rejected and the
+record needed to delete that registration was gone. A definitive rejection now
+reconciles the name instead of discarding the state, and a runner deletion
+GitHub rejects retains the state for the next attempt.
+
+Because these faults leave the process alive, systemd supervision cannot detect
+them. A slot that repeats the same failure for `stallAlertSeconds` (default
+1800, thirty minutes) logs a `STALL ALERT` naming the slot, the duration, the
+count and the error; the clock resets on any successful cycle or changed error
+and each stall episode alerts once. The threshold is wall-clock because failed cycles
+retry with jittered exponential backoff (10 s to 60 s, or 30 s to 300 s under
+HTTP 403/429), so a retry count no longer maps to a fixed delay. The backoff
+sleep is sliced and ends early on shutdown. This is the operator signal for a
+slot that is consuming no jobs; alert on it rather than on service state. The
+earlier retry-count key `stallAlertRetries` is no longer read; a config that
+still carries it falls back to the default.
+
 ## Minimal but necessary deployment boundary
 
 - Use an ECS dedicated to external CI; do not share a host with existing runners
@@ -143,9 +171,10 @@ For untrusted fork PRs, `pr_test_runner` directly selects
 Real external PR run 42382582937, attempt 2, received empty repository variables
 even though the repository settings were populated. Direct routing removes that
 dependency. It requires no configuration relay or manual smoke workflow. The
-ten registered runners use the formal labels to validate actual CI. Keep the
-pool at ten slots until success rate, duration and resource use are stable;
-capacity changes are manual configuration changes, not queue-driven scaling.
+ten registered runners use the formal labels to validate actual CI. The
+manager accepts up to 64 slots per host; keep capacity conservative until
+success rate, duration and resource use are stable. Capacity changes are
+manual configuration changes, not queue-driven scaling.
 
 Existing global overrides still take precedence where their values are
 available. Fork-triggered runs cannot rely on those variables for rollback.
