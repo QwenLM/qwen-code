@@ -252,6 +252,8 @@ Child 目标不可用时，仅保留原本可读的父调用，不返回 child I
 
 来源恢复后的首次 writer 准入按 Session fence 串行重建。清理每批最多 512 条旧派生记录；来源每批最多 512 个事件或 8 MiB，分别提交并保存 `rebuiltThroughSequence`、`rebuiltThroughRevision`。追上 head 才 ready；GET 不启动重建。单个来源事务超过 8 MiB 时明确拒绝该恢复路径，不能声称完整。已声明来源缺失或摘要不匹配是完整性错误。旧会话从新 epoch 起点开始，起点前的迟到结果不增加请求数；保留起点缺失的旧 epoch 并标注不完整。
 
+普通 publication receipt 可以合法引用超过 64 KiB、已经验证但没有 inline bytes 的外置 outcome。实时归约与来源重放保留调用的已知事实和计数，并为该回执增加 `receipt_outcome_not_inline` 部分覆盖原因；不持有 Session fence 读取对象存储，也不推断缺失的 outcome 字段。后续类型化观察仍可补充该调用。Publication 准入和外置对象验证继续作为权威校验，inline 或分块 outcome 的完整性检查保持不变。
+
 ### 14.3 API 与界面
 
 Public `GET /v1/agents/sessions/{id}/activity-stats`、`GET /v1/agents/sessions/{id}/activity` 与 WebShell 对应 `POST /api/agent/web-shell/v1/session-activity-stats/query`、`POST /api/agent/web-shell/v1/session-activity/query` 共用 Session/Workspace 授权和只读 REPEATABLE_READ 服务。响应包含版本、Session、self scope、十进制字符串 revision/sequence（未知 null）、覆盖起点与上界、可用性和原因；未 ready 不暴露貌似完整的部分概要。GET 不 acquire、attach、预热 Runtime，也不 discovery MCP；`private, no-store`。

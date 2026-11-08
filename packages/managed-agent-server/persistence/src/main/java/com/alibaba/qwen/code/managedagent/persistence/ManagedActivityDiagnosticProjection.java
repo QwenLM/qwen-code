@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.Function;
 
+import static com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
 import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.readBody;
 import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.require;
 import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.requireReference;
@@ -168,30 +169,36 @@ final class ManagedActivityDiagnosticProjection {
                 if (before != null) {
                     StoredResource outcome = resources.apply(payload.path("toolOutcomeRef").path("resourceId").asText());
                     requireReference(outcome, payload.path("toolOutcomeRef"));
-                    JsonNode result = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(
-                            payload.path("toolOutcomeRef"), referenced -> {
-                                StoredResource part = resources.apply(referenced.path("resourceId").asText());
-                                requireReference(part, referenced);
-                                return part.bytes();
-                            });
-                    JsonNode execution = result.path("envelope").has("executionStatus") ? result.path("envelope")
-                            : result.has("executionStatus") ? result : result.path("functionResponse").path("response");
-                    ObjectNode observation = fact.deepCopy();
-                    observation.set("delivery", before.path("delivery"));
-                    observation.set("capture", before.path("capture"));
-                    if (ManagedActivityDiagnostics.EXECUTIONS.contains(execution.path("executionStatus").asText())) {
-                        observation.set("execution", execution.get("executionStatus"));
+                    if ("managed-tool-outcome".equals(outcome.kind()) && outcome.bytes() == null
+                            && outcome.byteLength() > MAX_INLINE_RESOURCE_BYTES) {
+                        // Publication already verified the external object; do not fetch it under the Session fence.
+                        ManagedActivityDiagnostics.gap(summary, "receipt_outcome_not_inline");
+                    } else {
+                        JsonNode result = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(
+                                payload.path("toolOutcomeRef"), referenced -> {
+                                    StoredResource part = resources.apply(referenced.path("resourceId").asText());
+                                    requireReference(part, referenced);
+                                    return part.bytes();
+                                });
+                        JsonNode execution = result.path("envelope").has("executionStatus") ? result.path("envelope")
+                                : result.has("executionStatus") ? result : result.path("functionResponse").path("response");
+                        ObjectNode observation = fact.deepCopy();
+                        observation.set("delivery", before.path("delivery"));
+                        observation.set("capture", before.path("capture"));
+                        if (ManagedActivityDiagnostics.EXECUTIONS.contains(execution.path("executionStatus").asText())) {
+                            observation.set("execution", execution.get("executionStatus"));
+                        }
+                        JsonNode capture = execution.path("capture");
+                        if (List.of("complete", "partial", "unavailable").contains(capture.path("captureStatus").asText())) {
+                            observation.set("capture", capture.path("captureStatus"));
+                        }
+                        if ("blocked".equals(capture.path("deliveryStatus").asText()) && !List.of("complete", "partial").contains(before.path("delivery").asText())) {
+                            observation.put("delivery", "unavailable");
+                        }
+                        ObjectNode after = ManagedActivityDiagnostics.merge(before, observation, true);
+                        ManagedActivityDiagnostics.contribute(summary, before, after);
+                        state.invocation(after, sequence, at);
                     }
-                    JsonNode capture = execution.path("capture");
-                    if (List.of("complete", "partial", "unavailable").contains(capture.path("captureStatus").asText())) {
-                        observation.set("capture", capture.path("captureStatus"));
-                    }
-                    if ("blocked".equals(capture.path("deliveryStatus").asText()) && !List.of("complete", "partial").contains(before.path("delivery").asText())) {
-                        observation.put("delivery", "unavailable");
-                    }
-                    ObjectNode after = ManagedActivityDiagnostics.merge(before, observation, true);
-                    ManagedActivityDiagnostics.contribute(summary, before, after);
-                    state.invocation(after, sequence, at);
                 }
             }
         }
@@ -280,7 +287,8 @@ final class ManagedActivityDiagnosticProjection {
     private record ActivityRow(String resource, long time, String key, long firstSequence) { }
 
     /** Called only while acquiring the fenced writer, never by diagnostic reads. */
-    boolean rebuildBatch(String tenant, String workspace, String session, long storageVersion, long headRevision, long headSequence, String headDigest) {
+    boolean rebuildBatch(String tenant, String workspace, String session, long storageVersion, long headRevision, long headSequence, String headDigest,
+            Function<String, StoredResource> resources) {
         if (storageVersion < 4) {
             return true;
         }
@@ -366,7 +374,7 @@ final class ManagedActivityDiagnosticProjection {
                     complete = false;
                     break;
                 }
-                apply(tenant, workspace, session, event, id -> store.readResource(tenant, session, id));
+                apply(tenant, workspace, session, event, resources);
                 through = observed;
                 events++;
             }

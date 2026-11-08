@@ -202,8 +202,9 @@ public class ManagedExtensionRecordStore
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.STATS, "latest");
     }
 
-    boolean rebuildActivityBatch(String tenant, String workspace, String session, long version, long revision, long sequence, String digest) {
-        return activityDiagnostics.rebuildBatch(tenant, workspace, session, version, revision, sequence, digest);
+    boolean rebuildActivityBatch(String tenant, String workspace, String session, long version, long revision, long sequence, String digest,
+            Function<String, StoredResource> resources) {
+        return activityDiagnostics.rebuildBatch(tenant, workspace, session, version, revision, sequence, digest, resources);
     }
 
     public String diagnosticCommittedSequence(String tenantId, String sessionId) {

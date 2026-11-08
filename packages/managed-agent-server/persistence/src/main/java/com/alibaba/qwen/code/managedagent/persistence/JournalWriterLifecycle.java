@@ -253,6 +253,7 @@ final class JournalWriterLifecycle {
         }
         JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         JournalFencing.requireCsiWriter(csiOriginal, head);
         if ("DELETING".equals(head.state())
                 || "DELETED".equals(head.state())) {
@@ -272,7 +273,8 @@ final class JournalWriterLifecycle {
                     || !JournalFencing.secureEquals(tokenHash, head.leaseTokenHash())) {
                 throw JournalFencing.writerConflict();
             }
-            if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest())) {
+            if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
+                    id -> storeRows.storedResource(scope, tenantId, request.workspaceId(), sessionId, id))) {
                 return null;
             }
             Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
@@ -289,7 +291,8 @@ final class JournalWriterLifecycle {
         }
         long generation = JournalStoreRows.increment(head.writerGeneration(),
                 "writer generation");
-        if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest())) {
+        if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
+                id -> storeRows.storedResource(scope, tenantId, request.workspaceId(), sessionId, id))) {
             return null;
         }
         if (csiOriginal != null) {
