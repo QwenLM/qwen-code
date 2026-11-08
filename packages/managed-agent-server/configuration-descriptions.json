@@ -689,8 +689,8 @@
       "default": ""
     },
     "qwen.managed-agent.service-user": {
-      "en": "The operating-system account the server runs as. Only the preflight check reads it: it confirms the account exists and checks that the configuration and credentials files are readable by that account rather than by the account running preflight. Empty checks access as the account running preflight.",
-      "zh": "服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。为空时按运行预检的账号检查访问权限。"
+      "en": "The operating-system account the server runs as. Only the preflight check reads it: it confirms the account exists and checks that the configuration and credentials files are readable by that account rather than by the account running preflight. Where the account running preflight cannot look at such a file, or cannot read one the check reads, the row fails and says to run the check as that account. Empty checks access as the account running preflight.",
+      "zh": "服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。运行预检的账号看不到这类文件，或读不了检查要读取的文件时，该行为 FAIL，并提示以该账号运行检查。为空时按运行预检的账号检查访问权限。"
     },
     "qwen.managed-agent.session-store.allow-insecure-http": {
       "en": "Whether a plaintext `http` `qwen.managed-agent.session-store.base-url` on a non-loopback host is accepted. Without it startup refuses such a URL, which every Harness would reject; with it the flag is passed to the Harness in each Session's Store descriptor so its client accepts the URL.",
