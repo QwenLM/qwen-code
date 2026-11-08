@@ -4,11 +4,240 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
+import type { DaemonScheduledTask } from './types.js';
 
 describe('workspace actions', () => {
+  it('loads authenticated observed contacts from the task workspace without ambient fallback', async () => {
+    const contacts = {
+      users: [],
+      groups: [
+        {
+          channelName: 'bot',
+          id: 'chat-1',
+          label: 'Team',
+          lastObservedAt: '2026-11-07T00:00:00Z',
+          users: [],
+          topics: [],
+        },
+      ],
+    };
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () => Response.json(contacts));
+    vi.stubGlobal('fetch', fetch);
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client,
+      getWorkspaceCwd: () => '/unrelated-workspace',
+      baseUrl: 'http://daemon',
+      token: 'test-token',
+    });
+
+    await expect(
+      actions.listChannelObservedContacts('workspace/b'),
+    ).resolves.toEqual(contacts);
+    await actions.listChannelObservedContacts();
+    expect(fetch.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      '/workspaces/workspace%2Fb/channel/observed-contacts',
+      '/workspace/channel/observed-contacts',
+    ]);
+    for (const [, init] of fetch.mock.calls) {
+      expect(new Headers(init.headers).get('Authorization')).toBe(
+        'Bearer test-token',
+      );
+    }
+    client.dispose();
+  });
+
+  it('reports contact discovery failure without returning an empty successful result', async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () =>
+        Response.json(
+          { error: 'Observed channel contacts are unavailable.' },
+          { status: 500 },
+        ),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: 'http://daemon',
+    });
+    await expect(actions.listChannelObservedContacts('ws')).rejects.toThrow(
+      'Observed channel contacts are unavailable.',
+    );
+    client.dispose();
+  });
+
+  it('preserves delivery on reads and sends set, omitted and clear updates to the task workspace', async () => {
+    const delivery: NonNullable<DaemonScheduledTask['delivery']> = {
+      kind: 'channel',
+      target: { channelName: 'bot', type: 'chat', id: 'chat-1' },
+    };
+    const fetch = vi
+      .fn()
+      .mockImplementation(async (_url, init) =>
+        Response.json(
+          init?.method
+            ? { id: 'task-1', delivery }
+            : { tasks: [{ id: 'task-1', delivery }] },
+        ),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client,
+      getWorkspaceCwd: () => '/unrelated-workspace',
+      baseUrl: 'http://daemon',
+    });
+    expect((await actions.listScheduledTasks('ws-b'))[0].delivery).toEqual(
+      delivery,
+    );
+    await actions.createScheduledTask(
+      { cron: '0 9 * * *', prompt: 'Summary', delivery },
+      'ws-b',
+    );
+    await actions.updateScheduledTask('task-1', { delivery }, 'ws-b');
+    await actions.updateScheduledTask('task-1', { name: 'Renamed' }, 'ws-b');
+    await actions.updateScheduledTask('task-1', { delivery: null }, 'ws-b');
+    expect(fetch.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      '/workspaces/ws-b/scheduled-tasks',
+      '/workspaces/ws-b/scheduled-tasks',
+      '/workspaces/ws-b/scheduled-tasks/task-1',
+      '/workspaces/ws-b/scheduled-tasks/task-1',
+      '/workspaces/ws-b/scheduled-tasks/task-1',
+    ]);
+    expect(
+      fetch.mock.calls.slice(1).map(([, init]) => JSON.parse(init.body)),
+    ).toEqual([
+      { cron: '0 9 * * *', prompt: 'Summary', delivery },
+      { delivery },
+      { name: 'Renamed' },
+      { delivery: null },
+    ]);
+    client.dispose();
+  });
+
+  it('uses authenticated process-global subscription routes without a workspace', async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async (_url, init) =>
+        init?.method === 'DELETE'
+          ? new Response(null, { status: 204 })
+          : Response.json({ enabled: true, id: 'flow-1', status: 'waiting' }),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const owner = new DaemonClient({ baseUrl: 'http://localhost:3001' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => owner,
+      getWorkspaceCwd: () => undefined,
+      baseUrl: 'http://localhost:3001',
+      token: 'test-daemon-token',
+    });
+    const options = { signal: new AbortController().signal };
+    await actions.getSubscriptionConfig(options);
+    await actions.startSubscriptionLogin();
+    await actions.getSubscriptionLogin('flow-1', options);
+    await actions.cancelSubscriptionLogin('flow-1');
+    await actions.getSubscriptionUserInfo(options);
+    await actions.signOutSubscription();
+    expect(fetch.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      '/auth/subscription',
+      '/auth/subscription/flows',
+      '/auth/subscription/flows/flow-1',
+      '/auth/subscription/flows/flow-1',
+      '/auth/subscription/userinfo',
+      '/auth/subscription/revoke',
+    ]);
+    for (const [, init] of fetch.mock.calls) {
+      expect(new Headers(init.headers).get('Authorization')).toBe(
+        'Bearer test-daemon-token',
+      );
+    }
+    owner.dispose();
+  });
+
+  it('activates only the explicitly selected workspace and rejects a missing selection', async () => {
+    const activateSubscription = vi.fn().mockResolvedValue({
+      authType: 'qwen-subscription',
+      modelId: 'qwen3.8-max',
+      runtimeSync: { status: 'applied' },
+    });
+    const workspaceByCwd = vi.fn().mockReturnValue({ activateSubscription });
+    let cwd: string | undefined = '/primary';
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => cwd,
+      baseUrl: 'http://localhost:3001',
+    });
+    const options = { signal: new AbortController().signal };
+    await actions.activateSubscription({
+      ...options,
+      workspaceCwd: '/secondary',
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(activateSubscription).toHaveBeenCalledWith(options);
+    cwd = undefined;
+    expect(() => actions.activateSubscription()).toThrow(
+      'workspace is not connected',
+    );
+    expect(activateSubscription).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a late start on its original daemon after the workspace client is disposed', async () => {
+    let finishStart!: (response: Response) => void;
+    const fetch = vi.fn().mockImplementation((url, init) => {
+      if (
+        url === 'http://localhost:3001/auth/subscription/flows' &&
+        init.method === 'POST'
+      ) {
+        return new Promise<Response>((resolve) => {
+          finishStart = resolve;
+        });
+      }
+      return Promise.resolve(
+        init?.method === 'DELETE'
+          ? new Response(null, { status: 204 })
+          : Response.json({ id: 'flow-b', status: 'waiting' }),
+      );
+    });
+    vi.stubGlobal('fetch', fetch);
+    const original = new DaemonClient({ baseUrl: 'http://localhost:3001' });
+    const replacement = new DaemonClient({ baseUrl: 'http://localhost:3002' });
+    let current = original;
+    const makeActions = (baseUrl: string, token: string) =>
+      createDaemonWorkspaceActions({
+        getClient: () => current,
+        getWorkspaceCwd: () => undefined,
+        baseUrl,
+        token,
+      });
+    const oldActions = makeActions('http://localhost:3001', 'token-a');
+    const start = oldActions.startSubscriptionLogin();
+    original.dispose();
+    current = replacement;
+    const newActions = makeActions('http://localhost:3002', 'token-b');
+    finishStart(Response.json({ id: 'flow-a', status: 'waiting' }));
+    const flow = await start;
+    await oldActions.cancelSubscriptionLogin(flow.id);
+    await newActions.startSubscriptionLogin();
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      'http://localhost:3001/auth/subscription/flows',
+      'http://localhost:3001/auth/subscription/flows/flow-a',
+      'http://localhost:3002/auth/subscription/flows',
+    ]);
+    expect(fetch.mock.calls[1][1].method).toBe('DELETE');
+    expect(
+      new Headers(fetch.mock.calls[1][1].headers).get('Authorization'),
+    ).toBe('Bearer token-a');
+    replacement.dispose();
+  });
+
   it('changes UI language without a session and targets the requested workspace', async () => {
     const result = {
       language: 'en',
@@ -41,7 +270,9 @@ describe('workspace actions', () => {
     );
     expect(setUserLanguage).toHaveBeenCalledTimes(2);
   });
+
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 

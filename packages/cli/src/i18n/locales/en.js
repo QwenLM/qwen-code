@@ -8,6 +8,24 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.",
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    "You've used up your weekly credits.{{reset}} Please try again after the reset.",
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    "You've used up your credits.{{reset}} Please try again after the reset.",
+  ' Your credits are expected to reset in {{time}}.':
+    ' Your credits are expected to reset in {{time}}.',
+  '{{days}} and {{hours}}': '{{days}} and {{hours}}',
+  '1 day': '1 day',
+  '{{count}} days': '{{count}} days',
+  '1 hour': '1 hour',
+  '{{count}} hours': '{{count}} hours',
+  Retry: 'Retry',
+  'Connecting…': 'Connecting…',
+  'Loading models from provider…': 'Loading models from provider…',
+  'Recommended models · provider list unavailable, showing built-ins':
+    'Recommended models · provider list unavailable, showing built-ins',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
@@ -1817,6 +1835,51 @@ export default {
     'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.',
+  'Qwen Subscription': 'Qwen Subscription',
+  'Qwen Account with Subscription': 'Qwen Account with Subscription',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.',
+  "If the browser didn't open, visit:": "If the browser didn't open, visit:",
+  'Waiting for sign-in…': 'Waiting for sign-in…',
+  'c to copy link · Esc to cancel': 'c to copy link · Esc to cancel',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    'Authentication timed out. Please try again or select a different authentication method.',
+  'Signed in as {{email}}': 'Signed in as {{email}}',
+  'Signed in successfully · {{email}}': 'Signed in successfully · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    'Current plan: Qwen {{plan}}. Qwen Code is ready.',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
+    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
+  'Common commands: /usage   /upgrade   /model   /status   /logout':
+    'Common commands: /usage   /upgrade   /model   /status   /logout',
+  'Signed in as {{email}} (Qwen {{plan}})':
+    'Signed in as {{email}} (Qwen {{plan}})',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} is active · usage is included with your plan',
+  'Model: {{model}}': 'Model: {{model}}',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Code is included with Qwen Plus and Pro',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.",
+  'Waiting for your subscription to become active…':
+    'Waiting for your subscription to become active…',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    'Your Qwen session has expired. Run /auth to sign in again.',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    'Your login credentials are no longer valid. Run /auth to sign in again.',
+  'Checking your subscription…': 'Checking your subscription…',
+  'Retry Connection': 'Retry Connection',
+  'View Plans': 'View Plans',
+  'Opens the Qwen Code plans page in your browser':
+    'Opens the Qwen Code plans page in your browser',
+  'Switch Provider': 'Switch Provider',
+  'Use another account': 'Use another account',
+  'Choose another model provider': 'Choose another model provider',
+  'Sign out': 'Sign out',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    'Enter to select, ↑↓ to navigate · Esc to close',
   'Qwen OAuth Authentication': 'Qwen OAuth Authentication',
   'Please visit this URL to authorize:': 'Please visit this URL to authorize:',
   'Waiting for authorization': 'Waiting for authorization',
@@ -2970,4 +3033,44 @@ export default {
     'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
   'Create a git commit with an AI-drafted message':
     'Create a git commit with an AI-drafted message',
+  'Could not request an authorization link. Please try signing in again.':
+    'Could not request an authorization link. Please try signing in again.',
+  'Could not complete authorization. Please try signing in again.':
+    'Could not complete authorization. Please try signing in again.',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    'Could not read or save Qwen credentials. Check local file permissions and disk space.',
+  'Could not refresh your Qwen session. Please try again.':
+    'Could not refresh your Qwen session. Please try again.',
+  'You are signed out locally, but the remote session could not be revoked.':
+    'You are signed out locally, but the remote session could not be revoked.',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    'Could not remove local Qwen credentials. Check local file permissions.',
+  'Authorization or access was denied.': 'Authorization or access was denied.',
+  'Too many requests. Please try again later.':
+    'Too many requests. Please try again later.',
+  'The network request failed or timed out.':
+    'The network request failed or timed out.',
+  'The service returned an invalid response.':
+    'The service returned an invalid response.',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    'Model: {{model}} · Run /usage to see your plan usage',
+  'Type your request, or /usage': 'Type your request, or /usage',
+  'Try:': 'Try:',
+  'Open Qwen subscription plans': 'Open Qwen subscription plans',
+  'Could not open your browser. Visit {{url}}':
+    'Could not open your browser. Visit {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen subscription plans: {{url}}',
+  'Sign out of your Qwen account': 'Sign out of your Qwen account',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    'This connection does not require /logout. Use /auth to switch model providers.',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.',
+  'Wait for the current response to finish before signing out.':
+    'Wait for the current response to finish before signing out.',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    'You are signed out, but the saved authentication selection could not be cleared.',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    'Signed out of Qwen. Use /auth to sign in with another account.',
+  'Tip: Run /usage to see your plan usage.':
+    'Tip: Run /usage to see your plan usage.',
 };

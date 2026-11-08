@@ -4595,6 +4595,30 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('reloadModelProviders', () => {
+    it('notifies the selected runtime without clearing model settings on subscription logout', async () => {
+      const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
+      const invokeWorkspaceCommand = vi
+        .fn()
+        .mockResolvedValue({ configsFailed: 0 });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          preheatAcpChild,
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        }),
+      );
+      await expect(
+        svc.reloadModelProviders(makeCtx(), { subscriptionSignedOut: true }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/model-providers/reload',
+        { cwd: '/workspace', subscriptionSignedOut: true },
+        { timeoutMs: 30_000 },
+      );
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
     it('uses the provider-specific environment refresh when configured', async () => {
       const reloadDaemonEnv = vi.fn();
       const reloadModelProvidersDaemonEnv = vi.fn().mockResolvedValue({

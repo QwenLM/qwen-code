@@ -4826,6 +4826,67 @@ describe('workspace change propagation', () => {
     ).resolves.toMatchObject({ sessionId: 'managed-2' });
   });
 
+  it.each(['sessionsFailed', 'configsFailed'] as const)(
+    'keeps a channel usable after a partial User skill refresh (%s)',
+    async (failure) => {
+      let failed = true;
+      const quarantine = recordQuarantineEvents();
+      const p = paired(
+        { telemetry: quarantine.telemetry },
+        engineChannel('legacy', {
+          extMethodImpl: () => ({ sessionsFailed: 0, configsFailed: 0 }),
+        }),
+        engineChannel('managed', {
+          extMethodImpl: (method, params) => ({
+            ...acknowledge(method, params),
+            [failure]: failed ? 1 : 0,
+          }),
+        }),
+      );
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.preheat();
+      const refresh = () =>
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { includeUserSettings: true },
+        );
+
+      const error = await refresh().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+      expect(error).toMatchObject({
+        message: 'User Skill settings did not reach every session',
+      });
+      expect(quarantine.named('started')).toEqual([]);
+      expect(p.managed.killed).toBe(false);
+      await p.bridge.sendPrompt(
+        session.sessionId,
+        prompt(session.sessionId, 'still usable'),
+      );
+
+      failed = false;
+      await expect(refresh()).resolves.toMatchObject({
+        sessionsFailed: 0,
+        configsFailed: 0,
+      });
+      expect(
+        p.managed.agent.extMethodCalls
+          .filter(
+            (call) => call.method === SERVE_CONTROL_EXT_METHODS.workspaceChange,
+          )
+          .map((call) => ({
+            revision: call.params['revision'],
+            includeUserSettings: call.params['includeUserSettings'],
+          })),
+      ).toEqual([
+        { revision: 1, includeUserSettings: true },
+        { revision: 2, includeUserSettings: true },
+      ]);
+      expect(quarantine.named('started')).toEqual([]);
+      expect(p.managed.killed).toBe(false);
+    },
+  );
+
   it('quarantines an engine that does not acknowledge a permission change and cancels its turn', async () => {
     const running = deferred<void>();
     const quarantine = recordQuarantineEvents();
@@ -5144,6 +5205,38 @@ describe('workspace change propagation', () => {
     },
   );
 
+  it('propagates subscription logout to managed channels as a tightening change', async () => {
+    const p = paired(
+      {},
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        extMethodImpl: (method, params) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? { v: 1, revision: params['revision'], acknowledged: true }
+            : {},
+      }),
+    );
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    await p.bridge.invokeWorkspaceCommand(
+      SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+      { cwd: WS_A, subscriptionSignedOut: true },
+    );
+    expect(p.managed.agent.extMethodCalls).toEqual(
+      expect.arrayContaining([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceChange,
+          params: expect.objectContaining({
+            kind: 'modelProviders',
+            tightening: true,
+            subscriptionSignedOut: true,
+            cwd: WS_A,
+          }),
+        },
+      ]),
+    );
+  });
+
   it('refuses a prompt the quarantine overtakes while its attachments resolve', async () => {
     const resolving = deferred<void>();
     const p = paired(
@@ -5323,53 +5416,63 @@ describe('workspace change propagation', () => {
     await expect(side).resolves.toMatchObject({ answer: 'done' });
   });
 
-  it('lets a running turn settle when a change that keeps permissions is not acknowledged', async () => {
-    const running = deferred<void>();
-    const p = paired(
-      {},
-      engineChannel('legacy'),
-      engineChannel('managed', {
-        extMethodImpl: (method, params) =>
-          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
-            ? {
-                v: 1,
-                revision: Number(params['revision']) + 1,
-                acknowledged: true,
-              }
-            : acknowledge(method, params),
-        promptImpl: async () => {
-          await running.promise;
-          return { stopReason: 'end_turn' };
-        },
-      }),
-    );
-    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    await p.bridge.preheat();
-    const turn = p.bridge.sendPrompt(
-      managed.sessionId,
-      prompt(managed.sessionId, 'running'),
-    );
-    await vi.waitFor(() => expect(p.managed.agent.promptCalls).toHaveLength(1));
+  it.each([false, true])(
+    'lets a running turn settle when a change that keeps permissions is not acknowledged (user=%s)',
+    async (includeUserSettings) => {
+      const running = deferred<void>();
+      const p = paired(
+        {},
+        engineChannel('legacy'),
+        engineChannel('managed', {
+          extMethodImpl: (method, params) =>
+            method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+              ? {
+                  v: 1,
+                  revision: Number(params['revision']) + 1,
+                  acknowledged: true,
+                }
+              : acknowledge(method, params),
+          promptImpl: async () => {
+            await running.promise;
+            return { stopReason: 'end_turn' };
+          },
+        }),
+      );
+      const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.preheat();
+      const turn = p.bridge.sendPrompt(
+        managed.sessionId,
+        prompt(managed.sessionId, 'running'),
+      );
+      await vi.waitFor(() =>
+        expect(p.managed.agent.promptCalls).toHaveLength(1),
+      );
 
-    // An answer carrying another revision is not an acknowledgement.
-    await expect(
-      p.bridge.invokeWorkspaceCommand(
-        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: WS_A, reason: 'content' },
-      ),
-    ).rejects.toMatchObject({ kind: 'skills', revision: 1 });
-    expect(p.managed.agent.extMethodCalls.at(-1)?.params).toMatchObject({
-      kind: 'skills',
-      tightening: false,
-      reason: 'content',
-    });
-    expect(promptRefusal(p.bridge, managed.sessionId, 'x')).toMatchObject({
-      reason: 'workspace_change_unacknowledged',
-    });
-    expect(p.managed.agent.cancelCalls).toEqual([]);
-    running.resolve();
-    await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
-  });
+      // An answer carrying another revision is not an acknowledgement.
+      await expect(
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          {
+            cwd: WS_A,
+            reason: includeUserSettings ? 'all' : 'content',
+            ...(includeUserSettings ? { includeUserSettings } : {}),
+          },
+        ),
+      ).rejects.toMatchObject({ kind: 'skills', revision: 1 });
+      expect(p.managed.agent.extMethodCalls.at(-1)?.params).toMatchObject({
+        kind: 'skills',
+        tightening: false,
+        reason: includeUserSettings ? 'all' : 'content',
+        ...(includeUserSettings ? { includeUserSettings } : {}),
+      });
+      expect(promptRefusal(p.bridge, managed.sessionId, 'x')).toMatchObject({
+        reason: 'workspace_change_unacknowledged',
+      });
+      expect(p.managed.agent.cancelCalls).toEqual([]);
+      running.resolve();
+      await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+    },
+  );
 
   it.each([
     [true, 'cancels'],

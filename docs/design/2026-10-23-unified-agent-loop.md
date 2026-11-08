@@ -182,7 +182,7 @@ Some surfaces did part of the interaction step themselves before they moved, and
 | `interactionSpanByHost`  | ACP's span is parented to the daemon's trace                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | an input instead: the client joins the span the host started for the prompt; before the default changes for ACP                                                                                                                                                                                |
 | `userTurnRecordedByHost` | ACP records the prompt as typed, with its display text, attachments, resource links and daemon prompt id, before slash commands run, and takes the turn's file-history snapshot before its first send, so a prompt cancelled before it is sent still has one; on a retry, a continue or a restore it has started the todo work chain; on a Goal round it recorded the runtime continuation's message; on a cron round it records the prompt once its request reached history, and on a background-notification round the notification with the task it reports | an input instead: the host passes that record and the client writes it; before the default changes for ACP                                                                                                                                                                                     |
 
-`toolCallPreparations`, `memoryRecallQuery`, `stopPolicies` and `historyPromptId` are not in the table: the first asks for an extra event, the second gives recall the prompt's text, which the host expanded before the send, the third adds the host's reasons to continue at a stop point ([Stop-point continuations](#stop-point-continuations)), and the fourth gives a `Retry` the history identity of the attempt it replaces; none turns anything off. PR 2c-1 removed `stopHookRunByHost`, with which ACP fired the Stop hook in its own Stop loop.
+`toolCallPreparations`, `memoryRecallQuery`, `stopPolicies` and `historyPromptId` are not in the table: the first asks for an extra event, the second gives recall the prompt's text, which the host expanded before the send, the third adds the host's reasons to continue at a stop point ([Stop-point continuations](#stop-point-continuations)), and the fourth gives a `Retry` the history identity of the attempt it replaces; none turns anything off. `skipMemoryExtraction` is not in the table either: it does turn off the client's memory extraction and Dream, but because the turn relays a channel's message, not because the host does that part itself, so it is a lasting input rather than a transition step. PR 2c-1 removed `stopHookRunByHost`, with which ACP fired the Stop hook in its own Stop loop.
 
 A new option that turns off part of the client's work for one host needs a row here, and a surface's default does not change while it has an open row.
 
@@ -308,7 +308,7 @@ PR 2c-1 moves the stop point of the turns PR 2a moved onto the client's chain. A
 | each continuation streams through ACP's legacy send path and runs ACP's tool step                                | the client's round and the shared tool batch, as for the rest of the turn                                                                                                                     |
 | ACP runs the managed memory tasks after its Stop loop                                                            | the client runs them when the turn's last response stops on its own; ACP runs them when the turn ends otherwise, such as at the Stop-hook cap, on a Steer round or a tool that ended the turn |
 
-The client keeps a host's span, tool-guard and stop-policy options on a Stop-hook continuation, so it neither starts a span of its own nor turns its guards on for the continuation's tools. ACP resets its own tool-guard state for each Stop-hook or Todo Stop Guard continuation, including when Live tools retain ACP's tool executor. Tool-result requests within a continuation keep that budget.
+The client keeps a host's span, tool-guard, stop-policy and memory-extraction-skip options on a Stop-hook continuation, so it neither starts a span of its own nor turns its guards on for the continuation's tools. ACP resets its own tool-guard state for each Stop-hook or Todo Stop Guard continuation, including when Live tools retain ACP's tool executor. Tool-result requests within a continuation keep that budget.
 
 Hook diagnostics do not reopen a finished response's interruption window. Each new model request starts a new final-answer capture; a diagnostic with no following request keeps the preceding answer.
 
@@ -318,13 +318,13 @@ The core change of this step adds `SendMessageOptions.stopPolicies` with the `St
 
 PR 2c-2 puts five more kinds of ACP turn on the shared round, the shared tool batch and the client's stop point. Two are fresh prompts PR 2a left out: channel prompts and Goal-proposal approval turns. Three re-enter a turn the session already has: a retry, a continue of an interrupted turn and the restore of an unanswered `ask_user_question`. Goal turns, cron and background notifications move in PRs 2c-3 and 2c-4.
 
-| Turn                           | With the setting on                                                                                                                                                                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| channel prompt                 | a `UserQuery` like any fresh prompt, without the submitted prompt or workflow input, as today; its responses are not cut short by queued input, its tool results never end the turn, and its repeated-tool-failure guard stays off  |
-| Goal-proposal approval         | a `UserQuery`; the session settles the proposal as today, and a Todo Stop Guard that gives way, or the Stop hook's cap, keeps the proposal from starting a Goal                                                                     |
-| retry                          | ACP strips the failed attempt and puts it back if the retry never sends, as today; the first round is a `Retry` with `historyPromptId`, the attempt's identity, and UserPromptSubmit's verdict from `admitUserPrompt`               |
-| continue                       | ACP strips the interrupted run, or closes the interrupted calls, as today; the first round is a `Retry` with `historyPromptId` and no UserPromptSubmit; a first request that never goes out puts the interrupted run back as it was |
-| restore of `ask_user_question` | ACP asks the question again with its own tool step; the answer is the first round, a `Retry`; later batches run on the shared batch                                                                                                 |
+| Turn                           | With the setting on                                                                                                                                                                                                                                                                                                           |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| channel prompt                 | a `UserQuery` like any fresh prompt, without the submitted prompt or workflow input, as today; its responses are not cut short by queued input, its tool results never end the turn, its repeated-tool-failure guard stays off, and every round carries `skipMemoryExtraction`, so it schedules no memory extraction or Dream |
+| Goal-proposal approval         | a `UserQuery`; the session settles the proposal as today, and a Todo Stop Guard that gives way, or the Stop hook's cap, keeps the proposal from starting a Goal                                                                                                                                                               |
+| retry                          | ACP strips the failed attempt and puts it back if the retry never sends, as today; the first round is a `Retry` with `historyPromptId`, the attempt's identity, and UserPromptSubmit's verdict from `admitUserPrompt`                                                                                                         |
+| continue                       | ACP strips the interrupted run, or closes the interrupted calls, as today; the first round is a `Retry` with `historyPromptId` and no UserPromptSubmit; a first request that never goes out puts the interrupted run back as it was                                                                                           |
+| restore of `ask_user_question` | ACP asks the question again with its own tool step; the answer is the first round, a `Retry`; later batches run on the shared batch                                                                                                                                                                                           |
 
 A re-entered turn's first round is a `Retry`, not a `ToolResult`, even when it carries tool results: a `ToolResult` does not start the client's interaction, so the previous prompt's loop-detector counts would carry over and UserPromptSubmit would run on the results. Headless continues an interrupted turn with a `ToolResult` because each of its runs is a new process. A `Retry` gets no system reminders from the client, so ACP adds its plan, arena and output-style reminders to it as today, and the todo reminder ACP takes is the one the client would take.
 
@@ -411,7 +411,25 @@ PR 3b-2a moves the TUI's stops into the batch. The batch ends only when no model
 
 Batches that wait for the streams join the queue that the end of the last stream drains, so the results of every batch completed during one stream go out in one continuation, as today, in the order the batches completed.
 
-The history repair, the split by interaction owner and the tool-use summary check what the next round sends, so they stay in the completion step for now. PR 3b-2b has the turn await the batch, and they run right before the next round.
+PR 3b-2b has the turn await its batch. The batch's completion step still stops the turn or sends its next round, and the turn awaits both, so the history repair, the split by interaction owner and the tool-use summary run in the turn, right before the next round:
+
+| The TUI today                                                                                          | With the setting on                                                                                           |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| a round returns once its stream ended, and its batch's completion step sends the next round            | the round's turn awaits the batch, its completion step and the round that step sends                          |
+| the scheduler starts no queued batch until the completion step returned, after the next round's stream | until the completion step stopped the turn or is about to send the next round, whose calls need the scheduler |
+| a batch whose executed calls history all answered sends nothing                                        | the same: the batch's replay answers do not go out alone                                                      |
+
+When the turn's stream ends while another stream is active, which may be the stream that sent its round, the turn does not wait: a response of provider replays alone sends its answers before its own stream closes. The batch then waits for the streams to end and completes on its own, as before, and batches that wait for the streams still go out in one continuation.
+
+PR 3c-1 has the turn send the round its batch continues with. The batch's completion step still repairs history, splits the results by interaction owner, starts the tool-use summary and checks the stops, then hands the next round to the turn. The turn builds it as the loop's `nextRound` builds a round after its batch, and sends it:
+
+| The TUI today                                                                                                                            | With the setting on                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| the completion step takes the input queued for the tool boundary, mid-turn messages and then teammate messages, and sends the next round | the turn takes that input after the batch and sends the round |
+
+Until the turn sends the round, the batch keeps the scheduler and keeps the TUI off Idle, so queued batches and idle work do not start in between. A turn that does not wait for its batch, because another stream is active, leaves the round to the batch, which sends it itself. Batches that wait for the streams still go out in one continuation, which the turn whose stream ends last sends.
+
+A retry with Ctrl+Y already runs on the shared round and, from PR 3b-2b, awaits its batch. PR 3c-1 adds the retry scenarios to the Ink parity suite, with a retried tool-result round whose response calls a tool, and a scenario for input queued while a tool runs.
 
 ## Migration
 
@@ -513,6 +531,9 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a stream that drops and is retried;
 - two prompts in one session;
 - a model error;
+- a retry after a model error, and a retry that fails again;
+- a retried tool-result round whose response calls a tool;
+- input queued while a tool runs, which goes out with the tool's result;
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 

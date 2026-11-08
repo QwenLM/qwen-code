@@ -40,11 +40,19 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
+const triagePublisher = readFileSync(
+  '.github/scripts/triage-publish.mjs',
+  'utf8',
+);
 import {
   ATTRIBUTIONS,
   VERDICTS,
   checkArtifacts,
 } from '../../scripts/verify-pr-check.mjs';
+import {
+  REVIEW_STATE_QUERY,
+  reviewState,
+} from '../../scripts/verify-pr-prepare.mjs';
 
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
@@ -100,10 +108,11 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
-// Executed-harness factory shared by the claim and finalize lifecycle tests:
-// a stubbed `gh` on PATH with failure-injection arms, the real step script
-// run under GitHub's exact shell flags, and capture of the body/call the
-// stub saw plus whatever the step appended to $GITHUB_OUTPUT. GitHub runs
+// Executed-harness factory shared by the claim and finalize lifecycle tests
+// and the verify job's review snapshot: a stubbed `gh` on PATH with
+// failure-injection arms, the real step script run under GitHub's exact
+// shell flags, and capture of the body/call the stub saw, every call's argv,
+// and whatever the step appended to $GITHUB_OUTPUT. GitHub runs
 // `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`, and a step's
 // own `set -uo pipefail` does not turn `-e` back off — match that, or an
 // unguarded failing command kills the real step in production while the
@@ -111,19 +120,25 @@ function job(name) {
 // place: the two pasted copies already diverged once (only the finalize stub
 // had the failure arms), and a later fix made on only one copy would silently
 // degrade exactly one test. The failure arms stay inert unless a scenario
-// sets GH_STUB_FAIL_LIST / GH_STUB_FAIL_WRITE; a POST (any write that is not
-// a PATCH) answers with GH_STUB_POST_ID (default 7777) like the comments
-// API's created-id payload.
+// sets GH_STUB_FAIL_LIST / GH_STUB_FAIL_WRITE, or GH_STUB_EMPTY_LIST for a
+// paginated read that exits 0 with nothing on stdout; a paginated read
+// otherwise answers with `commentsFile`, and a POST (any write that is not a
+// PATCH) with GH_STUB_POST_ID (default 7777) like the comments API's
+// created-id payload. The temp `dir` is returned for steps that write under
+// $RUNNER_TEMP.
 function makeGhHarness(label) {
   const dir = mkdtempSync(join(tmpdir(), `triage-${label}-`));
   const commentsFile = join(dir, 'comments.json');
   const bodyOut = join(dir, 'body.md');
   const callOut = join(dir, 'call.txt');
   const outputFile = join(dir, 'github_output');
+  const argvFile = join(dir, 'argv');
   writeFileSync(
     join(dir, 'gh'),
     [
       '#!/usr/bin/env bash',
+      // One record per call, NUL between arguments: a body spans lines.
+      `printf '%s\\0' "$@" >> "$GH_STUB_ARGV"; printf '\\036' >> "$GH_STUB_ARGV"`,
       'body=""',
       'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
       'if [ -n "$body" ]; then',
@@ -132,7 +147,10 @@ function makeGhHarness(label) {
       'fi',
       'case "$*" in',
       "  'api user --jq .login') echo qwen-code-ci-bot ;;",
-      '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
+      '  *--paginate*)',
+      '    [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1',
+      '    [ -n "${GH_STUB_EMPTY_LIST:-}" ] && exit 0',
+      '    cat "$GH_STUB_COMMENTS" ;;',
       '  *PATCH*) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1 ;;',
       '  *) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1; echo "${GH_STUB_POST_ID:-7777}" ;;',
       'esac',
@@ -146,6 +164,7 @@ function makeGhHarness(label) {
     rmSync(bodyOut, { force: true });
     rmSync(callOut, { force: true });
     rmSync(outputFile, { force: true });
+    rmSync(argvFile, { force: true });
     const proc = spawnSync('bash', [...bashArgs, script], {
       env: {
         ...process.env,
@@ -158,6 +177,7 @@ function makeGhHarness(label) {
         GH_STUB_OUT: bodyOut,
         GH_STUB_CALL: callOut,
         GH_STUB_COMMENTS: commentsFile,
+        GH_STUB_ARGV: argvFile,
         ...env,
       },
       encoding: 'utf8',
@@ -168,10 +188,17 @@ function makeGhHarness(label) {
       call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
       out: `${proc.stdout}${proc.stderr}`,
       outputs: existsSync(outputFile) ? readFileSync(outputFile, 'utf8') : '',
+      calls: existsSync(argvFile)
+        ? readFileSync(argvFile, 'utf8')
+            .split('\x1e')
+            .slice(0, -1)
+            .map((call) => call.split('\0').slice(0, -1))
+        : [],
     };
   };
   return {
     commentsFile,
+    dir,
     run,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
     RUN_URL,
@@ -325,17 +352,25 @@ describe('qwen-triage tmux workflow', () => {
     expect(cleanStep).toContain('mkdir -p "$QWEN_HOME"');
     expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
     expect(cleanStep).toContain('echo "stale agent state cleaned"');
-    expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
+    // The direct launch carries QWEN_HOME in its env -i list; it must stay
+    // the same per-run path the clean step resets.
+    expect(runStep).toContain('"QWEN_HOME=${RUNNER_TEMP:?}/qwen-home"');
   });
 
-  it('pins the action reinstall to the version the job already runs', () => {
+  it('pins the CLI install the direct launch runs', () => {
     expect(workflow).toContain("id: 'ensure_qwen'");
     expect(workflow).toContain(
       'echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"',
     );
-    expect(workflow).toContain(
-      "qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'",
-    );
+    // Install from RUNNER_TEMP with an explicit registry: the persistent
+    // workspace may hold a previous run's tree whose .npmrc npm would read.
+    const ensureStep = step('Ensure qwen CLI');
+    expect(ensureStep).toContain('cd "${RUNNER_TEMP:?}"');
+    expect(ensureStep).toContain('--registry=https://registry.npmjs.org');
+    // The action's reinstall pin is gone with the action; the launch must
+    // use the installed CLI, not reinstall one.
+    expect(workflow).not.toContain('qwen_cli_version');
+    expect(step('Run Qwen Triage')).toContain('command -v qwen');
   });
 
   it('passes triage output through env before bash reads it', () => {
@@ -1084,7 +1119,9 @@ describe('qwen-triage tmux workflow', () => {
     expect(section).toContain('select(.user.login == $bot)');
     expect(section).toContain('startswith($m)');
     expect(section).not.toContain('contains($m)');
-    expect(section).toContain('re-resolve immediately before EACH patch');
+    // Writes are drafts now: the publisher resolves the id at publish time,
+    // so the agent never patches by a remembered id.
+    expect(section).toContain('PUBLISH TIME');
   });
 
   it('keeps the sandboxed-lane recommendation out of the local-only section', () => {
@@ -1138,7 +1175,7 @@ describe('qwen-triage tmux workflow', () => {
     // The assembly order is the other half: a section nothing assembles is
     // as dead as one nobody reads.
     const order = prSkill.slice(
-      prSkill.indexOf('Post a single Stage 2 comment'),
+      prSkill.indexOf('Draft a single Stage 2 comment'),
       prSkill.indexOf('### Stage 3'),
     );
     expect(order).toContain('(2b-bis)');
@@ -1216,16 +1253,21 @@ describe('qwen-triage tmux workflow', () => {
     expect(section).toContain('--paginate');
     expect(section).toContain('DISMISSED');
 
-    // The terminal-gate probe shares the same failure mode: an unpaginated
+    // The terminal-gate dedup shares the same failure mode: an unpaginated
     // read sees only the first 30 reviews, and re-runs land on exactly the
     // heavily-reviewed PRs where the gating review sits on a later page.
+    // Writes are drafts now, so the dedup lives in the publisher — the skill
+    // must delegate to it, and the publisher must keep the paginated,
+    // bot-scoped check.
     const terminalGate = prSkill.slice(
       prSkill.indexOf('Never create duplicates'),
       prSkill.indexOf('**Signature & footer:**'),
     );
-    expect(terminalGate).toContain('--paginate');
-    expect(terminalGate).toContain('.state == "CHANGES_REQUESTED"');
-    expect(terminalGate).not.toContain("--jq '[.[] | select");
+    expect(terminalGate).toContain("publisher's");
+    expect(terminalGate).toContain('CHANGES_REQUESTED');
+    expect(triagePublisher).toContain('--paginate');
+    expect(triagePublisher).toContain('CHANGES_REQUESTED');
+    expect(triagePublisher).toMatch(/user.*login|login.*user/);
   });
 
   it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
@@ -1552,6 +1594,7 @@ describe('qwen-triage verify workflow', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: commentBody,
           ISSUE_AUTHOR: author,
@@ -1689,6 +1732,323 @@ describe('qwen-triage verify workflow', () => {
     const mk = verifyJob.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
     expect(rm).toBeGreaterThan(-1);
     expect(mk).toBeGreaterThan(rm);
+  });
+
+  // The token-free agent learns the PR's review state only from this file,
+  // and the local preflight writes the same file with its own transform. One
+  // set of pages through both must give one answer, or a local round and a CI
+  // round read different review states for the same PR.
+  // Executes the step's real jq program, so it needs jq, like its siblings.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'snapshots review threads in the shape the local preflight writes',
+    () => {
+      const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+      const snippet = resolveStep
+        .match(/\n( {10}if ! gh api graphql[\s\S]*?\n {10}fi)\n/)?.[1]
+        ?.replace(/^ {10}/gm, '');
+      expect(snippet).toBeTruthy();
+      // After the context directory is reset, or the file never survives to
+      // the agent; before the decision line, so only a run pays for it.
+      const at = resolveStep.indexOf(snippet.split('\n')[0]);
+      const reset = resolveStep.indexOf('rm -rf "$RUNNER_TEMP/verify-context"');
+      const made = resolveStep.indexOf(
+        'mkdir -p "$RUNNER_TEMP/verify-context"',
+      );
+      expect(reset).toBeGreaterThan(-1);
+      expect(made).toBeGreaterThan(reset);
+      expect(at).toBeGreaterThan(made);
+      expect(at).toBeLessThan(
+        resolveStep.lastIndexOf('echo "decision=run" >> "$GITHUB_OUTPUT"'),
+      );
+      const { commentsFile, dir, ...harness } = makeGhHarness(
+        'verify-review-snapshot',
+      );
+      try {
+        const context = join(dir, 'verify-context');
+        const file = join(context, 'review-threads.json');
+        const run = (pages, env = {}) => {
+          rmSync(context, { recursive: true, force: true });
+          mkdirSync(context);
+          writeFileSync(commentsFile, JSON.stringify(pages));
+          const { out, calls } = harness.run(`set -euo pipefail\n${snippet}`, {
+            RUNNER_TEMP: dir,
+            PR_NUMBER: '7999',
+            ...env,
+          });
+          expect(calls).toHaveLength(1);
+          return {
+            out,
+            args: calls[0],
+            state: existsSync(file)
+              ? JSON.parse(readFileSync(file, 'utf8'))
+              : null,
+          };
+        };
+        const comment = (body, login = 'reviewer', review = null) => ({
+          createdAt: '2026-11-01T00:00:00Z',
+          url: `https://github.com/QwenLM/qwen-code/pull/7999#discussion_${body.length}`,
+          body,
+          author: login === null ? null : { login },
+          authorAssociation: 'MEMBER',
+          originalCommit: login === null ? null : { oid: 'c'.repeat(40) },
+          pullRequestReview: review === null ? null : { url: review },
+        });
+        const opinionated = {
+          nodes: [
+            {
+              state: 'CHANGES_REQUESTED',
+              submittedAt: '2026-11-01T01:00:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+              body: 'Blocking: the retry drops the cursor.',
+              author: { login: 'maintainer' },
+              authorAssociation: 'COLLABORATOR',
+              commit: { oid: 'a'.repeat(40) },
+            },
+            {
+              state: 'APPROVED',
+              submittedAt: '2026-11-01T02:00:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-2',
+              body: 'LGTM',
+              author: { login: 'colleague' },
+              authorAssociation: 'MEMBER',
+              commit: { oid: 'b'.repeat(40) },
+            },
+            {
+              state: 'CHANGES_REQUESTED',
+              submittedAt: '2026-11-01T03:00:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-3',
+              body: '',
+              author: null,
+              authorAssociation: 'NONE',
+              commit: null,
+            },
+          ],
+        };
+        // Two pages, as --paginate --slurp returns them: the threads continue,
+        // and the change requests repeat with every page.
+        const pages = [
+          {
+            data: {
+              repository: {
+                pullRequest: {
+                  latestOpinionatedReviews: opinionated,
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: true, endCursor: 'c1' },
+                    nodes: [
+                      {
+                        isResolved: false,
+                        isOutdated: false,
+                        path: 'packages/core/src/a.ts',
+                        line: 12,
+                        originalLine: 10,
+                        comments: {
+                          totalCount: 2,
+                          nodes: [
+                            comment(
+                              '**[Critical]** R1-1: the cursor is lost',
+                              'maintainer',
+                              'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+                            ),
+                            comment('Fixed in abc1234.', 'author'),
+                          ],
+                        },
+                      },
+                      {
+                        isResolved: true,
+                        isOutdated: false,
+                        path: 'packages/core/src/b.ts',
+                        line: null,
+                        originalLine: 7,
+                        comments: {
+                          totalCount: 1,
+                          nodes: [comment('**[Blocker]** R1-2: unbounded')],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          {
+            data: {
+              repository: {
+                pullRequest: {
+                  latestOpinionatedReviews: opinionated,
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: 'c2' },
+                    nodes: [
+                      {
+                        isResolved: false,
+                        isOutdated: true,
+                        path: 'docs/c.md',
+                        line: null,
+                        originalLine: null,
+                        // Longer than the 50 the query asks for.
+                        comments: {
+                          totalCount: 51,
+                          nodes: [comment('Typo?', null)],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        ];
+
+        const ok = run(pages);
+        expect(ok.state).toEqual(reviewState(pages));
+        // `line` and `originalLine` stay apart: an outdated thread's line in
+        // the current diff and its line in the comment's commit differ.
+        expect(
+          ok.state.threads.map((t) => [
+            t.resolved,
+            t.outdated,
+            t.path,
+            t.line,
+            t.originalLine,
+            t.commentCount,
+          ]),
+        ).toEqual([
+          [false, false, 'packages/core/src/a.ts', 12, 10, 2],
+          [true, false, 'packages/core/src/b.ts', null, 7, 1],
+          [false, true, 'docs/c.md', null, null, 51],
+        ]);
+        // An inline comment names the review it belongs to, so a change
+        // request with an empty body still has its defects.
+        expect(
+          ok.state.threads[0].comments.map((c) => [
+            c.author,
+            c.review,
+            c.commit,
+          ]),
+        ).toEqual([
+          [
+            'maintainer',
+            'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+            'c'.repeat(40),
+          ],
+          ['author', null, 'c'.repeat(40)],
+        ]);
+        expect(ok.state.threads[2].comments[0].author).toBeNull();
+        expect(
+          ok.state.changeRequests.map((r) => [r.author, r.commit]),
+        ).toEqual([
+          ['maintainer', 'a'.repeat(40)],
+          [null, null],
+        ]);
+        // The query the local preflight sends, against this PR of this repo.
+        expect(ok.args).toEqual(
+          expect.arrayContaining([
+            'graphql',
+            '--paginate',
+            '--slurp',
+            'owner=QwenLM',
+            'name=qwen-code',
+            'number=7999',
+            `query=${REVIEW_STATE_QUERY}`,
+          ]),
+        );
+        expect(ok.args[ok.args.indexOf('number=7999') - 1]).toBe('-F');
+        expect(ok.args[ok.args.indexOf('owner=QwenLM') - 1]).toBe('-f');
+
+        // A failed fetch, or pages that are not this query's answer, leave no
+        // file: the skill reads its absence as "unknown", and a partial file
+        // would read as "nothing open".
+        for (const [input, env] of [
+          [pages, { GH_STUB_FAIL_LIST: '1' }],
+          // gh exits 0 with nothing on stdout, and jq then exits 0 too.
+          [pages, { GH_STUB_EMPTY_LIST: '1' }],
+          [[{ data: null }], {}],
+          [[], {}],
+        ]) {
+          const failed = run(input, env);
+          expect(failed.state).toBeNull();
+          expect(failed.out).toContain(
+            "Could not snapshot the PR's review threads",
+          );
+        }
+        expect(reviewState([{ data: null }])).toBeNull();
+        expect(reviewState([])).toBeNull();
+      } finally {
+        harness.cleanup();
+      }
+    },
+  );
+
+  // The snapshot only helps if the round treats it as the skill says: an
+  // absent file is unknown, a resolved thread is a claim, and an open
+  // blocking finding nobody measured keeps the round from merge-ready.
+  it('tells the agent what the review snapshot means and what it rules out', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'If that directory also holds `review-threads.json`',
+    );
+    // Absent is unknown: disclosed, and not a verdict of its own.
+    expect(flat).toContain(
+      'A missing file means the snapshot failed, not that nothing is open: it does not change the verdict by itself, but say so under _Not covered_ and in the verdict line',
+    );
+    // PR code the round runs can rewrite the directory.
+    expect(flat).toContain('Read it before you run any PR code');
+    // Every term the verdict turns on is computed from snapshot fields, so
+    // two rounds reading one snapshot reach one verdict.
+    expect(flat).toContain(
+      "A thread is **blocking** when its first comment is tagged Critical, Blocker, P0 or P1 and that comment's `association` is `OWNER`, `MEMBER` or `COLLABORATOR`",
+    );
+    // An author resolving a change request's thread does not close it:
+    // GitHub's review decision still counts the change request.
+    expect(flat).toContain(
+      "A blocking thread is **open** when it is unresolved, or when its first comment's `review` is a standing change request's `url`, resolved or not: resolving a thread is a claim, not a measurement",
+    );
+    // A body is prose: listed and counted, never parsed into the verdict.
+    expect(flat).toContain(
+      'It does not hold the verdict by itself, because a body carries no severity the round can read the same way twice; a blocker its body names with no thread of its own is counted with the blocking threads that are not open',
+    );
+    expect(flat).toContain(
+      'a finding the previous-finding table already carries keeps that row instead of a second one here',
+    );
+    expect(flat).toContain(
+      "`line` is the thread's line in the current diff, null when GitHub could not carry it forward, and `originalLine` its line in the first comment's `commit`",
+    );
+    expect(flat).toContain(
+      'Measure every open blocking thread at the verified head.',
+    );
+    // `findings` at fail 0 publishes ✅ "non-blocking findings", which an
+    // open blocker nobody measured is not.
+    expect(flat).toContain(
+      'One left `not measured` rules out `merge-ready`; with nothing failed, the verdict is `inconclusive`',
+    );
+    expect(flat).toContain(
+      'no new blocking finding, and no known open blocking review thread left unmeasured',
+    );
+    expect(flat).toContain(
+      'central claim, or an open blocking review thread, from being tested',
+    );
+    // A blocker that is not open, left unmeasured, is disclosed, not
+    // silently covered.
+    expect(flat).toContain(
+      'the verdict line says how many there are, so a `merge-ready` cannot read as having checked them',
+    );
+    expect(flat).toContain(
+      'the verdict line also gives the open blocking threads measured out of their total and how many of the others were left unmeasured',
+    );
+    // The plan the agent follows is the budget list, not the report contract.
+    expect(verifySkill).toMatch(/^5\. \*\*Open blocking review threads\*\*/m);
+    expect(flat).toContain(
+      'measure each at the verified head (report item 4 has the rule). One left unmeasured rules out `merge-ready`, so this is budget, not breadth. The blocking threads that are not open get what is left after this list, and are not out of scope',
+    );
+    // A VM boundary gets the file under the name the agent looks for.
+    expect(flat).toContain(
+      "with prepare's `pr<n>-review-threads.json`, when it wrote one, beside it as `review-threads.json`",
+    );
+    // Report items are cited by number elsewhere in the skill.
+    expect(flat).toContain('It feeds report item 4 below');
+    expect(verifySkill).toMatch(/^4\. \*\*Existing review findings\*\*/m);
+    expect(flat).toContain('report item 7 (_Not covered_)');
+    expect(verifySkill).toMatch(/^7\. \*\*Not covered\*\*/m);
+    expect(flat).toContain('Title, body, comments, review threads,');
   });
 
   // The lane trigger was unpinned: deleting the gate from the verify job's
@@ -3768,6 +4128,7 @@ describe('qwen-triage verify hardening round 2', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: commentBody,
           ISSUE_AUTHOR: author,
@@ -3819,6 +4180,7 @@ describe('qwen-triage verify hardening round 2', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: '@qwen-code /verify',
           ISSUE_AUTHOR: '',

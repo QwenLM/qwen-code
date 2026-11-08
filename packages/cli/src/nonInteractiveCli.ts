@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { t } from './i18n/index.js';
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -36,6 +37,7 @@ import type {
   UserPromptAdmission,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
+import { waitForPendingMemoryTasks } from './nonInteractive/memory-tasks.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -154,6 +156,13 @@ const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
  * slow agent can't block exit indefinitely.
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
+
+/**
+ * The memory-wait window for a one-shot run whose caller supplied no stop
+ * signal (the `llm.tsx` shape). Mirrors the stream-JSON session's
+ * `EOF_MEMORY_WAIT_TIMEOUT_MS`; each drain arms its own window.
+ */
+const ONE_SHOT_MEMORY_WAIT_TIMEOUT_MS = 5_000;
 
 function isHeadlessLoopSentinel(prompt: string): boolean {
   return (
@@ -460,6 +469,8 @@ export interface RunNonInteractiveOptions {
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
+  /** Stop memory waiting at the session EOF deadline without cancelling a turn. */
+  memoryWaitStopSignal?: AbortSignal;
   /**
    * Emit a terminal result and return from this turn when its controller is
    * aborted with {@link TurnInterruptedError}, instead of exiting the process.
@@ -615,17 +626,58 @@ export async function runNonInteractive(
       })();
       return chatRecordingSettlement;
     };
+    // A one-shot run has no session EOF moment. Failure and cancellation
+    // terminals still get a bounded window per drain: without one, a failed
+    // `qwen -p` run with an extraction in flight stays alive after its error
+    // envelope is already on the wire. The success terminal instead waits
+    // for the memory writes the same turn started, bounded only by the run's
+    // own abort — the base behavior, so a success path never introduces a
+    // wait deadline the base did not have.
+    const drainPendingMemoryTasks = (
+      successTerminal: boolean = false,
+    ): Promise<void> => {
+      const client = config.getLlmClient();
+      if (options.memoryWaitStopSignal) {
+        return waitForPendingMemoryTasks(
+          client,
+          abortController.signal,
+          options.memoryWaitStopSignal,
+        );
+      }
+      if (successTerminal) {
+        return waitForPendingMemoryTasks(client, abortController.signal);
+      }
+      const oneShotMemoryWindow = new AbortController();
+      const oneShotMemoryWindowTimer = setTimeout(
+        () => oneShotMemoryWindow.abort(),
+        ONE_SHOT_MEMORY_WAIT_TIMEOUT_MS,
+      );
+      return waitForPendingMemoryTasks(
+        client,
+        abortController.signal,
+        oneShotMemoryWindow.signal,
+      ).finally(() => clearTimeout(oneShotMemoryWindowTimer));
+    };
+    let resultEmitted = false;
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
     ): Promise<void> => {
-      await settleBeforeTerminalOutput();
-      // Fire the callback only after a successful emit. The continue caller
-      // (session.ts) uses it to mark the result as delivered and swallow any
-      // later error; if emitResult itself throws, the flag must stay unset so
-      // the error still surfaces instead of losing both result and error.
-      adapter.emitResult(result);
-      options.onResultEmitted?.();
-      await modSession?.flushOutput();
+      try {
+        await settleBeforeTerminalOutput();
+        // Fire the callback only after a successful emit. The continue caller
+        // (session.ts) uses it to mark the result as delivered and swallow any
+        // later error; if emitResult itself throws, the flag must stay unset so
+        // the error still surfaces instead of losing both result and error.
+        adapter.emitResult(result);
+        resultEmitted = true;
+        options.onResultEmitted?.();
+        await modSession?.flushOutput();
+      } finally {
+        // Write the result first, but keep the invocation alive for memory
+        // writes — unbounded on a success terminal, as in the base; an
+        // error terminal keeps the bounded failure window below.
+        await drainPendingMemoryTasks(!result.isError);
+      }
     };
 
     // Get readonly values once at the start
@@ -897,6 +949,10 @@ export async function runNonInteractive(
      * preserved. Both branches call into `process.exit(...)` so the
      * `unreachable` throw is only present to keep the type-checker honest.
      */
+    let abortExitCommitted = false;
+    const markAbortExitCommitted = (): void => {
+      abortExitCommitted = true;
+    };
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
       endActiveInteraction(exceeded ? 'error' : 'cancelled', {
@@ -915,7 +971,11 @@ export async function runNonInteractive(
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {
-        await handleBudgetExceededError(config, exceeded);
+        await handleBudgetExceededError(
+          config,
+          exceeded,
+          markAbortExitCommitted,
+        );
         // Explicit unreachable — `handleBudgetExceededError` is `never`
         // in production (it calls `process.exit`). If a test stubs
         // `process.exit` or a future refactor makes the handler
@@ -932,7 +992,7 @@ export async function runNonInteractive(
       ) {
         throw reason;
       }
-      await handleCancellationError(config);
+      await handleCancellationError(config, markAbortExitCommitted);
       throw new Error('Operation cancelled.');
     };
 
@@ -1340,6 +1400,13 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              // Stacked-skill overflow is a warning: the prompt still runs, so
+              // the run keeps its exit code and stderr carries the notice.
+              if (slashCommandResult.stackedSkillOverflow) {
+                process.stderr.write(
+                  `${slashCommandResult.stackedSkillOverflow}\n`,
+                );
+              }
               // Re-validate provider identity rather than trust the producer:
               // any slash command can set `modelOverride`, so the consumer
               // enforces that it names a model on the active provider before
@@ -1934,6 +2001,12 @@ export async function runNonInteractive(
 
         if (outputFormat === OutputFormat.TEXT) {
           await settleBeforeTerminalOutput();
+          try {
+            await drainPendingMemoryTasks();
+          } catch {
+            // Keep the marker for the loop error already written to stderr.
+            throw new AlreadyReportedError(loopDetectedMessage);
+          }
           return 1;
         }
 
@@ -2837,6 +2910,7 @@ export async function runNonInteractive(
                 const errorText = parseAndFormatApiError(
                   event.value.error,
                   config.getContentGeneratorConfig()?.authType,
+                  outputFormat === OutputFormat.TEXT ? t : undefined,
                 );
                 if (outputFormat === OutputFormat.TEXT) {
                   process.stderr.write(`${errorText}\n`);
@@ -3265,6 +3339,7 @@ export async function runNonInteractive(
               const errorText = parseAndFormatApiError(
                 event.value.error,
                 config.getContentGeneratorConfig()?.authType,
+                outputFormat === OutputFormat.TEXT ? t : undefined,
               );
               if (outputFormat === OutputFormat.TEXT) {
                 process.stderr.write(`${errorText}\n`);
@@ -3706,6 +3781,7 @@ export async function runNonInteractive(
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
+                    outputFormat === OutputFormat.TEXT ? t : undefined,
                   );
                   if (outputFormat === OutputFormat.TEXT) {
                     process.stderr.write(`${errorText}\n`);
@@ -3954,12 +4030,6 @@ export async function runNonInteractive(
             await new Promise((r) => setTimeout(r, 100));
           }
 
-          const memoryTaskPromises = config
-            .getLlmClient()
-            .consumePendingMemoryTaskPromises();
-          if (memoryTaskPromises.length > 0) {
-            await Promise.allSettled(memoryTaskPromises);
-          }
           finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();
@@ -4114,15 +4184,15 @@ export async function runNonInteractive(
       // This path must settle independently because skipAdapterEmit bypasses
       // emitResult(), which normally performs the settle step.
       await settleBeforeTerminalOutput();
-      if (!skipAdapterEmit) {
-        // Wrap in try/catch: emitResult eventually hits stdout.write, which
-        // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
-        // consumer closes early (`qwen -p ... | head -n 1` is the common
-        // case). Letting that throw bubble out skips `handleBudgetExceededError`
-        // / `handleError` below, dropping the documented exit code 55
-        // contract — precisely when stdout is in trouble. Best-effort emit
-        // and continue to the exit handler.
-        try {
+      try {
+        if (!skipAdapterEmit && !resultEmitted) {
+          // Wrap in try/catch: emitResult eventually hits stdout.write, which
+          // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
+          // consumer closes early (`qwen -p ... | head -n 1` is the common
+          // case). Letting that throw bubble out skips `handleBudgetExceededError`
+          // / `handleError` below, dropping the documented exit code 55
+          // contract — precisely when stdout is in trouble. Best-effort emit
+          // and continue to the exit handler.
           await emitResult({
             isError: true,
             durationMs: Date.now() - startTime,
@@ -4132,7 +4202,11 @@ export async function runNonInteractive(
             usage,
             stats,
           });
-        } catch (emitErr) {
+        } else {
+          await drainPendingMemoryTasks();
+        }
+      } catch (emitErr) {
+        if (!abortController.signal.aborted) {
           debugLogger.error(
             `Failed to emit terminal result envelope: ${
               emitErr instanceof Error ? emitErr.message : String(emitErr)
@@ -4140,15 +4214,31 @@ export async function runNonInteractive(
           );
         }
       }
-      if (budgetExceeded) {
-        // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
-        // see a terminal result envelope before the process dies.
-        await handleBudgetExceededError(config, budgetExceeded);
+      // Preserve terminal output without entering exit cleanup a second time.
+      if (abortExitCommitted) throw error;
+      // Abort or budget expiry can arrive during the memory wait, after the
+      // result was written. Re-read the reason without emitting another result.
+      if (abortController.signal.aborted) {
+        try {
+          await routeAbort();
+        } catch (abortError) {
+          if (
+            abortError instanceof TurnInterruptedError &&
+            abortError === abortController.signal.reason &&
+            (options.recoverableCancellation === true ||
+              abortError instanceof ModTurnAbortedError)
+          ) {
+            return 130;
+          }
+          throw abortError;
+        }
       }
-      if (recoverableCancellation) {
-        return 130;
-      }
-      await handleError(error, config);
+      await handleError(
+        error,
+        config,
+        undefined,
+        outputFormat === OutputFormat.TEXT ? t : undefined,
+      );
     } finally {
       // A prompt a Mod submitted that this run did not start does not wait
       // for the next one, which a stream-json session runs on the same Mods.

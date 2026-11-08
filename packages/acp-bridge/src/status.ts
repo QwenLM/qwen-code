@@ -692,6 +692,7 @@ export interface ServeSessionContextStatus {
   };
 }
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface ServeContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -703,13 +704,14 @@ export interface ServeContextCategoryBreakdown {
   /** Startup prelude outside the skill listing. Absent from older servers. */
   startupContext?: number;
   /**
-   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * Independent conversation estimate after the startup prelude, never derived
+   * from or capped by totalTokens. When `totalTokens` is 0
    * (no provider count yet: after a model switch, `/restore` or a resume) this
    * is a local estimate of the history rather than 0, so the rows include the
    * conversation. Older servers report 0 there.
    */
   messages: number;
-  /** Provider total not accounted for by any category. Absent from older servers. */
+  /** @deprecated Legacy residual; accepted from old servers but no longer emitted or displayed. */
   unattributed?: number;
   /** Cached prefix tokens; an annotation that overlaps categories. Absent from older servers. */
   cachedTokens?: number;
@@ -1684,6 +1686,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   TodoCompleted: { description: 'When a todo item is marked as completed' },
   InstructionsLoaded: {
     description: 'When an instruction or context file is loaded',
+    matcherKind: 'filePath',
+  },
+  FileChanged: {
+    description: 'When a watched file is added, changed, or deleted',
     matcherKind: 'filePath',
   },
 };

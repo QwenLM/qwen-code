@@ -3,9 +3,11 @@ package com.alibaba.qwen.code.managedagent.preflight;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.FileSystemLoopException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayDeque;
@@ -22,12 +24,16 @@ import java.util.stream.Collectors;
 /**
  * The account the server runs as. Preflight often runs as root, which can
  * read every file, so it checks file access for this account from the
- * owners and modes instead. ACLs are not consulted.
+ * owners and modes instead, unless the account is root too. ACLs are not
+ * consulted.
  */
 final class ServiceAccount {
     private static final long LOOKUP_TIMEOUT_SECONDS = 5;
     // Linux's limit on symbolic links followed in one path lookup.
-    private static final int MAX_SYMBOLIC_LINKS = 40;
+    static final int MAX_SYMBOLIC_LINKS = 40;
+    // Whom the kernel lets read any file and enter any directory, whatever
+    // their modes.
+    private static final String SUPERUSER = "root";
 
     private final String name;
     private final Set<String> groups;
@@ -82,12 +88,38 @@ final class ServiceAccount {
         return groups;
     }
 
+    /** Whether the account is root, by its name. */
+    boolean superuser() {
+        return name.equals(SUPERUSER);
+    }
+
     /**
      * Whether the account can read the file. It must enter every directory
      * the kernel looks a name up in while it resolves the path: those on the
      * way to a symbolic link as well as those on the link's target.
      */
     boolean canRead(Path file) throws IOException {
+        return can(file, true);
+    }
+
+    /**
+     * Whether the account can enter the directory, to look a name up in it,
+     * as it must to read a file there.
+     */
+    boolean canEnter(Path directory) throws IOException {
+        return can(directory, false);
+    }
+
+    private boolean can(Path file, boolean read) throws IOException {
+        if (superuser()) {
+            // Root may wherever the file is; where it is not, nor may root.
+            try {
+                Files.readAttributes(file, BasicFileAttributes.class);
+            } catch (AccessDeniedException hidden) {
+                // This process cannot look; root can.
+            }
+            return true;
+        }
         Path absolute = file.toAbsolutePath();
         Path current = Objects.requireNonNull(absolute.getRoot(), "an absolute path has a root");
         Deque<Path> names = new ArrayDeque<>();
@@ -124,12 +156,13 @@ final class ServiceAccount {
                 names.addFirst(targetNames.get(index));
             }
         }
-        return allows(Files.readAttributes(current, PosixFileAttributes.class), true);
+        return allows(Files.readAttributes(current, PosixFileAttributes.class), read);
     }
 
-    // As the kernel does: the owner bits apply to the owner alone, then the
-    // group bits to any member, then the others bits.
-    boolean allows(PosixFileAttributes attributes, boolean read) {
+    // As the kernel does for an account other than root, which can() lets
+    // through first: the owner bits apply to the owner alone, then the group
+    // bits to any member, then the others bits.
+    private boolean allows(PosixFileAttributes attributes, boolean read) {
         Set<PosixFilePermission> permissions = attributes.permissions();
         if (attributes.owner().getName().equals(name)) {
             return permissions.contains(read ? PosixFilePermission.OWNER_READ : PosixFilePermission.OWNER_EXECUTE);

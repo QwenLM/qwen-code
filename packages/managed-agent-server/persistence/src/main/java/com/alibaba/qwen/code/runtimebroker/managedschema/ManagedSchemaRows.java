@@ -16,6 +16,7 @@ import java.util.Set;
 public final class ManagedSchemaRows {
     private static final Set<String> BOOLEANS = Set.of(
             "is_accepted_complete",
+            "is_activation_record",
             "is_archived",
             "is_cancel_requested",
             "is_csi_guard",

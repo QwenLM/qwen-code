@@ -140,7 +140,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the user/system-scoped `tools.lspEnabled` setting, its `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` env pair, or the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` and `tools.lspEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 > [!note]
 >
@@ -468,6 +468,8 @@ Commands for obtaining information and performing system settings.
 | `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
 | `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                               | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
 | `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
+| `/logout`        | Sign out of the active Qwen Subscription account (available with Qwen Subscription login)                                      | `/logout`                                                                           |
+| `/upgrade`       | Open Qwen subscription plans (available with Qwen Subscription login)                                                          | `/upgrade`                                                                          |
 | `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
 | → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
 | → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                              | `/doctor cpu-profile [--duration <seconds>]`                                        |

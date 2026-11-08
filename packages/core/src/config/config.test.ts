@@ -125,6 +125,7 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -316,6 +317,10 @@ vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.close = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.refreshFileWatchingForWorkingDirectory = vi
+    .fn()
+    .mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -1175,6 +1180,196 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  describe('subscription model switching', () => {
+    beforeEach(() => {
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account-a');
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getModels',
+      ).mockResolvedValue({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        cached: false,
+      });
+      stubContentGenerator();
+    });
+
+    afterEach(() => {
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockRestore();
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRestore();
+    });
+
+    const subscriptionConfig = async () => {
+      const config = makeConfig({
+        model: 'qwen3.8-max',
+        generationConfig: { reasoning: { effort: 'high' } },
+        modelProvidersConfig: { openai: [{ id: 'other-model' }] },
+      });
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      return config;
+    };
+
+    it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        model: 'qwen3.8-flash',
+        modalities: { image: true, video: true },
+        contextWindowSize: config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .find((model) => model.id === 'qwen3.8-flash')?.contextWindowSize,
+        reasoning: { effort: 'high' },
+      });
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
+
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(4);
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modalities: { image: true, video: true },
+        contextWindowSize: config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .find((model) => model.id === 'qwen3.8-max')?.contextWindowSize,
+        reasoning: { effort: 'high' },
+      });
+    });
+
+    it('reloads the catalog after the login identity changes', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refuses a model unavailable to the replacement account', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockResolvedValue({
+        models: ['qwen3.8-max'],
+        cached: false,
+      });
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('no longer available');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(config.getModel()).toBe('qwen3.8-max');
+    });
+
+    it('does not reuse the catalog after logout', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        undefined,
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRejectedValue(
+        new Error('session_changed'),
+      );
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('session_changed');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refreshes explicitly and when switching back from another provider', async () => {
+      const config = await subscriptionConfig();
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      await config.switchModel(AuthType.USE_OPENAI, 'other-model');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('invalidates reuse after a failed explicit catalog refresh', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockRejectedValueOnce(new Error('catalog rejected'));
+      await expect(config.refreshSubscriptionModels()).rejects.toThrow(
+        'catalog rejected',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('does not bind a catalog to a login that changed during refresh', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockImplementationOnce(async () => {
+        vi.mocked(
+          QwenSubscriptionSession.prototype.getIdentity,
+        ).mockReturnValue('account-b');
+        return { models: ['qwen3.8-max', 'qwen3.8-flash'], cached: false };
+      });
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+  });
+
+  it('clears active authentication and generators without erasing other providers', async () => {
+    const config = await initConfig({
+      modelProvidersConfig: {
+        openai: [
+          { id: 'saved-model', baseUrl: OPENAI_URL, envKey: 'SAVED_KEY' },
+        ],
+      },
+    });
+    stubContentGenerator();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const providers = config
+      .getModelsConfig()
+      .getAvailableModelsForAuthType(AuthType.USE_OPENAI);
+    config.setSubscriptionPlan('pro');
+    const worker = backgroundTask('logout-worker', 'Active member worker');
+    config.getBackgroundTaskRegistry().register(worker);
+    const listener = vi.fn();
+    config.onModelChange(listener);
+
+    config.clearAuth();
+
+    expect(config.getAuthType()).toBeUndefined();
+    expect(config.getCurrentAuthType()).toBeUndefined();
+    expect(config.getSubscriptionPlan()).toBeUndefined();
+    expect(worker.abortController.signal.aborted).toBe(true);
+    expect(() => config.getContentGenerator()).toThrow('Run /auth');
+    expect(
+      config.getContentGenerator({ allowUninitialized: true }),
+    ).toBeUndefined();
+    expect(() => config.getBaseLlmClient()).toThrow('not initialized');
+    expect(
+      config
+        .getModelsConfig()
+        .getAvailableModelsForAuthType(AuthType.USE_OPENAI),
+    ).toEqual(providers);
+    expect(listener).toHaveBeenCalled();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    expect(config.getContentGenerator()).toBeDefined();
+    expect(config.getAuthType()).toBe(AuthType.USE_GEMINI);
   });
 
   it('forwards usageStatisticsEnabled and proxy to the extension manager', () => {
@@ -6455,6 +6650,19 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('loads bootstrap hooks with file watching disabled', async () => {
+      const config = makeConfig();
+      await config.initialize({
+        skipFileWatching: true,
+        skipLlmInitialization: true,
+        skipMcpDiscovery: true,
+      });
+      expect(HookSystem).toHaveBeenCalled();
+      expect(config.getHookSystem()?.initialize).toHaveBeenCalledWith({
+        skipFileWatching: true,
+      });
+    });
+
     it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
       const config = makeConfig({ fileCheckpointingEnabled: true });
 
@@ -9322,6 +9530,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
+    const refreshFileWatchingForWorkingDirectory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    internals(config).hookSystem = { refreshFileWatchingForWorkingDirectory };
     Object.assign(config, {
       memoryRecallMode: 'structured',
       memoryRecallModeInitialized: true,
@@ -9345,6 +9557,7 @@ describe('Server Config (config.ts)', () => {
 
     await config.relocateWorkingDirectory(NEW_DIR);
 
+    expect(refreshFileWatchingForWorkingDirectory).toHaveBeenCalledOnce();
     expect(cwd.chdirSpy).toHaveBeenCalledWith(NEW_DIR);
     expect(config.getTargetDir()).toBe(NEW_DIR);
     expect(config.getProjectRoot()).toBe(NEW_DIR);
@@ -9478,6 +9691,7 @@ describe('Server Config (config.ts)', () => {
       '.runtime.json',
       '.worktree.json',
       '.pr.json',
+      '.title.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
@@ -10738,6 +10952,62 @@ describe('Server Config (config.ts)', () => {
           expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
         }
         expect(webSearchNotices(config)).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it.each([
+      [{}, true],
+      [{ safeMode: true }, false],
+      [{ bareMode: true }, false],
+      [{ webSearch: { enabled: false } }, false],
+      [{ disabledTools: [ToolNames.WEB_SEARCH] }, false],
+    ] satisfies Array<[Partial<ConfigParameters>, boolean]>)(
+      'registers subscription search while respecting restrictions %j',
+      async (overrides, expected) => {
+        vi.stubEnv('DEV', true);
+        process.env['DEV'] = 'true';
+        try {
+          await initConfig({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+            ...overrides,
+          });
+          expect(registeredToolNames().includes(ToolNames.WEB_SEARCH)).toBe(
+            expected,
+          );
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it('activates search immediately after login and removes it when switching away', async () => {
+      vi.stubEnv('DEV', true);
+      process.env['DEV'] = 'true';
+      try {
+        const config = await initConfig({
+          authType: AuthType.USE_GEMINI,
+          model: 'qwen3.8-max',
+        });
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+        vi.spyOn(config, 'refreshSubscriptionModels').mockResolvedValue({
+          models: ['qwen3.8-max'],
+          cached: false,
+        });
+        stubContentGenerator();
+        await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+        expect(registeredToolNames()).toContain(ToolNames.WEB_SEARCH);
+        expect(config.getGeminiClient().setTools).toHaveBeenCalled();
+
+        registerFactory().mockClear();
+        vi.mocked(ToolRegistry.prototype.unregisterTool).mockClear();
+        await config.refreshAuth(AuthType.USE_GEMINI);
+        expect(ToolRegistry.prototype.unregisterTool).toHaveBeenCalledWith(
+          ToolNames.WEB_SEARCH,
+        );
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
       } finally {
         vi.unstubAllEnvs();
       }
@@ -12876,7 +13146,13 @@ describe('Model Switching and Config Updates', () => {
         const config = await withHookSystem(hookSystem);
         const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
-        const response = await hookRequest(config, eventName, {});
+        const response = await hookRequest(
+          config,
+          eventName,
+          eventName === 'FileChanged'
+            ? { file_path: '/tmp/notes.md', event: 'change' }
+            : {},
+        );
 
         expect(warn).not.toHaveBeenCalledWith(
           expect.stringContaining('Unknown hook event'),
@@ -12888,6 +13164,44 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('direct-call hook events through the hook execution bridge', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'forwards a valid FileChanged %s input',
+      async (event) => {
+        const fireFileChangedEvent = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+        });
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', {
+          file_path: path.resolve('/memory/topic.md'),
+          event,
+        });
+        expect(response.success).toBe(true);
+        expect(fireFileChangedEvent).toHaveBeenCalledWith(
+          path.resolve('/memory/topic.md'),
+          event,
+          undefined,
+        );
+      },
+    );
+
+    it.each([
+      {},
+      { file_path: 'relative.md', event: 'change' },
+      { file_path: '/memory/topic.md', event: 'rename' },
+      { file_path: 1, event: 'add' },
+    ])(
+      'rejects invalid FileChanged input %j before dispatch',
+      async (input) => {
+        const fireFileChangedEvent = vi.fn();
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', input);
+        expect(response.success).toBe(false);
+        expect(fireFileChangedEvent).not.toHaveBeenCalled();
+      },
+    );
     const dispatch = async (
       method: string,
       fire: ReturnType<typeof vi.fn>,

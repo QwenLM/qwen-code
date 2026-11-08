@@ -1,0 +1,60 @@
+.content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--foreground);
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 13.67px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
+.content p {
+  margin: 0;
+}
+
+.message {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.success {
+  color: var(--success-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.muted {
+  color: var(--muted-foreground);
+}
+
+.linkGroup {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.desktopOption:focus-visible {
+  outline: none;
+}
+
+.link {
+  display: block;
+  width: 100%;
+  height: auto;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

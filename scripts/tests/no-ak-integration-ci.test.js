@@ -240,6 +240,7 @@ describe('no-AK integration CI wiring', () => {
       './interactive/workflow-intent.test.ts',
       './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
+      './interactive/mods-prompt-submit.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
       './interactive/tui-input-ownership.test.ts',
@@ -439,12 +440,40 @@ describe('no-AK integration CI wiring', () => {
       );
     }
 
+    // The gate runs as three shards over test_build's tree; the aggregate
+    // job carries the required check name and fails when the build or any
+    // shard fails.
     expect(gateJob).toContain(
+      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'",
+    );
+    expect(gateJob).toContain(
+      "    needs:\n      - 'classify_pr'\n      - 'test_build'\n",
+    );
+    expect(gateJob).toContain('        shard: [1, 2, 3]');
+    expect(gateJob).toContain(
+      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/3`,
+    );
+    const resultJob = getWorkflowJob(workflow, 'integration_no_ak_result');
+    expect(resultJob).toContain(
       "    name: 'Integration Tests (no-AK, No Sandbox)'",
     );
-    expect(gateJob).toContain("    needs: 'classify_pr'");
-    // Same runner routing as the Ubuntu gate, never a hard-coded pool.
-    expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
+    expect(resultJob).toContain(
+      "      - 'test_build'\n      - 'integration_no_ak'\n",
+    );
+    expect(resultJob).toContain(
+      'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
+    );
+    expect(
+      resultJob.split('\n').find((line) => line.startsWith('    if:')),
+    ).toBe(gateJob.split('\n').find((line) => line.startsWith('    if:')));
+    // Same trust class as lint (PR code on the pool, zero secrets by
+    // construction — 2026-11-02 extension of the 2026-10-31 decision),
+    // never a hard-coded pool. Pin the runs-on line itself: the timeout line
+    // also mentions lint_runner, so a bare substring stays green under a
+    // runs-on-only revert.
+    expect(gateJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner",
+    );
     const jobIf = gateJob
       .split('\n')
       .find((line) => line.startsWith('    if:'));
@@ -499,7 +528,9 @@ describe('no-AK integration CI wiring', () => {
     expect(trustedClassifier).toContain(
       'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
     );
-    expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
+    expect(trustedClassifier).toContain(
+      'docs_only|github_ci_only|java_only|full) ;;',
+    );
     expect(trustedClassifier).toContain('profile=full');
     // The classify_pr job output resolves against the step ID: renaming it
     // empties the output and every consumer silently falls back to `full` —
@@ -538,7 +569,12 @@ describe('no-AK integration CI wiring', () => {
       // steps.ci_profile.outputs.ci_profile, so every downstream profile
       // gate mis-compares; dropping the case line lets an unexpected
       // profile value pass through unnormalized.
-      expect(profileStep).toContain('docs_only|github_ci_only|full) ;;');
+      // java_only either passes through (the gate and test skip their
+      // steps on it) or, in lint_and_static, maps to its full payload.
+      expect(profileStep).toMatch(
+        /docs_only\|github_ci_only\|(?:java_only\|)?full\) ;;/,
+      );
+      expect(profileStep).toContain('java_only');
       expect(profileStep).toContain(
         'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
       );
@@ -596,19 +632,22 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
       gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
     );
+    // The job's first step publishes the run-unique HOME via GITHUB_ENV
+    // (2026-11-02 round-2: fork code starts at checkout/install, not at the
+    // gate — HOME/USERPROFILE are job-wide, not gate-scoped); the gate keeps
+    // QWEN_HOME + the key scrub.
     expect(gateStep).toContain(
-      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
+      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
-    expect(gateStep).toContain(
-      "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home'",
-    );
-    expect(gateStep).toContain(
-      "\n          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'",
-    );
+    // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
+    // gate must not re-pin them step-locally.
+    expect(gateStep).not.toContain('\n          HOME: ');
+    expect(gateStep).not.toContain('\n          USERPROFILE: ');
     for (const key of [
       'API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
       'ANTHROPIC_BASE_URL',
       'ANTHROPIC_MODEL',
       'BAILIAN_CODING_PLAN_API_KEY',
