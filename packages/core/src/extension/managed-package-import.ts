@@ -262,6 +262,34 @@ export async function prepareManagedPackageImport(
             );
         }
       }
+      const address = recipe.httpUrl ?? recipe.url;
+      if (address) {
+        const placeholder = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/gu;
+        const references = [...address.matchAll(placeholder)];
+        if (
+          address.split('${').length - 1 !== references.length ||
+          references.some((reference) => !declared.has(reference[1]))
+        )
+          invalid('MCP addresses require declared settings placeholders');
+        if (references.length > 0) {
+          const hydrated =
+            references.length === 1 && references[0][0] === address
+              ? 'https://placeholder.invalid'
+              : address.replace(placeholder, 'placeholder');
+          try {
+            parseManagedMcpRecipe({
+              ...recipe,
+              ...(recipe.httpUrl === undefined
+                ? { url: hydrated }
+                : { httpUrl: hydrated }),
+            });
+          } catch {
+            invalid(
+              'MCP addresses require declared settings placeholders and valid hydrated values',
+            );
+          }
+        }
+      }
       await fs.writeFile(
         path.join(root, 'qwen-extension.json'),
         JSON.stringify({

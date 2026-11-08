@@ -233,6 +233,39 @@ it('reviews actual package contents without publication, then installs once whil
   );
 });
 
+it('preserves the declared timeout when editing and republishing an MCP package', async () => {
+  const client = api();
+  const editingInspection: ManagedExtensionInspection = {
+    ...inspection,
+    mcpServers: [
+      {
+        ...inspection.mcpServers[0]!,
+        recipe: { ...inspection.mcpServers[0]!.recipe, timeout: 120 },
+      },
+    ],
+  };
+  client.previewPackage.mockResolvedValue(editingInspection);
+  await render(client, 'edit', 'mcp', vi.fn(), {
+    editing: { extensionId: pin.extensionId, inspection: editingInspection },
+  });
+  await edit('TOKEN', 'private-token');
+  await act(async () => {
+    button('Review package').click();
+    await vi.waitFor(() =>
+      expect(client.previewPackage).toHaveBeenCalledOnce(),
+    );
+  });
+  await act(async () => {
+    button('Install into current session').click();
+    await vi.waitFor(() => expect(client.apply).toHaveBeenCalledOnce());
+  });
+  const source = client.importPackage.mock.calls[0]?.[3] as unknown as Blob;
+  const document = JSON.parse(
+    new TextDecoder().decode(await source.arrayBuffer()),
+  );
+  expect(document.recipe.timeout).toBe(120);
+});
+
 it('keeps editing when apply has not become active', async () => {
   const client = api();
   client.previewPackage.mockResolvedValue({ ...inspection, settings: [] });

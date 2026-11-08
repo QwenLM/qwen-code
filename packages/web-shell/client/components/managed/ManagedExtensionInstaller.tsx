@@ -68,6 +68,7 @@ export function buildManagedMcpInput(input: {
   environment: string;
   headers: string;
   secretKeys: string[];
+  timeout?: number;
 }) {
   const settings = input.secretKeys.map((key) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key))
@@ -76,6 +77,13 @@ export function buildManagedMcpInput(input: {
   });
   if (new Set(input.secretKeys).size !== settings.length)
     throw new Error('Duplicate setting name.');
+  if (
+    input.timeout !== undefined &&
+    (!Number.isSafeInteger(input.timeout) ||
+      input.timeout < 1 ||
+      input.timeout > 600_000)
+  )
+    throw new Error('Invalid timeout.');
   const args: unknown = JSON.parse(input.args);
   if (!Array.isArray(args) || args.some((value) => typeof value !== 'string'))
     throw new Error('Arguments must be a string array.');
@@ -119,7 +127,10 @@ export function buildManagedMcpInput(input: {
       JSON.stringify({
         name: input.name,
         serverName: input.serverName,
-        recipe,
+        recipe:
+          input.timeout === undefined
+            ? recipe
+            : { ...recipe, timeout: input.timeout },
         settings,
       }),
     ],
@@ -154,6 +165,7 @@ export function ManagedExtensionInstaller(
   const [environment, setEnvironment] = useState('{}');
   const [headers, setHeaders] = useState('{}');
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
+  const [timeout, setTimeout] = useState<number>();
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [keepSettings, setKeepSettings] = useState(true);
   const [pending, setPending] = useState<ManagedExtensionInstallCommand>();
@@ -244,6 +256,9 @@ export function ManagedExtensionInstaller(
     setEnvironment(JSON.stringify(recipe['env'] ?? {}, null, 2));
     setHeaders(JSON.stringify(recipe['headers'] ?? {}, null, 2));
     setSecretKeys(inspection.settings.map((entry) => entry.envVar));
+    setTimeout(
+      typeof recipe['timeout'] === 'number' ? recipe['timeout'] : undefined,
+    );
     setTarget(
       `${inspection.manifest.target.platform}:${inspection.manifest.target.arch}`,
     );
@@ -284,6 +299,7 @@ export function ManagedExtensionInstaller(
     environment,
     headers,
     secretKeys,
+    timeout,
   ]);
   const previewMatches =
     preview?.identity === identity && preview.file === file;
@@ -306,6 +322,7 @@ export function ManagedExtensionInstaller(
           environment,
           headers,
           secretKeys,
+          timeout,
         })
       : file;
   const review = async () => {

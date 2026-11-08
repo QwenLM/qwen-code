@@ -152,6 +152,26 @@ describe('Managed package import', () => {
     expect(authored).not.toContain('fixture-private-token');
   });
 
+  it('accepts declared placeholders embedded in an MCP address', async () => {
+    const source = await input(
+      JSON.stringify({
+        name: 'example',
+        serverName: 'tools',
+        recipe: { httpUrl: 'https://mcp.example.test/${TENANT}/mcp' },
+        settings: [{ name: 'Tenant', envVar: 'TENANT' }],
+      }),
+      'mcp',
+    );
+    const result = await prepareManagedPackageImport(
+      source.file,
+      source.metadata,
+      { destination: path.join(temporary, 'output') },
+    );
+    expect(result.inspection.mcpServers[0]?.recipe.httpUrl).toBe(
+      'https://mcp.example.test/${TENANT}/mcp',
+    );
+  });
+
   it.each([
     {
       recipe: {
@@ -181,8 +201,20 @@ describe('Managed package import', () => {
       },
       settings: [],
     },
+    {
+      recipe: {
+        httpUrl: 'https://alice:s3cret@mcp.example.test/${TENANT}',
+      },
+      settings: [{ name: 'Tenant', envVar: 'TENANT' }],
+    },
+    {
+      recipe: {
+        httpUrl: 'https://mcp.example.test/${UNDECLARED}',
+      },
+      settings: [],
+    },
   ])(
-    'refuses literal or undeclared MCP env/header values before publication: $recipe',
+    'refuses literal or undeclared MCP credential values before publication: $recipe',
     async ({ recipe, settings }) => {
       const source = await input(
         JSON.stringify({

@@ -35,6 +35,9 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 final class AgentSessionPolicies {
+    private static final Set<String> EXTENSION_APPLY_PROFILES = Set.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP,
+            WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ);
+
     private final AgentEventJournal eventJournal;
     private final AgentSessionQueries sessionQueries;
     private final AgentStoreRows storeRows;
@@ -269,8 +272,7 @@ final class AgentSessionPolicies {
                 && operationId.equals(current.path("operationId").asText());
         if (lineage != null && mutation && (!same || !childExtensionBootstrapCommand(session, lineage).equals(current.path("command")))
                 || !workspaceFilesEnabled
-                || !Set.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ)
-                        .contains(session.toolProfile())) {
+                || !EXTENSION_APPLY_PROFILES.contains(session.toolProfile())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
         if (mutation) {
@@ -287,7 +289,7 @@ final class AgentSessionPolicies {
 
     boolean canApplyExtensions(SessionRecord session) {
         return workspaceFilesEnabled && "ACTIVE".equals(session.status())
-                && Set.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP).contains(session.toolProfile())
+                && EXTENSION_APPLY_PROFILES.contains(session.toolProfile())
                 && sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) == null
                 && !hasActiveTurn(session.tenantId(), session.sessionId());
     }

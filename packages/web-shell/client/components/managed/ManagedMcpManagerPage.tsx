@@ -233,7 +233,10 @@ function ManagedMcpManagerContent({
       server.serverId.startsWith(`${pin.extensionId}:`),
     );
   const openPackage = async (extensionId: string) => {
-    if (!provider.extensions?.inspect || !workspaceId) return;
+    if (!provider.extensions?.inspect || !workspaceId) {
+      setPackageError(true);
+      return;
+    }
     const pin =
       packages?.snapshot.extensions.find(
         (entry) => entry.extensionId === extensionId,
@@ -241,7 +244,10 @@ function ManagedMcpManagerContent({
       packages?.catalog.extensions.find(
         (entry) => entry.pin.extensionId === extensionId,
       )?.pin;
-    if (!pin) return;
+    if (!pin) {
+      setPackageError(true);
+      return;
+    }
     setPackageError(false);
     try {
       const inspection = await provider.extensions.inspect(workspaceId, pin, {
@@ -287,6 +293,17 @@ function ManagedMcpManagerContent({
     }
     return t(`managed.mcp.state.${entry.state}`);
   };
+  const canInstallPackages = Boolean(
+    packages?.catalog.selfService?.canPublish &&
+      packages.snapshot.selfService?.canApply &&
+      provider.extensions?.importPackage &&
+      provider.extensions.previewPackage &&
+      provider.extensions.lookupPackageOperation &&
+      provider.extensions.lookupApplyOperation &&
+      workspaceId &&
+      sessionId,
+  );
+  const canEditPackage = canInstallPackages && !!provider.extensions?.inspect;
 
   return (
     <div className="flex min-w-0 flex-col gap-5 pb-6" data-managed-mcp-manager>
@@ -328,59 +345,56 @@ function ManagedMcpManagerContent({
           </div>
         )}
       </div>
-      {packages?.catalog.selfService?.canPublish &&
-        packages.snapshot.selfService?.canApply &&
-        workspaceId &&
-        sessionId && (
-          <div className="grid gap-3">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setPackageEditor(undefined);
-                setShowInstaller((old) => !old);
+      {canInstallPackages && packages && workspaceId && sessionId && (
+        <div className="grid gap-3">
+          <Button
+            variant="outline"
+            onClick={() => {
+              setPackageEditor(undefined);
+              setShowInstaller((old) => !old);
+            }}
+          >
+            {t('managed.install.createMcp')}
+          </Button>
+          {showInstaller && (
+            <ManagedExtensionInstaller
+              key={packageEditor?.extensionId ?? 'new'}
+              provider={provider}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              catalog={packages.catalog}
+              snapshot={packages.snapshot}
+              initialKind="mcp"
+              editing={packageEditor}
+              onExitEdit={() => setPackageEditor(undefined)}
+              onChanged={() => {
+                void loadPackages().catch(() => setPackageError(true));
+                void management.refresh();
               }}
-            >
-              {t('managed.install.createMcp')}
-            </Button>
-            {showInstaller && (
-              <ManagedExtensionInstaller
-                key={packageEditor?.extensionId ?? 'new'}
-                provider={provider}
-                workspaceId={workspaceId}
-                sessionId={sessionId}
-                catalog={packages.catalog}
-                snapshot={packages.snapshot}
-                initialKind="mcp"
-                editing={packageEditor}
-                onExitEdit={() => setPackageEditor(undefined)}
-                onChanged={() => {
-                  void loadPackages().catch(() => setPackageError(true));
-                  void management.refresh();
-                }}
-              />
-            )}
-            {packages.catalog.extensions
-              .filter((entry) => entry.manifest.components.includes('mcp'))
-              .map((entry) => (
-                <div
-                  key={entry.pin.extensionId}
-                  className="flex flex-wrap items-center gap-2 rounded-md border p-3 text-sm"
+            />
+          )}
+          {packages.catalog.extensions
+            .filter((entry) => entry.manifest.components.includes('mcp'))
+            .map((entry) => (
+              <div
+                key={entry.pin.extensionId}
+                className="flex flex-wrap items-center gap-2 rounded-md border p-3 text-sm"
+              >
+                <span>{entry.manifest.name}</span>
+                <Badge variant="outline">
+                  {t('managed.install.packageSource')}
+                </Badge>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void openPackage(entry.pin.extensionId)}
                 >
-                  <span>{entry.manifest.name}</span>
-                  <Badge variant="outline">
-                    {t('managed.install.packageSource')}
-                  </Badge>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void openPackage(entry.pin.extensionId)}
-                  >
-                    {t('managed.install.editMcp')}
-                  </Button>
-                </div>
-              ))}
-          </div>
-        )}
+                  {t('managed.install.editMcp')}
+                </Button>
+              </div>
+            ))}
+        </div>
+      )}
       {packageError && (
         <Alert variant="destructive">
           <AlertDescription>
@@ -473,7 +487,7 @@ function ManagedMcpManagerContent({
                 <code className="break-all text-xs text-muted-foreground">
                   {server.definitionDigest}
                 </code>
-                {owned && (
+                {owned && canEditPackage && (
                   <div className="grid gap-2">
                     <p className="text-sm text-muted-foreground">
                       {t('managed.install.ownedMcp')}
@@ -486,7 +500,7 @@ function ManagedMcpManagerContent({
                     </Button>
                   </div>
                 )}
-                {server.state !== 'removed' && !owned && (
+                {server.state !== 'removed' && (!owned || !canEditPackage) && (
                   <div className="flex flex-wrap gap-2">
                     <Button
                       variant="outline"
