@@ -2007,10 +2007,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     public CompletionStage<Boolean> release(String harnessSessionId,
             String runtimeSessionId, boolean drain, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
-                "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
-                "runtimeSessionId");
+        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String runtimeId = BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
         CompletableFuture<SessionContext> local = bindingRegistry.session(runtimeId);
         if (local == null) {
             return releasedSession(harnessId, runtimeId, drain, authority);
@@ -2041,10 +2039,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      * here. Only the latest acquire's claim may hand the mount back, and a
      * lifecycle operation's window refuses it like the sibling release.
      * A Session with an active operation keeps its mount honestly, the
-     * same freeze the fleet promises while anything is unproven — every
-     * kind of unsettled row counts, background processes included (the
-     * drain excludes them because its sweep stops or settles them first,
-     * and this path runs no sweep). A settled execution whose capture
+     * same freeze the fleet promises while anything is unproven. An
+     * observe-only sweep first settles any background row whose exit it
+     * can prove — stopping nothing, because this handback is
+     * observe-and-hold (#13800), not a drain — and the busy check then
+     * re-reads without the exclusion, so a background row still live or
+     * unproven keeps the mount instead of being handed back over a
+     * running writer. A settled execution whose capture
      * never proved its writer stopped keeps the mount for good: the
      * operator-recovery family fences exactly that Workspace, and the
      * distinct refusal tells the caller that waiting settles nothing. The
@@ -2057,10 +2058,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             String runtimeSessionId, String mountClaimId,
             RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
-                "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
-                "runtimeSessionId");
+        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String runtimeId = BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
         String claimId = BrokerValues.requireId(mountClaimId, "mountClaimId");
         CompletableFuture<SessionContext> local = bindingRegistry.session(runtimeId);
         if (local == null) {
@@ -2082,24 +2081,17 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     throw conflict("runtime_session_conflict",
                             "Mount claim was superseded by a later acquire");
                 }
-                if (context.hasActiveControl()
-                        || executionRepository.hasActiveByRuntimeSession(
-                                context.binding().getBindingId(),
-                                context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("runtime_session_busy",
-                            "Runtime Session has an active operation");
-                }
-                if (executionRepository.hasUnprovenCaptureByRuntimeSession(
-                        context.binding().getBindingId(),
-                        context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("workspace_writer_unproven",
-                            "A settled execution never proved its writer stopped");
-                }
-                return safeStage(() -> transport.releaseMount(context.lease(),
-                        context.session())).toCompletableFuture();
             } finally {
                 context.unlock();
             }
+            // R17-2 / R18-1: observe the unproven background rows (stop nothing —
+            // observe-and-hold, #13800), then hand back under the claim/busy/
+            // unproven guard in releaseMountAfterSweep: a provable exit un-wedges
+            // a routine detach, a live or unproven row keeps the mount. Mount
+            // handback only — the owner id stays re-acquirable (R13-1).
+            return executionRecovery.settleUnprovenBackgroundRows(context, false)
+                    .thenCompose(ignored -> executionRecovery.releaseMountAfterSweep(
+                            context, claimId, runtimeId));
         });
     }
 

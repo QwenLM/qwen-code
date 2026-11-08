@@ -30,6 +30,7 @@ import type {
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import { FinishReason } from './genai-compat.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import {
   LlmChat,
@@ -9885,6 +9886,52 @@ describe('LlmChat', async () => {
         expectRecordedText(record, 'Analysis: the file contains the bug.');
         // Record and history must agree even though the send was abandoned.
         expect(historyText).toBe(recordedText(record));
+      });
+
+      it('preserves finishMessage on the deferred tool-result finish chunk', async () => {
+        vi.useFakeTimers();
+        chat.setHistory([
+          userText('read the file'),
+          content(
+            'model',
+            fnCall('read_file', { path: '/tmp/x' }, 'call_refusal'),
+          ),
+        ]);
+        mockStreamsOnce(
+          streamOf(textChunk('Request refused.'), {
+            candidates: [
+              {
+                finishReason: FinishReason.SAFETY,
+                finishMessage:
+                  'Response refused due to cyber-related safety policy.',
+              },
+            ],
+          } as GenerateContentResponse),
+        );
+
+        const events = await collectStreamWithFakeTimers(
+          await sendToolResult(
+            'call_refusal',
+            'prompt-deferred-finish-message',
+          ),
+          10_000,
+        );
+        const finish = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .map(
+            (event) =>
+              (event as { value: GenerateContentResponse }).value
+                .candidates?.[0],
+          )
+          .find((candidate) => candidate?.finishReason);
+
+        expect(finish).toEqual(
+          expect.objectContaining({
+            finishReason: FinishReason.SAFETY,
+            finishMessage:
+              'Response refused due to cyber-related safety policy.',
+          }),
+        );
       });
 
       /**

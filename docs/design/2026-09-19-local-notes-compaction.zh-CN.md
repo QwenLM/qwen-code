@@ -250,6 +250,10 @@ Cursor 绑定冻结的源快照和有效分支；rewind 或 transcript 替换使
 沿现有计数规则包含待发送用户输入、工具声明、上一轮输出以及恢复内容。
 不使用进程级 telemetry 总量，也不复制 Codex 特定模型的常量。
 
+`get_context_remaining` 是当前已发送上下文的诊断快照：有 provider 计数时，
+使用最近请求的输入与输出 token；尚未发送的输入及当前执行中的工具结果不计入。
+真正发送下一次请求前，预检查才会纳入该次 pending batch，不能把诊断值当成该请求的预算预留。
+
 | 情况                                   | Notes 模式行为                                                                                                                                       |
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 正常工作                               | 模型在有价值的阶段更新 notes，并可提前请求换窗口。                                                                                                   |
@@ -421,8 +425,8 @@ Strategy 字段缺失时沿用已有 summary/fast marker 行为，
 
 实现前已验证全局 CLI 基线。可重跑的本地测试与实现一起纳入版本控制：
 在 `packages/core` 运行
-`npx vitest run src/services/session-notes-service.test.ts src/services/session-history-service.test.ts src/core/llm-chat-notes.test.ts src/tools/session-context.test.ts`；
-在 `packages/cli` 运行 `npx vitest run src/acp-integration/session/Session.test.ts`。
+`npx vitest run src/services/session-notes-service.test.ts src/services/session-history-service.test.ts src/services/session-notes-lifecycle.test.ts src/services/session-history-edge-cases.test.ts src/core/llm-chat-notes.test.ts src/tools/session-context.test.ts`；
+在 `packages/cli` 运行 `npx vitest run src/acp-integration/session/Session.test.ts src/config/settingsSchema.test.ts`。
 先在仓库根目录运行 `npm run build && npm run typecheck`。
 这些检查验证协议与持久化行为；下述模型质量和成本比较仍是独立的验收项。
 

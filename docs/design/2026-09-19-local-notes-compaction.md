@@ -279,6 +279,12 @@ estimate. Include pending user input, tool declarations, previous output, and
 restoration content through the existing accounting rules. Do not use the
 process-global telemetry total or copy Codex's model-specific constants.
 
+`get_context_remaining` is a diagnostic snapshot of the context already sent.
+When provider counts exist, it uses the last request's input and output tokens;
+it excludes unsent input and the tool-result batch still being executed. The
+next request's preflight accounts for that pending batch. Do not treat the
+diagnostic as a reservation for the next request.
+
 | Situation                                    | Notes-mode behavior                                                                                                                                                                                                             |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Normal work                                  | The model updates notes at useful milestones and may request an early rollover.                                                                                                                                                 |
@@ -475,8 +481,8 @@ only registers tools on the normal path does not meet this contract.
 
 The global CLI baseline was verified before implementation. Reproducible local
 checks are tracked beside the implementation: from `packages/core`, run
-`npx vitest run src/services/session-notes-service.test.ts src/services/session-history-service.test.ts src/core/llm-chat-notes.test.ts src/tools/session-context.test.ts`;
-from `packages/cli`, run `npx vitest run src/acp-integration/session/Session.test.ts`.
+`npx vitest run src/services/session-notes-service.test.ts src/services/session-history-service.test.ts src/services/session-notes-lifecycle.test.ts src/services/session-history-edge-cases.test.ts src/core/llm-chat-notes.test.ts src/tools/session-context.test.ts`;
+from `packages/cli`, run `npx vitest run src/acp-integration/session/Session.test.ts src/config/settingsSchema.test.ts`.
 Run `npm run build && npm run typecheck` from the repository root first.
 These checks verify protocol and persistence behavior. The model-quality and
 cost comparison below remains a separate acceptance criterion.

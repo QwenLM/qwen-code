@@ -1089,6 +1089,8 @@ export interface AgentsCollabSettings {
   modelGrades?: Record<string, string>;
   /** Optional whitelist of model grades exposed to the Agent tool. */
   allowedGrades?: string[];
+  /** Default background mode for top-level regular subagents (default: true). */
+  defaultBackground?: boolean;
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.
@@ -3794,7 +3796,8 @@ export class Config {
     this.importFormat = params.importFormat ?? 'tree';
     this.chatCompression = params.chatCompression;
     if (
-      this.sessionExecutionEngine === 'managed' &&
+      (this.sessionExecutionEngine === 'managed' ||
+        !this.chatRecordingEnabled) &&
       this.chatCompression?.strategy === 'notes'
     ) {
       this.chatCompression = { ...this.chatCompression, strategy: 'summary' };

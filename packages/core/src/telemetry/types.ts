@@ -247,7 +247,10 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this.function_args =
       call.request.name === ToolNames.STRUCTURED_OUTPUT
         ? { ...STRUCTURED_OUTPUT_REDACTED_ARGS }
-        : call.request.args;
+        : call.request.name === ToolNames.SESSION_NOTES ||
+            call.request.name === ToolNames.SESSION_HISTORY
+          ? { __redacted: 'local session context' }
+          : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
     if (call.startTime !== undefined) this.started_at_ms = call.startTime;
     this.status = call.status;

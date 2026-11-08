@@ -44,6 +44,10 @@ interface HistoryCursor {
   action: 'list' | 'search';
 }
 
+function isRecordedMediaText(text: string): boolean {
+  return /^data:(?:[^,]*;base64,|(?:image|audio|video)\/[^,]*,)/iu.test(text);
+}
+
 function historyJson(value: unknown): string {
   return JSON.stringify(value, (key, entry: unknown) => {
     if (
@@ -56,6 +60,8 @@ function historyJson(value: unknown): string {
     )
       return undefined;
     if (/^(?:inline|file)[_-]?data$/iu.test(key))
+      return '[Recorded media omitted]';
+    if (key === 'b64_json' || key === 'bytesBase64Encoded')
       return '[Recorded media omitted]';
     if (
       entry &&
@@ -81,14 +87,17 @@ function historyJson(value: unknown): string {
         ('type' in entry && entry.type === 'base64'))
     )
       return '[Recorded media omitted]';
-    if (typeof entry === 'string' && /^data:[^;,]+;base64,/u.test(entry))
+    if (typeof entry === 'string' && isRecordedMediaText(entry))
       return '[Recorded media omitted]';
     return entry;
   });
 }
 
 function historyPartText(part: Part): string {
-  if (typeof part.text === 'string') return part.text;
+  if (typeof part.text === 'string')
+    return isRecordedMediaText(part.text)
+      ? '[Recorded media omitted]'
+      : part.text;
   if (part.functionCall) {
     return `${part.functionCall.name}\n${historyJson(part.functionCall.args ?? {})}`;
   }
@@ -247,9 +256,14 @@ export class SessionHistoryService {
       });
     }
 
-    const saved = request.cursor ? this.cursors.get(request.cursor) : undefined;
-    if (request.cursor && !saved)
+    const saved =
+      request.cursor !== undefined
+        ? this.cursors.get(request.cursor)
+        : undefined;
+    if (request.cursor !== undefined && !saved)
       throw new Error('History cursor expired. Start a new list or search.');
+    if (request.action === 'list' && request.query !== undefined)
+      throw new Error('Use search to filter history with a literal query.');
     if (
       saved &&
       (saved.action !== request.action ||

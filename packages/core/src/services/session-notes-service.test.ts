@@ -582,10 +582,20 @@ describe('local session notes', () => {
         'utf8',
       ),
     ).toContain('durable note');
-    vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(
-      new Error('sync failed'),
-    );
+    const writeLine = jsonl.writeLine;
+    let rejectedNotesWrite = false;
+    let assistantWritten = false;
+    vi.spyOn(jsonl, 'writeLine').mockImplementation(async (file, record) => {
+      if ((record as ChatRecord).subtype === 'session_notes') {
+        rejectedNotesWrite = true;
+        throw new Error('sync failed');
+      }
+      await writeLine(file, record);
+      if ((record as ChatRecord).type === 'assistant') assistantWritten = true;
+    });
     await expect(write('not committed')).rejects.toThrow('sync failed');
+    expect(assistantWritten).toBe(true);
+    expect(rejectedNotesWrite).toBe(true);
     await expect(notes.getNotesForHandoff()).rejects.toThrow('sync failed');
     expect((await reader.readNotesState(sessionId)).notes?.revision).toBe(
       recovered?.revision,

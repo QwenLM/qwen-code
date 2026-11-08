@@ -1111,7 +1111,32 @@ describe('UiTelemetryService', () => {
       });
     });
 
-    it('does not redact function_args for non-structured_output tools', () => {
+    it.each(['session_notes', 'session_history'])(
+      'redacts local context arguments for %s while preserving call metrics',
+      (name) => {
+        const call = createFakeCompletedToolCall(
+          name,
+          true,
+          250,
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+        call.request.args = {
+          action: 'write',
+          text: 'PRIVATE_NOTES',
+          query: 'PRIVATE_QUERY',
+        };
+        const event = new ToolCallEvent(call);
+        expect(event.function_args).toEqual({
+          __redacted: 'local session context',
+        });
+        expect(call.request.args['text']).toBe('PRIVATE_NOTES');
+        expect(event.function_name).toBe(name);
+        expect(event.duration_ms).toBe(250);
+        expect(event.success).toBe(true);
+      },
+    );
+
+    it('does not redact function_args for ordinary write_file calls', () => {
       const toolCall = createFakeCompletedToolCall(
         'write_file',
         true,

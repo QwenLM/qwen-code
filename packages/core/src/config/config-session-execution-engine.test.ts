@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
 import { ToolNames } from '../tools/tool-names.js';
+import * as debugLoggerModule from '../utils/debugLogger.js';
 import { LlmChat } from '../core/llm-chat.js';
 import {
   SessionExecutionEngineError,
@@ -276,6 +277,30 @@ it('falls back to summary for managed notes without changing the saved choice', 
   } finally {
     await config.closeSessionWriter();
   }
+});
+
+it('falls back to summary when recording is disabled without mutating the saved choice', () => {
+  const requested = { strategy: 'notes' as const, imageTokenEstimate: 1234 };
+  const warn = vi.fn();
+  const createLogger = debugLoggerModule.createDebugLogger;
+  vi.spyOn(debugLoggerModule, 'createDebugLogger').mockImplementation(
+    (tag) => ({
+      ...createLogger(tag),
+      warn,
+    }),
+  );
+  const config = createConfig({
+    chatRecording: false,
+    chatCompression: requested,
+  });
+  expect(config.getChatCompression()).toEqual({
+    strategy: 'summary',
+    imageTokenEstimate: 1234,
+  });
+  expect(requested.strategy).toBe('notes');
+  expect(warn).toHaveBeenCalledWith(
+    expect.stringContaining('using summary compression'),
+  );
 });
 
 it('reports a notes downgrade when policy disables a required context tool', async () => {

@@ -3002,7 +3002,13 @@ export const useLlmStream = (
           'Response stopped due to unexpected tool call.',
       };
 
-      const message = finishReasonMessages[finishReason];
+      // `finishMessage` is provider-authored free text; only the safety path
+      // curates it (Anthropic refusal details), so other reasons keep their
+      // maintained notice even if a provider fills the field (#9005).
+      const message =
+        (finishReason === FinishReason.SAFETY
+          ? event.value.finishMessage
+          : undefined) ?? finishReasonMessages[finishReason];
       if (message) {
         addItem(
           {

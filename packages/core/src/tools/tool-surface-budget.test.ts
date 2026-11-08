@@ -164,7 +164,7 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   [
     'session_history',
     (c) => new SessionContextTool(c, ToolNames.SESSION_HISTORY),
-    950,
+    1_150,
   ],
   [
     'session_notes',

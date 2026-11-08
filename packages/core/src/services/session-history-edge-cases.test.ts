@@ -121,17 +121,19 @@ describe('history snapshot and paging boundaries', () => {
       sessionId,
       () => 400,
     );
-    await append('user', [{ text: '中'.repeat(5000) }]);
-    let page = JSON.parse(await service.query({ action: 'list' }, signal));
-    for (let i = 0; i < 2 && page.nextCursor; i++) {
-      page = JSON.parse(
-        await service.query(
-          { action: 'list', cursor: page.nextCursor },
-          signal,
-        ),
-      );
-    }
-    expect(page.entries).toHaveLength(1);
+    await append('user', [{ text: 'FIRST ' + '中'.repeat(5000) }]);
+    await append('user', [{ text: 'SECOND ' + '中'.repeat(5000) }]);
+    const first = JSON.parse(await service.query({ action: 'list' }, signal));
+    expect(first.entries).toHaveLength(1);
+    expect(first.entries[0]).toMatchObject({ truncated: true });
+    expect(first.entries[0].text).toContain('FIRST');
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = JSON.parse(
+      await service.query({ action: 'list', cursor: first.nextCursor }, signal),
+    );
+    expect(second.entries).toHaveLength(1);
+    expect(second.entries[0].text).toContain('SECOND');
+    expect(second.nextCursor).toBeUndefined();
   });
   it('pages to evidence after an oversized record', async () => {
     await append('user', [{ text: 'before' }]);
@@ -162,6 +164,11 @@ describe('history snapshot and paging boundaries', () => {
   });
   it('omits raw provider video and base64 media bodies', async () => {
     for (const media of [
+      'data:text/plain;charset=utf-8;base64,' + 'YWJj'.repeat(1000),
+      'DATA:image/png;BASE64,' + 'YWJj'.repeat(1000),
+      'data:image/svg+xml;charset=utf-8,' + '<svg>YWJjYWJj</svg>',
+      { b64_json: 'YWJj'.repeat(1000) },
+      { bytesBase64Encoded: 'YWJj'.repeat(1000) },
       { type: 'video', data: 'YWJj'.repeat(1000) },
       { type: 'video_url', video_url: { url: 'YWJj'.repeat(1000) } },
       {
@@ -177,7 +184,7 @@ describe('history snapshot and paging boundaries', () => {
           functionResponse: {
             name: 'read_file',
             id: randomUUID(),
-            response: { media },
+            response: { media, error: 'HTTP_500_EVIDENCE' },
           },
         },
       ]);
@@ -186,8 +193,36 @@ describe('history snapshot and paging boundaries', () => {
         signal,
       );
       expect.soft(raw).not.toContain('YWJjYWJj');
+      expect.soft(raw).toContain('HTTP_500_EVIDENCE');
+      expect(JSON.parse(raw).entries[0].truncated).toBeUndefined();
     }
   });
+  it('omits a typed media URL in a text part without hiding plain text', async () => {
+    const media = await append('user', [
+      { text: 'DATA:image/png;charset=utf-8;BASE64,' + 'YWJj'.repeat(1000) },
+    ]);
+    const text = await append('user', [{ text: 'RECOVERY_KEY_12345' }]);
+    expect(
+      await service.query({ action: 'read', ref: media + ':0' }, signal),
+    ).not.toContain('YWJjYWJj');
+    expect(
+      await service.query({ action: 'read', ref: text + ':0' }, signal),
+    ).toContain('RECOVERY_KEY_12345');
+  });
+
+  it('rejects empty cursors and queries supplied to list', async () => {
+    await append('user', [{ text: 'ordinary evidence' }]);
+    await expect(
+      service.query({ action: 'list', cursor: '' }, signal),
+    ).rejects.toThrow('History cursor expired');
+    await expect(
+      service.query({ action: 'list', query: 'missing' }, signal),
+    ).rejects.toThrow('Use search');
+    expect(
+      JSON.parse(await service.query({ action: 'list' }, signal)).entries,
+    ).toHaveLength(1);
+  });
+
   it('exposes the actual literal search hit after a long prefix', async () => {
     await append('tool_result', [
       {

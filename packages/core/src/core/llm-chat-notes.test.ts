@@ -128,6 +128,24 @@ describe('notes compaction commit boundary', () => {
     expect(result.hardLimitHeadroom + result.estimatedInputTokens).toBe(105000);
   });
 
+  it('reports provider-counted context without reserving an unsent tool batch', () => {
+    const { chat } = fixture();
+    const before = chat.getContextRemaining().estimatedInputTokens;
+    chat.addHistory({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'read_file',
+            id: 'unsent-result',
+            response: { output: 'x'.repeat(40000) },
+          },
+        },
+      ],
+    });
+    expect(chat.getContextRemaining().estimatedInputTokens).toBe(before);
+  });
+
   it('Nov5 R2-16 counts an inflated notes fallback as a compression failure', async () => {
     const { chat } = fixture();
     chat.setLastPromptTokenCount(115000, false);

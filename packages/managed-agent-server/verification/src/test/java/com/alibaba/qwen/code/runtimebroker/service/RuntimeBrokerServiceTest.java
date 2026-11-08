@@ -557,8 +557,9 @@ class RuntimeBrokerServiceTest {
                     ((Map<?, ?>) settled.getResult().get("capture"))
                             .get("captureStatus"));
             // The main row settles on the detached evidence; the process
-            // row it admitted stays active — and THIS path runs no sweep,
-            // so it keeps the mount, unlike the drain's excluded set.
+            // row it admitted stays active — the observe-only sweep stops
+            // nothing and cannot prove its exit, so the un-excluded re-read
+            // keeps the mount, unlike the drain's excluded set.
             assertTrue(fixture.executionRepository.hasActiveByRuntimeSession(
                     prepared.getBindingId(), prepared.getRuntimeGeneration(),
                     "holder"));

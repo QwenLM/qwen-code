@@ -1982,6 +1982,20 @@ describe('SessionService', () => {
       if (sourcePath.toString().endsWith(ext)) throw new Error(message);
       return undefined;
     });
+  it.each(['archive', 'unarchive'] as const)(
+    '%s conflict repair removes only the dropped notes projection',
+    async (kind) => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      existsFor(`${sessionIdA}.notes.md`);
+      const m = mirror(kind);
+      const result = await m.run({ resolveConflicts: true });
+      expect(result.errors).toEqual([]);
+      expect(result.resolvedConflicts).toEqual([sessionIdA]);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(m.from('.notes.md'));
+      expect(unlinkSyncSpy).not.toHaveBeenCalledWith(m.to('.notes.md'));
+    },
+  );
+
   const mirrored = {
     movesPrSidecar: async (kind: MoveKind) => {
       const m = seeded(kind);
