@@ -2381,7 +2381,7 @@ describe('DiscoveredMCPTool', () => {
     // Every call fails with `error` under `status`; nothing reconnects.
     const expectNoRetry = async (status: MCPServerStatus, error: Error) => {
       const retryClient = okClient();
-      const { config, discoverToolsForServer, ensureTool } = registry({
+      const { config, discoverToolsForServer } = registry({
         ensured: mkTool({ client: retryClient }),
       });
       updateMCPServerStatus(serverName, status);
@@ -2395,7 +2395,6 @@ describe('DiscoveredMCPTool', () => {
 
       expect(client.callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).not.toHaveBeenCalled();
-      expect(ensureTool).not.toHaveBeenCalled();
       expect(retryClient.callTool).not.toHaveBeenCalled();
     };
     // The first call fails with `error` under `status`; the reconnect runs.
@@ -2931,6 +2930,79 @@ describe('DiscoveredMCPTool', () => {
       await expectNoRetry(MCPServerStatus.DISCONNECTED, abortError);
     });
 
+    // A cancelled call must not be replayed, but the connection it tore down
+    // is still repairable: otherwise every later MCP call in a session that
+    // survives the cancel inherits the dead transport (issue #12160).
+    it('repairs the connection after an abort leaves the server disconnected', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+              updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+            }),
+        ),
+      };
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('does not repair the connection when the abort left it connected', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+              updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+            }),
+        ),
+      };
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
     it('should not reconnect for an MCP isError result', async () => {
       const initialClient: McpDirectClient = {
         callTool: vi.fn().mockResolvedValueOnce({
@@ -3113,7 +3185,11 @@ describe('DiscoveredMCPTool', () => {
 
       const rejection = await executePromise.catch((error) => error);
       expect(rejection).toMatchObject({ name: 'AbortError' });
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      // Repaired, not replayed: the cancelled request is not re-issued, but
+      // the transport the abort tore down is re-initialized so the next call
+      // in this session does not inherit it (issue #12160).
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(client.callTool).toHaveBeenCalledTimes(1);
       expect(rejection).not.toMatchObject({
         errorType: ToolErrorType.EXECUTION_TIMEOUT,
       });
