@@ -1,5 +1,7 @@
 # Channel Named Sessions: Part 4B
 
+[English](channel-named-sessions-part4b.md) | [简体中文](channel-named-sessions-part4b.zh-CN.md)
+
 ## Status
 
 Proposed. Parts 1, 2, 3A, 3B, and 4A are merged. This design is the final
@@ -821,15 +823,15 @@ supersededBy?: string; // on the old sidecar: the replacement that owns the work
 supersedes?: string; // on the new sidecar: the session it replaced
 ```
 
-The forward link is the redirect signal read on restore — read on its own,
-before any marker or reverse-link read, so a redirect names a candidate owner
-rather than a proven one (see the redirect section below). The reverse link
-makes a reset retry's resume check bidirectional, so a `supersededBy` value
-is only acted on when the session it names also claims to replace `S_old` for
-the same worktree. `isValidWorktreeSession` accepts both as optional strings.
-Readers that do not know the fields ignore them. Only the daemon route writes
-them; only the restore/reset paths read them. The registry, the marker
-format, and the sidecar's versionless shape otherwise stay unchanged.
+The `supersededBy` link is the redirect signal read on restore — read on its
+own, before any marker or `supersedes` read, so a redirect names a candidate
+owner rather than a proven one (see the redirect section below). The
+`supersedes` link makes a reset retry's resume check bidirectional, so a
+`supersededBy` value is only acted on when the session it names also claims to
+replace `S_old` for the same worktree. `isValidWorktreeSession` accepts both as
+optional strings. Readers that do not know the fields ignore them. Only the
+daemon route writes them; only the restore/reset paths read them. The registry,
+the marker format, and the sidecar's versionless shape otherwise stay unchanged.
 
 ### Missing-marker restore signal
 
