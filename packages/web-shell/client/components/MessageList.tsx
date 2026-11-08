@@ -830,9 +830,10 @@ function findFinalAnswerIndexForDisplay(
   start: number,
   end: number,
 ): number {
-  // Never elect a notification row as an answer: the collapse renders what this
-  // returns, and a `background_notification` row would publish raw notice text
-  // as the model's reply.
+  // A `background_notification` row stays a candidate here: a turn whose only
+  // content is the notification (no assistant reply) must still render its
+  // result instead of nothing. The marker rule below is what keeps a real
+  // reply from being replaced by a notice.
   const answerIdx = findFinalAnswerIndex(items, start, end, true);
   if (answerIdx < 0) return answerIdx;
   let markerIdx = -1;
