@@ -8,6 +8,7 @@ import {
   measureToolOutput,
   getToolOutputProvenance,
   updateToolOutputBudget,
+  type ToolOutputBudgetSource,
 } from './tool-output-size.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
 import { ToolResultSizeEvent } from '../telemetry/types.js';
@@ -26,9 +27,15 @@ import {
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+  type ToolOutputRecovery,
+} from './tool-output-recovery.js';
 import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
+const TOOL_OUTPUT_TRUNCATED_NOTICE = 'Tool output truncated.';
 
 export interface ToolResponseBudgetEntry {
   callId: string;
@@ -105,7 +112,66 @@ type TextSlot = {
   field: 'text' | 'output' | 'error';
   text: string;
   protectedPrefix?: string;
+  recovery?: ToolOutputRecovery;
 };
+
+function recoveryOf(
+  entry: ToolResponseBudgetEntry,
+  part: Part,
+): ToolOutputRecovery {
+  const recovery = getToolOutputRecovery(part);
+  return {
+    ...recovery,
+    persistedOutputFiles:
+      entry.persistedOutputFiles ?? recovery?.persistedOutputFiles,
+  };
+}
+
+function recoveryHeader(files: string[] | undefined): string {
+  return files?.length
+    ? files.length === 1
+      ? `Tool output truncated. Persisted tool-output artifact: ${files[0]}`
+      : `Tool output truncated. Persisted tool-output artifacts:\n${files.map((file) => `- ${file}`).join('\n')}`
+    : TOOL_OUTPUT_TRUNCATED_NOTICE;
+}
+
+function minimumRecoveryBudget(slot: TextSlot): number {
+  const text = slot.recovery?.text;
+  return (
+    recoveryHeader(slot.recovery?.persistedOutputFiles).length +
+    (text ? text.length + 2 : 0) +
+    3
+  );
+}
+
+function isBudgetExemptOutputName(name: string | undefined): boolean {
+  const canonical = canonicalToolName(name ?? '');
+  return (
+    canonical === ToolNames.SEARCH_MEMORY || canonical === ToolNames.TOOL_SEARCH
+  );
+}
+
+/**
+ * Whether `enforceFunctionResponseBudget` shortens text in this part. Derived
+ * from `collectTextSlots` itself, so a caller that charges a batch of results
+ * against a token headroom holds out exactly the text the budget will not
+ * shorten — exempt output, empty output, output the plan-mode lifecycle prefix
+ * covers entirely, and nested media (which is not text) are counted as input
+ * instead. A hand-written mirror of those rules drifts from them silently.
+ *
+ * The synthetic entry is the send boundary's own: `enforceFunctionResponseBudget`
+ * collects with `includeTopLevelText = false` and one entry named
+ * `tool-response-batch`, so the entry-level exemption never applies and the
+ * skip is decided by each part's own tool name.
+ */
+export function isBudgetShrinkablePart(part: Part): boolean {
+  return (
+    collectTextSlots(
+      [{ callId: '', toolName: '', responseParts: [part] }],
+      false,
+    ).length > 0
+  );
+}
 
 function collectTextSlots(
   entries: ToolResponseBudgetEntry[],
@@ -124,12 +190,17 @@ function collectTextSlots(
     const parts = entry.responseParts;
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex];
+      if (entry.persistedOutputFiles !== undefined) {
+        setToolOutputRecovery(part, recoveryOf(entry, part));
+      }
       if (includeTopLevelText && typeof part.text === 'string') {
+        const recovery = recoveryOf(entry, part);
         slots.push({
           entryIndex,
           partIndex,
           field: 'text',
           text: part.text,
+          recovery,
         });
       }
       const response = part.functionResponse?.response;
@@ -139,9 +210,7 @@ function collectTextSlots(
         part.functionResponse?.name ?? entry.toolName,
       );
       const budgetExemptOutput =
-        excludeBudgetExemptOutput &&
-        (responseName === ToolNames.SEARCH_MEMORY ||
-          responseName === ToolNames.TOOL_SEARCH);
+        excludeBudgetExemptOutput && isBudgetExemptOutputName(responseName);
       if (typeof output === 'string' && !budgetExemptOutput) {
         const protectedPrefix = excludeBudgetExemptOutput
           ? getPlanModeLifecyclePrefix(
@@ -153,21 +222,25 @@ function collectTextSlots(
           ? output.slice(protectedPrefix.length)
           : output;
         if (budgetedOutput.length > 0) {
+          const recovery = recoveryOf(entry, part);
           slots.push({
             entryIndex,
             partIndex,
             field: 'output',
             text: budgetedOutput,
             ...(protectedPrefix ? { protectedPrefix } : {}),
+            recovery,
           });
         }
       }
       if (typeof error === 'string') {
+        const recovery = recoveryOf(entry, part);
         slots.push({
           entryIndex,
           partIndex,
           field: 'error',
           text: error,
+          recovery,
         });
       }
     }
@@ -232,31 +305,50 @@ function fitText(
   text: string,
   maxChars: number,
   persistedOutputFiles: string[] | undefined,
+  recovery?: ToolOutputRecovery,
 ): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
 
+  const preserved = recovery?.text ?? '';
+  const preservedSize = preserved ? preserved.length + 2 : 0;
+  const pointer = recoveryHeader(persistedOutputFiles);
+  // A pointer too long to deliver in full is dropped rather than sent as a
+  // partial path, so the preview is budgeted against the notice that is sent.
   const header =
-    persistedOutputFiles && persistedOutputFiles.length > 0
-      ? persistedOutputFiles.length === 1
-        ? `Tool output truncated. Persisted tool-output artifact: ${persistedOutputFiles[0]}`
-        : `Tool output truncated. Persisted tool-output artifacts:\n${persistedOutputFiles
-            .map((file) => `- ${file}`)
-            .join('\n')}`
-      : 'Tool output truncated.';
-  if (header.length >= maxChars) {
-    return sliceStartWithoutBrokenSurrogate(header, maxChars);
+    pointer.length + preservedSize + 3 <= maxChars
+      ? pointer
+      : TOOL_OUTPUT_TRUNCATED_NOTICE;
+  if (header.length > maxChars) {
+    return sliceStartWithoutBrokenSurrogate(
+      TOOL_OUTPUT_TRUNCATED_NOTICE,
+      maxChars,
+    );
   }
 
   const separator = '\n\n';
   const marker = '\n...\n';
-  const previewBudget = maxChars - header.length - separator.length;
+  let body = text;
+  // Remove only producer-owned data, never recognize handles in tool text.
+  for (const owned of [
+    pointer,
+    preserved,
+    ...(recovery?.persistedOutputFiles ?? []),
+  ]) {
+    if (owned) body = body.split(owned).join('');
+  }
+  const preservedBlock = preserved ? `${separator}${preserved}` : '';
+  const previewBudget =
+    maxChars - header.length - preservedBlock.length - separator.length;
   if (previewBudget <= 0) {
-    return sliceStartWithoutBrokenSurrogate(header, maxChars);
+    return header;
+  }
+  if (body.length <= previewBudget) {
+    return `${header}${preservedBlock}${separator}${body}`;
   }
   if (previewBudget <= marker.length) {
-    return `${header}${separator}${sliceStartWithoutBrokenSurrogate(
-      text,
+    return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+      body,
       previewBudget,
     )}`;
   }
@@ -264,10 +356,10 @@ function fitText(
   const contentBudget = previewBudget - marker.length;
   const headBudget = Math.floor(contentBudget / 5);
   const tailBudget = contentBudget - headBudget;
-  return `${header}${separator}${sliceStartWithoutBrokenSurrogate(
-    text,
+  return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+    body,
     headBudget,
-  )}${marker}${sliceEndWithoutBrokenSurrogate(text, tailBudget)}`;
+  )}${marker}${sliceEndWithoutBrokenSurrogate(body, tailBudget)}`;
 }
 
 function replaceTextSlots(
@@ -285,22 +377,25 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
+    const files =
+      entry.persistedOutputFiles ?? slot.recovery?.persistedOutputFiles;
+    const recovery = { ...slot.recovery, persistedOutputFiles: files };
+    // The header path is the entry's persisted artifact — data this module
+    // wrote, never a string recovered from model-visible text.
     const replacement = fitText(
       slot.text,
       allocations[index],
-      entry.persistedOutputFiles,
+      files,
+      slot.recovery,
     );
 
+    const updated = { ...part };
     if (slot.field === 'text') {
-      entry.responseParts[slot.partIndex] = { ...part, text: replacement };
-      continue;
-    }
-
-    const functionResponse = part.functionResponse;
-    if (!functionResponse) continue;
-    entry.responseParts[slot.partIndex] = {
-      ...part,
-      functionResponse: {
+      updated.text = replacement;
+    } else {
+      const functionResponse = part.functionResponse;
+      if (!functionResponse) continue;
+      updated.functionResponse = {
         ...functionResponse,
         response: {
           ...functionResponse.response,
@@ -308,8 +403,10 @@ function replaceTextSlots(
             ? `${slot.protectedPrefix}${replacement}`
             : replacement,
         },
-      },
-    };
+      };
+    }
+    setToolOutputRecovery(updated, recovery);
+    entry.responseParts[slot.partIndex] = updated;
   }
 
   return result;
@@ -323,23 +420,53 @@ export function toolResponseTextLength(parts: Part[]): number {
   ).reduce((total, slot) => total + slot.text.length, 0);
 }
 
+export function minimumFunctionResponseContent(parts: Part[]): {
+  parts: Part[];
+  budgetedChars: number;
+} {
+  const entries = [{ callId: '', toolName: '', responseParts: parts }];
+  const slots = collectTextSlots(entries, false);
+  const allocations = slots.map((slot) =>
+    slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length
+      ? Math.min(slot.text.length, minimumRecoveryBudget(slot))
+      : 0,
+  );
+  return {
+    parts: replaceTextSlots(entries, slots, allocations)[0].responseParts,
+    budgetedChars: allocations.reduce((sum, value) => sum + value, 0),
+  };
+}
+
 export function enforceFunctionResponseBudget(
   entries: ToolResponseBudgetEntry[],
   budget: number,
+  allowZeroBudget = false,
+  stampProvenance = true,
 ): ToolResponseBudgetEntry[] {
-  if (!Number.isFinite(budget) || budget <= 0) return entries;
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && !allowZeroBudget)
+  )
+    return entries;
   const slots = collectTextSlots(entries, false);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
 
-  const reduced = replaceTextSlots(
-    entries,
-    slots,
-    allocateTextBudget(
-      slots.map((slot) => slot.text.length),
-      budget,
-    ),
+  const allocations = allocateTextBudget(
+    slots.map((slot) => slot.text.length),
+    budget,
   );
+  if (
+    slots.some(
+      (slot, index) =>
+        slot.text.length > allocations[index] &&
+        (slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length) &&
+        allocations[index] < minimumRecoveryBudget(slot),
+    )
+  )
+    return entries;
+  const reduced = replaceTextSlots(entries, slots, allocations);
   for (let index = 0; index < reduced.length; index++)
     for (
       let partIndex = 0;
@@ -349,7 +476,7 @@ export function enforceFunctionResponseBudget(
       const part = reduced[index].responseParts[partIndex];
       // Attribute this fallback to the model send policy, including when a
       // Hosted Skill applies it before saving its model-facing result.
-      if (part !== entries[index].responseParts[partIndex])
+      if (stampProvenance && part !== entries[index].responseParts[partIndex])
         updateToolOutputBudget([part], budget, 'send_guard');
     }
   return reduced;
@@ -361,6 +488,10 @@ export async function finalizeToolResponses(
   promptIds?: ReadonlyMap<string, string>,
   observeBoundary = true,
   associateBoundary = false,
+  budgetOverride?: number,
+  includeTopLevelText = true,
+  budgetSource: ToolOutputBudgetSource = 'batch',
+  logResultSize = true,
 ): Promise<ToolResponseBudgetEntry[]> {
   const shouldAssociateBoundary = observeBoundary && associateBoundary;
   const associatedEntryIndexes = observeBoundary
@@ -396,15 +527,21 @@ export async function finalizeToolResponses(
     );
   };
   const budget =
-    config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
-  if (!Number.isFinite(budget) || budget <= 0) {
+    budgetOverride ??
+    config.getToolOutputBatchBudget?.() ??
+    Number.POSITIVE_INFINITY;
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && budgetOverride === undefined)
+  ) {
     observeUnchangedEntries();
     if (shouldAssociateBoundary)
       associateFinalizerEntries(entries, new Set(entries.keys()));
     return entries;
   }
 
-  const slots = collectTextSlots(entries);
+  const slots = collectTextSlots(entries, includeTopLevelText);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
     observeUnchangedEntries();
@@ -417,6 +554,25 @@ export async function finalizeToolResponses(
     slots.map((slot) => slot.text.length),
     budget,
   );
+  if (
+    slots.some(
+      (slot, index) =>
+        slot.text.length > allocations[index] &&
+        // `fitText` spends the allocation on the notice and its separator
+        // first, so anything below notice + '\n\n' + one character would
+        // persist an artifact and then send a contentless notice.
+        (budgetOverride !== undefined ||
+          slot.recovery?.text ||
+          slot.recovery?.persistedOutputFiles?.length) &&
+        allocations[index] < minimumRecoveryBudget(slot),
+    )
+  ) {
+    // Compaction owns headroom too small for a meaningful tool result.
+    observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
+    return entries;
+  }
   const entriesToPersist = new Set<number>();
   for (let index = 0; index < slots.length; index++) {
     if (slots[index].text.length > allocations[index]) {
@@ -453,7 +609,19 @@ export async function finalizeToolResponses(
   const usedCallIds = new Set<string>();
   for (const entryIndex of entriesToPersist) {
     const entry = withPersistence[entryIndex];
-    if (entry.persistedOutputFiles !== undefined) continue;
+    const previousFiles =
+      entry.persistedOutputFiles ??
+      entry.responseParts
+        .map(getToolOutputRecovery)
+        .find((recovery) => recovery?.persistedOutputFiles !== undefined)
+        ?.persistedOutputFiles;
+    if (previousFiles !== undefined) {
+      withPersistence[entryIndex] = {
+        ...entry,
+        persistedOutputFiles: previousFiles,
+      };
+      continue;
+    }
     const content = slots
       .filter((slot) => slot.entryIndex === entryIndex)
       .map((slot) => slot.text)
@@ -510,8 +678,9 @@ export async function finalizeToolResponses(
     ) {
       const part = entry.responseParts[partIndex];
       if (part !== entries[index].responseParts[partIndex])
-        updateToolOutputBudget([part], budget, 'batch');
+        updateToolOutputBudget([part], budget, budgetSource);
     }
+    if (!logResultSize) continue;
     try {
       // Measurement is part of the observation: an estimator throw must not
       // fail the finalizer it only observes.
@@ -533,7 +702,7 @@ export async function finalizeToolResponses(
           after.estimatedTokens,
           true,
           budget,
-          'batch',
+          budgetSource,
           entry.callId,
           promptIds?.get(entry.callId),
         ),
@@ -554,10 +723,10 @@ export async function finalizeToolResponses(
   if (shouldAssociateBoundary) {
     associateFinalizerEntries(finalized, new Set(finalized.keys()));
   }
-  const finalizedTotal = collectTextSlots(finalized).reduce(
-    (sum, slot) => sum + slot.text.length,
-    0,
-  );
+  const finalizedTotal = collectTextSlots(
+    finalized,
+    includeTopLevelText,
+  ).reduce((sum, slot) => sum + slot.text.length, 0);
   debugLogger.info(
     `Tool response budget (${budget} chars): reduced ${entriesToPersist.size} result(s) from ${total} to ${finalizedTotal} chars.`,
   );

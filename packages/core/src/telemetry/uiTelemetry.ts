@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -116,6 +117,27 @@ export interface ModelMetrics extends ModelMetricsCore {
   bySource: Record<string, ModelMetricsCore>;
 }
 
+/** One timed, non-internal response, for the per-request speed timeline. */
+export interface RequestTimingSample {
+  /** Event time, epoch ms. */
+  at: number;
+  ttftMs: number;
+  /** Generation window; below 100 ms it measures no output rate. */
+  generationMs: number;
+  outputTokens: number;
+  /** Subagent that issued the request; absent for the main conversation. */
+  source?: string;
+}
+
+/** One failed API call. */
+export interface RequestFailureSample {
+  /** Event time, epoch ms. */
+  at: number;
+  /** HTTP status code, else error type, else `unknown`. */
+  kind: string;
+  source?: string;
+}
+
 /**
  * Model totals for the daemon stats route. Generation timing lives here, not
  * in `ModelMetrics`, because `models` is also written to managed usage records
@@ -123,12 +145,39 @@ export interface ModelMetrics extends ModelMetricsCore {
  */
 export interface StatsModelMetrics extends ModelMetricsCore {
   generation?: GenerationMetrics;
+  /** Most recent timed responses, oldest first, capped at `MAX_TIMING_SAMPLES`. */
+  timingSamples?: RequestTimingSample[];
+  /** Failed calls by kind, and the most recent ones (oldest first). */
+  failures?: {
+    byKind: Record<string, number>;
+    recent: RequestFailureSample[];
+  };
+}
+
+/** Per-model response timeline length kept for the stats route. */
+export const MAX_TIMING_SAMPLES = 200;
+/** Per-model failure timeline length kept for the stats route. */
+export const MAX_FAILURE_SAMPLES = 50;
+
+function eventTime(event: { 'event.timestamp'?: string }): number {
+  const parsed = Date.parse(event['event.timestamp'] ?? '');
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function pushCapped<T>(list: T[], item: T, cap: number): void {
+  list.push(item);
+  if (list.length > cap) list.splice(0, list.length - cap);
 }
 
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
   /** Provider-normalized model totals exposed by the daemon stats route. */
   statsModels?: Record<string, StatsModelMetrics>;
+  /** Per-event output estimates; absent for models restored from raw-only history. */
+  billableOutputTokens?: Record<
+    string,
+    { total: number; bySource: Record<string, number> }
+  >;
   generation?: GenerationMetrics;
   /**
    * Per-instance subagent metadata (invocation id → business name + agent
@@ -214,6 +263,28 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
       Object.create(null) as NonNullable<SessionMetrics['statsModels']>,
       clone.statsModels,
     );
+    for (const model of Object.values(clone.statsModels)) {
+      if (model.failures) {
+        model.failures.byKind = Object.assign(
+          Object.create(null) as Record<string, number>,
+          model.failures.byKind,
+        );
+      }
+    }
+  }
+  if (clone.billableOutputTokens) {
+    clone.billableOutputTokens = Object.assign(
+      Object.create(null) as NonNullable<
+        SessionMetrics['billableOutputTokens']
+      >,
+      clone.billableOutputTokens,
+    );
+    for (const model of Object.values(clone.billableOutputTokens)) {
+      model.bySource = Object.assign(
+        Object.create(null) as Record<string, number>,
+        model.bySource,
+      );
+    }
   }
   return clone;
 };
@@ -224,6 +295,9 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   totalFail: 0,
   byName: {},
 });
+
+/** Shortest generation window that counts toward output speed. */
+const MIN_THROUGHPUT_WINDOW_MS = 100;
 
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
@@ -238,14 +312,23 @@ const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
     event.input_token_count > 0
       ? event.input_token_count
       : event.cached_content_token_count;
-  const thoughtsIncludedInOutput =
-    event.auth_type === 'openai' || event.auth_type === 'qwen-oauth';
   return (
     input +
     event.output_token_count +
-    (thoughtsIncludedInOutput ? 0 : event.thoughts_token_count)
+    (outputIncludesThoughts(event.auth_type) ? 0 : event.thoughts_token_count)
   );
 };
+
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
 
 const getLegacySubagentId = (
   event: { prompt_id?: string; subagent_name?: string },
@@ -363,6 +446,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      event,
     });
   }
 
@@ -408,6 +492,9 @@ export class UiTelemetryService extends EventEmitter {
       ...createInitialMetrics(),
       models,
     }).models;
+    // Raw history has no per-event convention. Never replace its full estimate
+    // with an authoritative count containing only subsequent live requests.
+    delete metrics.billableOutputTokens;
     this.#sessionMetrics.set(sessionId, metrics);
     this.#closedSessions.delete(sessionId);
   }
@@ -628,6 +715,13 @@ export class UiTelemetryService extends EventEmitter {
         ? event.input_token_count
         : event.cached_content_token_count;
     const normalizedTotalTokens = getEventTotalTokenCount(event);
+    const billable = metrics.billableOutputTokens?.[event.model];
+    if (billable) {
+      const output = getEventBillableOutputTokens(event);
+      const source = event.subagent_name ?? MAIN_SOURCE;
+      billable.total += output;
+      billable.bySource[source] = (billable.bySource[source] ?? 0) + output;
+    }
     const accumulate = (
       bucket: ModelMetricsCore,
       prompt: number,
@@ -659,27 +753,28 @@ export class UiTelemetryService extends EventEmitter {
     }
 
     const ttftMs = event.ttft_ms;
+    const generationDurationMs = event.generation_ms;
+    // Events recorded before `generation_ms` existed also predate counting
+    // tool-call preparations as visible output, so their TTFT can span a
+    // whole tool-call-only request. Leave them out of timing entirely.
     if (
       ttftMs === undefined ||
       !Number.isFinite(ttftMs) ||
       ttftMs < 0 ||
+      generationDurationMs === undefined ||
+      !Number.isFinite(generationDurationMs) ||
+      generationDurationMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    // Events recorded before `generation_ms` existed fall back to everything
-    // after the first visible output.
-    const generationDurationMs =
-      event.generation_ms !== undefined &&
-      Number.isFinite(event.generation_ms) &&
-      event.generation_ms >= 0
-        ? event.generation_ms
-        : Math.max(0, event.duration_ms - ttftMs);
     const accumulateGeneration = (generation: GenerationMetrics) => {
       generation.timedRequests++;
       generation.totalTtftMs += ttftMs;
-      if (generationDurationMs > 0) {
+      // A window this short means the output arrived in a burst, so dividing
+      // the whole response's tokens by it reads as thousands of tokens/s.
+      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
         generation.totalGenerationDurationMs += generationDurationMs;
         generation.totalThroughputOutputTokens += event.output_token_count;
       }
@@ -691,6 +786,17 @@ export class UiTelemetryService extends EventEmitter {
     if (statsModelMetrics) {
       accumulateGeneration(
         (statsModelMetrics.generation ??= createInitialGenerationMetrics()),
+      );
+      pushCapped(
+        (statsModelMetrics.timingSamples ??= []),
+        {
+          at: eventTime(event),
+          ttftMs,
+          generationMs: generationDurationMs,
+          outputTokens: event.output_token_count,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_TIMING_SAMPLES,
       );
     }
     generation.last = {
@@ -728,6 +834,26 @@ export class UiTelemetryService extends EventEmitter {
       bucket.api.totalRequests++;
       bucket.api.totalErrors++;
       bucket.api.totalLatencyMs += event.duration_ms;
+    }
+    if (statsModelMetrics) {
+      const kind =
+        event.status_code !== undefined && event.status_code !== ''
+          ? String(event.status_code)
+          : event.error_type || 'unknown';
+      const failures = (statsModelMetrics.failures ??= {
+        byKind: Object.create(null) as Record<string, number>,
+        recent: [],
+      });
+      failures.byKind[kind] = (failures.byKind[kind] ?? 0) + 1;
+      pushCapped(
+        failures.recent,
+        {
+          at: eventTime(event),
+          kind,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_FAILURE_SAMPLES,
+      );
     }
   }
 
@@ -861,6 +987,13 @@ export class UiTelemetryService extends EventEmitter {
   ): ModelMetrics {
     if (!metrics.models[modelName]) {
       metrics.models[modelName] = createInitialModelMetrics();
+      const billable = (metrics.billableOutputTokens ??= Object.create(
+        null,
+      ) as NonNullable<SessionMetrics['billableOutputTokens']>);
+      billable[modelName] = {
+        total: 0,
+        bySource: Object.create(null) as Record<string, number>,
+      };
     }
     return metrics.models[modelName];
   }

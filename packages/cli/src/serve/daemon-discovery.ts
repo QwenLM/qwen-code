@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   getGlobalQwenDirLite,
+  isFullyQualifiedPath,
   resolveConfigPathLite,
 } from '../config/storage-paths-lite.js';
 
@@ -43,6 +44,8 @@ export interface DaemonDiscoveryRecord {
    * Absent on records written before this field existed.
    */
   startupWorkspaces?: string[];
+  /** Resolved configured Conversations root, retained across daemon restart. */
+  conversationsDir?: string;
   /** Whether the Web Shell was enabled at startup. */
   web?: boolean;
   /** Whether `--require-auth` was set at startup. */
@@ -88,6 +91,102 @@ export function daemonDiscoveryFilePath(
   dir: string = resolveDaemonDiscoveryDir(),
 ): string {
   return path.join(dir, `${RECORD_PREFIX}${port}${RECORD_SUFFIX}`);
+}
+
+export function daemonTokenFilePath(
+  port: number,
+  pid: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string {
+  return path.join(dir, `${RECORD_PREFIX}${port}-${pid}.token`);
+}
+
+/**
+ * Opt-in token persistence. The file is scoped to the daemon instance's pid,
+ * sits beside the 0600 discovery record, and is never referenced by the
+ * record or written to the daemon log.
+ */
+export function writeDaemonToken(
+  port: number,
+  pid: number,
+  token: string,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string {
+  if (token.length === 0) {
+    throw new TypeError('A daemon token cannot be empty.');
+  }
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const target = daemonTokenFilePath(port, pid, dir);
+  fs.writeFileSync(target, `${token}\n`, { mode: 0o600 });
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(target, 0o600);
+    } catch {
+      // Filesystems without POSIX modes cannot enforce this.
+    }
+  }
+  return target;
+}
+
+export function readDaemonToken(
+  port: number,
+  pid: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string | undefined {
+  try {
+    return fs.readFileSync(daemonTokenFilePath(port, pid, dir), 'utf8').trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+export function removeDaemonToken(
+  port: number,
+  pid: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): boolean {
+  try {
+    fs.unlinkSync(daemonTokenFilePath(port, pid, dir));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/**
+ * Remove token sidecars for the same port that belong to other instances.
+ * A new daemon on a reused port must not inherit the previous instance's
+ * plaintext credential.
+ */
+export function removeStaleDaemonTokens(
+  port: number,
+  keepPid: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string[] {
+  const prefix = `${RECORD_PREFIX}${port}-`;
+  const suffix = '.token';
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue;
+    const pid = Number(name.slice(prefix.length, -suffix.length));
+    if (!Number.isInteger(pid) || pid === keepPid) continue;
+    try {
+      fs.unlinkSync(path.join(dir, name));
+      removed.push(name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return removed;
 }
 
 /**
@@ -136,6 +235,10 @@ function isValidRecord(value: unknown): value is DaemonDiscoveryRecord {
         record['startupWorkspaces'].every(
           (workspace) => typeof workspace === 'string' && workspace.length > 0,
         ))) &&
+    (record['conversationsDir'] === undefined ||
+      (typeof record['conversationsDir'] === 'string' &&
+        !record['conversationsDir'].includes('\0') &&
+        isFullyQualifiedPath(record['conversationsDir']))) &&
     (record['web'] === undefined || typeof record['web'] === 'boolean') &&
     (record['requireAuth'] === undefined ||
       typeof record['requireAuth'] === 'boolean') &&

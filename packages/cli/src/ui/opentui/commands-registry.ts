@@ -203,7 +203,7 @@ export type SlashResultKind =
 
 /** Config-based gates mirrored from services/BuiltinCommandLoader.ts. */
 export type CommandGate =
-  | 'workflows'
+  | 'workflows-or-mode'
   | 'managed-memory'
   | 'folder-trust'
   | 'lsp';
@@ -226,6 +226,12 @@ export interface CommandRouteSpec {
  * command tree.
  */
 export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
+  { name: 'upgrade', results: ['message'] },
+  {
+    name: 'logout',
+    results: ['message', 'dialog'],
+    dialogs: ['auth'],
+  },
   { name: 'status', altNames: ['about'], results: ['none', 'message'] },
   {
     name: 'agents',
@@ -233,7 +239,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     dialogs: ['subagent_create', 'subagent_list'],
   },
   { name: 'tasks', results: ['message'] },
-  { name: 'workflows', results: ['message'], gatedBy: 'workflows' },
+  { name: 'workflows', results: ['message'], gatedBy: 'workflows-or-mode' },
   {
     name: 'arena',
     results: ['dialog', 'message', 'confirm_action'],

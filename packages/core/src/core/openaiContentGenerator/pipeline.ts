@@ -1458,7 +1458,7 @@ export class ContentGenerationPipeline {
       // model would miss the disable signal (the regression).
       if (!thinkingMandatory && isQwenFamilyWireModel(model)) {
         if (isDashScope) {
-          if (isTieredEffortWireModel(model)) {
+          if (isTieredEffortWireModel(model, reasoningCapabilities)) {
             // The tier-native family reads reasoning_effort, not the
             // boolean: emit the canonical disable in the knob it reads
             // (the strip below preserves 'none'). Drop a user-supplied
@@ -1626,6 +1626,41 @@ export class ContentGenerationPipeline {
         { model, reasoningEffort, thinkingBudget, explicitThinkingMandatory },
       );
       delete typed['tool_choice'];
+    }
+
+    // The subscription gateway uses budget fields, including after the generic
+    // Qwen disable path above has selected a chat-template switch.
+    if (
+      this.contentGeneratorConfig.authType === 'qwen-subscription' &&
+      (reasoningDisabled || effectiveReasoning !== undefined)
+    ) {
+      delete typed['reasoning'];
+      delete typed['reasoning_effort'];
+      const template = asObject(typed['chat_template_kwargs']);
+      if (template && 'enable_thinking' in template) {
+        const { enable_thinking: _enableThinking, ...rest } = template;
+        if (Object.keys(rest).length) typed['chat_template_kwargs'] = rest;
+        else delete typed['chat_template_kwargs'];
+      }
+      const enabled =
+        thinkingMandatory ||
+        (!reasoningDisabled && typed['enable_thinking'] !== false);
+      typed['enable_thinking'] = enabled;
+      if (!enabled) {
+        delete typed['thinking_budget'];
+      } else if (
+        effectiveReasoning &&
+        effectiveReasoning.effort &&
+        typed['thinking_budget'] === undefined
+      ) {
+        typed['thinking_budget'] = {
+          low: 4096,
+          medium: 16384,
+          high: 32768,
+          xhigh: 32768,
+          max: 32768,
+        }[effectiveReasoning.effort];
+      }
     }
 
     return providerRequest;
