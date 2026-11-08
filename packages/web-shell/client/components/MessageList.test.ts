@@ -3477,5 +3477,15 @@ describe('turn collapse with a background notification ack', () => {
       'notice',
       'ack',
     ]);
+    // The row inventory above is the same whichever row the collapse resolves,
+    // so assert the effect: the real answer carries the collapse payload.
+    const answerRows = rows.filter(
+      (item) => item.type === 'message' && item.turnCollapse !== undefined,
+    );
+    expect(
+      answerRows.map(
+        (item) => (item as { message: { id: string } }).message.id,
+      ),
+    ).toEqual(['report']);
   });
 });

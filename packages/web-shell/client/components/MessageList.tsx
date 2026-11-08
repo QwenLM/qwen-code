@@ -829,14 +829,11 @@ function findFinalAnswerIndexForDisplay(
   items: readonly DisplayItem[],
   start: number,
   end: number,
-  includeBackgroundNotifications = true,
 ): number {
-  const answerIdx = findFinalAnswerIndex(
-    items,
-    start,
-    end,
-    includeBackgroundNotifications,
-  );
+  // Never elect a notification row as an answer: the collapse renders what this
+  // returns, and a `background_notification` row would publish raw notice text
+  // as the model's reply.
+  const answerIdx = findFinalAnswerIndex(items, start, end, true);
   if (answerIdx < 0) return answerIdx;
   let markerIdx = -1;
   for (let i = answerIdx - 1; i > start; i--) {
@@ -847,9 +844,7 @@ function findFinalAnswerIndexForDisplay(
     // after the answer above it.
     if (
       isExecutionWorkStep(item) ||
-      (item.type === 'message' &&
-        item.message.role === 'system' &&
-        item.message.source === 'mid_turn_message_injected')
+      (item.type === 'message' && isMidTurnInjectedDebugMessage(item.message))
     )
       return answerIdx;
     if (
@@ -866,7 +861,7 @@ function findFinalAnswerIndexForDisplay(
     items,
     start,
     markerIdx - 1,
-    includeBackgroundNotifications,
+    true,
   );
   return answerAboveMarker >= 0 ? answerAboveMarker : answerIdx;
 }
