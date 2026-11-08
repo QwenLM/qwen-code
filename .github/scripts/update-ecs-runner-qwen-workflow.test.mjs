@@ -270,6 +270,11 @@ describe('ECS runner qwen update workflow', () => {
         `${pool} missing from .github/actionlint.yaml`,
       );
     }
+    // The pairing runs both ways: a declaration left behind with no leg
+    // re-authorizes a label no runner carries, silently.
+    for (const [, label] of actionlint.matchAll(/- '(ecs-update-[^']+)'/g)) {
+      assert.ok(pools.includes(label), `${label} is declared but has no leg`);
+    }
   });
 
   it('pins the 90-minute resolve budget', () => {
