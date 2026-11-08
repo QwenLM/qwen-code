@@ -67,16 +67,20 @@ const daemonProxy: ProxyOptions = {
     return undefined;
   },
   configure: (proxy) => {
-    // Without a listener http-proxy drops the response and the browser waits
-    // out its own timeout; run 42460891896 lost 26 tests to that shape while
-    // the real fault was one missing daemon. Answer immediately, labeled.
+    // Vite's own listener already answers a dead daemon with an empty 500;
+    // the lost tests in run 42460891896 were the client's retry cadence, not
+    // a hung response. This handler runs first and replaces that empty 500
+    // with a labeled 502, so the failure is correctly attributed.
     proxy.on('error', (error, _req, res) => {
       if (!('writeHead' in res) || res.headersSent || res.writableEnded) return;
       res.writeHead(502, { 'content-type': 'application/json' });
       res.end(
+        // Same shape as the daemon's own errors: human text in `error`,
+        // machine token in `code`. readDaemonError prefers `error`, so the
+        // operator-facing sentence must live there.
         JSON.stringify({
-          error: 'daemon_unreachable',
-          message:
+          code: 'daemon_unreachable',
+          error:
             `No daemon answered at ${daemonTarget} (${error.message}). ` +
             'Start the daemon or install the page-level mock before this request.',
         }),

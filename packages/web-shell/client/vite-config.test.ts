@@ -331,7 +331,7 @@ describe('Web Shell daemon proxy failure', () => {
     );
   }
 
-  it('answers an unreachable daemon with a labeled 502 instead of hanging', () => {
+  it('answers an unreachable daemon with a labeled 502 instead of an empty 500', () => {
     const res = {
       headersSent: false,
       writableEnded: false,
@@ -345,8 +345,11 @@ describe('Web Shell daemon proxy failure', () => {
       'content-type': 'application/json',
     });
     const body = JSON.parse(String(res.end.mock.calls[0]?.[0]));
-    expect(body.error).toBe('daemon_unreachable');
-    expect(body.message).toContain('ECONNREFUSED');
+    expect(body.code).toBe('daemon_unreachable');
+    // readDaemonError surfaces `error` to the operator; the sentence with
+    // the target and errno must live there, not under a machine token.
+    expect(body.error).toContain('ECONNREFUSED');
+    expect(body.error).toContain('4170');
   });
 
   it('leaves an already-answered response alone', () => {
