@@ -125,7 +125,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if (!"POST".equals(exchange.getRequestMethod())
                     || exchange.getRequestURI().getRawQuery() != null
                     || !path.startsWith(prefix)
-                    || !path.endsWith(suffix)) {
+                    || !path.endsWith(suffix)
+                    || path.length() < prefix.length() + suffix.length()) {
                 throw notFound();
             }
             String lease = pathId(path.substring(prefix.length(), path.length() - suffix.length()));

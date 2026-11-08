@@ -135,7 +135,7 @@ async function receive(
 export function registerHostedPackagePreparation(
   app: Application,
   contract: HostedHarnessContract,
-  lifecycle: { accepting: () => boolean; track?: RequestHandler },
+  lifecycle: { accepting: () => boolean; beginOperation?: () => () => void },
 ): () => Promise<void> {
   const artifacts = new Map<string, Artifact>();
   const controllers = new Set<AbortController>();
@@ -194,6 +194,7 @@ export function registerHostedPackagePreparation(
       res.once('close', () => {
         if (!res.writableEnded) abort.abort();
       });
+      const finish = lifecycle.beginOperation?.();
       let directory: string | undefined;
       try {
         directory = await fs.mkdtemp(
@@ -264,27 +265,18 @@ export function registerHostedPackagePreparation(
       } finally {
         clearTimeout(timer);
         controllers.delete(abort);
-        preparing--;
-        if (directory) await fs.rm(directory, { recursive: true, force: true });
+        try {
+          if (directory)
+            await fs.rm(directory, { recursive: true, force: true });
+        } finally {
+          preparing--;
+          finish?.();
+        }
       }
     };
-  const track: RequestHandler =
-    lifecycle.track ?? ((_req, _res, next) => next());
-  app.post(
-    `${HOSTED_PACKAGE_PREPARATION_PREFIX}/prepare`,
-    track,
-    handler('prepare'),
-  );
-  app.post(
-    `${HOSTED_PACKAGE_PREPARATION_PREFIX}/inspect`,
-    track,
-    handler('inspect'),
-  );
-  app.post(
-    `${HOSTED_PACKAGE_PREPARATION_PREFIX}/preview`,
-    track,
-    handler('preview'),
-  );
+  app.post(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/prepare`, handler('prepare'));
+  app.post(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/inspect`, handler('inspect'));
+  app.post(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/preview`, handler('preview'));
   app.get(
     `${HOSTED_PACKAGE_PREPARATION_PREFIX}/:preparationId/archive`,
     async (req: Request, res: Response) => {

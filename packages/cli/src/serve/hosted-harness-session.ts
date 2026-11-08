@@ -133,7 +133,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
-import type { Application, Request, RequestHandler, Response } from 'express';
+import type { Application, Request, Response } from 'express';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -4366,7 +4366,7 @@ export function registerHostedHarnessSessionRoutes(
 ): {
   owns: (id: string) => boolean;
   accepting: () => boolean;
-  track?: RequestHandler;
+  beginOperation?: () => () => void;
 } {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
@@ -13803,7 +13803,7 @@ export function registerHostedHarnessSessionRoutes(
   });
   return {
     accepting: acceptingWork,
-    track: instance?.track,
+    beginOperation: instance?.beginOperation,
     owns: (id) =>
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),
