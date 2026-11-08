@@ -1808,12 +1808,20 @@ describe('ci failure patrol workflow', () => {
       join(home, '.gitconfig'),
       `[core]\n\thooksPath = ${hooks}\n[user]\n\tname = t\n\temail = t@e\n`,
     );
+    // The release runner exports an empty job-wide GIT_CONFIG_GLOBAL, which
+    // outranks $HOME/.gitconfig; pin it to the planted file so the positive
+    // control still exercises the config the fixture wrote.
+    const fixtureGitConfig = {
+      GIT_CONFIG_GLOBAL: join(home, '.gitconfig'),
+      GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_PARAMETERS: '',
+    };
     const git = (args, env) =>
       execFileSync('git', args, {
         cwd: workspace,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, HOME: home, ...env },
+        env: { ...process.env, HOME: home, ...fixtureGitConfig, ...env },
       });
     const seed = () => {
       git(['init', '-q']);
