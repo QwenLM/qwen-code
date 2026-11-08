@@ -59,6 +59,12 @@ export const TOOL_OUTPUT_TRUNCATED_PREFIX =
  * to a file. It is the only form that carries a path back to the bytes, so
  * consumers that must not orphan that reference key on it rather than on the
  * broader truncation sentinel.
+ *
+ * Detection is a `startsWith` test on the literal tag, not a parse, so a tool
+ * result that merely opens with that line — a grep hit on the tag, or a file
+ * read back that itself begins with an envelope — is treated as a stub too.
+ * That tolerance is deliberate: the cost is keeping a clearable result that
+ * need not have been kept, never losing the reference a real stub carries.
  */
 export const PERSISTED_OUTPUT_STUB_PREFIX = '<persisted-output>';
 
