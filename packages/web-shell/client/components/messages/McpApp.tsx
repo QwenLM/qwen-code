@@ -12,6 +12,8 @@ import {
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
+  McpAppModelContextContext,
+  generatedUiContextTagId,
   McpAppGeneratedUiOwnerContext,
   McpAppVisibilityContext,
 } from '../../mcpAppHostContext';
@@ -315,6 +317,9 @@ export function McpAppRuntime({
   const sessionId = useContext(McpAppSessionContext);
   const tools = useContext(McpAppToolsContext);
   const messages = useContext(McpAppMessagesContext);
+  const modelContext = useContext(McpAppModelContextContext);
+  const modelContextRef = useRef(modelContext);
+  modelContextRef.current = modelContext;
   const messageHost =
     sessionId && messages?.sessionId === sessionId ? messages : undefined;
   const requestMessage =
@@ -370,6 +375,10 @@ export function McpAppRuntime({
       {
         ...(callTool ? { serverTools: {} } : {}),
         ...(requestMessage ? { message: { text: {} } } : {}),
+        // Only the built-in card attaches its values to the next message.
+        ...(builtInGeneratedUi && requestMessage
+          ? { updateModelContext: { text: {} } }
+          : {}),
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
         },
@@ -422,6 +431,36 @@ export function McpAppRuntime({
         } finally {
           messagePending = false;
         }
+      };
+    }
+    if (builtInGeneratedUi && requestMessage) {
+      bridge.onupdatemodelcontext = async (params) => {
+        const host = modelContextRef.current;
+        const shown = displayRef.current;
+        const structured = shown.toolResult['structuredContent'];
+        const id =
+          structured && typeof structured === 'object'
+            ? (structured as Record<string, unknown>)['documentId']
+            : undefined;
+        const text = (params.content ?? [])
+          .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+          .join('\n\n');
+        if (
+          active &&
+          host &&
+          host.sessionId === sessionId &&
+          (!retained || retained.isVisible()) &&
+          typeof id === 'string' &&
+          text.trim() &&
+          text.length <= 16 * 1024
+        ) {
+          host.attach({
+            id: generatedUiContextTagId(id),
+            title: generatedUiSummary(shown)?.title ?? '',
+            text,
+          });
+        }
+        return {};
       };
     }
     if (callTool) {
@@ -581,6 +620,7 @@ export function McpAppRuntime({
     display.serverName,
     display.resourceUri,
     display.html,
+    builtInGeneratedUi,
     cspKey,
     toolArgumentsKey,
     toolResultKey,

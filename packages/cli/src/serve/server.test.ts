@@ -62,6 +62,7 @@ import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorizat
 import { tagListener } from './local-control/index.js';
 import {
   CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_BOUND_RELAY_META_KEY,
   registerChannelWorkerPromptAuthorization,
   revokeChannelWorkerPromptAuthorization,
 } from './channel-worker-prompt-authorization.js';
@@ -95,6 +96,7 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
   AuthType,
@@ -747,6 +749,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_github_setup',
   'workspace_github_prs',
   'workspace_git_worktrees',
+  'workspace_git_check_ignore',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -787,6 +790,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_export',
   'workspace_archived_session_export',
   'workspace_session_live_state',
+  'workspace_session_live_state_batch',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -813,6 +817,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
+    if (feature === 'workspace_skill_settings_batch_toggle') {
+      return [feature, 'user_skill_activation'];
+    }
     if (feature === 'session_create') {
       return [
         feature,
@@ -822,6 +829,9 @@ const EXPECTED_REGISTERED_FEATURES = [
     }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
+    }
+    if (feature === 'workspace_skill_manage') {
+      return [feature, 'skill_archive_install', 'skill_zip_file_source'];
     }
     if (feature === 'session_artifacts') {
       return [
@@ -858,6 +868,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_github_setup' &&
       f !== 'workspace_github_prs' &&
       f !== 'workspace_git_worktrees' &&
+      f !== 'workspace_git_check_ignore' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -891,6 +902,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
       f !== 'workspace_session_live_state' &&
+      f !== 'workspace_session_live_state_batch' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
@@ -909,6 +921,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_github_setup',
   'workspace_github_prs',
   'workspace_git_worktrees',
+  'workspace_git_check_ignore',
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',
@@ -948,6 +961,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_session_shell',
   'dynamic_workspace_registration',
   'persistent_workspace_registration',
+  'workspace_order',
   'workspace_display_name',
   'scratch_workspace_registration',
   'git_workspace_clone',
@@ -970,6 +984,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_export',
   'workspace_archived_session_export',
   'workspace_session_live_state',
+  'workspace_session_live_state_batch',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -2332,6 +2347,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         maxSessions: 20,
         maxPendingPromptsPerSession: 5,
         eventRingSize: 8000,
+        eventRingMaxBytes: 8 * 1024 * 1024,
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,
@@ -3968,7 +3984,10 @@ describe('createServeApp', () => {
           ).toContain(feature);
           continue;
         }
-        if (feature === 'persistent_workspace_registration') {
+        if (
+          feature === 'persistent_workspace_registration' ||
+          feature === 'workspace_order'
+        ) {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
           ).toBe(true);
@@ -4074,7 +4093,9 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'workspace_runtime' ||
-          feature === 'workspace_skills_config_runtime'
+          feature === 'workspace_skills_config_runtime' ||
+          feature === 'skill_archive_install' ||
+          feature === 'skill_zip_file_source'
         ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
@@ -4371,6 +4392,27 @@ describe('createServeApp', () => {
               workspaceDirectoriesAvailable: true,
             }),
           ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'user_skill_activation') {
+          expect(predicate({ userSkillActivationAvailable: true })).toBe(true);
+          expect(predicate({ userSkillActivationAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: false,
+            }),
+          ).not.toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
@@ -4689,6 +4731,7 @@ describe('createServeApp', () => {
     it.each([
       '/plugins',
       '/channels',
+      '/channel-events',
       '/live',
       '/scheduled-tasks',
       '/goals',
@@ -5998,6 +6041,68 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(managed.body.features).toContain('scheduled_task_session_reuse');
+    });
+
+    it('advertises workspace runtime stop only with the full managed stop wiring', async () => {
+      const bridge = Object.assign(fakeBridge(), {
+        stopWorkspaceRuntime: vi.fn(),
+        getRuntimeStopCompletion: vi.fn(),
+        getRuntimeStopSnapshot: vi.fn(),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const runtimeRemoval = {
+        beginDrain: vi.fn(),
+        cancelDrain: vi.fn(),
+        completeDrain: vi.fn(),
+        disposeRuntime: vi.fn().mockResolvedValue(undefined),
+        getActivity: vi.fn(() => ({
+          pendingSessionStarts: 0,
+          channelWorkers: 0,
+          voiceSessions: 0,
+        })),
+      };
+      const wiredDeps = {
+        bridge,
+        workspaceRegistry,
+        managedChildProcesses: {
+          registry: new ProcessRegistry(),
+          policy: createChildHeapPolicy({
+            budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+            mode: 'admit',
+          }),
+        },
+        workspaceRuntimeRemoval: runtimeRemoval,
+        voiceCoordinator: new WorkspaceVoiceCoordinator(),
+        getSessionBridges: () => [bridge],
+        manageScheduledTaskSessions: true,
+      };
+
+      // Every leg of the boot-time conjunction is present: the capabilities
+      // route must advertise the stop surface from that production wiring.
+      const wired = await request(
+        createServeApp(baseOpts, undefined, wiredDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(wired.body.features).toContain('workspace_runtime_stop');
+
+      // Drop exactly one required leg and the same route must stop
+      // advertising it, so a regression in any single leg is observable.
+      const { manageScheduledTaskSessions: _dropped, ...partialDeps } =
+        wiredDeps;
+      const missingLeg = await request(
+        createServeApp(baseOpts, undefined, partialDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingLeg.body.features).not.toContain('workspace_runtime_stop');
     });
 
     it('refuses scheduled task sessions in the Hosted Harness profile', () => {
@@ -18049,7 +18154,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('400s unknown explicit cwd before touching the bridge', async () => {
+    it('404s unknown explicit cwd before touching the bridge', async () => {
       const missingCwd = path.join(
         os.tmpdir(),
         `qwen-missing-workspace-${Date.now()}`,
@@ -18062,14 +18167,76 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: missingCwd });
 
-        expect(res.status).toBe(400);
-        expect(res.body.code).toBe('workspace_mismatch');
+        // An explicit cwd with no registry entry is a PERMANENT absence
+        // (404 workspace_not_found), distinct from the reversible
+        // non-active states (400 workspace_mismatch). The channel wake path
+        // keys its Gone classification on this 404.
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe('workspace_not_found');
         expect(res.body.boundWorkspace).toBe(process.cwd());
         expect(res.body.requestedWorkspace).toBe(missingCwd);
         expect(bridge.loadCalls).toHaveLength(0);
         expect(bridge.resumeCalls).toHaveLength(0);
       }
     });
+
+    it.each(['draining', 'transitioning', 'blocked'] as const)(
+      '400s workspace_mismatch (not 404) for a %s workspace on load and resume',
+      async (state) => {
+        // G14: an entry that EXISTS but is reversibly non-active must stay
+        // out of the permanent-absence (404 workspace_not_found) branch.
+        // Only a cwd with NO registry entry is a gone workspace; draining /
+        // transitioning / blocked still have an entry and answer 400
+        // workspace_mismatch, so the channel wake path must not classify
+        // them as Gone.
+        for (const action of ['load', 'resume'] as const) {
+          const primaryBridge = fakeBridge();
+          const secondaryBridge = fakeBridge();
+          const secondary = makeWorkspaceRuntimeForTest({
+            workspaceId: 'ws-secondary',
+            workspaceCwd: WS_DIFFERENT,
+            primary: false,
+            bridge: secondaryBridge,
+          });
+          const registry = createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'ws-primary',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              bridge: primaryBridge,
+            }),
+            secondary,
+          ]);
+          const app = createServeApp(
+            { ...baseOpts, workspace: WS_BOUND },
+            undefined,
+            { bridge: primaryBridge, workspaceRegistry: registry },
+          );
+          const entry = registry.getEntryByWorkspaceCwd(WS_DIFFERENT);
+          expect(entry).toBeDefined();
+          if (state === 'draining') {
+            expect(registry.beginDrain(secondary)).toBe(true);
+          } else if (state === 'transitioning') {
+            expect(registry.beginReplacement(entry!, 'rev-2')).toBe(true);
+          } else {
+            registry.blockReplacement(entry!, 'apply failed');
+          }
+          expect(entry!.state).toBe(state);
+
+          const res = await request(app)
+            .post(`/session/reversible-${state}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd: WS_DIFFERENT });
+
+          expect(res.status).toBe(400);
+          expect(res.body.code).toBe('workspace_mismatch');
+          expect(primaryBridge.loadCalls).toHaveLength(0);
+          expect(primaryBridge.resumeCalls).toHaveLength(0);
+          expect(secondaryBridge.loadCalls).toHaveLength(0);
+          expect(secondaryBridge.resumeCalls).toHaveLength(0);
+        }
+      },
+    );
 
     it('400s a non-string cwd before touching the bridge', async () => {
       // Mirrors the `POST /session` malformed-`cwd`-shape test: a
@@ -18244,7 +18411,11 @@ describe('createServeApp', () => {
       }
     });
 
-    it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
+    it('404s workspace_not_found before touching the bridge for an unregistered non-primary cwd', async () => {
+      // The single-workspace daemon has no registry entry for WS_DIFFERENT,
+      // so an explicit cwd naming it is a PERMANENT absence (404
+      // workspace_not_found), not the reversible workspace_mismatch (400).
+      // The resolver must reject before the bridge is ever consulted.
       const bridge = fakeBridge({
         loadImpl: async () => {
           throw new WorkspaceMismatchError(WS_BOUND, WS_DIFFERENT);
@@ -18260,9 +18431,9 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: WS_DIFFERENT });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(404);
       expect(res.body).toMatchObject({
-        code: 'workspace_mismatch',
+        code: 'workspace_not_found',
         boundWorkspace: WS_BOUND,
         requestedWorkspace: WS_DIFFERENT,
       });
@@ -20698,6 +20869,348 @@ describe('createServeApp', () => {
       expect(res.body.eventEpoch).toBe('epoch-abc');
     });
 
+    it('deduplicates a repeated idempotency key into the original admission (W4)', async () => {
+      // A channel relay marks acceptance durably AFTER the 202; a crash or
+      // write failure in that gap (or a lost response) makes it retry with
+      // the same key. The retry must return the original admission without
+      // enqueueing a second turn.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'task-42',
+        });
+      expect(first.status).toBe(202);
+
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'task-42',
+        });
+      expect(retry.status).toBe(202);
+      expect(retry.body.promptId).toBe(first.body.promptId);
+      expect(retry.body.deduplicated).toBe(true);
+      expect(bridge.promptCalls).toHaveLength(1);
+
+      // A different event admits normally.
+      const other = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'another event' }],
+          idempotencyKey: 'task-43',
+        });
+      expect(other.status).toBe(202);
+      expect(other.body.promptId).not.toBe(first.body.promptId);
+      expect(other.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
+      // The key is route-level admission metadata, never prompt content.
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
+    });
+
+    it('scopes idempotency keys per session (W4)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const a = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'same-key',
+        });
+      const b = await request(app)
+        .post('/session/session-B/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'same-key',
+        });
+      expect(a.status).toBe(202);
+      expect(b.status).toBe(202);
+      expect(b.body.promptId).not.toBe(a.body.promptId);
+      expect(bridge.promptCalls).toHaveLength(2);
+    });
+
+    it('evicts the oldest key past the per-session idempotency ring bound (R2-4)', async () => {
+      // The ring keeps the newest 128 keys per session. Evicting a live
+      // key is the documented trade-off for bounding daemon-lifetime
+      // growth: the evicted event re-admits instead of deduping forever.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const post = (key: string) =>
+        request(app)
+          .post('/session/ring-key-bound-session/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: key,
+          });
+      const admitted: string[] = [];
+      for (let i = 0; i < 129; i++) {
+        const res = await post(`ring-key-${i}`);
+        expect(res.status).toBe(202);
+        expect(res.body.deduplicated).toBeUndefined();
+        admitted.push(res.body.promptId);
+      }
+      // The first key fell out of the 128-key window: it re-admits fresh.
+      const evicted = await post('ring-key-0');
+      expect(evicted.status).toBe(202);
+      expect(evicted.body.deduplicated).toBeUndefined();
+      expect(evicted.body.promptId).not.toBe(admitted[0]);
+      // The newest keys still dedupe into their original admissions.
+      for (const i of [127, 128]) {
+        const retry = await post(`ring-key-${i}`);
+        expect(retry.status).toBe(202);
+        expect(retry.body.deduplicated).toBe(true);
+        expect(retry.body.promptId).toBe(admitted[i]);
+      }
+      // Re-admitting ring-key-0 pushed ring-key-1 out: FIFO, not LRU.
+      const nextEvicted = await post('ring-key-1');
+      expect(nextEvicted.status).toBe(202);
+      expect(nextEvicted.body.deduplicated).toBeUndefined();
+      expect(nextEvicted.body.promptId).not.toBe(admitted[1]);
+      // 129 admissions + 2 re-admissions; deduped retries never reach the
+      // bridge.
+      expect(bridge.promptCalls).toHaveLength(131);
+    });
+
+    // 1027 sequential HTTP round-trips: above the I/O-bound default.
+    it('evicts the oldest session past the idempotency session bound (R2-4)', async () => {
+      // The ring spans at most 1024 sessions; admitting a new session
+      // evicts the oldest one's keys (the documented trade-off), so its
+      // retry re-admits instead of deduping into an evicted admission.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const post = (sessionId: string) =>
+        request(app)
+          .post(`/session/${sessionId}/prompt`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: 'ring-shared-key',
+          });
+      const first = await post('ring-session-0');
+      expect(first.status).toBe(202);
+      expect(first.body.deduplicated).toBeUndefined();
+      let newestPromptId = '';
+      for (let i = 1; i <= 1024; i++) {
+        const res = await post(`ring-session-${i}`);
+        expect(res.status).toBe(202);
+        expect(res.body.deduplicated).toBeUndefined();
+        if (i === 1024) newestPromptId = res.body.promptId;
+      }
+      // The oldest session was evicted: its key re-admits fresh.
+      const evicted = await post('ring-session-0');
+      expect(evicted.status).toBe(202);
+      expect(evicted.body.deduplicated).toBeUndefined();
+      expect(evicted.body.promptId).not.toBe(first.body.promptId);
+      // The newest session still dedupes into its original admission.
+      const newest = await post('ring-session-1024');
+      expect(newest.status).toBe(202);
+      expect(newest.body.deduplicated).toBe(true);
+      expect(newest.body.promptId).toBe(newestPromptId);
+    }, 60_000);
+
+    it('rejects a malformed idempotency key (W4)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      for (const key of ['', 42, 'x'.repeat(201)]) {
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: key,
+          });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_idempotency_key');
+      }
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('forgets the idempotency key when admission rejects deferred (B-F1)', async () => {
+      // A bridge that rejects AFTER returning (the legacy closing-session
+      // shape) never enqueued the prompt. The remembered key must be
+      // removed, or a retry would dedupe into a phantom admission and the
+      // event would be silently lost instead of waking the session.
+      const bridge = fakeBridge({
+        promptImpl: () =>
+          Promise.reject(
+            new SessionNotFoundError(
+              'session-A',
+              'The session is closing; retry after close completes',
+              'session_closing',
+            ),
+          ),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const post = () =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: 'phantom-key',
+          });
+      const first = await post();
+      expect(first.status).toBe(202);
+      // Retry until the deferred rejection handler forgets the key: a fixed
+      // sleep flakes under load. Deduped retries never reach the bridge, so
+      // promptCalls still ends at 2; a broken forget exhausts the loop and
+      // fails the assertion below.
+      let retry = await post();
+      for (let i = 0; i < 100 && retry.body.deduplicated === true; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        retry = await post();
+      }
+      // The retry must reach admission again, not dedupe into the phantom.
+      expect(retry.status).toBe(202);
+      expect(retry.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
+    });
+
+    it('rejects a closing session synchronously without remembering the key (B-F1)', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new SessionNotFoundError(
+            'session-A',
+            'The session is closing; retry after close completes',
+            'session_closing',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'closing-key',
+        });
+      // Synchronous admission failure: 404 BEFORE any 202, so the relay
+      // wakes the session and retries instead of marking a phantom delivery.
+      expect(first.status).toBe(404);
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'closing-key',
+        });
+      expect(retry.status).toBe(404);
+      expect(retry.body.deduplicated).toBeUndefined();
+    });
+
+    it('rejects an unreleased standalone binding synchronously with 409 before any 202 (R9-B1)', async () => {
+      // The bridge's reserved-standalone working-directory check throws
+      // synchronously (admission contract): the route must answer 409
+      // working_directory_missing BEFORE any 202, so the channel relay
+      // defers instead of consuming a phantom acceptance, and no
+      // idempotency key is remembered.
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new RequestError(
+            -32004,
+            'The standalone working directory is missing.',
+            { errorKind: 'working_directory_missing' },
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'standalone-sync-key',
+        });
+      expect(first.status).toBe(409);
+      expect(first.body.code).toBe('working_directory_missing');
+      expect(first.body.retryable).toBe(true);
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'standalone-sync-key',
+        });
+      expect(retry.status).toBe(409);
+      expect(retry.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
+    });
+
+    it('forgets the idempotency key on any pre-admission deferred rejection (R2-A2)', async () => {
+      // Defense-in-depth: a custom bridge can still reject deferred with a
+      // plain Error (the built-in standalone working-directory check now
+      // throws synchronously). The forget must key off the admission
+      // signal, not the error type, or the phantom key survives and a
+      // retry dedupes into a non-admission.
+      const bridge = fakeBridge({
+        promptImpl: () =>
+          Promise.reject(
+            new Error('The standalone working directory is missing.'),
+          ),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const post = () =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: 'standalone-key',
+          });
+      const first = await post();
+      expect(first.status).toBe(202);
+      // Retry until the deferred rejection handler forgets the key (a fixed
+      // sleep flakes under load); a broken forget exhausts the loop.
+      let retry = await post();
+      for (let i = 0; i < 100 && retry.body.deduplicated === true; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        retry = await post();
+      }
+      expect(retry.status).toBe(202);
+      expect(retry.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
+    });
+
+    it('keeps the idempotency key when an admitted turn fails (R2-A2)', async () => {
+      // The admission signal fired: the prompt WAS enqueued and the turn
+      // then failed. Forgetting the key here would let a retry re-inject
+      // the same event as a second turn.
+      const bridge = fakeBridge({
+        promptImpl: (_sessionId, _req, _signal, context) => {
+          context?.onPromptAdmitted?.();
+          return Promise.reject(new Error('turn failed after admission'));
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'turn-failure-key',
+        });
+      expect(first.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'turn-failure-key',
+        });
+      expect(retry.status).toBe(202);
+      expect(retry.body.deduplicated).toBe(true);
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
     it('passes client identity and promptId context into bridge.sendPrompt', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -20869,6 +21382,193 @@ describe('createServeApp', () => {
             CHANNEL_PROMPT_META_KEY,
           );
         }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('admits a foreign worker token only for an explicit bound relay (G3, R1-14)', async () => {
+      // G3: bound delivery is cross-workspace, so the prompt route uses the
+      // process-level relay check (token registered for ANY workspace) gated
+      // on the target runtime's trust — not the old home===target equality.
+      // R1-14: the widening is scoped to its reason — cross-workspace
+      // classification additionally requires the bound-relay marker, so a
+      // PLAIN prompt carrying a foreign worker token stays an ordinary
+      // interactive prompt. A forged token must not classify either way.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const token = 'channel-worker-cross-workspace-token';
+      registerChannelWorkerPromptAuthorization(token, '/work/foreign-home');
+      try {
+        const forged = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+        const plainForeign = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: 'benign transcript text',
+            },
+          });
+        const relay = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_BOUND_RELAY_META_KEY]: true,
+            },
+          });
+
+        expect(forged.status).toBe(202);
+        expect(plainForeign.status).toBe(202);
+        expect(relay.status).toBe(202);
+        expect(bridge.promptCalls[0]?.context?.channelPrompt).toBeUndefined();
+        // The plain foreign prompt gets no channel classification and no
+        // caller-supplied display projection.
+        expect(bridge.promptCalls[1]?.context?.channelPrompt).toBeUndefined();
+        expect(
+          bridge.promptCalls[1]?.context?.promptDisplayText,
+        ).toBeUndefined();
+        expect(bridge.promptCalls[2]?.context?.channelPrompt).toBe(true);
+        for (const call of bridge.promptCalls) {
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_BOUND_RELAY_META_KEY,
+          );
+        }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('classifies a channel prompt delivered into a different trusted workspace', async () => {
+      // G3 end-to-end: the worker's home is the primary workspace, but the
+      // bound session lives in a secondary trusted workspace. The relay
+      // credential must survive the cross-workspace hop and classify the
+      // turn on the owning (secondary) bridge, not the home bridge.
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: primaryBridge, workspaceRegistry: registry },
+      );
+      const token = 'channel-worker-cross-workspace-delivery-token';
+      registerChannelWorkerPromptAuthorization(token, WS_BOUND);
+      try {
+        const res = await request(app)
+          .post('/session/session-cross-ws/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_BOUND_RELAY_META_KEY]: true,
+            },
+          });
+
+        expect(res.status).toBe(202);
+        expect(primaryBridge.promptCalls).toHaveLength(0);
+        expect(secondaryBridge.promptCalls).toHaveLength(1);
+        expect(secondaryBridge.promptCalls[0]?.context?.channelPrompt).toBe(
+          true,
+        );
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('rejects prompts to an untrusted non-primary workspace at the routing gate', async () => {
+      // Regression guard for the PRE-EXISTING routing trust gate (not the
+      // PR's classification gate): an untrusted non-primary owner is
+      // rejected before classification runs, so the classification's own
+      // trust conjunct is unreachable defense at this layer and cannot be
+      // pinned by a route-level test. The relay-marker negative is pinned
+      // by 'admits a foreign worker token only for an explicit bound relay'.
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          trusted: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: primaryBridge, workspaceRegistry: registry },
+      );
+      const token = 'channel-worker-untrusted-target-token';
+      registerChannelWorkerPromptAuthorization(token, WS_BOUND);
+      try {
+        const res = await request(app)
+          .post('/session/session-untrusted/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('untrusted_workspace');
+        expect(primaryBridge.promptCalls).toHaveLength(0);
+        expect(secondaryBridge.promptCalls).toHaveLength(0);
       } finally {
         revokeChannelWorkerPromptAuthorization(token);
       }
@@ -36283,6 +36983,84 @@ describe('createServeApp', () => {
       await fsp.rm(sidecarPath, { force: true });
     });
 
+    it('persists, preserves, and clears the binding role', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      try {
+        const set = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr: { ...pr, role: 'fix' } });
+        expect(set.status).toBe(200);
+        expect(set.body.prs).toEqual([{ ...pr, role: 'fix' }]);
+        expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBe('fix');
+
+        // An omitted role preserves the known one (a state refresh or
+        // rename must not silently untype the binding).
+        const preserve = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr: { ...pr, state: 'open' } });
+        expect(preserve.status).toBe(200);
+        expect(preserve.body.prs).toEqual([
+          { ...pr, state: 'open', role: 'fix' },
+        ]);
+
+        // null is the explicit clear; the bridge never sees the null (the
+        // sidecar owns the clear, the live list reconciles from disk).
+        const clear = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr: { ...pr, role: null } });
+        expect(clear.status).toBe(200);
+        expect(clear.body.prs).toEqual([{ ...pr, state: 'open' }]);
+        expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBeUndefined();
+        for (const call of bridge.updateMetadataCalls) {
+          expect(
+            (call.metadata as { pr?: { role?: unknown } }).pr?.role,
+          ).not.toBeNull();
+        }
+      } finally {
+        await fsp.rm(sidecarPath, { force: true });
+      }
+    });
+
+    it('400 on an unknown binding role', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          role: 'triage',
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+    });
+
     it('echoes the sidecar list, not the bridge echo, when they disagree on the primary route', async () => {
       // Without the persisted-readback overwrite the primary route would
       // echo the bridge's live list; without the sidecar hydration before
@@ -38121,6 +38899,7 @@ describe('createServeApp', () => {
             maxSessions: 20,
             maxPendingPromptsPerSession: 5,
             eventRingSize: 8000,
+            eventRingMaxBytes: 8 * 1024 * 1024,
             compactedReplayMaxBytes: 4 * 1024 * 1024,
             maxJournalEvents: 10_000,
             maxJournalBytes: 8 * 1024 * 1024,
@@ -38144,6 +38923,12 @@ describe('createServeApp', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 4,
+              eventRingCount: 3,
+              eventRingBytes: 1024,
+              eventRingEarliestEventId: 2,
+              eventRingEvictedEvents: 1,
+              eventRingEvictedBytes: 128,
+              availableCommandsSnapshotBytes: 64,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -38187,6 +38972,12 @@ describe('createServeApp', () => {
               sessionId: 'session-1',
               clientCount: 2,
               subscriberCount: 1,
+              eventRingCount: 3,
+              eventRingBytes: 1024,
+              eventRingEarliestEventId: 2,
+              eventRingEvictedEvents: 1,
+              eventRingEvictedBytes: 128,
+              availableCommandsSnapshotBytes: 64,
             },
           ],
           workspace: {
@@ -45335,6 +46126,53 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it.each([
+    ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],
+    ['qwen3.8-max(qwen-subscription)', 'unregistered-client', 400],
+    ['existing(openai)', 'standalone-client', 200],
+  ] as const)(
+    'switches standalone model %s through its owner for %s',
+    async (modelId, clientId, expectedStatus) => {
+      const sessionId = 'standalone-subscription';
+      const reloadModelProviders = vi.fn(async () => ({ status: 'failed' }));
+      const setup = setupLiveRuntime({
+        summaryImpl: (id) => ({
+          sessionId: id,
+          workspaceCwd: setup.root.canonicalRoot,
+          createdAt: '2026-11-06T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        }),
+        setModelImpl: async (id, _params, context) => {
+          expect(id).toBe(sessionId);
+          expect(context?.clientId).toBe(clientId);
+          if (context?.clientId !== 'standalone-client') {
+            throw new InvalidClientIdError(id, clientId);
+          }
+          return {};
+        },
+      });
+      Object.assign(setup.liveRuntime.workspaceService, {
+        reloadModelProviders,
+      });
+      setup.registry.add(setup.liveRuntime);
+
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/model`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ modelId });
+
+      expect(response.status).toBe(expectedStatus);
+      if (expectedStatus === 400)
+        expect(response.body.code).toBe('invalid_client_id');
+      expect(reloadModelProviders).not.toHaveBeenCalled();
+      expect(setup.liveBridge.setModelCalls).toHaveLength(1);
+      expect(setup.primaryBridge.setModelCalls).toHaveLength(0);
+    },
+  );
 
   it('mounts and advertises standalone sessions only with complete runtime dependencies', async () => {
     const partial = createServeApp(baseOpts, undefined, {

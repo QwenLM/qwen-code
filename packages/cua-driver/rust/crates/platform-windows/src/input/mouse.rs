@@ -538,10 +538,7 @@ fn send_click_synthesized_mods_impl(
     if target.0.is_null() {
         bail!("invalid target hwnd");
     }
-    if let Some(msg) = crate::input::post_message_blocked_by_uipi(target.0 as u64) {
-        // Same UIPI defense as PostMessage path — SendInput from non-UIAccess
-        // would fail just as silently as PostMessage when target is at higher
-        // integrity. Surface the diagnostic early.
+    if let Some(msg) = crate::input::send_input_blocked_by_uipi(target.0 as u64) {
         bail!(msg);
     }
 

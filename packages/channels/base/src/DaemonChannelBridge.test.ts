@@ -429,6 +429,326 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('serves adapter channel tools on the same client MCP server', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const handlers = new Map<
+      string,
+      (
+        message: Record<string, unknown>,
+      ) => Promise<Record<string, unknown> | undefined>
+    >();
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async (sessionId, handler) => {
+        handlers.set(sessionId, handler);
+      }),
+      unregister: vi.fn(async (sessionId) => {
+        handlers.delete(sessionId);
+      }),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create: vi.fn(async () => ({ text: 'created' })),
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+    const recall = vi.fn(async () => 'Message recalled.');
+    bridge.registerChannelTool({
+      name: 'qq_recall_message',
+      description: 'Recall a QQ message.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: recall,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const list = await handlers.get('session-1')?.({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    });
+    const names = (
+      list as { result: { tools: Array<{ name: string }> } }
+    ).result.tools.map((tool) => tool.name);
+    expect(names).toContain('channel_loop_create');
+    expect(names).toContain('qq_recall_message');
+
+    await expect(
+      handlers.get('session-1')?.({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'qq_recall_message', arguments: { message_id: 'M1' } },
+      }),
+    ).resolves.toMatchObject({
+      result: { content: [{ type: 'text', text: 'Message recalled.' }] },
+    });
+    expect(recall).toHaveBeenCalledWith(
+      { message_id: 'M1' },
+      { sessionId: 'session-1' },
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('keeps adapter tools reachable on a loop-opted-out session', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const handlers = new Map<
+      string,
+      (
+        message: Record<string, unknown>,
+      ) => Promise<Record<string, unknown> | undefined>
+    >();
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async (sessionId, handler) => {
+        handlers.set(sessionId, handler);
+      }),
+      unregister: vi.fn(async (sessionId) => {
+        handlers.delete(sessionId);
+      }),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create: vi.fn(async () => ({ text: 'created' })),
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+    bridge.registerChannelTool({
+      name: 'qq_recall_message',
+      description: 'Recall a QQ message.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: vi.fn(async () => 'Message recalled.'),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo', { enableChannelLoops: false });
+    await waitFor(() => expect(host.register).toHaveBeenCalled());
+
+    const list = await handlers.get('session-1')?.({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    });
+    const names = (
+      list as { result: { tools: Array<{ name: string }> } }
+    ).result.tools.map((tool) => tool.name);
+    expect(names).toEqual(['qq_recall_message']);
+
+    events.close();
+    bridge.stop();
+  });
+
+  it("does not register another channel's owned tools on a loop-opted-out session", async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async () => {}),
+      unregister: vi.fn(async () => {}),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelTool({
+      name: 'qq_recall_message',
+      description: 'Recall a QQ message.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: vi.fn(async () => 'Message recalled.'),
+      owner: 'qq-main',
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo', {
+      enableChannelLoops: false,
+      sourceId: 'feishu-main',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(host.register).not.toHaveBeenCalled();
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('ignores duplicate and reserved adapter tool names', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const handlers = new Map<
+      string,
+      (
+        message: Record<string, unknown>,
+      ) => Promise<Record<string, unknown> | undefined>
+    >();
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async (sessionId, handler) => {
+        handlers.set(sessionId, handler);
+      }),
+      unregister: vi.fn(async (sessionId) => {
+        handlers.delete(sessionId);
+      }),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      channelLoopMcpHost: host,
+    });
+    const first = vi.fn(async () => 'first');
+    const second = vi.fn(async () => 'second');
+    bridge.registerChannelLoopToolHandler({
+      create: vi.fn(async () => ({ text: 'created' })),
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      bridge.registerChannelTool({
+        name: 'qq_recall_message',
+        description: 'first',
+        inputSchema: { type: 'object', properties: {} },
+        handler: first,
+      });
+      bridge.registerChannelTool({
+        name: 'qq_recall_message',
+        description: 'second',
+        inputSchema: { type: 'object', properties: {} },
+        handler: second,
+      });
+      bridge.registerChannelTool({
+        name: 'channel_loop_create',
+        description: 'shadow the loop tool',
+        inputSchema: { type: 'object', properties: {} },
+        handler: second,
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const list = await handlers.get('session-1')?.({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    });
+    const names = (
+      list as { result: { tools: Array<{ name: string }> } }
+    ).result.tools.map((tool) => tool.name);
+    expect(names.filter((name) => name === 'qq_recall_message')).toHaveLength(
+      1,
+    );
+    expect(names.filter((name) => name === 'channel_loop_create')).toHaveLength(
+      1,
+    );
+
+    await handlers.get('session-1')?.({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'qq_recall_message', arguments: {} },
+    });
+    expect(first).toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('scopes same-named adapter tools to their owning channel', async () => {
+    const events = new EventQueue();
+    let created = 0;
+    const sessionFactory = vi.fn(async () =>
+      createFakeSession(events, `session-${++created}`),
+    );
+    const handlers = new Map<
+      string,
+      (
+        message: Record<string, unknown>,
+      ) => Promise<Record<string, unknown> | undefined>
+    >();
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async (sessionId, handler) => {
+        handlers.set(sessionId, handler);
+      }),
+      unregister: vi.fn(async (sessionId) => {
+        handlers.delete(sessionId);
+      }),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory,
+      channelLoopMcpHost: host,
+    });
+    const tool = (owner: string, marker: string) => ({
+      name: 'qq_recall_message',
+      description: `owned by ${owner}`,
+      inputSchema: { type: 'object', properties: {} },
+      owner,
+      handler: vi.fn(async () => marker),
+    });
+    // Two channels of the same type on one bridge: the second registration
+    // must not be dropped, and each session only sees its own channel's tool.
+    bridge.registerChannelTool(tool('bot-a', 'a'));
+    bridge.registerChannelTool(tool('bot-b', 'b'));
+
+    await bridge.start();
+    await bridge.newSession('/repo', { sourceId: 'bot-a' });
+    await bridge.newSession('/repo', { sourceId: 'bot-b' });
+
+    const list = async (sessionId: string) =>
+      (
+        (await handlers.get(sessionId)?.({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/list',
+        })) as {
+          result: { tools: Array<{ name: string; description: string }> };
+        }
+      ).result.tools;
+    expect(await list('session-1')).toEqual([
+      expect.objectContaining({ description: 'owned by bot-a' }),
+    ]);
+    expect(await list('session-2')).toEqual([
+      expect.objectContaining({ description: 'owned by bot-b' }),
+    ]);
+
+    await expect(
+      handlers.get('session-1')?.({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'qq_recall_message', arguments: {} },
+      }),
+    ).resolves.toMatchObject({
+      result: { content: [{ type: 'text', text: 'a' }] },
+    });
+    await expect(
+      handlers.get('session-2')?.({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'qq_recall_message', arguments: {} },
+      }),
+    ).resolves.toMatchObject({
+      result: { content: [{ type: 'text', text: 'b' }] },
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
   it.each(['new', 'load'] as const)(
     'does not attach loop tools to an opted-out %s session',
     async (operation) => {
@@ -910,6 +1230,42 @@ describe('DaemonChannelBridge', () => {
       sourceId: 'feishu-main',
     });
 
+    events.close();
+    bridge.stop();
+  });
+
+  it('records the owning channel for new, loaded and worktree-reset sessions', async () => {
+    const events = new EventQueue();
+    const factory = vi
+      .fn()
+      .mockResolvedValueOnce(createFakeSession(events, 's-new'))
+      .mockResolvedValueOnce(createFakeSession(events, 's-load'))
+      .mockResolvedValueOnce({
+        ...createFakeSession(events, 's-reset'),
+        worktree: { slug: 'task', path: '/repo-wt', branch: 'task' },
+        worktreeState: 'persisted-v1' as const,
+      });
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn().mockResolvedValue(undefined),
+      unregister: vi.fn().mockResolvedValue(undefined),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreeReset: true,
+      channelLoopMcpHost: host,
+    });
+    const owners = (bridge as unknown as { sessionOwners: Map<string, string> })
+      .sessionOwners;
+
+    await bridge.start();
+    await bridge.newSession('/repo', { sourceId: 'bot-a' });
+    await bridge.loadSession('s-load', '/repo', { sourceId: 'bot-b' });
+    await bridge.resetWorktreeSession('s-new', '/repo', { sourceId: 'bot-c' });
+
+    expect(owners.get('s-new')).toBe('bot-a');
+    expect(owners.get('s-load')).toBe('bot-b');
+    expect(owners.get('s-reset')).toBe('bot-c');
     events.close();
     bridge.stop();
   });
@@ -1830,6 +2186,164 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('carries a turn notice ahead of the model text instead of shadowing it', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Model text' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Only the first 5 skills were loaded.\n\nModel text',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('keeps the turn notice across a response boundary', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        },
+      });
+      // Drive the boundary from inside the turn: an out-of-band emit runs
+      // before the queued notice is consumed, so it would clear nothing.
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'read',
+            title: 'Read',
+            status: 'in_progress',
+          },
+        },
+      });
+      events.push({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Model text' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Only the first 5 skills were loaded.\n\nModel text',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('does not add a blank paragraph after a notice-only turn', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Only the first 5 skills were loaded.',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
   it('ignores emitted slash-command output for another prompt session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -1846,6 +2360,99 @@ describe('DaemonChannelBridge', () => {
     await bridge.newSession('/repo');
 
     await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe('');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('ignores a turn notice for another prompt session', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-2',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Model text' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Model text',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('ignores an emitted turn notice aimed at another prompt session', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      // Reach onTurnNotice directly: a session_update for session-2 never gets
+      // this far, so only the session filter keeps the notice out.
+      bridge.emit(
+        'turnNotice',
+        'session-2',
+        'Only the first 5 skills were loaded.',
+      );
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Model text' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Model text',
+    );
 
     events.close();
     bridge.stop();

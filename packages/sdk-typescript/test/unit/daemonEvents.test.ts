@@ -28,6 +28,27 @@ import type {
 } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
+it('accepts an explicitly cleared model after subscription logout', () => {
+  const event: DaemonEvent = {
+    v: 1,
+    type: 'model_switched',
+    data: { sessionId: 'session', modelId: '', subscriptionSignedOut: true },
+  };
+  expect(asKnownDaemonEvent(event)).toBe(event);
+  expect(
+    reduceDaemonSessionEvent(
+      createDaemonSessionViewState({ currentModelId: 'old' }),
+      event,
+    ).currentModelId,
+  ).toBeUndefined();
+  expect(
+    asKnownDaemonEvent({
+      ...event,
+      data: { sessionId: 'session', modelId: '' },
+    }),
+  ).toBeUndefined();
+});
+
 describe('session_messages_deleted', () => {
   it('validates the identities published on the wire', () => {
     const event: DaemonEvent = {

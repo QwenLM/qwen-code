@@ -3,7 +3,6 @@
   "compilerOptions": {
     "outDir": "dist",
     "jsx": "react-jsx",
-    "baseUrl": ".",
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
     "types": ["node", "vitest/globals"],
     "paths": {

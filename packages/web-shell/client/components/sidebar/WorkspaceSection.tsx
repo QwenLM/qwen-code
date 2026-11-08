@@ -10,6 +10,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type HTMLAttributes,
   type ReactNode,
 } from 'react';
 import type {
@@ -91,9 +92,12 @@ export function isAbsolutePath(cwd: string): boolean {
   );
 }
 
-function getSessionLabel(session: DaemonSessionSummary): string {
+function getSessionLabel(
+  session: DaemonSessionSummary,
+  untitledLabel?: string,
+): string {
   const displayName = session.displayName?.trim();
-  return displayName || session.sessionId.slice(0, 8);
+  return displayName || untitledLabel || session.sessionId.slice(0, 8);
 }
 
 function WorkspaceFolderIcon({
@@ -150,6 +154,8 @@ interface WorkspaceSectionProps {
   trustToOpenLabel: string;
   noSessionsLabel: string;
   loadErrorLabel: string;
+  /** Shown instead of an id prefix when a session has no persisted name. */
+  untitledSessionLabel?: string;
   organizationEnabled: boolean;
   sessionCatalogRequestsEnabled?: boolean;
   sessionGroupCatalog?: DaemonSessionGroupCatalog;
@@ -159,6 +165,12 @@ interface WorkspaceSectionProps {
   ungroupedLabel: string;
   searchQuery?: string;
   expanded?: boolean;
+  expansionRequest?: { expanded: boolean };
+  temporarilyCollapsed?: boolean;
+  dragHandleProps?: Pick<
+    HTMLAttributes<HTMLButtonElement>,
+    'draggable' | 'onDragStart' | 'onDragEnd'
+  >;
   autoExpandKey?: string;
   forceAutoExpand?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
@@ -276,6 +288,7 @@ export function WorkspaceSection({
   trustToOpenLabel,
   noSessionsLabel,
   loadErrorLabel,
+  untitledSessionLabel,
   organizationEnabled,
   sessionCatalogRequestsEnabled = true,
   sessionGroupCatalog,
@@ -285,6 +298,9 @@ export function WorkspaceSection({
   ungroupedLabel,
   searchQuery = '',
   expanded: controlledExpanded,
+  expansionRequest,
+  temporarilyCollapsed = false,
+  dragHandleProps,
   autoExpandKey,
   forceAutoExpand = false,
   onExpandedChange,
@@ -337,6 +353,7 @@ export function WorkspaceSection({
   const sessionPollFailed = useRef(false);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
+  const headerExpanded = expanded && !temporarilyCollapsed;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
   const searchActive = searchQuery.trim().length > 0;
@@ -347,6 +364,13 @@ export function WorkspaceSection({
       setInternalExpanded(readWorkspaceExpanded(storageId));
     }
   }, [controlledExpanded, storageId]);
+
+  useEffect(() => {
+    if (!expansionRequest || controlledExpanded !== undefined) return;
+    setInternalExpanded(expansionRequest.expanded);
+    setShowAllSessions(false);
+    writeWorkspaceExpanded(storageId, expansionRequest.expanded);
+  }, [expansionRequest, controlledExpanded, storageId]);
 
   useEffect(() => {
     // The five-row preview is scoped per source; reset the one-shot
@@ -857,14 +881,19 @@ export function WorkspaceSection({
     };
   };
   const renderReadOnlySessionRow = (session: DaemonSessionSummary) => {
-    const label = getSessionLabel(session);
+    const label = getSessionLabel(session, untitledSessionLabel);
+    // The body text stays the label; the id lives in the accessible name so
+    // two untitled rows are not announced identically.
+    const accessibleLabel = session.displayName?.trim()
+      ? `${label}. ${trustToOpenLabel}`
+      : `${label} (${session.sessionId.slice(0, 8)}). ${trustToOpenLabel}`;
     const stamp = session.updatedAt || session.createdAt;
     const row = (
       <div
         key={session.sessionId}
         className={styles.sessionItemReadOnly}
         role="note"
-        aria-label={`${label}. ${trustToOpenLabel}`}
+        aria-label={accessibleLabel}
         onMouseEnter={(event) => measureSessionTitleScroll(event.currentTarget)}
       >
         <span className={styles.sessionName} data-web-shell-session-title>
@@ -995,18 +1024,22 @@ export function WorkspaceSection({
         className={styles.header}
         type="button"
         disabled={disabled}
-        aria-expanded={expanded}
+        aria-expanded={headerExpanded}
         onClick={toggleExpanded}
+        {...dragHandleProps}
       >
         {renderHeader ? (
-          renderHeader(expanded)
+          renderHeader(headerExpanded)
         ) : (
           <>
             <span
-              className={cx(styles.chevron, expanded && styles.chevronOpen)}
+              className={cx(
+                styles.chevron,
+                headerExpanded && styles.chevronOpen,
+              )}
             >
               <WorkspaceFolderIcon
-                open={expanded}
+                open={headerExpanded}
                 remote={remote || !!workspace.ssh}
               />
             </span>
@@ -1090,7 +1123,10 @@ export function WorkspaceSection({
       {renderSessions &&
         (expanded || Boolean(searchQuery.trim())) &&
         !disabled && (
-          <div className={styles.sessions}>
+          <div
+            className={styles.sessions}
+            style={temporarilyCollapsed ? { display: 'none' } : undefined}
+          >
             {pendingSession &&
             !pendingSessionMatched &&
             !fulfilledPendingSessions.current.has(pendingSession.key)

@@ -276,6 +276,7 @@ export interface DaemonPermissionForbiddenData {
 export interface DaemonModelSwitchedData {
   sessionId: string;
   modelId: string;
+  subscriptionSignedOut?: boolean;
   [key: string]: unknown;
 }
 
@@ -2122,7 +2123,7 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         sessionId: event.data.sessionId,
-        currentModelId: event.data.modelId,
+        currentModelId: event.data.modelId || undefined,
         lastModelSwitchFailure: undefined,
       };
     case 'model_switch_failed':
@@ -2757,7 +2758,8 @@ function isModelSwitchedData(value: unknown): value is DaemonModelSwitchedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
-    isNonEmptyString(value['modelId'])
+    (isNonEmptyString(value['modelId']) ||
+      (value['modelId'] === '' && value['subscriptionSignedOut'] === true))
   );
 }
 
