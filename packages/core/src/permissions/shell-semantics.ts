@@ -3727,6 +3727,10 @@ function tokensContainGitAmend(
     return true;
   }
 
+  // Comment removal replaces `#…\n` with a space, gluing the next line's
+  // command onto this one; a raw newline therefore means the segment can
+  // carry a second command whose words are not the first program's arguments.
+  const multiLine = segment.includes('\n');
   segment = stripUnquotedComments(segment);
 
   const unwrapped = stripShellWrapper(segment);
@@ -3792,9 +3796,27 @@ function tokensContainGitAmend(
   // this linear: the scan runs for every shell tool call before the classifier,
   // and copying the token tail at each offset made a 40k-token command take
   // seconds.
-  for (let offset = 1; offset < tokens.length; offset++) {
-    if (amendExecutableBasename(tokens[offset]!) !== 'git') continue;
-    if (isGitAmendInvocationAt(tokens, offset)) return true;
+  // Unquoted words after a positively inert text program are its arguments
+  // (data), not a command: `echo git commit --amend >> CHANGELOG.md` prints
+  // the phrase, it never runs git. The sweep exists for wrappers (`xargs`,
+  // `find -exec`, a leading redirection); none of those is an inert text
+  // program. Without this skip the sweep re-denied the changelog echo the
+  // maintainer stopgap routes to approval (#16075 R15-4, issue #13570).
+  // Substitution bodies and shell-fed carriers are analysed separately, so
+  // `echo $(git commit --amend)` and `echo … | bash` stay invocations. A
+  // newline ends the inert program's command: words on the next line are a
+  // new command (`echo hi # note\ngit commit --amend`), not arguments, so
+  // the sweep still runs for any multi-line segment.
+  if (
+    multiLine ||
+    !INERT_TEXT_PROGRAMS.has(
+      amendExecutableBasename(amendProgramBeforeRedirect(tokens[0]!)),
+    )
+  ) {
+    for (let offset = 1; offset < tokens.length; offset++) {
+      if (amendExecutableBasename(tokens[offset]!) !== 'git') continue;
+      if (isGitAmendInvocationAt(tokens, offset)) return true;
+    }
   }
 
   // A here-string is one word handed to the program on its left; when that
@@ -4504,13 +4526,33 @@ function amendOccurrencesProvablyInert(command: string): boolean {
  * The recognizer can therefore only ever ADD denials, never remove one the
  * base guard made.
  */
-export function commandContainsGitAmend(command: string): boolean {
-  if (commandContainsGitAmendAtDepth(command, 0)) return true;
+/**
+ * Which layer recognised a `git commit --amend` (#16075 maintainer stopgap,
+ * round-15 assessment):
+ *  - `invocation`: the parsed recognizer identified an amend invocation —
+ *    positively, or fail-closed on an expansion whose inertness it cannot
+ *    prove. These keep the session-commit check and hard denial.
+ *  - `unprovable-text`: only the literal-phrase backstop fired. The command
+ *    mentions the amend but no invocation was identified and inertness is
+ *    unprovable; the guard routes these to approval, not hard denial.
+ *  - `none`: no amend recognised.
+ */
+export type GitAmendRecognition = 'invocation' | 'unprovable-text' | 'none';
+
+export function classifyGitAmend(command: string): GitAmendRecognition {
+  if (commandContainsGitAmendAtDepth(command, 0)) return 'invocation';
   const expanded = command + ' ' + stripShellQuotes(command);
-  return (
+  if (
     GIT_AMEND_BACKSTOP_PATTERN.test(expanded) &&
     !amendOccurrencesProvablyInert(command)
-  );
+  ) {
+    return 'unprovable-text';
+  }
+  return 'none';
+}
+
+export function commandContainsGitAmend(command: string): boolean {
+  return classifyGitAmend(command) !== 'none';
 }
 
 /** git subcommands that can move HEAD before a later `--amend` reads it, so
@@ -4540,7 +4582,14 @@ export interface AmendSegment {
 
 export type AmendSegmentAnalysis =
   | { kind: 'segments'; segments: AmendSegment[]; effectiveCwd: string }
-  | { kind: 'untrackable' };
+  | {
+      kind: 'untrackable';
+      /** A preceding segment positively moves HEAD, so the amend rewrites a
+       * commit the session never made even though guard-time HEAD is
+       * registered. The guard hard-denies this case; every other untrackable
+       * refusal routes to approval (#16075 maintainer stopgap). */
+      headMayMove?: boolean;
+    };
 
 /** Does the segment carry subshell/group parentheses outside quotes? Quoted
  * parentheses (`-m 'fix (bug)'`) are message data, not shell syntax. */
@@ -4665,13 +4714,20 @@ function walkAmendSegments(
   const amendSegments: AmendSegment[] = [];
   const poisoned = (): boolean =>
     !cwdKnown || sawSubshell || envRelocated || relocatedEnvNames.size > 0;
+  // Every refusal carries an already-proven HEAD movement: the amend after a
+  // `git reset --soft HEAD~1` rewrites an unregistered commit no matter what
+  // else the walk cannot attribute (#16075 review, R14-1 / R15-2).
+  const untrackable = (): AmendSegmentAnalysis =>
+    headMayMove
+      ? { kind: 'untrackable', headMayMove: true }
+      : { kind: 'untrackable' };
 
   // A substitution body that amends is a second amend whose cwd this walk
   // does not model (`git amend -m "$(git -C B amend)"` amends BOTH repos,
   // witnessed); refuse the exemption rather than attribute one of them.
   for (const body of extractCommandSubstitutionBodies(command)) {
     if (commandContainsGitAmendAtDepth(body, depth + 1, names)) {
-      return { kind: 'untrackable' };
+      return untrackable();
     }
   }
 
@@ -4696,7 +4752,7 @@ function walkAmendSegments(
       poisoned() &&
       commandContainsGitAmendAtDepth(payload, depth + 1, names)
     ) {
-      return { kind: 'untrackable' };
+      return untrackable();
     }
     const inner = walkInner(payload);
     if (inner.kind === 'untrackable') return inner;
@@ -4801,7 +4857,7 @@ function walkAmendSegments(
     // && eval 'git -C B amend'`), so the whole command is untrackable (#16075
     // review, R7-2).
     if (program === 'eval' || program === 'source' || program === '.') {
-      return { kind: 'untrackable' };
+      return untrackable();
     }
 
     // Exported GIT_DIR / GIT_WORK_TREE persist across segments and relocate
@@ -4927,8 +4983,11 @@ function walkAmendSegments(
       headMayMove = true;
     }
     if (tokens.length > 0 && isGitAmendInvocationAt(tokens, 0)) {
-      if (poisoned() || headMayMove) {
-        return { kind: 'untrackable' };
+      if (headMayMove) {
+        return { kind: 'untrackable', headMayMove: true };
+      }
+      if (poisoned()) {
+        return untrackable();
       }
       amendSegments.push({ segment, cwd: effectiveCwd });
       prevTerminator = terminator;
@@ -4944,15 +5003,15 @@ function walkAmendSegments(
       nestedAmendPayloads(tokenize(stripUnquotedComments(segment)), names)
         .unclassifiable
     ) {
-      return { kind: 'untrackable' };
+      return untrackable();
     }
     prevTerminator = terminator;
   }
   // A shell-fed body the segment loop did not consume belongs to an opener
   // this walk could not attribute: its amend may run under any cwd.
-  if (fedIndex < fedBodies.length) return { kind: 'untrackable' };
+  if (fedIndex < fedBodies.length) return untrackable();
   if ((!cwdKnown || sawSubshell) && amendSegments.length === 0) {
-    return { kind: 'untrackable' };
+    return untrackable();
   }
   return { kind: 'segments', segments: amendSegments, effectiveCwd };
 }

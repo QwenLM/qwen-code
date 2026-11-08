@@ -901,6 +901,13 @@ export async function evaluateAutoMode(
         reason: destructiveResult.reason,
       };
     }
+    if (destructiveResult?.ask) {
+      // Maintainer stopgap (#16075 round-15 assessment): amend text the guard
+      // cannot positively classify goes to the normal approval path, not a
+      // hard denial. The scheduler drops a `fallback` outcome through to the
+      // manual-approval dialog, so the user sees the command and decides.
+      return { via: 'fallback', reason: 'safety_check' };
+    }
   }
 
   // User `ask` rules require manual confirmation.

@@ -23,8 +23,9 @@ import { execFileSync, execSync } from 'node:child_process';
 import {
   amendSegmentRelocations,
   amendSegmentsForExemption,
-  commandContainsGitAmend,
+  classifyGitAmend,
   stripShellQuotes,
+  type AmendSegmentAnalysis,
 } from './shell-semantics.js';
 
 /**
@@ -96,6 +97,16 @@ export function extractLastUserPrompt(
 /** Result of a destructive command check. */
 export interface DestructiveCommandResult {
   blocked: boolean;
+  /**
+   * Third outcome (#16075 maintainer stopgap, round-15 assessment): route the
+   * command to the normal approval prompt instead of hard-denying it or
+   * silently allowing it. Set when the guard recognises amend text but cannot
+   * positively identify a dangerous amend — inert-unprovable mentions and
+   * amends whose target commit cannot be attributed. Hard denial stays
+   * reserved for positively identified dangerous amends. Never set together
+   * with `blocked: true`.
+   */
+  ask?: boolean;
   reason: string;
 }
 
@@ -171,10 +182,10 @@ const STATIC_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/-]+$/;
  * exemption rather than guess which HEAD gets amended. Commands without
  * relocations keep the historical cwd-only answer.
  */
-function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
-  const analysis = amendSegmentsForExemption(command, cwd);
-  if (analysis.kind === 'untrackable') return null;
-
+function resolveAmendTarget(
+  cwd: string,
+  analysis: Extract<AmendSegmentAnalysis, { kind: 'segments' }>,
+): AmendTarget | null {
   let target: AmendTarget;
   if (analysis.segments.length === 0) {
     // The amend lives in a carrier the exemption walk does not attribute
@@ -222,18 +233,34 @@ function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
 }
 
 /**
- * Check whether a `git commit --amend` targets a commit made this session.
- * Reads the current HEAD commit SHA of the repository the command actually
- * targets and checks against registered session commits. Without a command,
- * or with no repo-relocation flags, that is `cwd`'s HEAD exactly as before;
- * a relocation this guard cannot resolve statically refuses the exemption
- * (#16075 R9, B2).
+ * Three-way session-exemption outcome for a recognised amend invocation
+ * (#16075 maintainer stopgap, round-15 assessment):
+ *  - `exempt`: the target HEAD is a registered session commit.
+ *  - `foreign`: positively identified dangerous amend — no session commits
+ *    exist, the resolved target HEAD is not registered, or a preceding
+ *    segment positively moves HEAD so the amend rewrites an unregistered
+ *    commit. Hard denial.
+ *  - `unattributable`: an amend invocation whose target repository/commit the
+ *    walk cannot prove. Approval, not denial — never a silent allow.
  */
-export function isAmendOfSessionCommit(cwd: string, command?: string): boolean {
-  if (sessionCommitShas.size === 0) return false;
-  const target =
-    command === undefined ? { cwd } : resolveAmendTarget(cwd, command);
-  if (target === null) return false;
+type AmendExemptionOutcome = 'exempt' | 'foreign' | 'unattributable';
+
+function amendExemptionOutcome(
+  cwd: string,
+  command: string | undefined,
+): AmendExemptionOutcome {
+  if (sessionCommitShas.size === 0) return 'foreign';
+  let target: AmendTarget | null;
+  if (command === undefined) {
+    target = { cwd };
+  } else {
+    const analysis = amendSegmentsForExemption(command, cwd);
+    if (analysis.kind === 'untrackable') {
+      return analysis.headMayMove === true ? 'foreign' : 'unattributable';
+    }
+    target = resolveAmendTarget(cwd, analysis);
+  }
+  if (target === null) return 'unattributable';
   try {
     const headSha =
       target.gitDir !== undefined
@@ -253,10 +280,24 @@ export function isAmendOfSessionCommit(cwd: string, command?: string): boolean {
             timeout: 5000,
             stdio: ['ignore', 'pipe', 'ignore'],
           }).trim();
-    return sessionCommitShas.has(headSha);
+    return sessionCommitShas.has(headSha) ? 'exempt' : 'foreign';
   } catch {
-    return false;
+    // HEAD cannot be read: no proof the target is a session commit. Keep the
+    // historical fail-closed answer for this positively-unresolvable case.
+    return 'foreign';
   }
+}
+
+/**
+ * Check whether a `git commit --amend` targets a commit made this session.
+ * Reads the current HEAD commit SHA of the repository the command actually
+ * targets and checks against registered session commits. Without a command,
+ * or with no repo-relocation flags, that is `cwd`'s HEAD exactly as before;
+ * a relocation this guard cannot resolve statically refuses the exemption
+ * (#16075 R9, B2).
+ */
+export function isAmendOfSessionCommit(cwd: string, command?: string): boolean {
+  return amendExemptionOutcome(cwd, command) === 'exempt';
 }
 
 /**
@@ -281,7 +322,8 @@ export function clearSessionCommits(): void {
  * @param command - The raw shell command string
  * @param userPrompt - The user's most recent prompt text
  * @param cwd - Working directory for git operations (amend check)
- * @returns Block result if the command is destructive, null otherwise
+ * @returns Block result if the command is positively destructive, an `ask`
+ *   result if it must go to manual approval, null otherwise
  */
 export function isDestructiveCommand(
   command: string,
@@ -305,15 +347,37 @@ export function isDestructiveCommand(
     }
   }
 
-  if (
-    commandContainsGitAmend(command) &&
-    !isAmendOfSessionCommit(cwd, command)
-  ) {
+  // Amend guard (#16075 maintainer stopgap, round-15 assessment): hard denial
+  // is reserved for positively identified dangerous amends. Text that merely
+  // mentions the amend without a recognised invocation, and invocations whose
+  // target commit cannot be attributed, route to the approval prompt instead
+  // — issue #13570 accepts "allowed, or at worst an approval prompt".
+  const recognition = classifyGitAmend(command);
+  if (recognition === 'unprovable-text') {
     return {
-      blocked: true,
+      blocked: false,
+      ask: true,
       reason:
-        'Blocked "git commit --amend": the target commit was not made by the agent in this session. To proceed, use manual approval.',
+        'This command mentions "git commit --amend" in text the guard cannot prove inert. Routed to manual approval instead of blocking (issue #13570).',
     };
+  }
+  if (recognition === 'invocation') {
+    const outcome = amendExemptionOutcome(cwd, command);
+    if (outcome === 'foreign') {
+      return {
+        blocked: true,
+        reason:
+          'Blocked "git commit --amend": the target commit was not made by the agent in this session. To proceed, use manual approval.',
+      };
+    }
+    if (outcome === 'unattributable') {
+      return {
+        blocked: false,
+        ask: true,
+        reason:
+          'This command invokes "git commit --amend" but the guard cannot prove which commit it rewrites. Routed to manual approval (issue #13570).',
+      };
+    }
   }
 
   for (const pattern of IAC_DESTROY_PATTERNS) {

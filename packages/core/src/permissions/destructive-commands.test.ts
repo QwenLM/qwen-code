@@ -36,6 +36,19 @@ function expectAllowed(commands: string[], prompt: string) {
   }
 }
 
+/**
+ * Asserts the third outcome (#16075 maintainer stopgap, round-15 assessment):
+ * the command goes to the approval prompt — neither a hard block nor a silent
+ * allow. Used where the guard recognises amend text but cannot positively
+ * identify a dangerous amend.
+ */
+function expectAsk(cmd: string, prompt: string, cwd?: string) {
+  const result = isDestructiveCommand(cmd, prompt, cwd);
+  expect(result).not.toBeNull();
+  expect(result!.blocked).toBe(false);
+  expect(result!.ask).toBe(true);
+}
+
 describe('userMentionsDiscard', () => {
   it('returns true for English discard keywords', () => {
     const prompts = [
@@ -459,22 +472,36 @@ describe('isDestructiveCommand — git commit --amend', () => {
 
   // B1 (doudouOUC): every spelling below was ALLOWED at head 733b9096 with
   // an empty session registry while the base substring guard denied it, and
-  // each one really amends HEAD when executed. The fail-closed backstop must
-  // deny all of them again — the recognizer may only add denials.
+  // each one really amends HEAD when executed. The recognizer positively
+  // identifies these invocations (static values, quote removal, pipe chains,
+  // env -S, xargs, here-strings), so they stay hard-blocked.
   it.each([
     "X='git commit --amend --no-edit'; $X",
     "sh -c ''--'' 'git commit --amend --no-edit'",
-    "trap 'git commit --amend --no-edit' EXIT",
-    "git rebase --exec 'git commit --amend --no-edit' HEAD~1",
     "echo 'git commit --amend --no-edit' | cat | bash",
     "env -u FOO -S 'git commit --amend --no-edit'",
-    "bash -c -e 'git commit --amend --no-edit'",
     "xargs -n 1 bash -c 'git commit --amend --no-edit'",
-    "find . -maxdepth 0 -exec timeout 5 sh -c 'git commit --amend --no-edit' \\;",
     "bash <<< 'echo FIRST' <<< 'git commit --amend --no-edit'",
     'bash -c "echo hi # it\'s\ngit commit --amend --no-edit"',
-  ])('B1 backstop blocks a recognizer-missed amend: %s', (command) => {
+  ])('B1 recognizer blocks a positively identified amend: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  // Maintainer stopgap (#16075 round-15 assessment): these carriers really
+  // amend HEAD in bash, but the hand-rolled recognizer does not positively
+  // identify the invocation — only the literal-phrase backstop sees them.
+  // Hard denial is reserved for positively identified dangerous amends, so
+  // they route to the approval prompt instead (a human still sees the trap /
+  // rebase --exec / shell payload before anything runs). Carrier attribution
+  // is deferred to the parser-redesign follow-up, not chased spelling by
+  // spelling here.
+  it.each([
+    "trap 'git commit --amend --no-edit' EXIT",
+    "git rebase --exec 'git commit --amend --no-edit' HEAD~1",
+    "bash -c -e 'git commit --amend --no-edit'",
+    "find . -maxdepth 0 -exec timeout 5 sh -c 'git commit --amend --no-edit' \\;",
+  ])('B1 unattributed carrier routes to approval: %s', (command) => {
+    expectAsk(command, 'amend the commit');
   });
 
   // The narrow inert prover keeps genuinely inert data allowed: single-quoted
@@ -492,27 +519,26 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectAllowed([command], 'write a report');
   });
 
-  // The heredoc arm is inert ONLY for a quoted delimiter owned by a
-  // non-shell allowlisted program: a shell owner executes the body, a pipe
-  // hands it to a shell, and an unquoted delimiter lets bash expand the body.
-  it.each([
-    "bash <<'EOF'\ngit commit --amend\nEOF",
-    "cat <<'EOF'\ngit commit --amend\nEOF | bash",
-    'cat <<EOF\ngit commit --amend\nEOF',
-    "cat <<'EOF'\ngit commit --amend\nEOF\nls",
-  ])('B1 heredoc arm stays fail-closed outside its proof: %s', (command) => {
-    expectBlocked(command, 'write a report', 'amend');
-  });
+  // A shell owner executes the heredoc body: the recognizer positively
+  // identifies that invocation, so it stays hard-blocked.
+  it.each(["bash <<'EOF'\ngit commit --amend\nEOF"])(
+    'B1 shell-owned heredoc stays blocked: %s',
+    (command) => {
+      expectBlocked(command, 'write a report', 'amend');
+    },
+  );
 
-  // These were ALLOWED before R9. The settled backstop design only proves
-  // single-quoted words of a tiny inert-program allowlist, comments, and
-  // quoted-delimiter heredocs without redirects; each case below sits outside
-  // that proof (double quotes, a non-allowlisted program, a redirect, a
-  // here-string, or a compound command), so the fail-closed backstop denies
-  // it. They are false positives the design accepts this round — recorded
-  // here, not silently dropped (#16075 R9, B1; qqqys backstop option (a)).
+  // Maintainer stopgap (#16075 round-15 assessment, fixing R15-4 / issue
+  // #13570): these were hard-denied by the R9 backstop even though no amend
+  // invocation is recognised and real bash proves the anchor inert. The
+  // backstop now routes every inert-unprovable mention to the approval
+  // prompt — the issue accepts "allowed, or at worst an approval prompt".
+  // Provably inert data (the table above) stays allowed; positively
+  // identified amends stay blocked.
   it.each([
-    // node is not an inert program: a `-e` payload can execute anything.
+    // The issue #13570 verbatim acceptance anchor. Was pinned expectBlocked
+    // ("false positives the design accepts this round"); the maintainer
+    // decision reverses that: inert-unprovable text must not hard-deny.
     `node -e 'console.log("a report about git commit --amend behaviour")'`,
     // Double-quoted occurrences are not proven inert this round.
     'echo "git commit --amend"',
@@ -525,22 +551,27 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "grep -rn sh <<< 'git commit --amend'",
     // A compound command is not a simple allowlisted command.
     "bash --version; cat > notes.md <<'EOF'\ngit commit --amend --no-edit\nEOF",
-  ])('B1 backstop flips a formerly-allowed unprovable case: %s', (command) => {
-    expectBlocked(command, 'write a report', 'amend');
-  });
-
-  // Known limitations that stay blocked this round — pinned so a future
-  // narrowing of the backstop cannot silently re-open them, and not chased
-  // further in R9 (#16075 R9 task scope; doudouOUC R1).
-  it.each([
-    // R1: unquoted inert text with a redirect — the every-offset sweep still
-    // sees program-position amend words; fixing it needs the comment/newline
-    // refactor the review describes.
+    // Heredoc shapes outside the inert proof: a pipe on the delimiter line,
+    // an unquoted delimiter, and a trailing second command. The recognizer
+    // does not attribute these carriers; approval, not hard denial.
+    "cat <<'EOF'\ngit commit --amend\nEOF | bash",
+    'cat <<EOF\ngit commit --amend\nEOF',
+    "cat <<'EOF'\ngit commit --amend\nEOF\nls",
+    // R1: unquoted inert text with a redirect (changelog echo).
     'echo git commit --amend >> CHANGELOG.md',
     // Double-quoted interpreter payloads are outside the inert proof.
     `node -e "console.log('git commit --amend')"`,
-  ])('known limitation stays blocked: %s', (command) => {
-    expectBlocked(command, 'write a report', 'amend');
+    // A commit MESSAGE that mentions the amend is data, not an invocation;
+    // the recognizer ignores message arguments, the backstop sees the phrase.
+    "git commit -m 'fix: explain why git commit --amend is blocked'",
+    // The execSync twin: the model cannot parse JavaScript, so it cannot
+    // positively identify the amend inside the payload either. Approval
+    // keeps the security property (never silently auto-allow) while a human
+    // reviewer sees the execSync call; distinguishing inert JS from executing
+    // JS is the parser-redesign follow-up's job, not another spelling rule.
+    `node -e 'require("child_process").execSync("git commit --amend")'`,
+  ])('B1 inert-unprovable mention routes to approval: %s', (command) => {
+    expectAsk(command, 'write a report');
   });
 });
 
@@ -668,57 +699,57 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
   // R7-2 (second round): the walk must refuse the exemption whenever it
   // cannot prove which repository the amend rewrites. Each row keeps repo A's
   // HEAD registered while the amend really runs in repo B (or after a segment
-  // that moved HEAD), so the guard has to stay live.
-  it('blocks a cd that `||` makes conditional (true || cd A && amend, cwd=B)', () => {
-    expect(
-      isDestructiveCommand(
-        `true || cd ${repoA.dir} && git commit --amend --no-edit`,
-        'amend the commit',
-        repoB.dir,
-      ),
-    ).not.toBeNull();
+  // that moved HEAD), so the guard has to stay live. Maintainer stopgap
+  // (#16075 round-15 assessment): an unattributable target routes to the
+  // approval prompt instead of a hard denial — never a silent allow.
+  it('routes a cd that `||` makes conditional to approval (true || cd A && amend, cwd=B)', () => {
+    expectAsk(
+      `true || cd ${repoA.dir} && git commit --amend --no-edit`,
+      'amend the commit',
+      repoB.dir,
+    );
   });
 
-  it('blocks an assignment-prefixed cd (FOO=1 cd B; amend, cwd=A)', () => {
+  it('blocks an amend after an assignment-prefixed cd into repo B (cwd=A)', () => {
+    // The walk tracks the cd through the assignment prefix: the target is
+    // positively B, whose HEAD is not registered — hard denial stands.
     expect(
       isDestructiveCommand(
         `FOO=1 cd ${repoB.dir}; git commit --amend --no-edit`,
         'amend the commit',
         repoA.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
   });
 
-  it('blocks an export hidden behind `builtin` (builtin export GIT_DIR=B)', () => {
-    expect(
-      isDestructiveCommand(
-        `builtin export GIT_DIR=${repoB.dir}/.git; git commit --amend --no-edit`,
-        'amend the commit',
-        repoA.dir,
-      ),
-    ).not.toBeNull();
+  it('routes an export hidden behind `builtin` to approval (builtin export GIT_DIR=B)', () => {
+    expectAsk(
+      `builtin export GIT_DIR=${repoB.dir}/.git; git commit --amend --no-edit`,
+      'amend the commit',
+      repoA.dir,
+    );
   });
 
-  it('keeps an exported GIT_DIR across a backgrounded unset', () => {
-    expect(
-      isDestructiveCommand(
-        `export GIT_DIR=${repoB.dir}/.git; unset GIT_DIR & git commit --amend --no-edit`,
-        'amend the commit',
-        repoA.dir,
-      ),
-    ).not.toBeNull();
+  it('routes an exported GIT_DIR across a backgrounded unset to approval', () => {
+    expectAsk(
+      `export GIT_DIR=${repoB.dir}/.git; unset GIT_DIR & git commit --amend --no-edit`,
+      'amend the commit',
+      repoA.dir,
+    );
   });
 
-  it('refuses the exemption after a segment that moved HEAD (#16075 R14-1)', () => {
+  it('blocks the amend after a segment that positively moved HEAD (#16075 R14-1)', () => {
     // `git reset --soft HEAD~1` moves HEAD before the amend runs, so the
-    // registered commit is not the one the amend rewrites.
-    expect(
-      isDestructiveCommand(
-        'git reset --soft HEAD~1 && git commit --amend --no-edit',
-        'amend the commit',
-        repoA.dir,
-      ),
-    ).not.toBeNull();
+    // registered commit is not the one the amend rewrites. This is a
+    // positively identified dangerous amend: hard denial, not approval
+    // (patrol M3 fix, preserved by the maintainer stopgap).
+    const result = isDestructiveCommand(
+      'git reset --soft HEAD~1 && git commit --amend --no-edit',
+      'amend the commit',
+      repoA.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
   });
 
   it('allows an amend relocated to the repo whose HEAD is registered', () => {
@@ -793,17 +824,16 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
   });
 
   it.each([
-    // Non-static targets refuse the exemption entirely (fail closed), even
-    // when cwd's own HEAD is registered.
+    // Non-static targets refuse the exemption entirely, even when cwd's own
+    // HEAD is registered. The target is unattributable, not positively
+    // foreign: approval, not hard denial (#16075 maintainer stopgap).
     'git -C "$OTHER" commit --amend --no-edit',
     'git -C relative/path commit --amend --no-edit',
     'git -C ~/repo commit --amend --no-edit',
     // Stacked relocations cannot be resolved statically.
     'git -C /tmp -C /var commit --amend --no-edit',
-  ])('refuses the exemption for an unresolvable relocation: %s', (command) => {
-    const result = isDestructiveCommand(command, 'amend the commit', repoA.dir);
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
+  ])('routes an unresolvable relocation to approval: %s', (command) => {
+    expectAsk(command, 'amend the commit', repoA.dir);
   });
 
   // ── R7-2 fix-induced: relocations are segment-scoped and quote-aware ────
@@ -880,17 +910,17 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
 
   it.each([
     // A subshell cd does not move this shell's cwd, and the amend inside it
-    // runs under a cwd this walk cannot attribute: fail closed.
+    // runs under a cwd this walk cannot attribute.
     `( cd ${'%REPO_B%'} && git commit --amend --no-edit )`,
     // A dynamic cd target cannot be resolved statically.
     'cd "$TARGET" && git commit --amend --no-edit',
     // popd returns to an unknown directory.
     'popd && git commit --amend --no-edit',
-  ])('fails closed when the amend cwd is untrackable: %s', (template) => {
+  ])('routes an untrackable amend cwd to approval: %s', (template) => {
+    // Unattributable, not positively foreign: approval, never a silent
+    // allow (#16075 maintainer stopgap).
     const command = template.replace('%REPO_B%', repoB.dir);
-    const result = isDestructiveCommand(command, 'amend the commit', repoA.dir);
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
+    expectAsk(command, 'amend the commit', repoA.dir);
   });
 
   it.each(['sudo', 'env', 'env -i', 'sudo -u root'])(
@@ -972,16 +1002,12 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
     ).toBeNull();
   });
 
-  it('refuses the exemption for an unclassifiable direct git invocation', () => {
+  it('routes an unclassifiable direct git invocation to approval', () => {
     // `-c $X` may define an alias that amends any repository; this is not a
-    // nested payload, so the cwd-only answer must not exempt it.
-    const result = isDestructiveCommand(
-      'git -c $X y --no-edit',
-      'amend the commit',
-      repoA.dir,
-    );
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
+    // nested payload, so the cwd-only answer must not exempt it. The target
+    // is unattributable, not positively foreign: approval (#16075 maintainer
+    // stopgap).
+    expectAsk('git -c $X y --no-edit', 'amend the commit', repoA.dir);
   });
 
   it('keeps the exemption for a literal -c config on a direct amend', () => {
@@ -1003,11 +1029,13 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
 
   it('blocks an amend relocated by a prefix chdir to an unregistered repo', () => {
     expect(
-      amendAt(`env -C ${repoB.dir} git commit --amend --no-edit`, repoA.dir),
-    ).not.toBeNull();
+      amendAt(`env -C ${repoB.dir} git commit --amend --no-edit`, repoA.dir)!
+        .blocked,
+    ).toBe(true);
     expect(
-      amendAt(`sudo -D ${repoB.dir} git commit --amend --no-edit`, repoA.dir),
-    ).not.toBeNull();
+      amendAt(`sudo -D ${repoB.dir} git commit --amend --no-edit`, repoA.dir)!
+        .blocked,
+    ).toBe(true);
   });
 
   it('exempts an amend relocated by env -C to the registered repo', () => {
@@ -1016,13 +1044,14 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
     ).toBeNull();
   });
 
-  it('blocks an amend under an exported GIT_DIR of an unregistered repo', () => {
-    expect(
-      amendAt(
-        `export GIT_DIR=${repoB.dir}/.git; git commit --amend --no-edit`,
-        repoA.dir,
-      ),
-    ).not.toBeNull();
+  it('routes an amend under an exported GIT_DIR to approval', () => {
+    // The exported relocation poisons the walk: unattributable, not
+    // positively foreign (#16075 maintainer stopgap).
+    expectAsk(
+      `export GIT_DIR=${repoB.dir}/.git; git commit --amend --no-edit`,
+      'amend the commit',
+      repoA.dir,
+    );
   });
 
   it('blocks an amend after builtin/command cd into an unregistered repo', () => {
@@ -1030,14 +1059,14 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
       amendAt(
         `builtin cd ${repoB.dir} && git commit --amend --no-edit`,
         repoA.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
     expect(
       amendAt(
         `command cd ${repoB.dir} && git commit --amend --no-edit`,
         repoA.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
   });
 
   it('attributes a wrapper payload amend to the cwd it inherits', () => {
@@ -1046,15 +1075,15 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
       amendAt(
         `bash -c 'cd ${repoB.dir} && git commit --amend --no-edit'`,
         repoA.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
     // The payload amends before the outer cd runs: the target is still B.
     expect(
       amendAt(
         `bash -c 'git commit --amend --no-edit' && cd ${repoA.dir}`,
         repoB.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
     // The payload amends the inherited cwd: the exemption still applies.
     expect(
       amendAt("bash -c 'git commit --amend --no-edit'", repoA.dir),
@@ -1064,42 +1093,50 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
   it('does not move the cwd through a pipelined cd', () => {
     // Both sides of a pipe run in subshells: the amend stays at B.
     expect(
-      amendAt(`cd ${repoA.dir} | cat; git commit --amend --no-edit`, repoB.dir),
-    ).not.toBeNull();
+      amendAt(`cd ${repoA.dir} | cat; git commit --amend --no-edit`, repoB.dir)!
+        .blocked,
+    ).toBe(true);
     // Mirror: the pipelined cd to B does not move A, so the amend is exempt.
     expect(
       amendAt(`cd ${repoB.dir} | cat; git commit --amend --no-edit`, repoA.dir),
     ).toBeNull();
   });
 
-  it('blocks an amend after eval cd and inside piped/heredoc programs', () => {
-    expect(
-      amendAt(
-        `eval 'cd ${repoB.dir}'; git commit --amend --no-edit`,
-        repoA.dir,
-      ),
-    ).not.toBeNull();
+  it('routes an amend after eval cd to approval', () => {
+    // eval runs text the walk does not read: unattributable (#16075
+    // maintainer stopgap).
+    expectAsk(
+      `eval 'cd ${repoB.dir}'; git commit --amend --no-edit`,
+      'amend the commit',
+      repoA.dir,
+    );
+  });
+
+  it('blocks an amend inside piped/heredoc programs that cd to B', () => {
+    // The walk reads these carriers and resolves the target to B: positively
+    // foreign, so hard denial stands.
     expect(
       amendAt(
         `echo 'cd ${repoB.dir} && git commit --amend --no-edit' | bash`,
         repoA.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
     expect(
       amendAt(
         `bash <<'EOF'\ncd ${repoB.dir}\ngit commit --amend --no-edit\nEOF`,
         repoA.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
   });
 
-  it('blocks a second amend inside a command substitution', () => {
-    expect(
-      amendAt(
-        `git commit --amend --no-edit -m "$(git -C ${repoB.dir} commit --amend --no-edit)"`,
-        repoA.dir,
-      ),
-    ).not.toBeNull();
+  it('routes a second amend inside a command substitution to approval', () => {
+    // The substitution amends a second repository the walk does not model:
+    // unattributable, never exempt (#16075 maintainer stopgap).
+    expectAsk(
+      `git commit --amend --no-edit -m "$(git -C ${repoB.dir} commit --amend --no-edit)"`,
+      'amend the commit',
+      repoA.dir,
+    );
   });
 
   it('blocks a payload amend relocated by an escaped -C', () => {
@@ -1107,43 +1144,75 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
       amendAt(
         `bash -c 'git \\-C ${repoB.dir} commit --amend --no-edit'`,
         repoA.dir,
-      ),
-    ).not.toBeNull();
+      )!.blocked,
+    ).toBe(true);
   });
 
   // R7-2: the walk's cwd/relocation model must not exempt an amend of a repo
   // the command does not target. Each row amends B (or an ambiguous cwd) while
   // repo A's HEAD is registered; every one was auto-approved before the fix.
+  // Maintainer stopgap: unattributable targets route to approval; targets the
+  // walk resolves to the unregistered repo stay hard-blocked.
   it.each([
     // unset of one exported name must not forget the other.
     `export GIT_DIR=${'%B%'}/.git; unset GIT_WORK_TREE; git commit --amend --no-edit`,
     // A poisoned cwd must reach into the wrapper payload, not reset there.
     `cd "$TARGET" && bash -c 'git commit --amend --no-edit'`,
-    // The carrier's GIT_DIR= prefix relocates the inner amend.
-    `GIT_DIR=${'%B%'}/.git bash -c 'git commit --amend --no-edit'`,
-    // `command -- cd` still runs the cd builtin.
-    `command -- cd ${'%B%'} && git commit --amend --no-edit`,
     // eval may amend a second, unrecorded repository: terminal poison.
     `git commit --amend --no-edit && eval 'git -C ${'%B%'} commit --amend --no-edit'`,
+  ])('routes an unattributable target to approval: %s', (template) => {
+    const command = template.replaceAll('%B%', repoB.dir);
+    expectAsk(command, 'amend the commit', repoA.dir);
+  });
+
+  it.each([
+    // The carrier's GIT_DIR= prefix relocates the inner amend to B.
+    `GIT_DIR=${'%B%'}/.git bash -c 'git commit --amend --no-edit'`,
+    // `command -- cd` still runs the cd builtin, into B.
+    `command -- cd ${'%B%'} && git commit --amend --no-edit`,
   ])(
-    'refuses the exemption when the walk cannot attribute the target: %s',
+    'blocks a target the walk resolves to the unregistered repo: %s',
     (template) => {
       const command = template.replaceAll('%B%', repoB.dir);
-      const result = amendAt(command, repoA.dir);
-      expect(result).not.toBeNull();
-      expect(result!.blocked).toBe(true);
+      expect(amendAt(command, repoA.dir)!.blocked).toBe(true);
     },
   );
 
-  it('refuses the exemption for a cd bash never reaches', () => {
-    // cwd=B; `false && cd A` never moves the cwd, so the amend targets B, not
-    // the registered A the conditional cd names.
-    const result = amendAt(
+  it('routes a cd bash never reaches to approval', () => {
+    // cwd=B; `false && cd A` never moves the cwd. The conditional cd leaves
+    // the target ambiguous — unattributable, not positively foreign (#16075
+    // maintainer stopgap).
+    expectAsk(
       `false && cd ${repoA.dir}; git commit --amend --no-edit`,
+      'amend the commit',
       repoB.dir,
     );
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
+  });
+
+  // R15-1 (#16075 maintainer stopgap): an unquoted `$( … )` in the amend's
+  // own arguments is a substitution, not a subshell group, but the walk's
+  // paren poison cannot tell them apart and refuses the exemption. The
+  // regression was a HARD DENIAL of a legitimate amend of the registered
+  // commit; the stopgap routes it to approval instead. The quoted twin was
+  // already exempt and stays exempt. Full exemption for substitution forms
+  // belongs to the parser-redesign follow-up.
+  it('routes an amend with an unquoted substitution argument to approval', () => {
+    expectAsk(
+      'git commit --amend -m $(date +%s)',
+      'amend the commit',
+      repoA.dir,
+    );
+    expectAsk(
+      'echo $(date) && git commit --amend --no-edit',
+      'amend the commit',
+      repoA.dir,
+    );
+  });
+
+  it('keeps the quoted-substitution twin exempt', () => {
+    expect(
+      amendAt('git commit --amend -m "$(date +%s)"', repoA.dir),
+    ).toBeNull();
   });
 
   it('carries a carrier prefix GIT_DIR to the registered repo', () => {

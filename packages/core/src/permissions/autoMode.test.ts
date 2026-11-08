@@ -27,7 +27,10 @@ import {
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
-import { clearSessionCommits } from './destructive-commands.js';
+import {
+  clearSessionCommits,
+  registerSessionCommit,
+} from './destructive-commands.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
@@ -1301,6 +1304,66 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
 
   it('blocks terraform destroy via shell tool', async () => {
     const decision = await evaluateShell('terraform destroy', 'update infra');
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  // Maintainer stopgap (#16075 round-15 assessment, issue #13570): the guard's
+  // third outcome routes to the normal approval path, not a hard denial.
+  it('routes the issue #13570 inert-text anchor to approval, not denial', async () => {
+    const decision = await evaluateShell(
+      `node -e 'console.log("a report about git commit --amend behaviour")'`,
+      'write a report about the amend guard',
+    );
+    expect(decision.via).toBe('fallback');
+    if (decision.via === 'fallback') {
+      expect(decision.reason).toBe('safety_check');
+    }
+    const outcome = applyAutoModeDecision(
+      decision,
+      makeConfig([cwd]) as unknown as Config,
+      counters(0, 0, 0, 0),
+      getAutoModeActionFingerprint(
+        ToolNames.SHELL,
+        {
+          command: `node -e 'console.log("a report about git commit --amend behaviour")'`,
+        },
+        cwd,
+      ),
+    );
+    // A fallback outcome is the manual-approval dialog, never a silent allow.
+    expect(outcome.kind).toBe('fallback');
+  });
+
+  it('still hard-blocks a direct amend with no session commits', async () => {
+    const decision = await evaluateShell(
+      'git commit --amend --no-edit',
+      'amend the commit',
+    );
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  it('routes an unattributable amend target to approval', async () => {
+    // A non-empty registry makes the exemption walk run; the unresolvable
+    // relocation cannot be attributed, so the outcome is ask, not denial.
+    registerSessionCommit('0'.repeat(40));
+    const decision = await evaluateShell(
+      'git -C "$OTHER" commit --amend --no-edit',
+      'amend the commit',
+    );
+    expect(decision.via).toBe('fallback');
+    if (decision.via === 'fallback') {
+      expect(decision.reason).toBe('safety_check');
+    }
+  });
+
+  it('still hard-blocks an amend after a positive HEAD move', async () => {
+    // Patrol M3 preserved through the stopgap: the reset moves HEAD off the
+    // registered commit, so the amend is positively foreign.
+    registerSessionCommit('0'.repeat(40));
+    const decision = await evaluateShell(
+      'git reset --soft HEAD~1 && git commit --amend --no-edit',
+      'amend the commit',
+    );
     expect(decision.via).toBe('blocked:destructive-command');
   });
 

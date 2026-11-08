@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  classifyGitAmend,
   commandContainsGitAmend,
   extractShellOperations,
   extractShellOperationsAcrossCommand,
@@ -1202,6 +1203,55 @@ describe('recognizer closes the unmodelled amend spellings', () => {
     "printf 'echo hi' | bash",
     'git commit -m "x #y" --no-edit',
   ])('keeps the inert twin allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});
+
+// ── #16075 maintainer stopgap: recognition channels ───────────────────────
+// The guard hard-denies only `invocation`; `unprovable-text` (backstop-only)
+// routes to approval. These pins keep the two channels from drifting back
+// into one boolean.
+describe('classifyGitAmend channels (issue #13570 maintainer stopgap)', () => {
+  it.each([
+    'git commit --amend --no-edit',
+    "X='git commit --amend --no-edit'; $X",
+    "printf 'g%s commit --amend' it | bash",
+    "IFS=:; X='git:commit:--amend'; $X",
+    'xargs -I{} git commit --amend --no-edit',
+    'find . -exec git commit --amend --no-edit \\;',
+    "bash <<'EOF'\ngit commit --amend\nEOF",
+    // A command glued onto an inert program by comment removal is a real
+    // second command, not argument data.
+    "echo hi # it's\ngit commit --amend --no-edit",
+    // Substitution bodies execute even under an inert program.
+    'echo $(git commit --amend --no-edit)',
+  ])('positively identifies an invocation: %s', (command) => {
+    expect(classifyGitAmend(command)).toBe('invocation');
+  });
+
+  it.each([
+    // The issue #13570 acceptance anchor and its inert-unprovable siblings.
+    `node -e 'console.log("a report about git commit --amend behaviour")'`,
+    'echo "git commit --amend"',
+    'echo git commit --amend >> CHANGELOG.md',
+    "git commit -m 'fix: explain why git commit --amend is blocked'",
+    "cat > notes.txt <<'EOF'\ngit commit --amend\nEOF",
+    // Carriers the recognizer does not attribute: approval, not denial.
+    "trap 'git commit --amend --no-edit' EXIT",
+    "bash -c -e 'git commit --amend --no-edit'",
+  ])('routes inert-unprovable text to the backstop channel: %s', (command) => {
+    expect(classifyGitAmend(command)).toBe('unprovable-text');
+    // The boolean contract is the union of both channels.
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    'git status',
+    "echo 'git commit --amend'",
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    'git status # git commit --amend is blocked',
+  ])('recognises nothing amend-related: %s', (command) => {
+    expect(classifyGitAmend(command)).toBe('none');
     expect(commandContainsGitAmend(command)).toBe(false);
   });
 });
