@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   MODEL_ID_MAX_CHARS,
@@ -21,9 +23,125 @@ import {
   stripForgedFooterLines,
   stripParagraphMarkers,
   stripReviewFooter,
+  stripReviewFooterLine,
   swallowsAppendedMarker,
+  FIXED_RULING_SHAPE_RE,
+  FIXED_RULING_MARKER,
+  FOOTER_MARKER,
 } from './review-footer.js';
 import { CANONICAL_LGTM_RE } from '../pr-context.js';
+import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
+
+const RULING_CORPUS = [
+  // What `submit` posts: `${fixedRulingLine(id, by)} ${MARKER}`, with the
+  // attribution footer appended under attribution on.
+  ['R1-2 fixed by the guard rewrite <!-- qwen-review-fixed-ruling -->', true],
+  ['R1-2 fixed <!-- qwen-review-fixed-ruling -->', true],
+  [
+    'R01-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\n_— m via Qwen Code /review (v0.21.3)_',
+    true,
+  ],
+  [
+    'R123-456 fixed by the retry; the old path still fails <!-- qwen-review-fixed-ruling -->\r\n\r\n_— m via Qwen Code /review (v1)_',
+    true,
+  ],
+  // A Critical that QUOTES the note — the shape must end at the marker,
+  // or such a finding demotes itself out of the blocker re-check.
+  [
+    'R1-2 fixed by the guard <!-- qwen-review-fixed-ruling --> is the shape this filter matches, and it is anchored',
+    false,
+  ],
+  [
+    '**[Critical]** R3-1: the filter `<!-- qwen-review-fixed-ruling -->` is substring-anywhere',
+    false,
+  ],
+  [
+    'a note that merely mentions <!-- qwen-review-fixed-ruling --> mid-body',
+    false,
+  ],
+  // GitHub hands a body back with its trailing newline; jq's `$` matches
+  // before one and JS's does not, so the `\s*` before the anchor is what
+  // keeps the two dialects reading the same note (#9940 review, round 31
+  // reverse audit).
+  ['R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n', true],
+  ['R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\r\n', true],
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\n_— m via Qwen Code /review (v1)_\r\n',
+    true,
+  ],
+  // A `by` carrying a line break of ANY kind is not a bare note. jq's
+  // `[^\n]` admits `\r`/U+2028/U+2029 and JS's `.` does not, so the census
+  // dropped comments this side counted until both named the same breaks
+  // (#9940 review, round 31 reverse audit).
+  ['R1-2 fixed by x\rEXTRA <!-- qwen-review-fixed-ruling -->', false],
+  ['R1-2 fixed by x\u2028EXTRA <!-- qwen-review-fixed-ruling -->', false],
+  ['R1-2 fixed by x\u2029EXTRA <!-- qwen-review-fixed-ruling -->', false],
+  ['R1-2 fixed by x EXTRA <!-- qwen-review-fixed-ruling -->', true],
+  // `\s` is not one set: Oniguruma matches U+0085 and JS does not; JS
+  // matches U+FEFF and Oniguruma does not. Both engines must read these
+  // the same way, or the census drops a comment this side counts (#9940
+  // review, round 31 reverse audit).
+  ['R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\u0085', false],
+  ['R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\ufeff', false],
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\u0085_— m via Qwen Code /review (v1)_',
+    false,
+  ],
+  // …and the gap before the footer is the same story the other way round:
+  // JS `\s` matches U+00A0, Oniguruma's does not.
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\u00a0_— m via Qwen Code /review (v1)_',
+    false,
+  ],
+  ['R1-2 fixed by x', false],
+  ['  R1-2 fixed by x <!-- qwen-review-fixed-ruling -->', false],
+  // A comment that quotes the note in FULL on its first line and then
+  // states its own finding underneath — the natural way to say "this was
+  // ruled fixed last round and is not". Anchoring the note's LINE let the
+  // census drop that whole comment, the live Critical with it (#9940
+  // review, round 31).
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\n**[Critical]** R3-4: the census drops this whole comment',
+    false,
+  ],
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\n_— m via Qwen Code /review (v1)_\n\nand then some prose',
+    false,
+  ],
+  // The tail after the marker is the CANONICAL footer, not "any italic
+  // line": a comment whose own second paragraph is italic prose read as a
+  // note and left the census with the Critical inside it (#9940 review,
+  // round 31 reverse audit).
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\n_— **[Critical]** R3-4: the auth check is still missing_',
+    false,
+  ],
+  // The footer's model segment names the SAME line breaks the `by` clause
+  // does. Spelled `[^\n]` it admitted `\r`, U+2028 and U+2029, so a
+  // "footer" carrying a live finding on a second display line read as a
+  // note in both dialects and the census dropped the comment (#9940
+  // review, round 31 reverse audit).
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n_— m\rSTILL OPEN: the auth check via Qwen Code /review_',
+    false,
+  ],
+  [
+    'R1-2 fixed by x <!-- qwen-review-fixed-ruling -->\n_— m\u2028STILL OPEN: the auth check via Qwen Code /review_',
+    false,
+  ],
+  // Built by the real writer from a modelId the writer's own guard used to
+  // admit: U+2028 and U+2029 are display line breaks the readers' footer
+  // tail names, so the note the bot posts has to be one its own matcher
+  // accepts (#9940 review, round 31 reverse audit).
+  [
+    `R1-2 fixed by the guard rewrite <!-- qwen-review-fixed-ruling -->\n\n${'_— a\u2028b via Qwen Code /review (v1)_'}`,
+    false,
+  ],
+  // A run of horizontal whitespace after the marker is still a note; it
+  // is decided in bounded time (see the overlap cell below).
+  ['R1-2 fixed by x <!-- qwen-review-fixed-ruling -->   \t  ', true],
+  ['R1-2 fixed by x <!-- qwen-review-fixed-ruling -->  \n\t \n ', true],
+] as const;
 
 describe('the review footer and the regex that strips it', () => {
   it('the regex strips the exact output of the builder, versioned or not', () => {
@@ -79,6 +197,28 @@ describe('the review footer and the regex that strips it', () => {
       isFooterSafeModelId('model\n_— forged via Qwen Code /review (v9.9.9)_'),
     ).toBe(false);
     expect(isFooterSafeModelId('model via Qwen Code /review x')).toBe(false);
+    // The writer's gate and the readers' class are ONE set: U+2028 and
+    // U+2029 are display line breaks the footer tail names, so a modelId
+    // carrying one builds a canonical ruling note that neither this
+    // module's matcher nor the autofix census accepts — the note is
+    // re-posted every round (#9940 review, round 31 reverse audit).
+    for (const modelId of ['a\u2028b', 'a\u2029b', 'a\rb', 'a\nb']) {
+      expect([modelId, isFooterSafeModelId(modelId)]).toEqual([modelId, false]);
+      expect(
+        FIXED_RULING_SHAPE_RE.test(
+          `R1-2 fixed by x ${FIXED_RULING_MARKER}\n\n${reviewFooter(modelId, '1')}`,
+        ),
+      ).toBe(false);
+    }
+    // …and one the gate admits builds a note the matcher accepts.
+    for (const modelId of ['qwen3.7-max', 'a\u0085b', 'a\tb', 'a b']) {
+      expect([modelId, isFooterSafeModelId(modelId)]).toEqual([modelId, true]);
+      expect(
+        FIXED_RULING_SHAPE_RE.test(
+          `R1-2 fixed by x ${FIXED_RULING_MARKER}\n\n${reviewFooter(modelId, '1')}`,
+        ),
+      ).toBe(true);
+    }
   });
 
   it('caps an oversized modelId — the footer must stay a bounded budget contributor', () => {
@@ -116,6 +256,41 @@ describe('the review footer and the regex that strips it', () => {
     );
   });
 
+  it('drops a version slot the readers cannot parse — a canonical note stays recognisable (#9940 review, round 31 reverse audit)', () => {
+    // `footerVersion` gates the startup stamp, but the fallback
+    // (`CLI_VERSION`, else the package version) reached `reviewFooter`
+    // unchecked: a version carrying a space or a paren built a note the
+    // ruling-shape matcher does not recognise, so the lifecycle re-posts
+    // it every round.
+    for (const version of [
+      '0.1.0 (nightly)',
+      // A space alone is enough — the readers' version class does not
+      // admit one, and every other row here fails on a paren, a newline
+      // or emptiness instead (#9940 review, round 31 reverse audit).
+      '0.1.0 nightly',
+      '1.0\n2.0',
+      '0.21.3)evil',
+      '',
+    ]) {
+      const footer = reviewFooter('qwen3-max', version);
+      expect(footer).toBe(`_— qwen3-max ${FOOTER_MARKER}_`);
+      expect(`a finding\n\n${footer}`.replace(REVIEW_FOOTER_RE, '')).toBe(
+        'a finding',
+      );
+      expect(
+        FIXED_RULING_SHAPE_RE.test(
+          `R1-2 fixed by the guard rewrite ${FIXED_RULING_MARKER}\n\n${footer}`,
+        ),
+      ).toBe(true);
+    }
+    // A version the charset accepts is still carried, capped and all.
+    expect(
+      FIXED_RULING_SHAPE_RE.test(
+        `R1-2 fixed by x ${FIXED_RULING_MARKER}\n\n${reviewFooter('m', 'v'.repeat(65_200))}`,
+      ),
+    ).toBe(true);
+  });
+
   it('refuses a startup stamp the footer cannot carry', () => {
     expect(footerVersion('0.21.3')).toBe('0.21.3');
     expect(footerVersion('0.21.3-dev.1')).toBe('0.21.3-dev.1');
@@ -148,7 +323,9 @@ describe('the review footer and the regex that strips it', () => {
       const body = `a finding\n\n_— cut short${' '.repeat(200_000)}end`;
       const start = performance.now();
       expect(stripReviewFooter(body)).toBe(body);
-      expect(performance.now() - start).toBeLessThan(2000);
+      expectWithinLatencyBudget(performance.now() - start, 2000, {
+        poolMultiplier: 10,
+      });
     });
 
     it('returns a marker-carrying body with no trailing footer unchanged — and bounded', () => {
@@ -164,7 +341,9 @@ describe('the review footer and the regex that strips it', () => {
       const body = `_— quoted via Qwen Code /review (v0.21.3), then\n\n${' '.repeat(200_000)}end`;
       const start = performance.now();
       expect(stripReviewFooter(body)).toBe(body);
-      expect(performance.now() - start).toBeLessThan(2000);
+      expectWithinLatencyBudget(performance.now() - start, 2000, {
+        poolMultiplier: 10,
+      });
     });
 
     it('strips a trailing footer from a body longer than the tail bound', () => {
@@ -194,6 +373,228 @@ describe('the review footer and the regex that strips it', () => {
       );
     });
 
+    it('an unterminated comment opener quoted in code does not blind the strip', () => {
+      // A witness block quoting an HTML marker cut short — what a review of
+      // a dedup marker posts — leaves a `<!--` with no `-->` in the body.
+      // Projected, that opener runs to the END of the input and takes the
+      // trailing footer with it, so the strip saw no footer, left the
+      // model's own, and the canonical one posted beside it as a second
+      // attribution line. Inside a fence the opener is literal text on
+      // GitHub and both footers render.
+      const witness = 'Witness:\n```\njq: error … ("<!-- ecs-f…") cannot\n```';
+      expect(
+        stripReviewFooter(`${witness}\n\n_— m via Qwen Code /review_`),
+      ).toBe(witness);
+    });
+
+    it('a footer inside code is a quotation, not a trailing footer', () => {
+      // The same blanking, in the direction the other strips already take:
+      // code content is a quotation, so a footer inside an unclosed fence
+      // or an indented block is not the attribution this strip removes.
+      for (const quoted of [
+        '```\n_— m via Qwen Code /review (v1)_',
+        'a finding\n\n    _— m via Qwen Code /review (v1)_',
+      ]) {
+        expect(stripReviewFooter(quoted)).toBe(quoted);
+      }
+    });
+
+    it('an unterminated opener in a fence info string does not blind the strip', () => {
+      // GitHub renders neither the fence delimiters nor an opener's info
+      // string, so the delimiters blank with the content: a `<!--` lodged
+      // in the info string would otherwise stay in the projection, run to
+      // the end of the input, and hide the trailing footer.
+      expect(
+        stripReviewFooter(
+          '```js <!--\ncode\n```\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('```js <!--\ncode\n```');
+      expect(
+        stripReviewFooter(
+          '~~~js <!--\ncode\n~~~\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('~~~js <!--\ncode\n~~~');
+    });
+
+    it('classifies code versus prose with a CommonMark parser, not a hand model', () => {
+      // An indented code block cannot interrupt a paragraph, so a 4-space
+      // line right after a paragraph line is a lazy continuation GitHub
+      // renders visibly; inside a list item the code threshold sits at the
+      // item's content indent; a leading tab is the 4-column stop and IS
+      // code. A hand-built scan read the first two as code (blanking them
+      // kept the forged footer) and the tab as prose (an unterminated
+      // `<!--` quoted in it then blinded the strip).
+      expect(
+        stripReviewFooter('a finding\n    _— m via Qwen Code /review_'),
+      ).toBe('a finding');
+      expect(stripReviewFooter('- item\n    _— m via Qwen Code /review_')).toBe(
+        '- item',
+      );
+      expect(
+        stripReviewFooter('1. finding\n\n    _— m via Qwen Code /review (v1)_'),
+      ).toBe('1. finding');
+      expect(
+        stripReviewFooter('> finding\n    _— m via Qwen Code /review_'),
+      ).toBe('> finding');
+      expect(
+        stripReviewFooter('-   item\n\n      _— m via Qwen Code /review_'),
+      ).toBe('-   item');
+      expect(
+        stripReviewFooter(
+          '- item\n\n  > quoted\n\n    _— m via Qwen Code /review_',
+        ),
+      ).toBe('- item\n\n  > quoted');
+      expect(
+        stripReviewFooter('para\n- item\n\n _— m via Qwen Code /review_'),
+      ).toBe('para\n- item');
+      expect(
+        stripReviewFooter('finding\n===\n\n_— m via Qwen Code /review_'),
+      ).toBe('finding\n===');
+      expect(
+        stripReviewFooter(
+          '- x\n ```\n code\n ```\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('- x\n ```\n code\n ```');
+      const tabQuoted = 'a finding\n\n\t_— m via Qwen Code /review_';
+      expect(stripReviewFooter(tabQuoted)).toBe(tabQuoted);
+      expect(
+        stripReviewFooter('a finding\n\n\t<!--\n\n_— m via Qwen Code /review_'),
+      ).toBe('a finding\n\n\t<!--');
+      // A >= 4-column `<div>` line is indented code, not an HTML block.
+      expect(
+        stripReviewFooter(
+          'x\n\n    <div>\n    <!-- y\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('x\n\n    <div>\n    <!-- y');
+    });
+
+    it('pins the keep side of the classifier — breaks, headings, and the list code threshold', () => {
+      // A heading or thematic break interrupts a paragraph, so a 4-space
+      // footer line after one is an indented code block the strip keeps,
+      // and inside a list item the code threshold rises by the item's
+      // content indent. Unpinned, a dropped check would silently delete
+      // footer lines GitHub renders as code.
+      const keep = (body: string): void => {
+        expect(stripReviewFooter(body)).toBe(body);
+      };
+      keep('a finding\n---\n    _— m via Qwen Code /review_');
+      keep('# h\n    _— m via Qwen Code /review_');
+      keep('a finding\n## h\n    _— m via Qwen Code /review_');
+      keep('- item\n\n        _— m via Qwen Code /review_');
+      keep('- item\n# h\n\n    _— m via Qwen Code /review (v1)_');
+    });
+
+    it('a comment closer quoted in a raw-HTML block still closes the projected comment', () => {
+      // The dual of the hole the blanking fixes: a line-leading `<!--`
+      // opens a CommonMark comment block that runs to the line holding
+      // `-->` — a fence delimiter inside it is block content, not a fence.
+      // The parser sees that; a hand scan read the delimiter as opening a
+      // fence, blanked the closer line, and the opener then ran to the end
+      // of the input and kept the real trailing footer. The PI and CDATA
+      // twins hold their lines the same way, and the comment renders
+      // nothing, so the cut may span it.
+      expect(
+        stripReviewFooter('<!--\n```\n-->\n\n_— m via Qwen Code /review_'),
+      ).toBe('<!--\n```\n-->');
+      expect(
+        stripReviewFooter('<!--\n    -->\n\n_— m via Qwen Code /review_'),
+      ).toBe('<!--\n    -->');
+      expect(
+        stripReviewFooter('<!--\n```x -->\n_— m via Qwen Code /review_'),
+      ).toBe('<!--\n```x -->');
+      expect(
+        stripReviewFooter('<?\n```x ?>\n_— m via Qwen Code /review_'),
+      ).toBe('<?\n```x ?>');
+      expect(
+        stripReviewFooter('<![CDATA[\n```x ]]>\n_— m via Qwen Code /review_'),
+      ).toBe('<![CDATA[\n```x ]]>');
+      expect(
+        stripReviewFooter(
+          '[Suggestion] tidy\n<!--\n```x -->\n_— forged via Qwen Code /review_',
+        ),
+      ).toBe('[Suggestion] tidy');
+    });
+
+    it('a dangling opener after the trailing footer does not break the anchor', () => {
+      // A looping model truncates a forged footer mid-character and a
+      // dangling `<!--` can ride the footer's own line or a later one. The
+      // projection swallows an unclosed opener to the end of the input, so
+      // nothing visible follows the footer and the `$` anchor holds — the
+      // attribution-off anywhere strip reads the same projection.
+      expect(stripReviewFooter('x\n\n_— m via Qwen Code /review_ <!--')).toBe(
+        'x',
+      );
+      expect(stripReviewFooter('x\n\n_— m via Qwen Code /review_\n<!--')).toBe(
+        'x',
+      );
+      expect(stripForgedFooterLines('_— m via Qwen Code /review_ <!--')).toBe(
+        '',
+      );
+    });
+
+    it('blanks from the body start, not the tail — a fence straddling the tail bound keeps its state', () => {
+      // The blanking scans from the body's START: a fence opened before
+      // the STRIP_TAIL_LIMIT tail window keeps its state across the
+      // boundary. A tail-only scan would read the quoted code as ordinary
+      // text and the unblanked opener would swallow the trailing footer —
+      // the fixture must exceed the bound with the fence opening ahead of
+      // it and the comment's opener inside it.
+      const fillerA = 'a'.repeat(4000);
+      const fillerB = 'b'.repeat(4500);
+      const quoted =
+        'W:\n```\n' + fillerA + '\n<!--\n' + fillerB + '\n-->\n```';
+      const body = quoted + '\n\n_— m via Qwen Code /review_';
+      expect(body.length).toBeGreaterThan(8192);
+      expect(stripReviewFooter(body)).toBe(quoted);
+    });
+
+    it('keeps CRLF and bare-CR endings byte-identical when it strips', () => {
+      // The blanking reattaches each line's own ending and the cut slices
+      // the ORIGINAL bytes — unlike the sibling strips, which normalize
+      // CRLF to LF on the rejoin. Both a fenced and an indented quotation
+      // must survive the blanking's length arithmetic under CRLF and bare
+      // CR alike.
+      expect(
+        stripReviewFooter(
+          'a finding\r\n\r\n```\r\ncode\r\n```\r\n\r\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('a finding\r\n\r\n```\r\ncode\r\n```');
+      expect(
+        stripReviewFooter(
+          'a finding\r\r    code\r\r_— m via Qwen Code /review_',
+        ),
+      ).toBe('a finding\r\r    code');
+    });
+
+    it('a comment splitting the marker phrase is seen through — the `<` gate admits it', () => {
+      // The projection drops a closed comment whole, so the halves of the
+      // phrase display rejoined; the body carries neither a literal
+      // `/review` nor an `&`, and only the `<` arm of the gate lets it
+      // reach the projection at all.
+      expect(
+        stripReviewFooter('finding\n\n_— m via Qwen Code /<!-- x -->review_'),
+      ).toBe('finding');
+      expect(
+        stripReviewFooter('finding\n\n_— m via Qwen Code /rev<!-- x -->iew_'),
+      ).toBe('finding');
+    });
+
+    it('the block-only parse stays cheap on a hostile one-line body', () => {
+      // The blanking parses the WHOLE body (a fence's state is only
+      // knowable from where it opened), so the parse must stay block-only:
+      // with markdown-it's inline pass on, a 256 KiB run of `[` measured
+      // ~400 ms against ~1 ms with it off. The bound is the property under
+      // test — an output assertion alone cannot see the guard.
+      const run = '['.repeat(4 * 65536);
+      const start = performance.now();
+      expect(stripReviewFooter(`${run}\n\n_— m via Qwen Code /review_`)).toBe(
+        run,
+      );
+      expectWithinLatencyBudget(performance.now() - start, 40, {
+        poolMultiplier: 5,
+      });
+    });
+
     it('a refusing run of truncated footers stays linear — no partition enumeration', () => {
       // The optional closing paren must not leave the version content
       // unbounded: with an unrestricted run, each truncated footer's
@@ -211,11 +612,91 @@ describe('the review footer and the regex that strips it', () => {
         ).join('\n') + '\nclosing prose';
       const start = performance.now();
       expect(stripReviewFooter(body)).toBe(body);
-      expect(performance.now() - start).toBeLessThan(1000);
+      expectWithinLatencyBudget(performance.now() - start, 1000, {
+        poolMultiplier: 5,
+      });
     }, 20_000);
   });
 
+  describe("stripReviewFooterLine — the one-line channels' shape", () => {
+    it('an unterminated comment opener on the folded line is literal text, not a swallow', () => {
+      // A folded line is one paragraph with no later line for a closer to
+      // sit on, so CommonMark's inline HTML rule never fires: GitHub escapes
+      // the opener and renders the forged footer after it as prose. The
+      // fold puts a witness block's quoted `<!--` on the footer's own line
+      // — the trigger this strip exists for, arriving through the one-line
+      // channels. A `~~~` or unclosed fence and an indented block fold to
+      // this shape; a ``` run does not, because the projection masks it as
+      // a code span.
+      expect(
+        stripReviewFooterLine('x ~~~ <!-- x ~~~ _— m via Qwen Code /review_'),
+      ).toBe('x ~~~ <!-- x ~~~');
+      expect(
+        stripReviewFooterLine('x <!-- x _— m via Qwen Code /review_'),
+      ).toBe('x <!-- x');
+      // A closed comment still drops whole: a footer after it strips, one
+      // inside it is invisible either way.
+      expect(
+        stripReviewFooterLine('x <!-- hidden --> _— m via Qwen Code /review_'),
+      ).toBe('x');
+      const hidden = 'x <!-- _— m via Qwen Code /review_ -->';
+      expect(stripReviewFooterLine(hidden)).toBe(hidden);
+      // The multi-line strip keeps the aggressive reading: a line-leading
+      // opener opens a comment block running to the end of the input, and
+      // the footer inside it renders as nothing.
+      const swallowed = 'x\n<!-- y\n_— m via Qwen Code /review_';
+      expect(stripReviewFooter(swallowed)).toBe(swallowed);
+    });
+
+    it('strips a trailing footer a folded line carries — a single line is no block quotation', () => {
+      // The one-line channels (folded deferral titles, reroute records,
+      // relocated claims, ingested entries) flatten every code shape
+      // before they post, so the blanking the multi-line strip applies
+      // cannot keep a footer here: a fence delimiter leading the line is
+      // posted text, and the forged attribution must not ride it.
+      expect(
+        stripReviewFooterLine('tidy ``` _— m via Qwen Code /review_'),
+      ).toBe('tidy ```');
+      expect(stripReviewFooterLine('``` _— m via Qwen Code /review_')).toBe(
+        '```',
+      );
+      expect(
+        stripReviewFooterLine('    finding _— m via Qwen Code /review_'),
+      ).toBe('    finding');
+    });
+
+    it('keeps a footer an inline code span quotes on the line', () => {
+      // Inline code renders visibly — the projection masks it, so a
+      // quoted footer stays while a forged one outside the span strips.
+      const quoted = 'see `_— m via Qwen Code /review_` quoted above';
+      expect(stripReviewFooterLine(quoted)).toBe(quoted);
+      expect(
+        stripReviewFooterLine('x `code` _— m via Qwen Code /review_'),
+      ).toBe('x `code`');
+    });
+  });
+
   describe('stripForgedFooterLines — the attribution-off anywhere strip', () => {
+    it('classifies through the CommonMark parser like the trailing strip', () => {
+      // The line-aware strips read the same token map as the blanking: a
+      // fence inside an open list item measures its indent against the
+      // item's content indent (the quoted footer stays), a setext
+      // underline ends the paragraph (the 4-space line after it is a code
+      // block the strip keeps), and the item's content indent is the
+      // ACTUAL whitespace after the marker — two tabs past a 5-column
+      // indent is item prose, not code.
+      const fenceInList =
+        '- item\n\n    ```\n    _— m via Qwen Code /review_\n    ```\n\nmore';
+      expect(stripForUnattributedPost(fenceInList)).toBe(fenceInList);
+      const setext = 'para\n===\n    _— m via Qwen Code /review_';
+      expect(stripForUnattributedPost(setext)).toBe(setext);
+      expect(
+        stripForUnattributedPost(
+          '-    para\n\n\t\t_— m via Qwen Code /review_',
+        ),
+      ).toBe('-    para');
+    });
+
     it('strips a forged footer on the very first line', () => {
       expect(
         stripForgedFooterLines(
@@ -430,15 +911,208 @@ describe('the review footer and the regex that strips it', () => {
         '<!--->',
         '<?php evil() ?>',
         '<!DOCTYPE x>',
-        '<script>alert(1)</script>',
         '[label]: /url',
       ]) {
         expect(rendersAsNothing(scaffold)).toBe(true);
       }
     });
 
+    it('decides a run of unterminated openers in bounded time (#9940 review, round 31 reverse audit)', () => {
+      // The `<!` family is taken as ONE left-to-right SCAN, not a regex
+      // alternation: with no end-of-input alternative the alternation
+      // retries at every later `<`, and this projection runs twice per
+      // entry and once per inline comment body, on text a model writes with
+      // no length bound. Measured 19 s on the first of these before the
+      // scan.
+      for (const text of [
+        '<![CDATA['.repeat(80000),
+        '<!--'.repeat(80000),
+        '<?'.repeat(80000),
+        '<!A '.repeat(80000),
+      ]) {
+        const t0 = Date.now();
+        rendersAsNothing(text);
+        expectWithinLatencyBudget(Date.now() - t0, 1000, {
+          poolMultiplier: 20,
+        });
+      }
+    });
+
+    it('decides an entity reference by what it decodes to, and reads its case (#9940 review, round 31 reverse audit)', () => {
+      // A hand list named ten of the thirty-three invisible HTML5 names
+      // and twelve of the numeric spellings, so a Critical of nothing but
+      // `&Tab;` passed every gate and posted with no visible content —
+      // counted toward the verdict, re-promoted as an unanswerable
+      // blocker.
+      for (const ref of [
+        '&Tab;',
+        '&NewLine;',
+        '&NonBreakingSpace;',
+        '&NoBreak;',
+        '&MediumSpace;',
+        '&ThinSpace;',
+        '&ThickSpace;',
+        '&VeryThinSpace;',
+        '&NegativeThinSpace;',
+        '&hairsp;',
+        '&numsp;',
+        '&puncsp;',
+        '&emsp13;',
+        '&emsp14;',
+        '&af;',
+        '&ic;',
+        '&it;',
+        '&ApplyFunction;',
+        '&InvisibleTimes;',
+        '&InvisibleComma;',
+        '&ZeroWidthSpace;',
+        '&nbsp;',
+        '&#9;',
+        '&#x9;',
+        '&#10;',
+        '&#xa;',
+        '&#1564;',
+        '&#5760;',
+        '&#6158;',
+        '&#8232;',
+        '&#x2028;',
+        '&#8233;',
+        '&#x2029;',
+        '&#8287;',
+        '&#x205f;',
+        '&#8289;',
+        '&#8290;',
+        '&#8291;',
+        '&#12288;',
+        '&#x3000;',
+        // Controls are never glyphs, and the numeric bound is wider than
+        // CommonMark's because cmark-gfm decodes past it.
+        '&#28;',
+        '&#31;',
+        '&#133;',
+        '&#00000160;',
+        '&#x00000a0;',
+      ]) {
+        expect([ref, rendersAsNothing(ref)]).toEqual([ref, true]);
+      }
+      // Named references are CASE-SENSITIVE — a reader sees the literal
+      // `&NBSP;` — and matching case-insensitively read a visible body as
+      // empty, which throws the compose away.
+      for (const ref of [
+        '&NBSP;',
+        '&TAB;',
+        '&AF;',
+        '&IT;',
+        '&nobreak;',
+        '&notanentity;',
+        '&#0;',
+        '&#55296;',
+        '&#x41;',
+        '&#1114112;',
+      ]) {
+        expect([ref, rendersAsNothing(ref)]).toEqual([ref, false]);
+      }
+    });
+
+    it('a `<!` construct hides only up to the first `>` — the prose behind one still counts (#9940 review, round 31 reverse audit)', () => {
+      // The markdown block hands its raw text to an HTML parser, which
+      // closes a bogus comment at the first `>` — and `<!-->`/`<!--->`
+      // close on their own dashes. Reading either as running to `]]>` or
+      // to the next `-->` deleted VISIBLE prose, and the callers of
+      // `rendersAsNothingAtExit` throw the whole compose away on a body
+      // this projection calls empty.
+      for (const body of [
+        '<![CDATA[ a > the auth check at line 40 is still missing ]]>',
+        '<![CDATA[>the auth check at line 40 is still missing',
+        '<!--> the auth check at line 40 is still missing',
+        '<!---> the auth check at line 40 is still missing',
+        '<!A y> the auth check at line 40 is still missing',
+      ]) {
+        expect([body, rendersAsNothing(body)]).toEqual([body, false]);
+      }
+      // …and with nothing behind the `>` they are still scaffolding.
+      for (const body of [
+        '<![CDATA[ x ]]>',
+        '<![CDATA[ x',
+        '<!-->',
+        '<!--->',
+        // An abrupt close with nothing behind it is still scaffolding.
+        '<!-- a --!>',
+        // …and a LINE-LEADING opener with no terminator really is an HTML
+        // block that runs to the end of the document.
+        '<!A the auth check at line 40 is missing',
+        '<!DOCTYPE the auth check at line 40 is missing',
+        '<![CDATA[the auth check at line 40 is missing',
+        '<!--the auth check at line 40 is missing',
+        '<?the auth check at line 40 is missing',
+        '<?php echo 1 ?>',
+      ]) {
+        expect([body, rendersAsNothing(body)]).toEqual([body, true]);
+      }
+      // …and a comment ALSO closes at `--!>` (HTML5 comment-end-bang), so
+      // the prose behind one is visible and the compose must not be thrown
+      // away over it (#9940 review, round 10 reverse audit).
+      expect(
+        rendersAsNothing(
+          '<!-- a --!> the auth check at line 40 is still missing',
+        ),
+      ).toBe(false);
+      // A declaration is `<!` + UPPERCASE letters + WHITESPACE — cmark-gfm's
+      // grammar, derived exhaustively — so `<!a …` is none of those and the
+      // reader sees it and everything behind it. A processing instruction
+      // hides only to the first `>`, not to its `?>`, for the same reason
+      // the CDATA arm already does. And the four openers are ONE
+      // left-to-right decision, because that is how the HTML tokenizer takes
+      // it: read as four independent global passes, the comment pass ate the
+      // `>` that terminates the declaration standing in FRONT of it. Each of
+      // these threw the whole compose away over prose a reader can see
+      // (#9940 review, round 11 reverse audit).
+      for (const body of [
+        '<!a the auth check at line 40 is missing',
+        '<?x</b> the auth check at line 40 is missing',
+        '<!A <!-->the auth check at line 40 is missing',
+        '<!Ax> the auth check is missing',
+        // `<!ax>` is not a declaration at all — cmark renders `&lt;!ax&gt;`,
+        // so a reader sees it.
+        '<!ax>',
+        'q <!--the auth check at line 40 is missing',
+        'q <![CDATA[the auth check at line 40 is missing',
+        'q <?the auth check at line 40 is missing',
+        // A `<?` whose span leaves prose behind it: what it hides ends at
+        // the first `>`, so the sentence after that still counts.
+        'q <?x?> the auth check at line 40 is missing',
+        '<?x> the auth check at line 40 is missing',
+      ]) {
+        expect([body, rendersAsNothing(body)]).toEqual([body, false]);
+      }
+      // These arms are POSITION-BLIND on purpose, and `&nbsp;<?x>` is the
+      // shape where that shows: mid-line a `<?` with no `?>` forms nothing
+      // in the renderer, so its characters are VISIBLE and calling the
+      // body empty is wrong. The split that would fix it was measured and
+      // REVERTED — being right about it needs the block structure this
+      // module does not model, and the half-measure cost more bodies than
+      // it saved. Pinned so the boundary is a decision on the record
+      // rather than something the next audit rediscovers; the numbers are
+      // on `rendersAsNothing` (#9940 review, round 12 reverse audit).
+      for (const body of ['&nbsp;<?x>', '<?x>', '<?php echo 1 ?>']) {
+        expect([body, rendersAsNothing(body)]).toEqual([body, true]);
+      }
+      expect(rendersAsNothing('q <?x>')).toBe(false);
+    });
+
     it('still counts real content wearing the same shapes', () => {
       expect(rendersAsNothing('<div>real bug</div>')).toBe(false);
+      // GFM's tagfilter — which GitHub runs — rewrites the opener to
+      // `&lt;script`, so a reader SEES the tag and everything between the
+      // tags. Deleting them read a visible body as empty, and a security
+      // Critical that pastes its payload is exactly that shape: the whole
+      // compose was thrown away over it (#9940 review, round 10 reverse
+      // audit).
+      expect(rendersAsNothing('<script>alert(1)</script>')).toBe(false);
+      expect(rendersAsNothing('<style>a{}</style>')).toBe(false);
+      expect(
+        rendersAsNothing('<script>x</script> the auth check is missing'),
+      ).toBe(false);
       expect(rendersAsNothing('[see here](url)')).toBe(false);
       expect(rendersAsNothing('a\n\n[label]: /used\n[see label]')).toBe(false);
     });
@@ -546,6 +1220,20 @@ describe('the review footer and the regex that strips it', () => {
       );
       expect(swallowsAppendedMarker('plain claim')).toBe(false);
       expect(swallowsAppendedMarker('')).toBe(false);
+      // A comment/PI/declaration/CDATA block left open swallows the
+      // appended marker to NOTHING — the exposure this gate refuses is a
+      // marker that renders VISIBLE, so only the tag-based blocks (the
+      // <pre> control above) count.
+      expect(swallowsAppendedMarker('**[Critical]** x\n\n<!-- note')).toBe(
+        false,
+      );
+      expect(swallowsAppendedMarker('**[Critical]** x\n\n<? note')).toBe(false);
+      expect(swallowsAppendedMarker('**[Critical]** x\n\n<!DOCTYPE x')).toBe(
+        false,
+      );
+      expect(swallowsAppendedMarker('**[Critical]** x\n\n<![CDATA[ note')).toBe(
+        false,
+      );
     });
   });
 
@@ -783,6 +1471,103 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('</div>\n```\n\nafter');
     });
 
+    it('a type-6 opener with trailing text opens an HTML block — the start condition ends at the tag name (#9940 review, round 27)', () => {
+      expect(
+        stripForgedFooterLines(
+          '<div class="x">foo\n```\n_— m via Qwen Code /review (v1)_\n\nafter',
+        ),
+      ).toBe('<div class="x">foo\n```\n\nafter');
+      // A type-1 block runs past a blank line to its closing tag.
+      expect(
+        stripForgedFooterLines(
+          '<pre>foo\n\n```\n_— m via Qwen Code /review (v1)_\n</pre>\n\nafter',
+        ),
+      ).toBe('<pre>foo\n\n```\n</pre>\n\nafter');
+      // A name that only starts with a block-level tag name is text.
+      const text = '<divx>foo\n```\n_— m via Qwen Code /review (v1)_\n```';
+      expect(stripForgedFooterLines(text)).toBe(text);
+    });
+
+    it('a type-1 block whose closing tag sits on the opener line ends there; `<pre-x>` is no type-1 tag (#9940 review, audit 4)', () => {
+      expect(swallowsAppendedMarker('claim\n\n<pre>x</pre>\n\nmore')).toBe(
+        false,
+      );
+      expect(
+        swallowsAppendedMarker('claim\n\n<script>x</script>\n\nmore'),
+      ).toBe(false);
+      expect(
+        stripForUnattributedPost(
+          '<pre>x</pre>\n\nfoo _— a via Qwen\nCode /review_ bar',
+        ),
+      ).toBe('<pre>x</pre>\n\nfoo bar');
+      // Still open when the closing tag is not on the line.
+      expect(swallowsAppendedMarker('claim\n\n<pre>x\n\nmore')).toBe(true);
+      expect(swallowsAppendedMarker('<pre-x>\n\nclaim')).toBe(false);
+    });
+
+    it('a tab-indented code line is code in the line model — its footer or marker text is quotation, kept (#9940 review, audit 4)', () => {
+      const marker = 'claim\n\n\t<!-- qwen-review critical -->\n\tmore code';
+      expect(stripCommentMarkerLines(marker)).toBe(marker);
+      const footer = 'claim\n\n\t_— a via Qwen Code /review_\n\tmore code';
+      expect(stripForgedFooterLines(footer)).toBe(footer);
+      const mixed = 'claim\n\n  \t_— a via Qwen Code /review_\n  \tmore code';
+      expect(stripForgedFooterLines(mixed)).toBe(mixed);
+    });
+
+    it('four columns is code before it is an opener or a fence — quotation kept, a real forged footer behind a tab-fence stripped (#9940 review, audit 5)', () => {
+      const code = 'claim\n\n\t<div>\n    _— x via Qwen Code /review_ keep';
+      expect(stripForUnattributedPost(`**[Critical]** ${code}`)).toBe(code);
+      const fenced = '    <div>\n```\n_— x via Qwen Code /review_\n```';
+      expect(stripForgedFooterLines(fenced)).toBe(fenced);
+      expect(
+        stripForgedFooterLines(
+          'claim\n\n\t```\n_— x via Qwen Code /review_\nprose',
+        ),
+      ).toBe('claim\n\n\t```\nprose');
+      // A single code-indented line is quotation — the span stays.
+      expect(stripFooterSpans('    quoted _— x via Qwen Code /review_')).toBe(
+        '    quoted _— x via Qwen Code /review_',
+      );
+      expect(stripFooterSpans('_— x via Qwen Code /review_ claim')).toBe(
+        'claim',
+      );
+    });
+
+    it('a single code-indented line keeps its footer span — quotation on the one-line path too (#9940 review, audit 5)', () => {
+      const code = '    quoted _— x via Qwen Code /review_';
+      expect(stripFooterSpans(code)).toBe(code);
+      expect(stripFooterSpans('\t_— x via Qwen Code /review_')).toBe(
+        '\t_— x via Qwen Code /review_',
+      );
+      // The marker-stripped shape of a comment whose only content is a
+      // quoted footer in a code block: visible code, not "nothing".
+      expect(
+        stripForUnattributedPost(
+          '**[Critical]**\n\n    _— m via Qwen Code /review_',
+        ),
+      ).toBe('    _— m via Qwen Code /review_');
+      expect(
+        rendersAsNothing(
+          stripForUnattributedPost(
+            '**[Critical]**\n\n    _— m via Qwen Code /review_',
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it('a bare-CR body takes the line-aware path — its first line cannot vouch for the rest (#9940 review, round 28)', () => {
+      expect(
+        stripForUnattributedPost(
+          '    quoted code\rmore prose _— gpt-5 via Qwen Code /review (v1.2.3)_ tail',
+        ),
+      ).toBe('    quoted code\nmore prose tail');
+      expect(
+        stripForUnattributedPost(
+          '    R1-2: the guard drops a case\rmore prose _— qwen3-max via Qwen Code /review (v0.21)_ tail',
+        ),
+      ).not.toContain('via Qwen Code /review');
+    });
+
     it('a >-only line is not blank — the HTML block continues past it', () => {
       expect(
         stripForgedFooterLines(
@@ -889,7 +1674,67 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripForUnattributedPost(body)).toBe(
         'intro paragraph\n\nx /review & y',
       );
-      expect(Date.now() - started).toBeLessThan(1000);
+      expectWithinLatencyBudget(Date.now() - started, 1000, {
+        poolMultiplier: 20,
+      });
     });
+  });
+});
+
+describe('FIXED_RULING_SHAPE_RE — the ruling note by its posted shape', () => {
+  it('matches every note submit posts and nothing that quotes one (#9940 review, round 30)', () => {
+    for (const [body, expected] of RULING_CORPUS) {
+      expect([body, FIXED_RULING_SHAPE_RE.test(body)]).toEqual([
+        body,
+        expected,
+      ]);
+    }
+  });
+
+  it('decides a long run of trailing whitespace in bounded time — the two runs after the marker do not overlap (#9940 review, round 31 reverse audit)', () => {
+    // `[ \t]*` followed by `[ \t\r\n]*` gives a run of spaces no unique
+    // split, which is quadratic: the same shape in the census dialect made
+    // real jq abort with `retry-limit-in-match`, and `set -e` failed the
+    // whole scan step. `isRuling` runs this one on every author's body, so
+    // the JS spelling owes the same bound.
+    for (const pad of [' '.repeat(60000), '\t'.repeat(60000)]) {
+      for (const body of [
+        `R1-2 fixed by x ${FIXED_RULING_MARKER}${pad}x`,
+        `R1-2 fixed by x ${FIXED_RULING_MARKER}\n_— m via Qwen Code /review (v1)_${pad}x`,
+      ]) {
+        const t0 = Date.now();
+        expect(FIXED_RULING_SHAPE_RE.test(body)).toBe(false);
+        expectWithinLatencyBudget(Date.now() - t0, 1000, {
+          poolMultiplier: 20,
+        });
+      }
+    }
+  });
+
+  it('agrees with the autofix census filter, which is a second spelling of the same shape', () => {
+    // The workflow cannot import this module, so the shape lives twice —
+    // in different regex dialects. Pinned by BEHAVIOUR over the corpus,
+    // which is what has to agree; a textual pin would fail on `\d` vs
+    // `[0-9]` and say nothing about what either matches.
+    // vitest runs with cwd = packages/cli; the workflow is repo-rooted.
+    const yaml = readFileSync(
+      join(
+        import.meta.dirname,
+        '../../../../../../.github/workflows/qwen-autofix.yml',
+      ),
+      'utf8',
+    );
+    const shape = /^ {2}FIXED_RULING_FILTER: '([^\n]*)'$/m.exec(yaml)?.[1];
+    expect(shape).toBeTruthy();
+    // One explicit translation, and only one: jq spells a code point
+    // `\x{2028}` where JS spells it `\u2028`. Everything else must be
+    // character-for-character the same regex.
+    const census = new RegExp(
+      shape!.replace(/\\x\{([0-9a-fA-F]{4})\}/g, '\\u$1'),
+    );
+    expect(shape).toContain('[^\\r\\n\\x{2028}\\x{2029}]');
+    for (const [body, expected] of RULING_CORPUS) {
+      expect([body, census.test(body)]).toEqual([body, expected]);
+    }
   });
 });

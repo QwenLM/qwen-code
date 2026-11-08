@@ -6,28 +6,42 @@ interface RootErrorFallbackProps {
   onRetry: () => void;
   /** Selects the fallback copy. Defaults to English when omitted. */
   language?: WebShellLanguage;
+  /**
+   * What the retry button does, so its label stays honest. Defaults to
+   * 'reset' (an in-place boundary retry); 'reload' is for callers whose
+   * retry navigates (e.g. the standalone root boundary reloads the page).
+   */
+  retryMode?: 'reset' | 'reload';
 }
 
 interface FallbackCopy {
   title: string;
   body: string;
   retry: string;
+  reload: string;
 }
 
 // This surface renders OUTSIDE the in-app I18nProvider (the boundary wraps the
 // whole App, which owns that provider), so it cannot call useI18n. It carries
 // its own minimal copy instead of pulling the full translation table.
+const EN_COPY: FallbackCopy = {
+  title: 'Something went wrong',
+  body: 'An unexpected error occurred and this content could not be displayed.',
+  retry: 'Try again',
+  reload: 'Reload page',
+};
+
 const COPY: Record<WebShellLanguage, FallbackCopy> = {
-  en: {
-    title: 'Something went wrong',
-    body: 'An unexpected error occurred and this content could not be displayed.',
-    retry: 'Try again',
-  },
+  en: EN_COPY,
   'zh-CN': {
     title: '出了点问题',
     body: '发生意外错误，无法显示此内容。',
     retry: '重试',
+    reload: '重新加载',
   },
+  // Not translated yet — same partial-catalog policy as the ru table in
+  // i18n.tsx (#13391): ru reuses the EN copy.
+  ru: EN_COPY,
 };
 
 // The boundary wraps the whole App, so this surface renders when the themed
@@ -82,6 +96,7 @@ export function RootErrorFallback({
   error,
   onRetry,
   language = 'en',
+  retryMode = 'reset',
 }: RootErrorFallbackProps) {
   const copy = COPY[language] ?? COPY.en;
   return (
@@ -97,7 +112,7 @@ export function RootErrorFallback({
         </p>
       )}
       <button type="button" style={buttonStyle} onClick={onRetry}>
-        {copy.retry}
+        {retryMode === 'reload' ? copy.reload : copy.retry}
       </button>
     </div>
   );

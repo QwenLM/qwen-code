@@ -9,7 +9,12 @@ import { Buffer } from 'node:buffer';
 import { isIP, type LookupFunction } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { WSClient, decryptFile } from '@wecom/aibot-node-sdk';
-import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  sanitizeLogText,
+  singleScopeRoutingKey,
+} from '@qwen-code/channel-base';
+import { splitMarkdown } from '@qwen-code/channel-base/markdown-chunks';
 import type {
   Attachment,
   ChannelAgentBridge,
@@ -80,6 +85,7 @@ const SENSITIVE_ERROR_FIELDS = new Set([
 const DEDUP_TTL_MS = 5 * 60 * 1000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MARKDOWN_CHUNK_BYTES = 3800;
+const MARKDOWN_MAX_CHUNK_BYTES = 20_000;
 const AUTHENTICATION_TIMEOUT_MS = 30_000;
 const KICK_RECONNECT_MAX_ATTEMPTS = 3;
 const KICK_RECONNECT_MAX_RETRY_CYCLES = 3;
@@ -441,6 +447,9 @@ export class WeComChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      ...(isSyntheticMediaText(body, text)
+        ? { syntheticText: true as const }
+        : {}),
       messageId: rawMessageId ?? messageId,
       isGroup,
       // WeCom only delivers group callbacks when the intelligent robot is
@@ -451,6 +460,7 @@ export class WeComChannel extends ChannelBase {
       referencedText: extractQuoteText(quote),
     };
     let attachments: Attachment[] = [];
+    const hasInboundMedia = collectInboundMediaRefs(body).length > 0;
     const attachmentRouteKey = this.attachmentRouteKey(
       senderId,
       chatId,
@@ -480,6 +490,13 @@ export class WeComChannel extends ChannelBase {
         }
         if (attachments.length) {
           envelope.attachments = attachments;
+        }
+        if (
+          envelope.syntheticText &&
+          attachments.length === 0 &&
+          hasInboundMedia
+        ) {
+          envelope.text = '(User sent media but download failed)';
         }
         if (!envelope.text && attachments.length) {
           envelope.text = attachments.some((a) => a.type === 'image')
@@ -793,6 +810,12 @@ export class WeComChannel extends ChannelBase {
     chatId: string,
     threadId?: string,
   ): string {
+    // This switch mirrors SessionRouter.routingKey so an attachment directory
+    // is keyed like the route that owns it. Only `single` consumes the shared
+    // template (singleScopeRoutingKey); `thread`, `chat_thread` and `user`
+    // still hand-duplicate SessionRouter's key shapes there, so a change to
+    // those shapes must be applied here too or an attachment lookup silently
+    // misses the route that stored it.
     switch (this.config.sessionScope) {
       case 'thread':
         return `${this.name}:${threadId || chatId}`;
@@ -801,7 +824,7 @@ export class WeComChannel extends ChannelBase {
           ? `${this.name}:${chatId}:${threadId}`
           : `${this.name}:${chatId}`;
       case 'single':
-        return `${this.name}:__single__`;
+        return singleScopeRoutingKey(this.name);
       case 'user':
       default:
         return `${this.name}:${senderId}:${chatId}`;
@@ -1345,6 +1368,23 @@ function extractQuoteText(
   return extractText(quote) || undefined;
 }
 
+function isSyntheticMediaText(
+  body: Record<string, unknown>,
+  text: string,
+): boolean {
+  const msgType = getString(body, 'msgtype');
+  if (msgType === 'image' || msgType === 'video' || msgType === 'file') {
+    return true;
+  }
+  if (msgType === 'voice') {
+    // A transcript is the user's own words, so it stays gated on the
+    // configured prefix; a voice note without one carries only the
+    // `(voice)` placeholder.
+    return !getString(getRecord(body, 'voice'), 'content');
+  }
+  return msgType === 'mixed' && text.length === 0;
+}
+
 interface InboundMediaRef {
   type: WeComMediaType;
   url: string;
@@ -1478,103 +1518,24 @@ function isWeComMediaType(value: string | undefined): value is WeComMediaType {
   );
 }
 
-function splitMarkdownChunks(text: string, prefix?: string): string[] {
+function splitMarkdownChunks(text: string, prefix = ''): string[] {
   if (!text) return [];
-
-  const contentLimit = MARKDOWN_CHUNK_BYTES - Buffer.byteLength(prefix ?? '');
+  const overhead = Buffer.byteLength(prefix, 'utf8');
+  const maxLength = MARKDOWN_MAX_CHUNK_BYTES - overhead;
+  const contentLimit = MARKDOWN_CHUNK_BYTES - overhead;
   if (contentLimit <= 0) {
     throw new Error('WeCom source label exceeds the markdown message limit.');
   }
-
-  const chunks: string[] = [];
-  let current = '';
-  let codeFence: FenceToken | undefined;
-  const fits = (value: string, nextCodeFence = codeFence): boolean =>
-    Buffer.byteLength(
-      nextCodeFence ? `${value}\n${nextCodeFence}` : value,
-      'utf8',
-    ) <= contentLimit;
-  const flush = (closeCode = true): void => {
-    if (!current) return;
-    chunks.push(closeCode && codeFence ? `${current}\n${codeFence}` : current);
-    current = closeCode && codeFence ? codeFence : '';
-  };
-
-  for (const line of text.split('\n')) {
-    const candidate = current ? `${current}\n${line}` : line;
-    const candidateCodeFence = toggleCodeFenceState(line, codeFence);
-    if (fits(candidate, candidateCodeFence)) {
-      current = candidate;
-      codeFence = candidateCodeFence;
-      continue;
-    }
-
-    flush();
-    const retried = current ? `${current}\n${line}` : line;
-    const retriedCodeFence = toggleCodeFenceState(line, codeFence);
-    if (fits(retried, retriedCodeFence)) {
-      current = retried;
-      codeFence = retriedCodeFence;
-      continue;
-    }
-
-    let needsLineBreak = Boolean(current);
-    for (let index = 0; index < line.length; ) {
-      const codePoint = line.codePointAt(index);
-      const token = line.startsWith('```', index)
-        ? '```'
-        : line.startsWith('~~~', index)
-          ? '~~~'
-          : codePoint === undefined
-            ? ''
-            : String.fromCodePoint(codePoint);
-      if (!token) break;
-      const nextCodeFence =
-        token === codeFence
-          ? undefined
-          : !codeFence && isFenceToken(token)
-            ? token
-            : codeFence;
-      const addition = needsLineBreak && current ? `\n${token}` : token;
-      const candidate = `${current}${addition}`;
-      if (!fits(candidate, nextCodeFence)) {
-        flush();
-        current = current ? `${current}\n${token}` : token;
-      } else {
-        current = candidate;
-      }
-      codeFence = nextCodeFence;
-      needsLineBreak = false;
-      index += token.length;
-    }
-  }
-
-  flush();
-  return prefix ? chunks.map((chunk) => `${prefix}${chunk}`) : chunks;
+  return splitMarkdown(text, {
+    targetLength: contentLimit,
+    reservedLength: overhead,
+    maxLength,
+    unit: 'utf8',
+  }).map((chunk) => prefix + chunk);
 }
 
 function escapeWeComMarkdown(value: string): string {
   return value.replace(/([\\`*_{}[\]()#+\-.!|>])/gu, '\\$1');
-}
-
-function toggleCodeFenceState(
-  line: string,
-  codeFence: FenceToken | undefined,
-): FenceToken | undefined {
-  let nextCodeFence = codeFence;
-  for (const match of line.matchAll(/```|~~~/g)) {
-    const token = match[0] as FenceToken;
-    if (nextCodeFence === token) {
-      nextCodeFence = undefined;
-    } else if (!nextCodeFence) {
-      nextCodeFence = token;
-    }
-  }
-  return nextCodeFence;
-}
-
-function isFenceToken(token: string): token is FenceToken {
-  return token === '```' || token === '~~~';
 }
 
 async function readOutboundMedia(

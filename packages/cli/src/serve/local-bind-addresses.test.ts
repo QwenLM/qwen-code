@@ -35,9 +35,30 @@ import {
  * IPv4-only host too.
  */
 describe('isOwnInterfaceAddress', () => {
-  const own = Object.values(networkInterfaces())
-    .flatMap((entries) => entries ?? [])
-    .map((entry) => entry.address);
+  const currentAddresses = () =>
+    Object.values(networkInterfaces())
+      .flatMap((entries) => entries ?? [])
+      .map((entry) => entry.address);
+
+  const own = currentAddresses();
+
+  /**
+   * A shared CI host adds and drops veth interfaces while a suite runs, and
+   * `isOwnInterfaceAddress` re-reads `networkInterfaces()` on every call — so
+   * an address captured at collection can be gone by the time a later case
+   * asserts on it, and the case then fails on a host that changed rather than
+   * on a lost normalisation. That is how a release lane went red on the two
+   * cases that run last here while the earlier ones passed. Intersect the
+   * collection snapshot with a fresh read per case, from `node:os` rather than
+   * from the function under test so no case can confirm itself, and keep the
+   * vacuity guard: the loopback never churns, so this never runs empty.
+   */
+  const stillOwn = () => {
+    const current = new Set(currentAddresses());
+    const stable = own.filter((address) => current.has(address));
+    expect(stable.length).toBeGreaterThan(0);
+    return stable;
+  };
 
   it('reports at least one own address to test against', () => {
     // Guards the loops below from passing vacuously on a host that somehow
@@ -46,7 +67,7 @@ describe('isOwnInterfaceAddress', () => {
   });
 
   it('accepts every own interface address in its bare form', () => {
-    for (const address of own) {
+    for (const address of stillOwn()) {
       expect(isOwnInterfaceAddress(address)).toBe(true);
     }
   });
@@ -55,7 +76,7 @@ describe('isOwnInterfaceAddress', () => {
     // The bracketed spelling is what `workerDialHost` hands back out of a
     // `https://[2001:db8::5]:8080` daemon URL, and what an operator passes to
     // `--hostname`. `os.networkInterfaces()` never reports the brackets.
-    for (const address of own) {
+    for (const address of stillOwn()) {
       expect(isOwnInterfaceAddress(`[${address}]`)).toBe(true);
     }
   });
@@ -65,7 +86,7 @@ describe('isOwnInterfaceAddress', () => {
     // is the only form an operator can pass for one — and `networkInterfaces()`
     // keeps the scope in `scopeid`, not in `address`. Both the percent-encoded
     // URL spelling and the bare one have to survive.
-    for (const address of own) {
+    for (const address of stillOwn()) {
       expect(isOwnInterfaceAddress(`${address}%eth0`)).toBe(true);
       expect(isOwnInterfaceAddress(`[${address}%25eth0]`)).toBe(true);
     }
@@ -74,7 +95,7 @@ describe('isOwnInterfaceAddress', () => {
   it('matches an own address case-insensitively', () => {
     // IPv6 literals are hex and an operator may type them uppercase, while
     // `networkInterfaces()` reports them lowercase.
-    for (const address of own) {
+    for (const address of stillOwn()) {
       expect(isOwnInterfaceAddress(address.toUpperCase())).toBe(true);
     }
   });

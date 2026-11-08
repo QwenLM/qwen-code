@@ -61,6 +61,9 @@ describe('CronCreateTool', () => {
     expect(result.llmContent).toContain('Auto-expires after 7 days');
     expect(result.llmContent).toContain('Session-only');
     expect(config._scheduler.list()).toHaveLength(1);
+    // The interactive cron E2E gates on this confirmation text appearing on
+    // screen, so pin the session-only recurring shape of it here.
+    expect(result.returnDisplay).toMatch(/^Scheduled \S+ \(/);
   });
 
   it('reports a configured recurring max age in days', async () => {

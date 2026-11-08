@@ -4,18 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
+  useSession,
+  useWorkspace,
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type {
-  DaemonSessionArtifact,
-  DaemonSessionMonitorTaskStatus,
-  DaemonWorkspaceCapability,
+import {
+  STANDALONE_SESSIONS_CAPABILITY,
+  DaemonHttpError,
+  isStandaloneSessionNotFoundError,
+  type DaemonSessionArtifact,
+  type DaemonSessionMonitorTaskStatus,
+  type DaemonSessionSummary,
+  type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
+import type { WebShellModelManagementOptions } from '../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
+import type { RegisterContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -30,6 +49,7 @@ import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
+import { isSessionArchivedHttpError } from '../daemon/session/DaemonSessionProvider';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
 import {
@@ -38,13 +58,64 @@ import {
   workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
+import { AssistantTurnSettlementObserver } from '../assistant-turn-settlement';
+import type { WebShellAssistantTurnSettledEvent } from '../customization';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
 
+// A deterministic 409 that is not the not-found answer: the daemon knows the
+// id but refuses to serve it as a standalone session (a session-id case
+// conflict, or a stored/live shape mismatch). The pane is kept on this
+// outcome — the id exists somewhere — and the verdict is cached so the round
+// stops re-probing it. A conflict the daemon marks `retryable` (a pending
+// deletion journal) is transient: it caches nothing, so a later round asks
+// again.
+function isStandaloneSessionConflictError(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 409) {
+    return false;
+  }
+  const body: unknown = error.body;
+  if (typeof body !== 'object' || body === null) return false;
+  const record = body as Record<string, unknown>;
+  return (
+    record['code'] === 'standalone_session_conflict' &&
+    record['retryable'] !== true
+  );
+}
+
+/**
+ * Reports, from inside a pane's own provider, the moment the connection
+ * parks on the daemon's terminal `session_archived` answer (409). SplitView
+ * acts on it whether or not the catalog page is complete: it is the pane's
+ * own authoritative answer.
+ */
+function TerminalArchivedReporter({
+  sessionId,
+  onReport,
+}: {
+  sessionId: string;
+  onReport: (sessionId: string, archived: boolean) => void;
+}) {
+  const { connection } = useSession();
+  const archived =
+    connection.sessionArchived === true &&
+    connection.status === 'disconnected' &&
+    connection.sessionId === undefined;
+  useEffect(() => {
+    if (!archived) return;
+    onReport(sessionId, true);
+    return () => onReport(sessionId, false);
+  }, [archived, onReport, sessionId]);
+  return null;
+}
+
 export interface SplitViewProps {
+  showResponseTokensPerSecond?: boolean;
   /** Sessions to show in the split view. */
   sessionIds?: string[];
+  /** Respect the host's session-details action allowlist. */
+  showSessionDetails?: boolean;
   /**
    * Report the live pane set (after every add / remove) up to the parent so it
    * survives this view unmounting. Switching away from the split and back must
@@ -53,15 +124,32 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  /** Report the resolved owners of mounted panes for the app-level poller. */
+  onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
+  /**
+   * Report panes surfacing approvals, including hidden panes. Keep stable while
+   * consumer inputs are unchanged; a new callback receives the current list.
+   */
+  onPendingPanesChange?: (sessionIds: string[]) => void;
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
+  modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
     task: DaemonSessionMonitorTaskStatus,
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
+  registerContextUsageControls?: RegisterContextUsageControls;
+  onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
     sessionId: string,
     sessionActions: DaemonSessionActions,
   ) => void;
@@ -87,6 +175,7 @@ export interface SplitViewProps {
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
   sessionWorkflowEnabled?: boolean;
+  planControlVisible?: boolean;
 }
 
 /**
@@ -98,15 +187,25 @@ export interface SplitViewProps {
  */
 export function SplitView({
   sessionIds,
+  showSessionDetails = true,
   onPanesChange,
+  onPaneWorkspacesChange,
+  onAssistantTurnSettled,
+  onPendingPanesChange,
   onExit,
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
+  registerContextUsageControls,
+  onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   renderPaneHeaderActions,
   includeOtherWorkspaces = true,
@@ -117,14 +216,43 @@ export function SplitView({
   voiceWorkspaceRevisions = {},
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  showResponseTokensPerSecond = false,
+  planControlVisible = false,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const currentSessionId = connection.sessionId;
+  // The provider clears `connection.sessionId` when the current session parks
+  // on a terminal answer (archived, deleted). The seed pane must keep its
+  // prune exemption and its workspace through that park, so it is keyed on
+  // the last defined id.
+  const seedSessionIdRef = useRef(currentSessionId);
+  if (currentSessionId !== undefined) {
+    seedSessionIdRef.current = currentSessionId;
+  }
+  const seedSessionId = seedSessionIdRef.current;
   const organizationEnabled =
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
-  const { sessions, reload } = useScopedSessions(workspaceCwd, {
+  const workspace = useWorkspace();
+  const {
+    sessions,
+    reload,
+    // Defined only once the active list has loaded at least once — the
+    // readiness signal for pruning panes whose session left the catalog.
+    data: activeSessionPage,
+    // Page-completeness markers: a bounded page (more results than were
+    // fetched) or a merge that failed partway means "not in this page" is not
+    // "gone", so the prune guard waits for all three to be clean before
+    // trusting an absence.
+    nextCursor: activeSessionNextCursor,
+    liveMergeFailed: activeSessionLiveMergeFailed,
+    truncated: activeSessionTruncated,
+    // A page retained after a failed refresh is not a fresh answer: absence
+    // from it proves nothing, so the prune guard waits for it too.
+    error: activeSessionError,
+    stale: activeSessionStale,
+  } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -135,11 +263,79 @@ export function SplitView({
   // Live sessions from the daemon's other workspaces, so the picker can offer —
   // and a pane can attach to — sessions that aren't in the primary workspace.
   // Empty (a no-op) on a single-workspace daemon.
-  const { sessions: otherSessions, reload: reloadOther } =
-    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
+  const {
+    sessions: otherSessions,
+    loading: otherSessionsLoading,
+    // The workspaces the fan-out actually queries. A pane whose workspace is
+    // not among them is outside the catalog's coverage — its absence from the
+    // merged list proves nothing.
+    queriedCwds: otherQueriedCwds,
+    // The queried workspaces where absence can't be proven right now (errored,
+    // never landed, or an incomplete page): a pane whose workspace is here
+    // must not be pruned on catalog absence.
+    notReadyCwds: otherNotReadyCwds,
+    reload: reloadOther,
+  } = useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
   const allSessions = useMemo(
     () => mergeSessionsById(sessions, otherSessions),
     [sessions, otherSessions],
+  );
+  const knownSessionIds = useMemo(
+    () => new Set(allSessions.map((session) => session.sessionId)),
+    [allSessions],
+  );
+  const knownSessionIdsRef = useRef(knownSessionIds);
+  knownSessionIdsRef.current = knownSessionIds;
+  // The workspaces where the catalog can *prove* a session is gone: the
+  // primary workspace when its page landed fresh and complete, plus each
+  // fan-out workspace whose page is ready. Everything else — a workspace the
+  // daemon no longer advertises, a page that never landed, or one that landed
+  // incomplete — is not proof of anything, so a pane living there is a
+  // candidate for the probe, never for direct pruning.
+  const provenCwds = useMemo(() => {
+    const set = new Set<string>();
+    const primaryCwd = workspaceCwd ?? workspace.workspaceCwd;
+    const primaryReady =
+      activeSessionPage !== undefined &&
+      activeSessionError === undefined &&
+      !activeSessionStale &&
+      !activeSessionTruncated &&
+      activeSessionNextCursor === undefined &&
+      !activeSessionLiveMergeFailed;
+    if (primaryCwd !== undefined && primaryReady) set.add(primaryCwd);
+    for (const cwd of otherQueriedCwds) {
+      if (!otherNotReadyCwds.includes(cwd)) set.add(cwd);
+    }
+    return set;
+  }, [
+    workspaceCwd,
+    workspace.workspaceCwd,
+    activeSessionPage,
+    activeSessionError,
+    activeSessionStale,
+    activeSessionTruncated,
+    activeSessionNextCursor,
+    activeSessionLiveMergeFailed,
+    otherQueriedCwds,
+    otherNotReadyCwds,
+  ]);
+  // Sessions a pane's own provider has already answered terminal: parked on
+  // the daemon's 409 session_archived. Authoritative per pane, so it prunes
+  // whether or not the catalog page is complete.
+  const [terminalArchivedIds, setTerminalArchivedIds] = useState<
+    ReadonlySet<string>
+  >(new Set());
+  const reportTerminalArchived = useCallback(
+    (sessionId: string, archived: boolean) => {
+      setTerminalArchivedIds((current) => {
+        if (current.has(sessionId) === archived) return current;
+        const next = new Set(current);
+        if (archived) next.add(sessionId);
+        else next.delete(sessionId);
+        return next;
+      });
+    },
+    [],
   );
   const multiWorkspace =
     !workspaceCwd &&
@@ -156,11 +352,70 @@ export function SplitView({
     [sessionIds],
   );
 
-  const [paneIds, setPaneIds] = useState<string[]>(() => {
+  const [statePaneIds, setStatePaneIds] = useState<string[]>(() => {
     if (normalizedSessionIds.length > 0) return normalizedSessionIds;
     return currentSessionId ? [currentSessionId] : [];
   });
+  // In controlled mode the prop is the authoritative pane set. Deriving from
+  // it directly (a state mirror synced by an effect could lag a commit) keeps
+  // the derived state and the async prune continuation on the same set.
+  const paneIds = sessionIdsControlled ? normalizedSessionIds : statePaneIds;
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [activePaneId, setActivePaneId] = useState(paneIds[0]);
+  const [pendingPaneIds, setPendingPaneIds] = useState<Set<string>>(new Set());
+  const [paneFocusId, setPaneFocusId] = useState<string | null>(null);
+  const panesRef = useRef<HTMLDivElement>(null);
+  const previousPaneIdsRef = useRef(paneIds);
+  const activeId = paneIds.includes(activePaneId ?? '')
+    ? activePaneId
+    : paneIds[
+        Math.min(
+          Math.max(previousPaneIdsRef.current.indexOf(activePaneId ?? ''), 0),
+          paneIds.length - 1,
+        )
+      ];
+  useLayoutEffect(() => {
+    if (previousPaneIdsRef.current === paneIds) return;
+    previousPaneIdsRef.current = paneIds;
+    if (activeId === activePaneId) return;
+    setActivePaneId(activeId);
+    if (document.activeElement === document.body) {
+      setPaneFocusId(activeId ?? null);
+    }
+  }, [paneIds, activeId, activePaneId]);
+  // Keep report identity stable across parent renders: consumers may store it
+  // in state, which would otherwise retrigger the reporting effect below.
+  const pendingIds = useMemo(
+    () => paneIds.filter((id) => pendingPaneIds.has(id)),
+    [paneIds, pendingPaneIds],
+  );
+  useEffect(() => {
+    onPendingPanesChange?.(pendingIds);
+  }, [pendingIds, onPendingPanesChange]);
+  useEffect(() => () => onPendingPanesChange?.([]), [onPendingPanesChange]);
+  const backButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingButtonRef = useRef<HTMLButtonElement | null>(null);
+  const setPendingButtonRef = useCallback(
+    (button: HTMLButtonElement | null) => {
+      if (!button && pendingButtonRef.current === document.activeElement) {
+        backButtonRef.current?.focus();
+      }
+      pendingButtonRef.current = button;
+    },
+    [],
+  );
+  const handleApprovalChange = useCallback(
+    (sessionId: string, pending: boolean) => {
+      setPendingPaneIds((current) => {
+        if (current.has(sessionId) === pending) return current;
+        const next = new Set(current);
+        if (pending) next.add(sessionId);
+        else next.delete(sessionId);
+        return next;
+      });
+    },
+    [],
+  );
   // Which pane, if any, is maximized to fill the whole split. Purely visual and
   // ephemeral (not deep-linked via `?split=`, like the dialog fullscreen toggle
   // it mirrors): the other panes stay mounted and streaming, just hidden.
@@ -175,17 +430,41 @@ export function SplitView({
       : Math.random().toString(36).slice(2),
   );
 
-  useEffect(() => {
-    if (!sessionIdsControlled) return;
-    setPaneIds((prev) =>
-      prev.length === normalizedSessionIds.length &&
-      prev.every((id, index) => id === normalizedSessionIds[index])
-        ? prev
-        : normalizedSessionIds,
-    );
-  }, [normalizedSessionIds, sessionIdsControlled]);
   const paneIdsRef = useRef(paneIds);
   paneIdsRef.current = paneIds;
+  // Parent-appended panes (controlled mode): reveal and focus the new one.
+  // paneIds derives from the prop, so by the time this runs the render-time
+  // ref above is already current — track the previous commit here instead.
+  const prevControlledIdsRef = useRef(normalizedSessionIds);
+  useEffect(() => {
+    if (!sessionIdsControlled) return;
+    const prev = prevControlledIdsRef.current;
+    const addedSessionId = normalizedSessionIds.find(
+      (id) => !prev.includes(id),
+    );
+    prevControlledIdsRef.current = normalizedSessionIds;
+    if (addedSessionId) {
+      setMaximizedPaneId(null);
+      setActivePaneId(addedSessionId);
+    }
+  }, [normalizedSessionIds, sessionIdsControlled]);
+
+  // Probe verdicts per session id, recorded for the lifetime of the pane set.
+  // Only definitive outcomes are recorded: a successful probe of a live
+  // standalone session, a not-found or archived answer (nothing a pane can
+  // load), and a non-retryable conflict 409 (the daemon knows the id but
+  // refuses to serve it standalone — keep the pane and stop re-probing). A
+  // transient failure, including a retryable conflict, records nothing, so
+  // the next round re-probes. A pane's own terminal answer is checked before
+  // this cache, so a cached verdict never outvotes it. Without the cache,
+  // every catalog commit (the 5s live-state poll, every invalidation) would
+  // re-ask the daemon a question whose answer cannot change.
+  const probeVerdictsRef = useRef(
+    new Map<string, 'alive' | 'absent' | 'conflict'>(),
+  );
+  // One in-flight probe per id: a catalog commit landing mid-probe joins the
+  // running request instead of firing a duplicate.
+  const probeInFlightRef = useRef(new Map<string, Promise<void>>());
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -215,6 +494,17 @@ export function SplitView({
     }
   }, [pickerOpen, reload, reloadOther]);
 
+  // Last-seen summary per session id (refreshed on every render). A pane the
+  // prune guard keeps can temporarily leave the merged catalog — e.g. its
+  // workspace flips untrusted and the fan-out stops querying it, dropping its
+  // snapshot — and its entries must stay resolvable or the pane renders with
+  // an empty title and remounts under the primary workspace. Kept as the full
+  // summary so the pane's session-details target survives too.
+  const lastKnownById = useRef(new Map<string, DaemonSessionSummary>());
+  for (const session of allSessions) {
+    lastKnownById.current.set(session.sessionId, session);
+  }
+
   const titleById = useMemo(() => {
     const map = new Map<string, string>();
     for (const session of allSessions) {
@@ -223,8 +513,29 @@ export function SplitView({
         session.displayName?.trim() || session.sessionId.slice(0, 8),
       );
     }
+    for (const id of paneIds) {
+      if (!map.has(id)) {
+        const known = lastKnownById.current.get(id);
+        if (known) {
+          map.set(id, known.displayName?.trim() || known.sessionId.slice(0, 8));
+        }
+      }
+    }
     return map;
-  }, [allSessions]);
+  }, [allSessions, paneIds]);
+
+  const sessionById = useMemo(() => {
+    const map = new Map(
+      allSessions.map((session) => [session.sessionId, session]),
+    );
+    for (const id of paneIds) {
+      if (!map.has(id)) {
+        const known = lastKnownById.current.get(id);
+        if (known) map.set(id, known);
+      }
+    }
+    return map;
+  }, [allSessions, paneIds]);
 
   // The workspace each session lives in, so a pane attaches under its owning
   // workspace (a non-primary session 409s if loaded with the primary cwd). The
@@ -236,15 +547,28 @@ export function SplitView({
     for (const session of allSessions) {
       map.set(session.sessionId, session.workspaceCwd);
     }
-    if (
-      currentSessionId &&
-      connection.workspaceCwd &&
-      !map.has(currentSessionId)
-    ) {
-      map.set(currentSessionId, connection.workspaceCwd);
+    for (const id of paneIds) {
+      if (!map.has(id)) {
+        const known = lastKnownById.current.get(id);
+        if (known) map.set(id, known.workspaceCwd);
+      }
+    }
+    if (seedSessionId && connection.workspaceCwd && !map.has(seedSessionId)) {
+      map.set(seedSessionId, connection.workspaceCwd);
     }
     return map;
-  }, [allSessions, currentSessionId, connection.workspaceCwd]);
+  }, [allSessions, seedSessionId, connection.workspaceCwd, paneIds]);
+
+  useEffect(() => {
+    if (!onPaneWorkspacesChange) return;
+    const cwds = new Set<string>();
+    for (const id of paneIds) {
+      const cwd = workspaceCwdById.get(id) ?? workspaceCwd;
+      if (cwd) cwds.add(cwd);
+    }
+    onPaneWorkspacesChange([...cwds]);
+  }, [onPaneWorkspacesChange, paneIds, workspaceCwd, workspaceCwdById]);
+  useEffect(() => () => onPaneWorkspacesChange?.([]), [onPaneWorkspacesChange]);
 
   const addPane = useCallback(
     (sessionId: string) => {
@@ -260,10 +584,11 @@ export function SplitView({
       // Reveal the freshly added pane rather than leaving it hidden behind a
       // still-maximized one.
       setMaximizedPaneId(null);
+      setActivePaneId(sessionId);
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
-        setPaneIds(next);
+        setStatePaneIds(next);
       }
       setPickerOpen(false);
     },
@@ -297,15 +622,188 @@ export function SplitView({
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
-        setPaneIds(next);
+        setStatePaneIds(next);
       }
     },
     [onPanesChange, sessionIdsControlled],
   );
 
+  // Reconcile the live pane set with the settled active catalog: a pane whose
+  // session has left it (archived or deleted) has nothing left to load — the
+  // provider parks on a terminal error with an empty transcript, and the
+  // parent re-seeds the stale id from the persisted pane set on every entry
+  // into the split view.
+  //
+  // Pruning is only safe when the catalog can *prove* a session is gone. An
+  // absence from a bounded page (the daemon clamps the page size, so a busy
+  // workspace can have more sessions than were fetched), a merge that failed
+  // partway, an errored or stale-retained page, or a fan-out workspace whose
+  // page never landed is not proof of removal — a session may simply be
+  // missing from what we saw. A pane whose workspace the daemon no longer
+  // advertises is outside the catalog's coverage entirely: it is a candidate
+  // for the standalone probe, never for direct pruning. The seed pane (the
+  // current session) is never pruned. Standalone panes (deep-linked) never
+  // appear in a workspace list: probe them and keep them on any non-not-found
+  // outcome — a transient probe failure must not close a live pane. A pane
+  // whose own provider parked on the terminal `session_archived` answer is
+  // pruned on that answer alone, whatever the page state.
+  useEffect(() => {
+    if (activeSessionPage === undefined || otherSessionsLoading) return;
+    const terminalIds = paneIds.filter(
+      (id) => id !== seedSessionId && terminalArchivedIds.has(id),
+    );
+    const listInferenceOff =
+      activeSessionTruncated ||
+      activeSessionNextCursor !== undefined ||
+      activeSessionLiveMergeFailed ||
+      activeSessionError !== undefined ||
+      activeSessionStale;
+    const staleIds = listInferenceOff
+      ? []
+      : paneIds.filter((id) => {
+          if (id === seedSessionId || terminalArchivedIds.has(id)) {
+            return false;
+          }
+          if (knownSessionIds.has(id)) return false;
+          const cwd = workspaceCwdById.get(id);
+          // A pane of unknown workspace (cold mount, deep link) is settled
+          // only while every fan-out workspace can prove absence: the probe's
+          // not-found means "not a standalone session", which a live
+          // workspace session answers too.
+          if (cwd === undefined) return otherNotReadyCwds.length === 0;
+          return provenCwds.has(cwd);
+        });
+    if (staleIds.length === 0) {
+      if (terminalIds.length === 0) return;
+      const next = paneIds.filter((id) => !terminalIds.includes(id));
+      if (sessionIdsControlled) onPanesChange?.(next);
+      else setStatePaneIds(next);
+      return;
+    }
+    let cancelled = false;
+    const standaloneSessionsEnabled =
+      connection.capabilities?.features?.includes(
+        STANDALONE_SESSIONS_CAPABILITY,
+      ) === true;
+    void (async () => {
+      const toPrune: string[] = [];
+      await Promise.all(
+        staleIds.map(async (id) => {
+          const verdict = probeVerdictsRef.current.get(id);
+          if (verdict === 'alive' || verdict === 'conflict') {
+            return; // a kept pane — stop re-probing
+          }
+          if (verdict === 'absent') {
+            toPrune.push(id);
+            return;
+          }
+          if (!standaloneSessionsEnabled) {
+            toPrune.push(id);
+            return;
+          }
+          const inFlight = probeInFlightRef.current.get(id);
+          if (inFlight) {
+            await inFlight;
+          } else {
+            const probe = (async () => {
+              try {
+                const lookup = await workspace.client.getStandaloneSession(id);
+                // An archived standalone session still answers 200 with its
+                // summary: readable, but nothing a pane can load.
+                probeVerdictsRef.current.set(
+                  id,
+                  'isArchived' in lookup && lookup.isArchived === true
+                    ? 'absent'
+                    : 'alive',
+                );
+              } catch (error) {
+                if (
+                  isStandaloneSessionNotFoundError(error) ||
+                  isSessionArchivedHttpError(error)
+                ) {
+                  probeVerdictsRef.current.set(id, 'absent');
+                } else if (isStandaloneSessionConflictError(error)) {
+                  probeVerdictsRef.current.set(id, 'conflict');
+                }
+                // transient: records nothing, next round re-probes
+              } finally {
+                probeInFlightRef.current.delete(id);
+              }
+            })();
+            probeInFlightRef.current.set(id, probe);
+            await probe;
+          }
+          const settled = probeVerdictsRef.current.get(id);
+          if (settled === 'absent') toPrune.push(id);
+        }),
+      );
+      if (cancelled) return;
+      // The probes may have taken a moment: re-check against the freshest
+      // pane set and catalog before removing, so a re-unarchived session
+      // survives the round trip. paneIdsRef tracks the prop-derived set in
+      // controlled mode too, so a stale mirror can't resurrect a pane the
+      // parent just closed.
+      const currentPaneIds = paneIdsRef.current;
+      const next = currentPaneIds.filter(
+        (id) =>
+          !terminalIds.includes(id) &&
+          (!toPrune.includes(id) || knownSessionIdsRef.current.has(id)),
+      );
+      if (next.length === currentPaneIds.length) return;
+      if (sessionIdsControlled) onPanesChange?.(next);
+      else setStatePaneIds(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSessionPage,
+    activeSessionTruncated,
+    activeSessionNextCursor,
+    activeSessionLiveMergeFailed,
+    activeSessionError,
+    activeSessionStale,
+    otherSessionsLoading,
+    provenCwds,
+    paneIds,
+    knownSessionIds,
+    workspaceCwdById,
+    seedSessionId,
+    terminalArchivedIds,
+    otherNotReadyCwds,
+    connection.capabilities,
+    workspace.client,
+    sessionIdsControlled,
+    onPanesChange,
+  ]);
+
   const toggleMaximize = useCallback((sessionId: string) => {
+    setActivePaneId(sessionId);
     setMaximizedPaneId((current) => (current === sessionId ? null : sessionId));
   }, []);
+
+  const goToPendingPane = () => {
+    const activeIndex = paneIds.indexOf(activeId ?? '');
+    const nextId =
+      pendingIds.find((id) => paneIds.indexOf(id) > activeIndex) ??
+      pendingIds[0];
+    if (!nextId) return;
+    setActivePaneId(nextId);
+    if (maximizedPaneId) setMaximizedPaneId(nextId);
+    setPaneFocusId(nextId);
+  };
+
+  useLayoutEffect(() => {
+    if (!paneFocusId) return;
+    const pane = Array.from(panesRef.current?.children ?? []).find(
+      (element) => element.getAttribute('data-pane-session-id') === paneFocusId,
+    );
+    pane?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    // Approval panels submit on Escape, Enter, and digits. Navigation must
+    // stop outside those keyboard scopes until the user deliberately enters.
+    if (pane instanceof HTMLElement) pane.focus({ preventScroll: true });
+    setPaneFocusId(null);
+  }, [paneFocusId]);
 
   // Maximize only makes sense against another pane, so drop it whenever it no
   // longer can hold: the maximized pane left the set (closed here, or removed by
@@ -341,7 +839,10 @@ export function SplitView({
     () => allSessions.filter((session) => !paneIds.includes(session.sessionId)),
     [allSessions, paneIds],
   );
-  const canAdd = paneIds.length < MAX_PANES && available.length > 0;
+  // The cached catalog may lag behind sessions created elsewhere, so the button
+  // must stay clickable whenever another pane fits. The picker reloads on open
+  // and reports an empty list itself.
+  const canAdd = paneIds.length < MAX_PANES;
   // Only offer per-pane maximize once there's another pane to maximize against —
   // a lone pane already fills the split.
   const canMaximize = paneIds.length > 1;
@@ -352,6 +853,7 @@ export function SplitView({
         <button
           type="button"
           className={styles.backButton}
+          ref={backButtonRef}
           onClick={onExit}
           aria-label={t('common.back')}
           title={t('common.back')}
@@ -371,6 +873,25 @@ export function SplitView({
         <span className={styles.count}>
           {t('splitView.count', { count: paneIds.length })}
         </span>
+        <span className="sr-only" role="status">
+          {pendingIds.length > 0
+            ? t('splitView.pendingCount', { count: pendingIds.length })
+            : ''}
+        </span>
+        {pendingIds.length > 0 && (
+          <button
+            type="button"
+            className={styles.pendingButton}
+            onClick={goToPendingPane}
+            ref={setPendingButtonRef}
+            title={t('splitView.nextPending')}
+            aria-label={`${t('splitView.pendingCount', {
+              count: pendingIds.length,
+            })} — ${t('splitView.nextPending')}`}
+          >
+            {t('splitView.pendingCount', { count: pendingIds.length })}
+          </button>
+        )}
         <div className={styles.addWrap} ref={addWrapRef}>
           <button
             type="button"
@@ -382,8 +903,13 @@ export function SplitView({
           >
             + {t('splitView.addPane')}
           </button>
-          {pickerOpen && available.length > 0 && (
+          {pickerOpen && (
             <ul className={styles.picker} role="listbox">
+              {available.length === 0 && (
+                <li className={styles.pickerEmpty} role="presentation">
+                  {t('splitView.noOtherSessions')}
+                </li>
+              )}
               {available.map((session) => (
                 <li key={session.sessionId} role="option" aria-selected="false">
                   <button
@@ -414,7 +940,7 @@ export function SplitView({
         </div>
       </header>
 
-      <div className={styles.panes}>
+      <div className={styles.panes} ref={panesRef}>
         {paneIds.length === 0 ? (
           <div className={styles.empty}>{t('splitView.empty')}</div>
         ) : (
@@ -427,7 +953,21 @@ export function SplitView({
             return (
               <div
                 className={styles.paneSlot}
+                data-pane-session-id={sessionId}
                 data-pane-hidden={isHidden ? '' : undefined}
+                role="group"
+                aria-label={titleById.get(sessionId) ?? sessionId.slice(0, 8)}
+                tabIndex={-1}
+                onPointerDownCapture={(event) => {
+                  if (event.currentTarget.contains(event.target as Node)) {
+                    setActivePaneId(sessionId);
+                  }
+                }}
+                onFocusCapture={(event) => {
+                  if (event.currentTarget.contains(event.target as Node)) {
+                    setActivePaneId(sessionId);
+                  }
+                }}
                 // Include the resolved workspace in the key on a multi-workspace
                 // daemon so a pane whose workspace resolves only after mount (e.g.
                 // a `?split=` deep link) remounts under the right workspace rather
@@ -484,8 +1024,25 @@ export function SplitView({
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
+                    <TerminalArchivedReporter
+                      sessionId={sessionId}
+                      onReport={reportTerminalArchived}
+                    />
+                    {onAssistantTurnSettled ? (
+                      <AssistantTurnSettlementObserver
+                        onAssistantTurnSettled={onAssistantTurnSettled}
+                      />
+                    ) : null}
                     <ChatPane
+                      showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
+                      sessionSummary={
+                        showSessionDetails
+                          ? sessionById.get(sessionId)
+                          : undefined
+                      }
+                      isActive={activeId === sessionId}
+                      onApprovalChange={handleApprovalChange}
                       workspaceCwd={paneWorkspaceCwd}
                       reportCatalogTurnCompletion={
                         sessionId !== currentSessionId ||
@@ -506,12 +1063,23 @@ export function SplitView({
                       onError={onError}
                       onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
+                      modelManagement={modelManagement}
+                      unavailableModels={unavailableModels}
+                      mountUnavailableModelTooltip={
+                        mountUnavailableModelTooltip
+                      }
                       onOpenGoals={onOpenGoals}
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}
                       onPaneArtifactsChange={onPaneArtifactsChange}
+                      registerContextUsageControls={
+                        registerContextUsageControls
+                      }
+                      onBeforeContextCompress={onBeforeContextCompress}
+                      onOpenContextUsage={onOpenContextUsage}
                       messageTurnOutputs={messageTurnOutputs}
                       sessionWorkflowEnabled={sessionWorkflowEnabled}
+                      planControlVisible={planControlVisible}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>

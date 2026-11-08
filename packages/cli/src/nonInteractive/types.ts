@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type {
-  ActiveGoal,
   ApprovalModeValue,
   GoalSnapshotV2,
   SubagentConfig,
@@ -117,6 +116,7 @@ export interface APIAssistantMessage {
  */
 export interface CLIUserMessage {
   type: 'user';
+  origin?: { kind: 'human' };
   uuid?: string;
   session_id: string;
   message: APIUserMessage;
@@ -251,11 +251,6 @@ export interface ToolProgressStreamEvent {
   content: McpToolProgressData | ShellProgressData;
 }
 
-export interface ActiveGoalStreamEvent {
-  type: 'active_goal';
-  active_goal: ActiveGoal | null;
-}
-
 export interface GoalStateStreamEvent {
   type: 'goal_state';
   goal_state: GoalSnapshotV2;
@@ -268,8 +263,7 @@ export type StreamEvent =
   | ContentBlockStopEvent
   | MessageStopStreamEvent
   | ToolProgressStreamEvent
-  | GoalStateStreamEvent
-  | ActiveGoalStreamEvent;
+  | GoalStateStreamEvent;
 
 export interface CLIPartialAssistantMessage {
   type: 'stream_event';
@@ -356,6 +350,8 @@ export interface CLIMcpServerConfig {
   tcp?: string;
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -404,6 +400,7 @@ export interface CLIControlInitializeRequest {
    * Applied at session start via config.setReasoningEffort().
    */
   effort?: string;
+  workflowMode?: boolean;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -439,6 +436,15 @@ export interface CLIControlSetEffortRequest {
   effort: string;
 }
 
+export interface CLIControlGetWorkflowModeRequest {
+  subtype: 'get_workflow_mode';
+}
+
+export interface CLIControlSetWorkflowModeRequest {
+  subtype: 'set_workflow_mode';
+  enabled: boolean;
+}
+
 export interface CLIControlGetAvailableModelsRequest {
   subtype: 'get_available_models';
 }
@@ -471,6 +477,8 @@ export type ControlRequestPayload =
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
   | CLIControlSetEffortRequest
+  | CLIControlGetWorkflowModeRequest
+  | CLIControlSetWorkflowModeRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
   | CLIControlGetContextUsageRequest

@@ -1,0 +1,174 @@
+.viewport {
+  height: 100%;
+  overflow: auto;
+  background:
+    radial-gradient(
+        circle,
+        color-mix(in srgb, var(--border) 70%, transparent) 1px,
+        transparent 1px
+      )
+      0 0 / 18px 18px,
+    var(--background);
+}
+
+.canvas {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.edges path {
+  fill: none;
+  stroke: color-mix(in srgb, var(--muted-foreground) 55%, transparent);
+  stroke-width: 1.5;
+}
+
+.edges .edgeRunning {
+  stroke: var(--primary);
+  stroke-dasharray: 7 7;
+  animation: workflow-edge-flow 0.8s linear infinite;
+}
+
+.node {
+  position: absolute;
+  display: flex;
+  width: 184px;
+  height: 68px;
+  box-sizing: border-box;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow: 0 4px 12px color-mix(in srgb, #000 8%, transparent);
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+}
+
+button.node {
+  cursor: pointer;
+}
+
+button.node:hover,
+button.node:focus-visible {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
+.node[data-status='running'] {
+  border-color: color-mix(in srgb, var(--primary) 65%, var(--border));
+}
+
+.node[data-status='failed'],
+.node[data-status='cancelled'] {
+  border-color: color-mix(in srgb, var(--error-color) 55%, var(--border));
+}
+
+.nodeTitle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.nodeTitle svg,
+.mainNode svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  stroke-width: 1.7;
+}
+
+.nodeTitle span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mainNode {
+  flex-direction: row;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.nodeMeta {
+  display: flex;
+  width: 100%;
+  align-items: center;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.status svg {
+  width: 12px;
+  height: 12px;
+}
+
+.status[data-status='completed'] {
+  color: var(--success-color);
+}
+
+.status[data-status='failed'],
+.status[data-status='cancelled'] {
+  color: var(--error-color);
+}
+
+.statusRunning {
+  animation: workflow-status-spin 1s linear infinite;
+}
+
+.duration {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.empty,
+.loading {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 32px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+@keyframes workflow-edge-flow {
+  to {
+    stroke-dashoffset: -14;
+  }
+}
+
+@keyframes workflow-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .edges .edgeRunning,
+  .statusRunning {
+    animation: none;
+  }
+}

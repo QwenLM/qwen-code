@@ -4,12 +4,161 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
 
 describe('workspace actions', () => {
+  it('uses authenticated process-global subscription routes without a workspace', async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async (_url, init) =>
+        init?.method === 'DELETE'
+          ? new Response(null, { status: 204 })
+          : Response.json({ enabled: true, id: 'flow-1', status: 'waiting' }),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const owner = new DaemonClient({ baseUrl: 'http://localhost:3001' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => owner,
+      getWorkspaceCwd: () => undefined,
+      baseUrl: 'http://localhost:3001',
+      token: 'test-daemon-token',
+    });
+    const options = { signal: new AbortController().signal };
+    await actions.getSubscriptionConfig(options);
+    await actions.startSubscriptionLogin();
+    await actions.getSubscriptionLogin('flow-1', options);
+    await actions.cancelSubscriptionLogin('flow-1');
+    await actions.getSubscriptionUserInfo(options);
+    await actions.signOutSubscription();
+    expect(fetch.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      '/auth/subscription',
+      '/auth/subscription/flows',
+      '/auth/subscription/flows/flow-1',
+      '/auth/subscription/flows/flow-1',
+      '/auth/subscription/userinfo',
+      '/auth/subscription/revoke',
+    ]);
+    for (const [, init] of fetch.mock.calls) {
+      expect(new Headers(init.headers).get('Authorization')).toBe(
+        'Bearer test-daemon-token',
+      );
+    }
+    owner.dispose();
+  });
+
+  it('activates only the explicitly selected workspace and rejects a missing selection', async () => {
+    const activateSubscription = vi.fn().mockResolvedValue({
+      authType: 'qwen-subscription',
+      modelId: 'qwen3.8-max',
+      runtimeSync: { status: 'applied' },
+    });
+    const workspaceByCwd = vi.fn().mockReturnValue({ activateSubscription });
+    let cwd: string | undefined = '/primary';
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => cwd,
+      baseUrl: 'http://localhost:3001',
+    });
+    const options = { signal: new AbortController().signal };
+    await actions.activateSubscription({
+      ...options,
+      workspaceCwd: '/secondary',
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(activateSubscription).toHaveBeenCalledWith(options);
+    cwd = undefined;
+    expect(() => actions.activateSubscription()).toThrow(
+      'workspace is not connected',
+    );
+    expect(activateSubscription).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a late start on its original daemon after the workspace client is disposed', async () => {
+    let finishStart!: (response: Response) => void;
+    const fetch = vi.fn().mockImplementation((url, init) => {
+      if (
+        url === 'http://localhost:3001/auth/subscription/flows' &&
+        init.method === 'POST'
+      ) {
+        return new Promise<Response>((resolve) => {
+          finishStart = resolve;
+        });
+      }
+      return Promise.resolve(
+        init?.method === 'DELETE'
+          ? new Response(null, { status: 204 })
+          : Response.json({ id: 'flow-b', status: 'waiting' }),
+      );
+    });
+    vi.stubGlobal('fetch', fetch);
+    const original = new DaemonClient({ baseUrl: 'http://localhost:3001' });
+    const replacement = new DaemonClient({ baseUrl: 'http://localhost:3002' });
+    let current = original;
+    const makeActions = (baseUrl: string, token: string) =>
+      createDaemonWorkspaceActions({
+        getClient: () => current,
+        getWorkspaceCwd: () => undefined,
+        baseUrl,
+        token,
+      });
+    const oldActions = makeActions('http://localhost:3001', 'token-a');
+    const start = oldActions.startSubscriptionLogin();
+    original.dispose();
+    current = replacement;
+    const newActions = makeActions('http://localhost:3002', 'token-b');
+    finishStart(Response.json({ id: 'flow-a', status: 'waiting' }));
+    const flow = await start;
+    await oldActions.cancelSubscriptionLogin(flow.id);
+    await newActions.startSubscriptionLogin();
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      'http://localhost:3001/auth/subscription/flows',
+      'http://localhost:3001/auth/subscription/flows/flow-a',
+      'http://localhost:3002/auth/subscription/flows',
+    ]);
+    expect(fetch.mock.calls[1][1].method).toBe('DELETE');
+    expect(
+      new Headers(fetch.mock.calls[1][1].headers).get('Authorization'),
+    ).toBe('Bearer token-a');
+    replacement.dispose();
+  });
+
+  it('changes UI language without a session and targets the requested workspace', async () => {
+    const result = {
+      language: 'en',
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 1, failed: 1 },
+    };
+    const setUserLanguage = vi.fn().mockResolvedValue(result);
+    const setUiLanguage = vi.fn().mockResolvedValue(result);
+    const workspaceByCwd = vi.fn(() => ({ setUiLanguage }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ setUserLanguage, workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/primary',
+      baseUrl: '',
+    });
+    await expect(actions.setUiLanguage('ru', 'user')).resolves.toEqual(result);
+    expect(setUserLanguage).toHaveBeenCalledWith('ru');
+    await expect(
+      actions.setUiLanguage('ru', 'user', '/secondary'),
+    ).resolves.toEqual(result);
+    expect(setUserLanguage).toHaveBeenCalledTimes(2);
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    await expect(
+      actions.setUiLanguage('ru', 'workspace', '/secondary'),
+    ).resolves.toEqual(result);
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(setUiLanguage).toHaveBeenCalledWith('ru');
+    await expect(actions.setUiLanguage('ru', 'workspace')).rejects.toThrow(
+      'unavailable',
+    );
+    expect(setUserLanguage).toHaveBeenCalledTimes(2);
+  });
+
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -334,16 +483,132 @@ describe('workspace actions', () => {
     expect(activeExtensionOperations).toHaveBeenCalledOnce();
   });
 
-  it('reloads MCP settings through the daemon client', async () => {
-    const reloadWorkspaceMcp = vi.fn().mockResolvedValue({ accepted: true });
+  it('reloads MCP through the selected workspace runtime client', async () => {
+    const reloadRuntimeMcp = vi.fn().mockResolvedValue({ accepted: true });
+    const workspaceByCwd = vi.fn(() => ({ reloadRuntimeMcp }));
     const actions = createDaemonWorkspaceActions({
-      getClient: () => ({ reloadWorkspaceMcp }) as unknown as DaemonClient,
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
       getWorkspaceCwd: () => '/workspace',
       baseUrl: 'http://daemon',
     });
 
     await expect(actions.reloadMcp()).resolves.toEqual({ accepted: true });
-    expect(reloadWorkspaceMcp).toHaveBeenCalledOnce();
+    expect(workspaceByCwd).toHaveBeenCalledWith('/workspace');
+    expect(reloadRuntimeMcp).toHaveBeenCalledOnce();
+  });
+
+  it('loads MCP status from the selected workspace runtime', async () => {
+    const runtimeMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/secondary',
+      initialized: false,
+      servers: [],
+    });
+    const workspaceByCwd = vi.fn(() => ({ runtimeMcp }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.loadMcpStatus()).resolves.toMatchObject({
+      workspaceCwd: '/secondary',
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+  });
+
+  it('persists MCP configuration in the requested scope', async () => {
+    const setUserMcpServer = vi
+      .fn()
+      .mockResolvedValue({ activation: 'reconciling' });
+    const setMcpServer = vi
+      .fn()
+      .mockResolvedValue({ activation: 'reconciling' });
+    const workspaceByCwd = vi.fn(() => ({ setMcpServer }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ setUserMcpServer, workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await actions.setMcpServer('user-docs', 'user', { command: 'user' });
+    await actions.setMcpServer('workspace-docs', 'workspace', {
+      command: 'workspace',
+    });
+
+    expect(setUserMcpServer).toHaveBeenCalledWith('user-docs', {
+      command: 'user',
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(setMcpServer).toHaveBeenCalledWith('workspace-docs', {
+      command: 'workspace',
+    });
+  });
+
+  it('enables an MCP server in every disabled scope', async () => {
+    const setUserMcpServerEnabled = vi
+      .fn()
+      .mockResolvedValue({ changed: true, activation: 'reconciling' });
+    const setMcpServerEnabled = vi
+      .fn()
+      .mockResolvedValue({ changed: true, activation: 'reconciling' });
+    const workspaceByCwd = vi.fn(() => ({
+      mcpConfig: vi.fn().mockResolvedValue({
+        user: {},
+        workspace: {},
+      }),
+      setMcpServerEnabled,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          setUserMcpServerEnabled,
+          workspaceByCwd,
+        }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.manageMcpServer('docs', 'enable')).resolves.toEqual({
+      serverName: 'docs',
+      action: 'enable',
+      ok: true,
+      changed: true,
+    });
+    expect(setUserMcpServerEnabled).toHaveBeenCalledWith('docs', true);
+    expect(setMcpServerEnabled).toHaveBeenCalledWith('docs', true);
+    expect(setUserMcpServerEnabled.mock.invocationCallOrder[0]!).toBeLessThan(
+      setMcpServerEnabled.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('disables a user MCP server in user scope', async () => {
+    const setUserMcpServerEnabled = vi
+      .fn()
+      .mockResolvedValue({ changed: true, activation: 'reconciling' });
+    const setMcpServerEnabled = vi.fn();
+    const workspaceByCwd = vi.fn(() => ({
+      mcpConfig: vi.fn().mockResolvedValue({
+        user: { docs: { command: 'docs' } },
+        workspace: {},
+      }),
+      setMcpServerEnabled,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          setUserMcpServerEnabled,
+          workspaceByCwd,
+        }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await actions.manageMcpServer('docs', 'disable');
+
+    expect(setUserMcpServerEnabled).toHaveBeenCalledWith('docs', false);
+    expect(setMcpServerEnabled).not.toHaveBeenCalled();
   });
 
   it('forwards an extension interaction response to the daemon client', async () => {
@@ -577,5 +842,47 @@ describe('workspace actions', () => {
     await expect(actions.pickWorkspaceDirectory()).rejects.toThrow(
       'Open directory picker failed: DaemonClient is not connected',
     );
+  });
+
+  it('forwards workspace directory operations to the selected workspace', async () => {
+    const directories = vi.fn().mockResolvedValue({
+      v: 1,
+      primaryDirectory: '/ws',
+      directories: [],
+    });
+    const addDirectory = vi.fn().mockResolvedValue({
+      v: 1,
+      primaryDirectory: '/ws',
+      directories: ['/extra'],
+      changed: true,
+      warnings: [],
+    });
+    const removeDirectory = vi.fn().mockResolvedValue({
+      v: 1,
+      primaryDirectory: '/ws',
+      directories: [],
+      changed: true,
+      warnings: [],
+    });
+    const workspaceByCwd = vi.fn(() => ({
+      directories,
+      addDirectory,
+      removeDirectory,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await actions.listWorkspaceDirectories('/ws');
+    await actions.addWorkspaceDirectory('/ws', '/extra');
+    await actions.removeWorkspaceDirectory('/ws', '/extra');
+
+    expect(workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(workspaceByCwd).toHaveBeenCalledWith('/ws');
+    expect(directories).toHaveBeenCalledOnce();
+    expect(addDirectory).toHaveBeenCalledWith('/extra');
+    expect(removeDirectory).toHaveBeenCalledWith('/extra');
   });
 });

@@ -11,10 +11,10 @@ import {
   outputSchema,
   renderResult,
 } from './profile.js';
-import type { InstanceConfigV1, SearchProvider } from './types.js';
+import type { InstanceConfigV2, SearchProvider } from './types.js';
 
 export function createMem0McpServer(runtime: {
-  instance: InstanceConfigV1;
+  instance: InstanceConfigV2;
   search: SearchProvider;
 }): McpServer {
   const server = new McpServer({

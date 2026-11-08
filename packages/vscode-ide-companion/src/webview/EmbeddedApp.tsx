@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import {
   WebShellWithProviders,
+  QwenSubscriptionPanel,
   type ComposerToolbarAction,
   type TurnOutputOpenRequest,
   type WebShellApi,
@@ -16,6 +17,9 @@ import {
 } from '@qwen-code/web-shell';
 import {
   DaemonClient,
+  DaemonHttpError,
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
@@ -41,8 +45,49 @@ import { isDiscontinuedModel } from './utils/discontinuedModel.js';
 const SESSION_SWITCH_TIMEOUT_MS = 15_000;
 const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 
+/** Longest an edit submit waits for the rewind to land in the transcript. */
+const REWIND_APPLIED_TIMEOUT_MS = 2_000;
+
+/**
+ * Conversational user turns — the blocks a rewind indexes against.
+ * `mid_turn_message_injected` renders as `role: 'system'`, so the web shell's
+ * ordinal never numbers it; counting it here shifts every later index.
+ */
+function isEditableUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  return isDaemonRewindUserBlock(block);
+}
+
+function countEditableUserTurns(
+  blocks: readonly DaemonTranscriptBlock[],
+): number {
+  return blocks.filter(isEditableUserBlock).length;
+}
+
+function waitForRewindApplied(
+  getBlocks: () => readonly DaemonTranscriptBlock[],
+  targetTurnIndex: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + REWIND_APPLIED_TIMEOUT_MS;
+    const poll = () => {
+      if (countEditableUserTurns(getBlocks()) <= targetTurnIndex) {
+        resolve(true);
+      } else if (Date.now() >= deadline) {
+        resolve(false);
+      } else {
+        setTimeout(poll, 16);
+      }
+    };
+    poll();
+  });
+}
+
 const COMPOSER_TOOLBAR_ACTIONS = [
+  'addMenu',
   'approvalMode',
+  'workflowMode',
   'contextUsage',
   'model',
 ] as const satisfies readonly ComposerToolbarAction[];
@@ -51,7 +96,10 @@ const isVsCodeModelVisible = (model: { id: string }) =>
   !isDiscontinuedModel(model.id);
 
 /** Host-only slash entries. Built per language so the menu is not half-English. */
-function buildVsCodeSlashCommands(t: ChromeStrings) {
+function buildVsCodeSlashCommands(
+  t: ChromeStrings,
+  subscriptionEnabled: boolean,
+) {
   return [
     {
       name: 'model',
@@ -68,6 +116,15 @@ function buildVsCodeSlashCommands(t: ChromeStrings) {
       completionPriority: -100,
       autoSubmit: true,
     },
+    ...(subscriptionEnabled ? (['logout', 'upgrade'] as const) : []).map(
+      (name) => ({
+        name,
+        description: t(`cmd.${name}.description`),
+        completionSection: t('cmd.section.account'),
+        completionPriority: -100,
+        autoSubmit: true,
+      }),
+    ),
     {
       name: 'account',
       description: t('cmd.account.description'),
@@ -206,6 +263,14 @@ interface RuntimeConfig {
   token?: string;
   clientId?: string;
   workspaceCwd?: string;
+  subscriptionEnabled?: boolean;
+  /**
+   * The workspace path as VS Code spells it, sent only when it differs from
+   * the canonical `workspaceCwd` (a symlinked folder). Every
+   * `activeEditorChanged` payload carries a raw `uri.fsPath`, so relativizing
+   * the active file has to accept either spelling.
+   */
+  editorWorkspaceCwd?: string;
   sessionId?: string;
   hostKind?: 'view' | 'panel';
 }
@@ -217,6 +282,8 @@ function readRuntimeConfig(): RuntimeConfig | null {
     baseUrl,
     token: document.body.dataset.qwenDaemonToken || undefined,
     clientId: document.body.dataset.qwenDaemonClientId || undefined,
+    subscriptionEnabled:
+      document.body.dataset.qwenSubscriptionEnabled === 'true',
     workspaceCwd: document.body.dataset.qwenWorkspaceCwd || undefined,
     sessionId: document.body.dataset.qwenSessionId || undefined,
     hostKind:
@@ -255,7 +322,7 @@ interface InsightProgress {
 }
 
 interface EditingMessage {
-  turnIndex?: number;
+  blockId?: string;
 }
 
 function isAutomaticApprovalMode(modeId: unknown): boolean {
@@ -297,16 +364,34 @@ export function EmbeddedApp() {
   const vscode = useVSCode();
   const language = useMemo(readLanguage, []);
   const t = useMemo(() => createChromeStrings(language), [language]);
-  const slashCommands = useMemo(() => buildVsCodeSlashCommands(t), [t]);
   const [theme, setTheme] = useState<WebShellTheme>(readTheme);
   const initialRuntime = useMemo(readRuntimeConfig, []);
   const [runtime, setRuntime] = useState(initialRuntime);
+  const slashCommands = useMemo(
+    () => buildVsCodeSlashCommands(t, runtime?.subscriptionEnabled === true),
+    [t, runtime?.subscriptionEnabled],
+  );
+
   const runtimeRef = useRef(runtime);
   runtimeRef.current = runtime;
   const [runtimeError, setRuntimeError] = useState<string>();
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [signedOut, setSignedOut] = useState(false);
+  const authStateRef = useRef({ authenticated, signedOut });
+  authStateRef.current = { authenticated, signedOut };
   const [authConnecting, setAuthConnecting] = useState(false);
   const [authError, setAuthError] = useState<string>();
+  const [subscriptionFlowId, setSubscriptionFlowId] = useState<string>();
+  const subscriptionFlowRef = useRef<string | undefined>(undefined);
+  subscriptionFlowRef.current = subscriptionFlowId;
+  const subscriptionActivation = useRef<
+    | {
+        requestId: string;
+        resolve: (modelId: string) => void;
+        reject: (error: unknown) => void;
+      }
+    | undefined
+  >(undefined);
   const [hostNotice, setHostNotice] = useState<HostNotice>();
   const [accountInfo, setAccountInfo] = useState<AccountInfo>();
   const [insightProgress, setInsightProgress] = useState<InsightProgress>();
@@ -323,32 +408,149 @@ export function EmbeddedApp() {
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
-  const latestSubmittedPromptRef = useRef<{
-    sessionId: string;
-    prompt: string;
-  } | undefined>(undefined);
+  const latestSubmittedPromptRef = useRef<
+    | {
+        sessionId: string;
+        prompt: string;
+      }
+    | undefined
+  >(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
+  const sessionHistoryRequestRef = useRef(0);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
   const composerRef = useRef<WebShellComposerApi | null>(null);
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
+  // The request whose host-owned diff the user closed without voting. While it
+  // is set, the host does not reopen that diff and hands the edit preview back
+  // to the web shell, which renders it inline (#10557).
+  const dismissedPermissionDiffIdRef = useRef<string | undefined>(undefined);
+  const [hostOwnsEditDiffPreview, setHostOwnsEditDiffPreview] = useState(true);
+  const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
-  const previousActiveFilePathRef = useRef<string | undefined>(undefined);
   const daemonBaseUrl = runtime?.baseUrl;
   const daemonToken = runtime?.token;
   const daemonClient = useMemo(
     () =>
       daemonBaseUrl
-        ? new DaemonClient({ baseUrl: daemonBaseUrl, token: daemonToken })
+        ? new DaemonClient({
+            baseUrl: daemonBaseUrl,
+            token: daemonToken,
+            subscriptionPaywallScene: 'plugin',
+          })
         : null,
     [daemonBaseUrl, daemonToken],
   );
+
+  const authRequest = useRef<AbortController | null>(null);
+  const subscriptionTransport = useMemo(
+    () =>
+      daemonClient && {
+        getSubscriptionConfig:
+          daemonClient.getSubscriptionConfig.bind(daemonClient),
+        startSubscriptionLogin:
+          daemonClient.startSubscriptionLogin.bind(daemonClient),
+        getSubscriptionLogin:
+          daemonClient.getSubscriptionLogin.bind(daemonClient),
+        cancelSubscriptionLogin:
+          daemonClient.cancelSubscriptionLogin.bind(daemonClient),
+        getSubscriptionUserInfo:
+          daemonClient.getSubscriptionUserInfo.bind(daemonClient),
+        signOutSubscription:
+          daemonClient.signOutSubscription.bind(daemonClient),
+      },
+    [daemonClient],
+  );
+  useEffect(() => {
+    setAuthConnecting(false);
+    setSignedOut(false);
+    setSubscriptionFlowId(undefined);
+    return () => {
+      authRequest.current?.abort();
+      subscriptionActivation.current?.reject(
+        new DOMException('Cancelled', 'AbortError'),
+      );
+      subscriptionActivation.current = undefined;
+      const flowId = subscriptionFlowRef.current;
+      if (flowId)
+        vscode.postMessage({
+          type: 'qwenSubscriptionCancel',
+          data: { flowId },
+        });
+    };
+  }, [daemonClient, runtime?.workspaceCwd, vscode]);
+
+  const openAuthentication = async () => {
+    if (authRequest.current && !authRequest.current.signal.aborted) return;
+    const request = new AbortController();
+    authRequest.current = request;
+    setAuthConnecting(true);
+    setAuthError(undefined);
+    setHostNotice((notice) =>
+      notice?.text === t('auth.failed') ? undefined : notice,
+    );
+    try {
+      const config = await daemonClient?.getSubscriptionConfig({
+        signal: request.signal,
+      });
+      if (request.signal.aborted) return;
+      vscode.postMessage({
+        type: 'auth',
+        data: { subscriptionEnabled: config?.enabled === true },
+      });
+    } catch {
+      if (!request.signal.aborted) {
+        setAuthConnecting(false);
+        setAuthError(t('auth.failed'));
+        setHostNotice({ tone: 'error', text: t('auth.failed') });
+      }
+    } finally {
+      if (authRequest.current === request) authRequest.current = null;
+    }
+  };
+
+  const activateSubscription = (signal: AbortSignal) =>
+    new Promise<string>((resolve, reject) => {
+      signal.throwIfAborted();
+      if (subscriptionActivation.current)
+        throw new Error('Subscription activation is already running.');
+      const flowId = subscriptionFlowRef.current;
+      if (!flowId) throw new DOMException('Cancelled', 'AbortError');
+      const requestId = crypto.randomUUID();
+      const cancel = () => {
+        if (subscriptionActivation.current?.requestId === requestId) {
+          subscriptionActivation.current = undefined;
+          vscode.postMessage({
+            type: 'qwenSubscriptionCancel',
+            data: { flowId },
+          });
+        }
+        reject(signal.reason);
+      };
+      subscriptionActivation.current = {
+        requestId,
+        resolve: (modelId) => {
+          signal.removeEventListener('abort', cancel);
+          resolve(modelId);
+        },
+        reject: (error) => {
+          signal.removeEventListener('abort', cancel);
+          reject(error);
+        },
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      vscode.postMessage({
+        type: 'qwenSubscriptionActivate',
+        data: { flowId, requestId },
+      });
+    });
 
   const clearInsight = useCallback(() => {
     setInsightProgress(undefined);
@@ -403,7 +605,10 @@ export function EmbeddedApp() {
 
   const loadSessionHistory = useCallback(
     async (cursor?: string) => {
-      if (!daemonClient || !runtime?.workspaceCwd || sessionListLoading) return;
+      if (!daemonClient || !runtime?.workspaceCwd || sessionListLoading) {
+        return;
+      }
+      const requestId = ++sessionHistoryRequestRef.current;
       setSessionListLoading(true);
       setSessionListError(undefined);
       try {
@@ -413,15 +618,32 @@ export function EmbeddedApp() {
             pageSize: 20,
             cursor,
             archiveState: 'active',
-            // Only conversations started from VS Code. The daemon is shared
-            // with the CLI and the browser Web Shell for this workspace, so an
-            // unfiltered page lists sessions the user never opened here.
-            sourceType: VSCODE_SESSION_SOURCE_TYPE,
+            view: 'organized',
+            group: 'all',
           });
-        const pageSessions = Array.isArray(page.sessions) ? page.sessions : [];
+        const pageSessions = (
+          Array.isArray(page.sessions) ? page.sessions : []
+        ).filter(
+          (session) =>
+            !session.parentSessionId &&
+            // Live voice threads are ordinary 'default' sessions carrying a
+            // sourceId built from LIVE_SESSION_SOURCE_PREFIX in packages/cli;
+            // the literal is inlined since the CLI is not a bundle dependency.
+            !(
+              session.sourceType === 'default' &&
+              session.sourceId?.startsWith('realtime_voice:')
+            ) &&
+            !['scheduled_task', 'side_task', 'channel', 'qwen-live'].includes(
+              session.sourceType ?? '',
+            ),
+        );
+        if (requestId !== sessionHistoryRequestRef.current) return;
         setSessions((current) => {
           const merged = new Map(
-            current.map((session) => [session.sessionId, session]),
+            (cursor ? current : []).map((session) => [
+              session.sessionId,
+              session,
+            ]),
           );
           for (const session of pageSessions) {
             merged.set(session.sessionId, session);
@@ -440,12 +662,18 @@ export function EmbeddedApp() {
           return Array.from(merged.values());
         });
         setSessionCursor(page.nextCursor);
+        setSessionListError(
+          page.truncated ? t('session.historyIncomplete') : undefined,
+        );
       } catch (error) {
+        if (requestId !== sessionHistoryRequestRef.current) return;
         setSessionListError(
           error instanceof Error ? error.message : t('session.loadFailed'),
         );
       } finally {
-        setSessionListLoading(false);
+        if (requestId === sessionHistoryRequestRef.current) {
+          setSessionListLoading(false);
+        }
       }
     },
     [
@@ -489,37 +717,84 @@ export function EmbeddedApp() {
   );
 
   const closeOpenPermissionDiffs = useCallback(() => {
-    for (const path of openPermissionDiffsRef.current.values()) {
-      vscode.postMessage({ type: 'closeDiff', data: { path } });
+    for (const [requestId, path] of openPermissionDiffsRef.current) {
+      vscode.postMessage({ type: 'closeDiff', data: { path, requestId } });
     }
     openPermissionDiffsRef.current.clear();
+    dismissedPermissionDiffIdRef.current = undefined;
+    setHostOwnsEditDiffPreview(true);
+    if (webShellPermissionRequestIdRef.current) {
+      webShellPermissionRequestIdRef.current = undefined;
+      vscode.postMessage({
+        type: 'webShellPermissionState',
+        data: { pending: false },
+      });
+    }
   }, [vscode]);
 
   const updateTranscript = useCallback(
     (blocks: readonly DaemonTranscriptBlock[]) => {
       transcriptBlocksRef.current = blocks;
       const pendingIds = new Set<string>();
-      let permissionToFocus: string | undefined;
-      for (const block of blocks) {
-        if (block.kind !== 'permission' || block.resolved) {
-          continue;
+      const pendingPermission = blocks.find(
+        (block) => block.kind === 'permission' && !block.resolved,
+      );
+      const permissionToFocus =
+        pendingPermission?.kind === 'permission'
+          ? pendingPermission.requestId
+          : undefined;
+      if (pendingPermission?.kind === 'permission') {
+        const diff = permissionDiffPreview(pendingPermission);
+        if (diff) {
+          const { path, oldText, newText } = diff;
+          pendingIds.add(pendingPermission.requestId);
+          if (
+            !openPermissionDiffsRef.current.has(pendingPermission.requestId) &&
+            dismissedPermissionDiffIdRef.current !== pendingPermission.requestId
+          ) {
+            openPermissionDiffsRef.current.set(
+              pendingPermission.requestId,
+              path,
+            );
+            vscode.postMessage({
+              type: 'openDiff',
+              data: {
+                path,
+                oldText,
+                newText,
+                source: 'web-shell',
+                requestId: pendingPermission.requestId,
+              },
+            });
+          }
         }
-        permissionToFocus = block.requestId;
-        const diff = permissionDiffPreview(block);
-        if (!diff) continue;
-        const { path, oldText, newText } = diff;
-        pendingIds.add(block.requestId);
-        if (openPermissionDiffsRef.current.has(block.requestId)) continue;
-        openPermissionDiffsRef.current.set(block.requestId, path);
-        vscode.postMessage({
-          type: 'openDiff',
-          data: { path, oldText, newText, source: 'web-shell' },
-        });
       }
       for (const [requestId, path] of openPermissionDiffsRef.current) {
         if (pendingIds.has(requestId)) continue;
         openPermissionDiffsRef.current.delete(requestId);
-        vscode.postMessage({ type: 'closeDiff', data: { path } });
+        vscode.postMessage({
+          type: 'closeDiff',
+          data: { path, requestId },
+        });
+      }
+      if (
+        dismissedPermissionDiffIdRef.current !== undefined &&
+        dismissedPermissionDiffIdRef.current !== permissionToFocus
+      ) {
+        dismissedPermissionDiffIdRef.current = undefined;
+        setHostOwnsEditDiffPreview(true);
+      }
+      const pendingDiffRequestId = pendingIds.values().next().value as
+        | string
+        | undefined;
+      if (webShellPermissionRequestIdRef.current !== pendingDiffRequestId) {
+        webShellPermissionRequestIdRef.current = pendingDiffRequestId;
+        vscode.postMessage({
+          type: 'webShellPermissionState',
+          data: pendingDiffRequestId
+            ? { pending: true, requestId: pendingDiffRequestId }
+            : { pending: false },
+        });
       }
       if (
         permissionToFocus &&
@@ -573,6 +848,33 @@ export function EmbeddedApp() {
       document.removeEventListener('contextmenu', trackContextMenu, true);
   }, [vscode]);
 
+  // VS Code 1.143's webview guest script refocuses the webview's last
+  // focused element right before running a clipboard execCommand (Ctrl+C,
+  // context-menu Copy). The last focused element here is the composer's
+  // contenteditable, and focusing an editable collapses the document text
+  // selection, so the copy runs on an empty selection and lands nothing in
+  // the clipboard. Keep the app root (a non-editable element) focused while
+  // the pointer presses into a non-interactive area: focusing a
+  // non-editable div preserves the selection, and an activeElement that is
+  // not <body> makes the guest script skip the refocus.
+  useEffect(() => {
+    const keepSelectionFocus = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (
+        target.closest(
+          'button, a, input, textarea, select, [contenteditable="true"], [role="button"]',
+        )
+      ) {
+        return;
+      }
+      appRootRef.current?.focus({ preventScroll: true });
+    };
+    document.addEventListener('pointerdown', keepSelectionFocus, true);
+    return () =>
+      document.removeEventListener('pointerdown', keepSelectionFocus, true);
+  }, []);
+
   useEffect(() => {
     const handleCopyCommand = (event: MessageEvent) => {
       const message = event.data as {
@@ -623,26 +925,138 @@ export function EmbeddedApp() {
         type?: string;
         data?: Record<string, unknown> | ReturnType<typeof readRuntimeConfig>;
       };
+      const subscriptionData = message.data as
+        | Record<string, unknown>
+        | undefined;
       if (
         message.type === 'webShellBootstrap' &&
         typeof message.data?.baseUrl === 'string'
       ) {
-        setRuntime(
-          message.data as NonNullable<ReturnType<typeof readRuntimeConfig>>,
-        );
+        const nextRuntime = message.data as NonNullable<
+          ReturnType<typeof readRuntimeConfig>
+        >;
+        sessionHistoryRequestRef.current++;
+        setSessionHistoryOpen(false);
+        setSessions([]);
+        setSessionCursor(undefined);
+        setSessionListLoading(false);
+        setSessionListError(undefined);
+        setRuntime(nextRuntime);
       } else if (message.type === 'webShellBootstrapError') {
-        const errorMessage = (message.data as { message?: unknown } | null)
-          ?.message;
+        const errorData = message.data as {
+          message?: unknown;
+          reason?: unknown;
+        } | null;
         const text =
-          typeof errorMessage === 'string' ? errorMessage : t('boot.failed');
+          errorData?.reason === 'daemonPreAuthHostGate'
+            ? t('boot.preAuthHostGate')
+            : typeof errorData?.message === 'string'
+              ? errorData.message
+              : t('boot.failed');
         setRuntimeError(text);
         // Before bootstrap this renders as the full-panel startup state. After
         // it, `runtime` is set and that branch is gone, so the same failure
         // would be invisible — show it over the transcript instead.
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
+      } else if (message.type === 'permissionDiffClosed') {
+        const requestId = (message.data as { requestId?: unknown } | null)
+          ?.requestId;
+        // Same source gate as the decision handler below: MCP apps and artifact
+        // previews run in scriptable sandboxed iframes inside this webview and
+        // can postMessage here. This is not a vote, but it does flip who owns
+        // the edit preview, so only the preload parent frame may send it.
+        if (typeof requestId === 'string' && event.source === window.parent) {
+          openPermissionDiffsRef.current.delete(requestId);
+          if (webShellPermissionRequestIdRef.current === requestId) {
+            dismissedPermissionDiffIdRef.current = requestId;
+            setHostOwnsEditDiffPreview(false);
+          }
+        }
+      } else if (message.type === 'webShellPermissionDecision') {
+        const decisionData = message.data as {
+          decision?: unknown;
+          requestId?: unknown;
+        } | null;
+        const decision = decisionData?.decision;
+        const requestId = decisionData?.requestId;
+        const isHostDecision =
+          event.source === window.parent &&
+          requestId === webShellPermissionRequestIdRef.current;
+        if (
+          (decision === 'allow' || decision === 'reject') &&
+          typeof requestId === 'string' &&
+          isHostDecision
+        ) {
+          const response = shellRef.current?.respondToPendingPermission?.(
+            requestId,
+            decision,
+          );
+          if (!response) {
+            // The shell is not mounted yet, so the vote would die without a
+            // rejection for `.catch` to see.
+            if (runtimeRef.current) {
+              setHostNotice({
+                tone: 'info',
+                text: t('permission.voteNotApplied'),
+              });
+            }
+          } else {
+            void response
+              .then((handled) => {
+                // A resolved `false` drops the vote as silently as a
+                // rejection would — e.g. while catching up after a session
+                // switch — but it is also the normal result when the
+                // approval was resolved elsewhere one tick earlier. Notify
+                // without the hard-error state reset of `handleShellError`.
+                if (!handled) {
+                  setHostNotice({
+                    tone: 'info',
+                    text: t('permission.voteNotApplied'),
+                  });
+                }
+              })
+              .catch(handleShellError);
+          }
+        }
       } else if (message.type === 'error') {
         const text = (message.data as { message?: unknown } | null)?.message;
         if (typeof text === 'string') setHostNotice({ tone: 'error', text });
+      } else if (
+        message.type === 'qwenSubscriptionAuth' &&
+        typeof subscriptionData?.flowId === 'string'
+      ) {
+        setAuthError(undefined);
+        setAuthConnecting(false);
+        setSubscriptionFlowId(subscriptionData.flowId);
+      } else if (
+        message.type === 'qwenSubscriptionClosed' &&
+        subscriptionData?.flowId === subscriptionFlowRef.current
+      ) {
+        setSubscriptionFlowId(undefined);
+        subscriptionActivation.current?.reject(
+          new DOMException('Cancelled', 'AbortError'),
+        );
+        subscriptionActivation.current = undefined;
+      } else if (
+        message.type === 'qwenSubscriptionActivationResult' &&
+        subscriptionData?.flowId === subscriptionFlowRef.current
+      ) {
+        const pending = subscriptionActivation.current;
+        if (pending && pending.requestId === subscriptionData?.requestId) {
+          subscriptionActivation.current = undefined;
+          if (subscriptionData?.error)
+            pending.reject(
+              Object.assign(new Error('Subscription activation failed.'), {
+                body: subscriptionData.body,
+              }),
+            );
+          else if (typeof subscriptionData.modelId === 'string')
+            pending.resolve(subscriptionData.modelId);
+          else
+            pending.reject(
+              new Error('Subscription activation did not return a model.'),
+            );
+        }
       } else if (message.type === 'accountInfo' && message.data) {
         setAccountInfo(message.data as AccountInfo);
       } else if (message.type === 'authState') {
@@ -653,18 +1067,40 @@ export function EmbeddedApp() {
           setAuthConnecting(false);
           clearInsight();
         } else if (state === true) {
+          setSignedOut(false);
           setAuthConnecting(false);
           setAuthError(undefined);
         }
+      } else if (message.type === 'authSignedOut') {
+        setAuthenticated(false);
+        setSignedOut(true);
+        setAuthConnecting(false);
+        setAuthError(undefined);
+        setSubscriptionFlowId(undefined);
+        setHostNotice(undefined);
+        void shellRef.current?.refreshModels().catch((error: unknown) => {
+          console.error('Unable to refresh models after sign-out', error);
+        });
+        clearInsight();
       } else if (
         message.type === 'authSuccess' ||
         message.type === 'agentConnected'
       ) {
         setAuthenticated(true);
+        setSignedOut(false);
         setAuthConnecting(false);
         setAuthError(undefined);
         if (message.type === 'authSuccess') {
-          setHostNotice({ tone: 'info', text: t('auth.signedIn') });
+          void shellRef.current?.refreshModels().catch((error: unknown) => {
+            console.error('Unable to refresh models after sign-in', error);
+          });
+          setHostNotice({
+            tone: 'info',
+            text:
+              typeof subscriptionData?.['message'] === 'string'
+                ? subscriptionData['message']
+                : t('auth.signedIn'),
+          });
         }
       } else if (message.type === 'authCancelled') {
         // A cancelled auth flow must not hide an already-authenticated
@@ -688,7 +1124,16 @@ export function EmbeddedApp() {
             : typeof data?.error === 'string'
               ? data.error
               : t('auth.failed');
-        setAuthenticated(false);
+        if (
+          message.type === 'authError' &&
+          (authStateRef.current.authenticated === true ||
+            authStateRef.current.signedOut)
+        ) {
+          setHostNotice({ tone: 'error', text });
+        } else {
+          setAuthenticated(false);
+          setSignedOut(false);
+        }
         setAuthConnecting(false);
         setAuthError(text);
         clearInsight();
@@ -755,16 +1200,8 @@ export function EmbeddedApp() {
             filePath: data.filePath,
             selection: data.selection,
           });
-          // The host fires this on every selection change, including plain
-          // cursor moves; only an actual file change may re-arm inclusion,
-          // or a click silently undoes the user's explicit exclusion.
-          if (previousActiveFilePathRef.current !== data.filePath) {
-            setIncludeActiveFile(true);
-          }
-          previousActiveFilePathRef.current = data.filePath;
         } else {
           setActiveFile(undefined);
-          previousActiveFilePathRef.current = undefined;
         }
       } else if (
         message.type === 'modeChanged' ||
@@ -807,7 +1244,20 @@ export function EmbeddedApp() {
     window.addEventListener('message', receiveBootstrap);
     vscode.postMessage({ type: 'webShellReady', data: {} });
     return () => window.removeEventListener('message', receiveBootstrap);
-  }, [clearInsight, closeOpenPermissionDiffs, t, updateTranscript, vscode]);
+  }, [
+    clearInsight,
+    closeOpenPermissionDiffs,
+    handleShellError,
+    t,
+    updateTranscript,
+    vscode,
+  ]);
+
+  const sessionTransitionLabel = creatingSession
+    ? t('session.creating')
+    : switchingSessionId
+      ? t('session.switching')
+      : undefined;
 
   if (!runtime) {
     return (
@@ -843,7 +1293,14 @@ export function EmbeddedApp() {
 
   return (
     <div
-      style={{ ...ROOT_STYLE, position: 'relative', flexDirection: 'column' }}
+      ref={appRootRef}
+      tabIndex={-1}
+      style={{
+        ...ROOT_STYLE,
+        position: 'relative',
+        flexDirection: 'column',
+        outline: 'none',
+      }}
       data-vscode-context='{"webviewSection":"chat-messages"}'
     >
       <style>{VSCODE_EMBEDDED_CSS}</style>
@@ -878,7 +1335,9 @@ export function EmbeddedApp() {
             });
           }}
           onRename={async (session, title) => {
-            if (!daemonClient || !runtime.workspaceCwd) return;
+            if (!daemonClient || !runtime.workspaceCwd) {
+              return;
+            }
             setSessionListError(undefined);
             try {
               const result = await daemonClient
@@ -940,33 +1399,6 @@ export function EmbeddedApp() {
           }}
         />
       )}
-      {(switchingSessionId || creatingSession) && (
-        <div
-          role="status"
-          style={{
-            position: 'absolute',
-            inset: '30px 0 0',
-            zIndex: 900,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
-            background:
-              'color-mix(in srgb, var(--vscode-sideBar-background) 82%, transparent)',
-            color: 'var(--vscode-descriptionForeground)',
-            backdropFilter: 'blur(2px)',
-          }}
-        >
-          <LoaderCircle
-            size={18}
-            aria-hidden="true"
-            style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
-          />
-          <span>
-            {creatingSession ? t('session.creating') : t('session.switching')}
-          </span>
-        </div>
-      )}
       <div
         style={{
           display: 'flex',
@@ -1024,7 +1456,21 @@ export function EmbeddedApp() {
           >
             {sessionTitle}
           </span>
-          <ChevronDown size={15} strokeWidth={1.8} aria-hidden="true" />
+          {sessionTransitionLabel ? (
+            <span
+              role="status"
+              aria-label={sessionTransitionLabel}
+              style={{ display: 'inline-flex' }}
+            >
+              <LoaderCircle
+                size={15}
+                aria-hidden="true"
+                style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
+              />
+            </span>
+          ) : (
+            <ChevronDown size={15} strokeWidth={1.8} aria-hidden="true" />
+          )}
         </button>
         <span style={{ flex: 1 }} />
         <button
@@ -1266,17 +1712,78 @@ export function EmbeddedApp() {
           )}
         </div>
       )}
-      {authenticated === false ? (
+      {subscriptionFlowId && subscriptionTransport ? (
         <QwenOnboarding
-          connecting={authConnecting}
-          error={authError}
+          connecting={false}
           t={t}
           onGetStarted={() => {
-            setAuthConnecting(true);
-            setAuthError(undefined);
-            vscode.postMessage({ type: 'auth', data: {} });
+            void openAuthentication();
           }}
-        />
+        >
+          <QwenSubscriptionPanel
+            key={subscriptionFlowId}
+            transport={subscriptionTransport}
+            language={language}
+            theme={theme}
+            style={
+              {
+                ...SHELL_STYLE,
+                '--font-mono': 'var(--vscode-font-family)',
+                height: 'auto',
+                padding: 0,
+                overflow: 'visible',
+                background: 'transparent',
+              } as CSSProperties
+            }
+            onOpenExternal={(url) =>
+              vscode.postMessage({ type: 'openExternalUrl', data: { url } })
+            }
+            onSignedOut={() =>
+              vscode.postMessage({
+                type: 'qwenSubscriptionSignedOut',
+                data: { flowId: subscriptionFlowId },
+              })
+            }
+            onClose={() =>
+              vscode.postMessage({
+                type: 'qwenSubscriptionCancel',
+                data: { flowId: subscriptionFlowId },
+              })
+            }
+            onOtherProviders={() =>
+              vscode.postMessage({
+                type: 'qwenSubscriptionOtherProviders',
+                data: { flowId: subscriptionFlowId },
+              })
+            }
+            onAuthError={(message) =>
+              vscode.postMessage({
+                type: 'qwenSubscriptionError',
+                data: { flowId: subscriptionFlowId, message },
+              })
+            }
+            onActivate={activateSubscription}
+            onActivated={(message) =>
+              vscode.postMessage({
+                type: 'qwenSubscriptionComplete',
+                data: { flowId: subscriptionFlowId, message },
+              })
+            }
+          />
+        </QwenOnboarding>
+      ) : null}
+      {/* Keep the session providers mounted when subscription login replaces the view. */}
+      {authenticated === false && !signedOut ? (
+        subscriptionFlowId ? null : (
+          <QwenOnboarding
+            connecting={authConnecting}
+            error={authError}
+            t={t}
+            onGetStarted={() => {
+              void openAuthentication();
+            }}
+          />
+        )
       ) : (
         <WebShellWithProviders
           baseUrl={runtime.baseUrl}
@@ -1286,18 +1793,28 @@ export function EmbeddedApp() {
           sessionId={runtime.sessionId}
           className="qwen-code-vscode-web-shell"
           style={SHELL_STYLE}
+          viewHidden={Boolean(subscriptionFlowId)}
           theme={theme}
-          language={language}
-          sessionSourceType={VSCODE_SESSION_SOURCE_TYPE}
+          // No `language` prop on purpose: the shell resolves its own UI
+          // language (daemon setting, then browser locale), so a pick in its
+          // settings dialog is not reset to the host chrome language.
+          // `readLanguage` above feeds only the chrome's own copy table.
+          sessionSourceType={
+            runtime.sessionId ? undefined : VSCODE_SESSION_SOURCE_TYPE
+          }
           shellRef={shellRef}
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
             if (switchingSessionId && sessionId !== switchingSessionId) return;
+            webShellPermissionRequestIdRef.current = undefined;
             clearInsight();
             setEditingMessage(undefined);
             vscode.postMessage({
               type: 'webShellSessionChanged',
-              data: { sessionId, workspaceCwd: runtime.workspaceCwd },
+              data: {
+                sessionId,
+                workspaceCwd: runtime.workspaceCwd,
+              },
             });
             setRuntime((current) =>
               current && current.sessionId !== sessionId
@@ -1331,10 +1848,17 @@ export function EmbeddedApp() {
               }
             }
           }}
+          onModelChange={(modelId, authType) => {
+            vscode.postMessage({
+              type: 'webShellModelChanged',
+              data: { workspaceCwd: runtime.workspaceCwd, modelId, authType },
+            });
+          }}
           onError={handleShellError}
           sidebar={false}
           compactThinking
           collapseCompletedTurns
+          hostOwnsEditDiffPreview={hostOwnsEditDiffPreview}
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
           mainModelFilter={isVsCodeModelVisible}
           compactComposerOverlays
@@ -1344,7 +1868,11 @@ export function EmbeddedApp() {
           hiddenSlashCommands={[...VSCODE_HIDDEN_SLASH_COMMANDS]}
           onSlashCommand={({ command, input }) => {
             if (command === 'auth' || command === 'login') {
-              vscode.postMessage({ type: 'auth', data: {} });
+              void openAuthentication();
+              return true;
+            }
+            if (command === 'logout' || command === 'upgrade') {
+              vscode.postMessage({ type: command, data: {} });
               return true;
             }
             if (command === 'account') {
@@ -1375,11 +1903,16 @@ export function EmbeddedApp() {
             const editContent = queuedPromptForEdit
               ? queuedPromptForEdit.prompt
               : content;
+            const target =
+              transcriptBlocksRef.current.filter(isEditableUserBlock)[
+                turnIndex
+              ];
+            if (!editsQueuedPrompt && !target) return false;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
             composerRef.current?.focus?.();
             setEditingMessage({
-              turnIndex: editsQueuedPrompt ? undefined : turnIndex,
+              blockId: editsQueuedPrompt ? undefined : target?.id,
             });
             return true;
           }}
@@ -1396,6 +1929,9 @@ export function EmbeddedApp() {
           }}
           messageTurnOutputs={['file']}
           onFileReviewOpen={openReviewDiff}
+          onWorkspaceFileOpen={(path) =>
+            vscode.postMessage({ type: 'openFile', data: { path } })
+          }
           onInsightReportOpen={(path) =>
             vscode.postMessage({
               type: 'openInsightReport',
@@ -1408,47 +1944,119 @@ export function EmbeddedApp() {
           }}
           composerRef={composerRef}
           prepareSubmit={async (submission) => {
+            if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
+              const { blockId } = editingMessage;
+              setEditingMessage(undefined);
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
-              const { snapshots } =
-                await daemonClient.getRewindSnapshots(sessionId);
-              const snapshot =
-                editingMessage.turnIndex === undefined
-                  ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
-                      (latest, entry) =>
-                        !latest || entry.turnIndex > latest.turnIndex
-                          ? entry
-                          : latest,
-                      undefined,
-                    )
-                  : snapshots.find(
-                      (entry) => entry.turnIndex === editingMessage.turnIndex,
-                    );
-              if (!snapshot) {
-                throw new Error(t('composer.editExpired'));
+              const blocks = transcriptBlocksRef.current;
+              const userBlocks = blocks.filter(isEditableUserBlock);
+              const target =
+                blockId === undefined
+                  ? userBlocks.at(-1)
+                  : userBlocks.find((block) => block.id === blockId);
+              // The clear above is unconditional so no refusal can wedge the
+              // next send, but a transient daemon failure has to re-arm the
+              // edit: the message says "Please try again", and a retry that
+              // skipped the rewind would append the edited text as a new turn
+              // instead of replacing the original. Only permanent 4xx refusals
+              // stay cleared, so a rewind that can never succeed cannot wedge
+              // the composer again. Never `cancelMessageEditing` here — it
+              // wipes the composer text the retry needs.
+              const rearmOnTransientFailure = (error: unknown) => {
+                if (runtimeRef.current?.sessionId !== sessionId) return;
+                if (error instanceof DaemonHttpError && error.status < 500) {
+                  return;
+                }
+                setEditingMessage({ blockId });
+              };
+              let snapshots: Awaited<
+                ReturnType<typeof daemonClient.getRewindSnapshots>
+              >['snapshots'];
+              try {
+                ({ snapshots } =
+                  await daemonClient.getRewindSnapshots(sessionId));
+              } catch (err) {
+                rearmOnTransientFailure(err);
+                throw new Error(t('composer.editFailed'), { cause: err });
               }
-              await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                clientId: runtime.clientId,
-                rewindFiles: false,
-              });
-              setEditingMessage(undefined);
+              const matches =
+                target?.promptId &&
+                findDaemonRewindUserBlock(blocks, target.promptId)?.id ===
+                  target.id
+                  ? snapshots.filter(
+                      (entry) => entry.daemonPromptId === target.promptId,
+                    )
+                  : [];
+              const snapshot = matches.length === 1 ? matches[0] : undefined;
+              if (!snapshot || !target) {
+                const reason =
+                  snapshots.length > 0 &&
+                  snapshots.every((entry) => !entry.daemonPromptId)
+                    ? 'composer.editIdentityUnavailable'
+                    : 'composer.editExpired';
+                throw new Error(t(reason));
+              }
+              try {
+                // No X-Qwen-Client-Id on purpose: the daemon registers a
+                // session-bound id (`client_<uuid>`) at create/load that the
+                // raw DaemonClient here never learns, and the extension's own
+                // `vscode-<uuid>` is not registered either — sending it makes
+                // the rewind 400 `invalid_client_id`. Like the host's other
+                // session mutations (rename, delete), the rewind is
+                // unattributed and still token-authenticated.
+                await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+                  rewindFiles: false,
+                });
+              } catch (err) {
+                rearmOnTransientFailure(err);
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               clearInsight();
+              // The daemon delivers `session.rewound` on the session stream,
+              // which lands in the transcript store after the rewind HTTP
+              // response resolves. Returning now would let the web shell add
+              // its optimistic user message before the rewind event truncates
+              // the transcript, and that late truncation would wipe the
+              // message from the view. Skip the failure when the user has
+              // navigated to another session — the send is cancelled on
+              // switch and the transcript reloads from the daemon anyway.
+              if (
+                !(await waitForRewindApplied(
+                  () => transcriptBlocksRef.current,
+                  userBlocks.indexOf(target),
+                )) &&
+                runtimeRef.current?.sessionId === sessionId
+              ) {
+                throw new Error(t('composer.editSyncFailed'));
+              }
             }
 
             if (!activeFile || !includeActiveFile) return undefined;
-            const normalizedWorkspace = runtime.workspaceCwd?.replace(
-              /\\/g,
-              '/',
-            );
             const normalizedFile = activeFile.filePath.replace(/\\/g, '/');
-            const relativePath =
-              normalizedWorkspace &&
-              normalizedFile.startsWith(`${normalizedWorkspace}/`)
-                ? normalizedFile.slice(normalizedWorkspace.length + 1)
-                : activeFile.fileName;
+            // `workspaceCwd` is canonical — the daemon matches workspaces by
+            // realpath — while `activeFile.filePath` is VS Code's raw
+            // `uri.fsPath`, so in a symlinked folder the two sit in different
+            // path spaces. Try both spellings: on a miss the strip silently
+            // degrades to a bare basename, the prompt says `@foo.ts` instead
+            // of `@src/foo.ts`, and the picker-annotation dedup below misses
+            // with it.
+            const workspacePrefixes = [
+              runtime.workspaceCwd,
+              runtime.editorWorkspaceCwd,
+            ]
+              .filter((cwd): cwd is string => Boolean(cwd))
+              .map((cwd) => cwd.replace(/\\/g, '/'));
+            let relativePath = activeFile.fileName;
+            for (const prefix of workspacePrefixes) {
+              if (normalizedFile.startsWith(`${prefix}/`)) {
+                relativePath = normalizedFile.slice(prefix.length + 1);
+                break;
+              }
+            }
             const reference = `@${relativePath}`;
             const selectedLines = activeFile.selection
               ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`

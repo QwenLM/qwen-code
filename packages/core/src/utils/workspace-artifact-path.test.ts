@@ -11,23 +11,20 @@ import {
   toCanonicalWorkspaceArtifactPath,
 } from './workspace-artifact-path.js';
 
+const agent = '/mnt/workspace/w/agent';
+const myWorktree = `${agent}/.qwen/worktrees/my-feature`;
+
 describe('resolveBoundWorkspaceRoot', () => {
   it('returns the directory unchanged for an ordinary session cwd', () => {
-    expect(resolveBoundWorkspaceRoot('/mnt/workspace/w/agent')).toBe(
-      path.resolve('/mnt/workspace/w/agent'),
-    );
+    expect(resolveBoundWorkspaceRoot(agent)).toBe(path.resolve(agent));
   });
 
   it('strips a .qwen/worktrees/<slug> suffix', () => {
-    expect(
-      resolveBoundWorkspaceRoot(
-        '/mnt/workspace/w/agent/.qwen/worktrees/my-feature',
-      ),
-    ).toBe(path.resolve('/mnt/workspace/w/agent'));
+    expect(resolveBoundWorkspaceRoot(myWorktree)).toBe(path.resolve(agent));
   });
 
   it('does not strip a nested path under the worktree', () => {
-    const nested = '/mnt/workspace/w/agent/.qwen/worktrees/my-feature/reports';
+    const nested = `${myWorktree}/reports`;
     expect(resolveBoundWorkspaceRoot(nested)).toBe(path.resolve(nested));
   });
 
@@ -45,37 +42,23 @@ describe('resolveBoundWorkspaceRoot', () => {
 describe('toCanonicalWorkspaceArtifactPath', () => {
   it('returns a posix path relative to an ordinary session root', () => {
     expect(
-      toCanonicalWorkspaceArtifactPath(
-        '/mnt/workspace/w/agent/reports/summary.csv',
-        '/mnt/workspace/w/agent',
-      ),
+      toCanonicalWorkspaceArtifactPath(`${agent}/reports/summary.csv`, agent),
     ).toBe('reports/summary.csv');
   });
 
   it('anchors a worktree file at the bound workspace root', () => {
     expect(
-      toCanonicalWorkspaceArtifactPath(
-        '/mnt/workspace/w/agent/.qwen/worktrees/my-feature/report.csv',
-        '/mnt/workspace/w/agent/.qwen/worktrees/my-feature',
-      ),
+      toCanonicalWorkspaceArtifactPath(`${myWorktree}/report.csv`, myWorktree),
     ).toBe('.qwen/worktrees/my-feature/report.csv');
   });
 
   it('returns null when the file is outside the bound workspace', () => {
     expect(
-      toCanonicalWorkspaceArtifactPath(
-        '/tmp/outside.csv',
-        '/mnt/workspace/w/agent',
-      ),
+      toCanonicalWorkspaceArtifactPath('/tmp/outside.csv', agent),
     ).toBeNull();
   });
 
   it('returns null for the workspace root itself', () => {
-    expect(
-      toCanonicalWorkspaceArtifactPath(
-        '/mnt/workspace/w/agent',
-        '/mnt/workspace/w/agent',
-      ),
-    ).toBeNull();
+    expect(toCanonicalWorkspaceArtifactPath(agent, agent)).toBeNull();
   });
 });

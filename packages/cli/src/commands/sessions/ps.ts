@@ -5,37 +5,45 @@
  */
 
 /**
- * `qwen sessions ps` — list the interactive Qwen Code sessions running
- * right now.
+ * `qwen sessions ps` — list registered and managed Qwen Code sessions.
  *
- * The sibling `qwen sessions list` walks saved transcripts; this walks the
- * live-process registry, so the two answer different questions: "what have
- * I worked on" versus "what is running on this machine at this moment".
- *
- * "Interactive" is a registration fact, not a filter: only the
- * interactive UI registers sessions, so headless runs (`qwen -p`) never
- * appear here.
+ * The sibling `qwen sessions list` walks saved transcripts. This command shows
+ * live registry records and Agent View records marked `managed`. The latter are
+ * persistent records, not a liveness claim.
  */
 
 import type { CommandModule, Argv } from 'yargs';
 import {
+  describeSessionKind,
   listLiveSessions,
   type SessionRegistryRecord,
 } from '@qwen-code/qwen-code-core';
 import stringWidth from 'string-width';
+import { listAgentViewSessionStates } from '../../agent-view/supervisor-store.js';
 import {
   sanitizeTerminalText,
   truncateToWidth,
 } from '../../ui/utils/textUtils.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 
 /** Fixed column widths for the human-readable table (exported for tests). */
 export const NAME_COL = 22;
+/** Wide enough for the longest kind this build writes (`headless`). */
+export const KIND_COL = 10;
 export const PID_COL = 9;
 export const AGE_COL = 10;
 
 interface PsArgs {
   json?: boolean;
+}
+
+interface ManagedSession {
+  sessionId: string;
+  cwd: string;
 }
 
 /**
@@ -75,19 +83,45 @@ export function formatAge(ms: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function outputHuman(records: SessionRegistryRecord[], now: number): void {
+function outputHuman(
+  records: SessionRegistryRecord[],
+  managed: ManagedSession[],
+  now: number,
+): void {
   writeStdoutLine(
     padDisplay('NAME', NAME_COL) +
+      padDisplay('KIND', KIND_COL) +
       padDisplay('PID', PID_COL) +
       padDisplay('AGE', AGE_COL) +
       'DIRECTORY',
   );
+  for (const session of managed) {
+    writeStdoutLine(
+      padDisplay(
+        truncateToWidth(sanitize(session.sessionId), NAME_COL - 2),
+        NAME_COL,
+      ) +
+        padDisplay('managed', KIND_COL) +
+        padDisplay('-', PID_COL) +
+        padDisplay('-', AGE_COL) +
+        sanitize(session.cwd),
+    );
+  }
   for (const record of records) {
     writeStdoutLine(
       padDisplay(
         truncateToWidth(sanitize(record.name), NAME_COL - 2),
         NAME_COL,
       ) +
+        // Truncated for the same reason NAME is: a newer build may write
+        // a longer kind than any this one knows, and one over-wide cell
+        // would misalign every column after it. Not sanitized — unlike
+        // NAME and DIRECTORY, the read guard already bounds `kind` to
+        // lowercase ASCII, digits and dashes.
+        padDisplay(
+          truncateToWidth(describeSessionKind(record.kind), KIND_COL - 2),
+          KIND_COL,
+        ) +
         padDisplay(String(record.pid), PID_COL) +
         padDisplay(formatAge(now - record.startedAt), AGE_COL) +
         sanitize(record.cwd),
@@ -95,35 +129,60 @@ function outputHuman(records: SessionRegistryRecord[], now: number): void {
   }
 }
 
+async function readManagedSessions(): Promise<ManagedSession[]> {
+  try {
+    return (await listAgentViewSessionStates())
+      .filter((state) => state.ownership === 'managed')
+      .map(({ sessionId, activeCwd }) => ({ sessionId, cwd: activeCwd }));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    writeStderrLine(
+      `Managed sessions could not be listed: ${sanitize(reason)}`,
+    );
+    return [];
+  }
+}
+
 async function handlePs(argv: PsArgs): Promise<void> {
+  ignoreBrokenPipe();
   // listLiveSessions reports "cannot look" as "no peers" rather than
   // throwing, so there is no failure path to surface here.
-  const records = await listLiveSessions();
-  const now = Date.now();
+  const [records, managed] = await Promise.all([
+    listLiveSessions(),
+    readManagedSessions(),
+  ]);
 
   if (argv.json) {
+    for (const session of managed) {
+      writeStdoutLine(JSON.stringify({ ...session, managed: true }));
+    }
     for (const record of records) {
       // Deliberately raw: field values are emitted exactly as recorded,
       // with none of the table path's terminal sanitization. That keeps
       // the output honest data for tooling (and matches the sibling
       // `sessions list --json`); consumers that RENDER these values in a
-      // terminal own the sanitization.
-      writeStdoutLine(JSON.stringify(record));
+      // terminal own the sanitization. The inbox token is the one
+      // exception — a credential, not data: tooling that really needs it
+      // can read the record file, but it must not spill into logs and
+      // pipelines by default.
+      writeStdoutLine(JSON.stringify({ ...record, ipcToken: undefined }));
     }
     return;
   }
 
-  if (records.length === 0) {
-    writeStdoutLine('No other interactive Qwen Code sessions are running.');
+  if (records.length === 0 && managed.length === 0) {
+    writeStdoutLine(
+      'No Qwen Code sessions are registered or managed right now.',
+    );
     return;
   }
 
-  outputHuman(records, now);
+  outputHuman(records, managed, Date.now());
 }
 
 export const psCommand: CommandModule<unknown, PsArgs> = {
   command: 'ps',
-  describe: 'List interactive Qwen Code sessions running right now',
+  describe: 'List registered and managed Qwen Code sessions',
   builder: (yargs: Argv) =>
     yargs.option('json', {
       type: 'boolean',

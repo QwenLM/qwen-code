@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,9 +18,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 
 const workflowPath = join(
@@ -33,7 +34,7 @@ const cacheProducerPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
   'workflows',
-  'npm-cache.yml',
+  'pnpm-store.yml',
 );
 const cacheProducerDoc = parse(readFileSync(cacheProducerPath, 'utf8'));
 const prWorkflowPath = join(
@@ -54,6 +55,58 @@ const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
 const triageOwnershipStep = steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
+const triageContextStep = steps.find((s) => s.name === 'Prepare agent context');
+const publishTriageJob = doc.jobs['publish-triage'];
+const publisherPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  'triage-publish.mjs',
+);
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(scriptsDir, '..', '..');
+// The sparse-checkout list is the pool job's entire world: it carries no
+// node_modules, so anything the publisher needs must be listed. Read the
+// list once; the guard below materializes exactly it and loads the module.
+const sparseCheckoutEntries = () => {
+  const checkout = publishTriageJob.steps.find((s) => /^Checkout/.test(s.name));
+  assert.ok(checkout, 'publish-triage must checkout its scripts');
+  assert.equal(
+    checkout.with['sparse-checkout-cone-mode'],
+    false,
+    'the sparse list is a set of exact paths, not cone-mode directories',
+  );
+  return String(checkout.with['sparse-checkout'])
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+};
+// The triage agent is a direct CLI launch now; its settings travel as the
+// heredoc the host writes into the fresh per-run QWEN_HOME. Extract and parse
+// them the same way the runtime will read them.
+const readTriageSettings = () => {
+  assert.ok(
+    triageContextStep,
+    'triage must keep the Prepare agent context step',
+  );
+  const m = triageContextStep.run.match(
+    /cat > "\$QWEN_HOME\/settings\.json" <<'SETTINGS_JSON'\n([\s\S]*?)\n\s*SETTINGS_JSON/,
+  );
+  assert.ok(
+    m,
+    'the context step must write settings.json through the SETTINGS_JSON heredoc',
+  );
+  const settings = JSON.parse(m[1]);
+  // v1 top-level keys only work through runtime migration; write the native
+  // v2 shape (the qwen-triage.yml convention).
+  for (const key of ['coreTools', 'maxSessionTurns', 'sandbox']) {
+    assert.equal(
+      settings[key],
+      undefined,
+      `v1 top-level \`${key}\` is a legacy key — use the v2 shape`,
+    );
+  }
+  return settings;
+};
 const verifyJob = doc.jobs.verify;
 const verifyOwnershipStep = verifyJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
@@ -100,7 +153,8 @@ const followupWorkflowPath = join(
   'qwen-issue-followup-bot.yml',
 );
 const followupDoc = parse(readFileSync(followupWorkflowPath, 'utf8'));
-const followupStep = followupDoc.jobs['follow-up-issues'].steps.find(
+const followupJob = followupDoc.jobs['follow-up-issues'];
+const followupStep = followupJob.steps.find(
   (s) => s.name === 'Run Qwen issue follow-up',
 );
 const ciWebShellJob = ciDoc.jobs.web_shell_e2e_smoke;
@@ -109,6 +163,10 @@ const ciWebShellOwnershipStep = ciWebShellJob.steps.find(
 );
 const ciIntegrationJob = ciDoc.jobs.integration_cli;
 const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciLintJob = ciDoc.jobs.lint_and_static;
+const ciLintOwnershipStep = ciLintJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
 
@@ -182,12 +240,22 @@ const assertSettingsContract = (step, label) => {
 };
 
 describe('qwen-triage: agent tool/permission settings', () => {
-  it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
-    assertSettingsContract(triageStep, 'triage step (id: triage)');
+  it('writes settings host-side; the agent is a direct launch, not an action', () => {
+    // The settings_json bug class (an unknown action input silently dropped)
+    // is gone with the action: the host writes the settings file itself and
+    // the launch is a plain CLI invocation whose env we fully control.
+    readTriageSettings();
+    assert.equal(
+      triageStep.uses,
+      undefined,
+      'the triage agent must be a direct CLI launch, not qwen-code-action',
+    );
+    assert.match(triageStep.run, /runuser -u node -- env -i/);
+    assert.doesNotMatch(JSON.stringify(triageJob), /settings_json/);
   });
 
   it('settings is valid JSON that restricts the toolset', () => {
-    const settings = assertSettingsContract(triageStep, 'triage settings');
+    const settings = readTriageSettings();
     const core = settings.tools?.core;
     assert.ok(
       Array.isArray(core),
@@ -216,7 +284,7 @@ describe('qwen-triage: agent tool/permission settings', () => {
   });
 
   it('settings denies interpreters, network, and PR-code-materializing git/gh', () => {
-    const settings = assertSettingsContract(triageStep, 'triage settings');
+    const settings = readTriageSettings();
     const deny = settings.permissions?.deny ?? [];
     for (const d of [
       'run_shell_command(node)',
@@ -229,8 +297,7 @@ describe('qwen-triage: agent tool/permission settings', () => {
     ]) {
       assert.ok(deny.includes(d), `permissions.deny must include ${d}`);
     }
-    // No sandbox key: the ECS pool ships no container runtime, and adding one
-    // would silently disable the step.
+    // No sandbox key: the job itself is the container now.
     assert.equal(
       settings.sandbox,
       undefined,
@@ -241,20 +308,62 @@ describe('qwen-triage: agent tool/permission settings', () => {
 
 // The same settings_json → settings bug survived in two more workflows after
 // the triage fix. An unknown action input is dropped without error, so the
-// /resolve agent ran every time with no turn cap, no tool allowlist, and no
-// sandbox — on a runner pool its runs-on comment chose specifically because
-// `sandbox: true` needs docker — and the follow-up bot ran uncapped too.
-// These blocks were therefore never validated by anything; parse them here.
+// /resolve agent ran every time with no turn cap and no tool allowlist, and
+// the follow-up bot ran uncapped too. These blocks were therefore never
+// validated by anything; parse them here.
+//
+// The sandbox key is pinned to FALSE, not true. The fix that made the block
+// take effect (#9252) also switched the container on, and /resolve went from
+// 84% pushed to 0 of 81 in a row: the versioned ghcr image lags the npm
+// release (#9898) so the agent died at startup, or it hung silently to the job
+// timeout. No sandboxed /resolve run has ever pushed a resolution.
 describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
-  it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
-    assertSettingsContract(resolveConflictsStep, 'resolve_conflicts');
+  // The agent is a direct `qwen` invocation (no qwen-code-action), so the
+  // settings travel as a step env value that the run block writes to a
+  // per-run QWEN_HOME — nothing can be silently dropped by an input name.
+  const resolveSettings = (label) => {
+    assert.ok(resolveConflictsStep, `${label} must keep its agent step`);
+    assert.equal(
+      resolveConflictsStep.uses,
+      undefined,
+      `${label} must invoke qwen directly, not through an action (its $GITHUB_ENV/$GITHUB_PATH cannot be decoyed)`,
+    );
+    const raw = resolveConflictsStep.env?.QWEN_SETTINGS;
+    assert.ok(typeof raw === 'string', `${label} must carry QWEN_SETTINGS`);
+    assert.ok(
+      resolveConflictsStep.run.includes('> "$QWEN_HOME/settings.json"'),
+      `${label} must write QWEN_SETTINGS to the per-run QWEN_HOME`,
+    );
+    assert.ok(
+      resolveConflictsStep.run.includes('export QWEN_HOME'),
+      `${label} must export QWEN_HOME so the qwen process reads the per-run settings`,
+    );
+    // A fork PR can commit .qwen/settings.json (the workspace layer), which
+    // the CLI merges ABOVE the user layer written above — an attacker file
+    // would override tools.sandbox and maxSessionTurns. The run block must
+    // remove it; out-setting it from the user layer cannot work.
+    assert.ok(
+      resolveConflictsStep.run.includes('rm -f .qwen/settings.json'),
+      `${label} must remove a fork-PR-committed workspace settings file`,
+    );
+    const settings = JSON.parse(raw);
+    for (const key of ['coreTools', 'maxSessionTurns', 'sandbox']) {
+      assert.equal(
+        settings[key],
+        undefined,
+        `${label}: v1 top-level \`${key}\` is a legacy key — use the v2 shape`,
+      );
+    }
+    return settings;
+  };
+
+  it('writes its settings to a per-run QWEN_HOME instead of an action input', () => {
+    resolveSettings('resolve_conflicts');
+    assert.equal(resolveConflictsStep.with, undefined);
   });
 
   it('settings is valid JSON pinning the turn cap, allowlist, and sandbox', () => {
-    const settings = assertSettingsContract(
-      resolveConflictsStep,
-      'resolve_conflicts',
-    );
+    const settings = resolveSettings('resolve_conflicts');
     assert.equal(
       settings.model?.maxSessionTurns,
       400,
@@ -275,29 +384,351 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     ]) {
       assert.ok(core.includes(t), `tools.core must include ${t}`);
     }
-    // The runs-on comment pins this job to hosted runners because the sandbox
-    // needs docker; dropping the key would pay that routing cost for nothing.
+    // Explicit false, not absent: absent means "whatever the CLI defaults to
+    // or QWEN_SANDBOX says", and the one time this flipped on it took the
+    // command down for 13 days (see the describe comment).
     assert.equal(
       settings.tools?.sandbox,
-      true,
-      'tools.sandbox must stay true — the runs-on routing depends on it',
+      false,
+      'tools.sandbox must stay false — every sandboxed /resolve run has failed; re-enable only with a dry-run that finishes inside the container',
     );
   });
 
-  it('keeps resolve-pr on hosted runners (sandbox: true needs docker)', () => {
-    // The routing half of the sandbox coupling: the ECS pool ships no
-    // container runtime, so an ECS-routed sandboxed agent dies at startup.
-    assert.equal(
-      resolvePrJob['runs-on'],
-      'ubuntu-latest',
-      'resolve-pr must stay on hosted runners — sandbox: true needs docker, absent on the ECS pool',
+  it('pins the CLI version instead of following `latest`', () => {
+    // `latest` ties the job to the npm release pipeline of the moment: on
+    // 2026-08-15 the dist-tag pointed at an unresolvable 0.21.12 and every
+    // /resolve died on `npm error notarget` before the agent started.
+    const install = resolvePrJob.steps.find(
+      (s) => s.name === 'Install Qwen CLI',
     );
+    assert.ok(install, 'resolve-pr must install the CLI in its own step');
+    assert.match(
+      String(install.env?.QWEN_CLI_VERSION),
+      /^\d+\.\d+\.\d+$/,
+      'QWEN_CLI_VERSION must be an exact semver, not a dist-tag',
+    );
+    assert.ok(
+      install.run.includes('@qwen-code/qwen-code@${QWEN_CLI_VERSION}'),
+      'the install must use the pinned version',
+    );
+  });
+
+  it('decoys the runner command files for the agent invocation', () => {
+    // The agent has arbitrary shell; whatever it appends to $GITHUB_ENV or
+    // $GITHUB_PATH would apply to the credentialed push step of the same
+    // job. The invocation must see invocation-scoped decoys, inside a
+    // parsing-off window, with no token in its environment.
+    const run = resolveConflictsStep.run;
+    for (const file of [
+      'GITHUB_PATH',
+      'GITHUB_ENV',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
+      assert.ok(
+        run.includes(`${file}="$decoy_dir/`),
+        `${file} must point at the decoy for the qwen invocation`,
+      );
+    }
+    // The decoys only mask the invocation's env: the REAL runner command
+    // files stay discoverable by the agent (the step's parent-shell
+    // /proc/<pid>/environ is same-uid readable, $RUNNER_TEMP is enumerable),
+    // and anything planted there applies to every later step — shell lookup
+    // included. The step must therefore truncate all four after the agent,
+    // on every exit path.
+    const statusIdx = run.indexOf('status=$?');
+    assert.ok(
+      statusIdx > -1,
+      'the run block must capture the qwen exit status',
+    );
+    for (const file of [
+      'GITHUB_ENV',
+      'GITHUB_PATH',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
+      const trunc = `: > "\${${file}:?}" || true`;
+      const idx = run.indexOf(trunc);
+      assert.ok(
+        idx > -1,
+        `${file} must be truncated after the qwen invocation`,
+      );
+      assert.ok(
+        idx > statusIdx,
+        `${file} truncation must run on the exit path, after status=$?`,
+      );
+    }
+    // A hung agent must end inside the script (GNU timeout), not by the
+    // runner killing the process tree — only then are the resume and the
+    // truncation above reached (mirrors 'Run review').
+    assert.ok(run.includes('timeout --kill-after=10s'));
+    // The workspace-layer settings file is removed BEFORE qwen starts: a
+    // fork-committed .qwen/settings.json would otherwise outrank the
+    // per-run home written above for the whole run.
+    const settingsRm = run.indexOf('rm -f .qwen/settings.json');
+    assert.ok(settingsRm > -1, 'the workspace settings file must be removed');
+    assert.ok(
+      settingsRm < run.indexOf('timeout --kill-after=10s'),
+      'the workspace settings removal must precede the qwen invocation',
+    );
+    assert.ok(run.includes('echo "::stop-commands::${stop_token}"'));
+    assert.ok(run.includes('printf \'\\n::%s::\\n\' "$stop_token"'));
+    assert.ok(run.includes('--approval-mode yolo'));
+    for (const key of Object.keys(resolveConflictsStep.env)) {
+      assert.ok(
+        !/TOKEN|PAT/.test(key),
+        `agent env must carry no credential, found ${key}`,
+      );
+    }
+    // Dead keys: the run block reads none of them (PROMPT interpolates
+    // pr_number directly) and the CLI consumes no such env vars — they only
+    // clutter the env surface this step's containment comment says to audit.
+    for (const key of ['PR_NUMBER', 'BASE_REF', 'HEAD_REF']) {
+      assert.equal(
+        resolveConflictsStep.env[key],
+        undefined,
+        `agent env must not carry dead key ${key} (keep the copies on 'Report result' / 'Report skipped request')`,
+      );
+    }
+  });
+
+  it('keeps every credential out of the agent job once the agent has run', () => {
+    // Structural containment: the agent runs --yolo without a sandbox and
+    // can leave anything on its runner (config scopes, hooks, moved refs,
+    // PATH shims, the real $GITHUB_ENV, a detached process reading /proc).
+    // Rather than chase each entrance with a scrub, nothing credentialed
+    // runs on that runner after the agent: the push and the result comment
+    // live in `publish-resolution`, whose runner never executed the agent.
+    const steps = resolvePrJob.steps;
+    const agentIdx = steps.findIndex((s) => s.id === 'resolve_conflicts');
+    assert.ok(agentIdx > -1);
+    const secretRef = (v) =>
+      typeof v === 'string' && v.includes('${{ secrets.');
+    for (const s of steps.slice(agentIdx + 1)) {
+      if (s.name === 'Report skipped request') {
+        // The one exception: it runs only when the agent did NOT run.
+        assert.ok(
+          String(s.if).includes("steps.prepare.outputs.decision == 'skip'") &&
+            !String(s.if).includes("decision == 'run'"),
+          'Report skipped request must be gated on the agent not having run',
+        );
+        continue;
+      }
+      for (const [key, value] of Object.entries(s.env ?? {})) {
+        assert.ok(
+          !secretRef(value),
+          `'${s.name}' runs after the agent and must not carry a secret (${key})`,
+        );
+      }
+      for (const [key, value] of Object.entries(s.with ?? {})) {
+        assert.ok(
+          !secretRef(value),
+          `'${s.name}' runs after the agent and must not carry a secret (${key})`,
+        );
+      }
+    }
+    // What crosses the job boundary is a bundle and report files, verified
+    // on the other side; the verdict on the agent step crosses as an output.
+    const packageStep = steps.find((s) => s.name === 'Package resolution');
+    assert.ok(packageStep, 'resolve-pr must package the resolution');
+    assert.ok(
+      packageStep.run.includes(
+        'git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"',
+      ),
+    );
+    assert.equal(
+      resolvePrJob.outputs.agent_outcome,
+      '${{ steps.resolve_conflicts.outcome }}',
+    );
+    assert.equal(
+      resolvePrJob.outputs.decision,
+      '${{ steps.prepare.outputs.decision }}',
+    );
+  });
+
+  it('publishes from a job that never ran the agent, from GitHub-fetched refs and a verified bundle', () => {
+    const publish = prReviewDoc.jobs['publish-resolution'];
+    assert.ok(publish, 'publish-resolution must exist');
+    assert.deepEqual(publish.needs, ['resolve-pr']);
+    assert.equal(
+      publish.if,
+      "${{ always() && needs.resolve-pr.outputs.decision == 'run' }}",
+    );
+    assert.equal(publish['runs-on'], 'ubuntu-latest');
+    assert.deepEqual(publish.permissions, { contents: 'read' });
+    // The publisher uses a PER-RUN concurrency group, NOT the shared
+    // head-write one: it is reached only after resolve-pr uploaded a
+    // completed resolution, and GitHub replaces the single pending job in a
+    // group when another is queued, so sharing the head-write group would let
+    // a second /resolve or an autofix writer silently cancel this pending
+    // publisher and drop a resolution that already succeeded. A per-run group
+    // can never be replaced; competing publishers are made safe by the
+    // force-with-lease push, not by the group.
+    assert.match(publish.concurrency.group, /\$\{\{\s*github\.run_id\s*\}\}/);
+    assert.notEqual(publish.concurrency.group, resolvePrJob.concurrency.group);
+    assert.match(resolvePrJob.concurrency.group, /^qwen-pr-head-write-/);
+    assert.equal(publish.concurrency['cancel-in-progress'], false);
+    // The atomic guard for two concurrent publishers is the lease, pinned to
+    // the head the agent resolved from.
+    const reportRun = publish.steps.find((s) => s.name === 'Report result').run;
+    assert.ok(
+      reportRun.includes(
+        '--force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}"',
+      ),
+      'the publisher push must be force-with-lease pinned to HEAD_SHA',
+    );
+    // No agent here, and the token-bearing step is here and nowhere else.
+    assert.ok(publish.steps.every((s) => s.id !== 'resolve_conflicts'));
+    assert.ok(publish.steps.every((s) => !(s.run ?? '').includes('qwen ')));
+    const report = publish.steps.find((s) => s.name === 'Report result');
+    assert.equal(report.env.PUSH_TOKEN, '${{ secrets.CI_DEV_BOT_PAT }}');
+    assert.ok(report.run.includes('x-access-token:${PUSH_TOKEN}'));
+    assert.ok(
+      resolvePrJob.steps.every(
+        (s) => !(s.run ?? '').includes('x-access-token:'),
+      ),
+    );
+    // Fresh checkout, refs from GitHub, compared against the head the agent
+    // resolved from; the resolution enters only as a verified bundle that
+    // must descend from that head.
+    const checkout = publish.steps.find((s) =>
+      s.uses?.startsWith('actions/checkout@'),
+    );
+    assert.equal(checkout.with['persist-credentials'], false);
+    const verify = publish.steps.find((s) => s.id === 'verify');
+    assert.equal(
+      verify.env.HEAD_SHA,
+      '${{ needs.resolve-pr.outputs.head_sha }}',
+    );
+    assert.equal(
+      verify.env.RESOLVE_OUTCOME,
+      '${{ needs.resolve-pr.outputs.agent_outcome }}',
+    );
+    for (const line of [
+      'git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}"',
+      'git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"',
+      'git bundle verify "$bundle"',
+      'git merge-base --is-ancestor "$HEAD_SHA" HEAD',
+    ]) {
+      assert.ok(verify.run.includes(line), `verify must contain: ${line}`);
+    }
+    assert.ok(
+      verify.run.indexOf('git bundle verify') <
+        verify.run.indexOf('git fetch "$bundle"'),
+      'the bundle must verify before it is fetched',
+    );
+    assert.ok(
+      verify.run.indexOf('git merge-base --is-ancestor') <
+        verify.run.indexOf('git ls-files -u'),
+      'lineage must be checked before any content check',
+    );
+    // The artifact is the same one the agent job uploads. The name carries
+    // run_attempt on both sides: a re-run keeps the run_id, and without the
+    // suffix the re-run would republish attempt 1's stale bundle. The
+    // DOWNLOAD spells the attempt that RAN THE AGENT, not the publish job's
+    // own run_attempt: a partial "Re-run failed jobs" re-runs only the
+    // publish job, whose attempt number has no artifact. A missing artifact
+    // with a successful agent step is the lost artifact, never an infra
+    // failure of the agent run.
+    const download = publish.steps.find((s) =>
+      s.uses?.startsWith('actions/download-artifact@'),
+    );
+    assert.equal(download['continue-on-error'], true);
+    assert.equal(
+      download.with.name,
+      'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ needs.resolve-pr.outputs.agent_run_attempt }}',
+    );
+    assert.equal(
+      resolvePrJob.outputs.agent_run_attempt,
+      '${{ steps.resolve.outputs.run_attempt }}',
+    );
+    const resolveStep = resolvePrJob.steps.find((s) => s.id === 'resolve');
+    assert.ok(
+      resolveStep.run.includes(
+        'echo "run_attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+      ),
+      'the attempt that ran the agent must cross the job boundary',
+    );
+    const upload = resolvePrJob.steps.find((s) =>
+      s.uses?.startsWith('actions/upload-artifact@'),
+    );
+    assert.equal(
+      upload.with.name,
+      'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}',
+    );
+    assert.ok(verify.run.includes('failure_kind=infra'));
+    assert.ok(verify.run.includes('failure_kind=artifact_missing'));
+    assert.ok(verify.run.includes('its run artifact is missing'));
+  });
+
+  it('keeps both /resolve jobs on ephemeral hosted runners', () => {
+    // resolve-pr runs an unsandboxed agent; publish-resolution force-pushes
+    // to the PR head with a PAT. A fresh runner for each is the cheapest
+    // guarantee that nothing from an earlier attempt — or from the other
+    // job — is carried into either.
+    for (const name of ['resolve-pr', 'publish-resolution']) {
+      assert.equal(
+        prReviewDoc.jobs[name]['runs-on'],
+        'ubuntu-latest',
+        `${name} must stay on an ephemeral hosted runner`,
+      );
+    }
   });
 });
 
 describe('qwen-issue-followup-bot.yml: agent settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
     assertSettingsContract(followupStep, 'the follow-up step');
+  });
+
+  it('installs the pinned CLI job-locally so the pin binds BOTH lanes', () => {
+    // The action's 'Install Qwen Code' step skips when `qwen` is already on
+    // PATH (verified at the pinned action SHA) — always true on the ecs-qwen
+    // pool this job routes to by default, whose fleet CLI
+    // update-ecs-runner-qwen.yml maintains at `latest`. An input-only pin
+    // never bound that primary lane, so the bot there ran whatever the fleet
+    // update last installed — the exact 2026-08-15 notarget outage class the
+    // pin exists to prevent. The job-local install is prepended to PATH, so
+    // the pinned copy outranks the fleet CLI on ecs-qwen and is the only CLI
+    // on the ubuntu-latest fallback lane; without a contract test a future
+    // edit silently reverts the bot to the fleet dist-tag with nothing red
+    // at merge time.
+    const install = followupJob.steps.find((s) => s.id === 'install_qwen');
+    assert.ok(install, 'the pinned CLI install step must exist');
+    assert.match(
+      String(install.env?.QWEN_CLI_VERSION),
+      /^\d+\.\d+\.\d+$/,
+      'the install must pin an exact CLI version, not a dist-tag',
+    );
+    assert.ok(
+      install.run.includes('npm install --prefix') &&
+        install.run.includes('"@qwen-code/qwen-code@${QWEN_CLI_VERSION}"'),
+      'the install must be job-local (--prefix) and pinned to QWEN_CLI_VERSION',
+    );
+    assert.ok(
+      install.run.includes('--registry=https://registry.npmjs.org'),
+      'the install must pin the registry, not the runner npm mirror',
+    );
+    assert.ok(
+      install.run.includes(
+        'echo "${install_dir}/node_modules/.bin" >> "${GITHUB_PATH}"',
+      ),
+      'the job-local bin dir must be prepended to PATH to outrank the fleet CLI',
+    );
+    // PATH prepends apply only to LATER steps, and the action's own install
+    // skips on any `qwen` already on PATH: if the install stops preceding
+    // the action step, the fleet CLI wins on ecs-qwen again.
+    assert.ok(
+      followupJob.steps.indexOf(install) <
+        followupJob.steps.indexOf(followupStep),
+      'the pinned install must run before the action step',
+    );
+    // Single source of truth: the action input is the installed version, so
+    // it can never drift from what actually runs.
+    assert.equal(
+      String(followupStep.with?.qwen_cli_version),
+      '${{ steps.install_qwen.outputs.version }}',
+    );
   });
 
   it('settings is valid JSON pinning the turn cap and gh allowlist', () => {
@@ -329,23 +760,24 @@ describe('qwen-issue-followup-bot.yml: agent settings', () => {
   });
 });
 
-describe('qwen-triage: fork-PR runner routing', () => {
+describe('qwen-triage: runner routing under token isolation', () => {
   const runsOn = String(triageJob['runs-on']);
   const authorizeJob = doc.jobs.authorize;
   const authorizeRunsOn = String(authorizeJob['runs-on']);
 
-  it('routes the ECS pool on same-repo or a REAL write-permission check', () => {
-    assert.match(runsOn, /head\.repo\.full_name == github\.repository/);
-    // The boundary is the collaborator-permission lookup authorize computes,
-    // NOT the coarse author_association: MEMBER admits any org member and
-    // COLLABORATOR admits read-only invitees — neither implies write access
-    // on this repo, and this job's agent loads bot PATs and a model key.
-    assert.match(
-      runsOn,
-      /needs\.authorize\.outputs\.author_can_write == 'true'/,
-    );
-    assert.doesNotMatch(runsOn, /author_association/);
+  it('routes every trigger to ECS behind the repo guard and kill-switch', () => {
+    // With the write PAT out of the agent environment (read-only token +
+    // drafts executed by publish-triage + container), routing no longer
+    // depends on the target PR's author or on the event shape: the controls
+    // carry the trust boundary, not the machine choice. Hosted capacity is
+    // the scarce side; the pool is maintainer-provided and expandable.
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    assert.match(runsOn, /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/);
     assert.match(runsOn, /ecs-qwen/);
+    assert.doesNotMatch(runsOn, /author_can_write/);
+    assert.doesNotMatch(runsOn, /author_association/);
+    assert.doesNotMatch(runsOn, /head\.repo/);
+    assert.doesNotMatch(runsOn, /event_name/);
   });
 
   it('keeps the authorize gate itself on the same-repo guard', () => {
@@ -359,30 +791,370 @@ describe('qwen-triage: fork-PR runner routing', () => {
     assert.doesNotMatch(authorizeRunsOn, /needs\./);
   });
 
-  it('computes author_can_write from the collaborator-permission API', () => {
+  it('routes the payload-less command triggers to ECS and keeps the gate hardened', () => {
+    // Same fix as qwen-code-pr-review.yml's authorize: issue_comment
+    // (/triage, /tmux, /verify) and workflow_dispatch carry no
+    // github.event.pull_request payload, so the same-repo guard alone fell
+    // through to ubuntu-latest for every command. Route them to the pool,
+    // keeping the hosted fallback and the kill switch.
+    // Exact pin, not substrings: a regrouping that defeats the repo guard or
+    // the kill switch must red this, like the review-workflow gate pin.
     assert.equal(
-      authorizeJob.outputs.author_can_write,
-      '${{ steps.perm.outputs.author_can_write }}',
+      authorizeRunsOn,
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
     );
+    // The gate stays checkout-free and splices no event value into a shell
+    // (everything arrives through env:). Pin the step inventory too, so a new
+    // step cannot be added unnoticed.
+    assert.deepEqual(
+      authorizeJob.steps.map((s) => s.name),
+      [
+        'Sanitize the triage budget',
+        'Check principal write permission',
+        'Acknowledge verify request',
+        'Report disabled verify lane',
+      ],
+    );
+    assert.ok(authorizeJob.steps.every((s) => s.uses === undefined));
+    for (const s of authorizeJob.steps) {
+      assert.ok(
+        !String(s.run ?? '').includes('${{'),
+        `step splices an expression into the shell: ${s.name}`,
+      );
+      // No step may execute repository code: on the pool the cwd is the
+      // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+      // files. This holds for EVERY step, not just the PAT-bearing ones —
+      // even a credential-free step that runs a planted file leaves a
+      // survivor on the persistent host. Evaluate the live
+      // (comment-stripped) lines so a commented-out example cannot red
+      // this, and a live execution line cannot hide behind a comment.
+      const live = String(s.run ?? '')
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.doesNotMatch(live, /(^|[\s;&|(`'"])(\.{1,2}\/)/m, s.name);
+      assert.doesNotMatch(
+        live,
+        /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+        s.name,
+      );
+    }
+    // Every step that spends CI_BOT_PAT on gh pins gh's config resolution
+    // (GH_HOST + a private, guarded GH_CONFIG_DIR), like the sibling pool
+    // jobs; a planted shared ~/.config/gh must not receive the PAT.
+    // Identify PAT-spending steps by the credential in their env, not by the
+    // spelling of a gh subcommand, so a differently-spelled gh call cannot
+    // slip past the hardening check.
+    const ghSteps = authorizeJob.steps.filter((s) => s.env && s.env.GH_TOKEN);
+    assert.ok(ghSteps.length >= 1, 'expected at least one PAT-bearing step');
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then';
+    for (const s of ghSteps) {
+      // Evaluate the live (comment-stripped) lines, not mere substrings: an
+      // unguarded mktemp one-liner or a preamble moved below the first gh
+      // call must red this. (The no-repository-code invariant above covers
+      // every step, including this one.)
+      const live = String(s.run)
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.ok(live.includes('export GH_HOST=github.com'), s.name);
+      assert.ok(live.includes(guard), s.name);
+      assert.match(live, /exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/, s.name);
+      const firstGh = live.search(/gh (api|pr) /);
+      assert.ok(firstGh > -1, s.name);
+      assert.ok(live.indexOf('export GH_HOST=github.com') < firstGh, s.name);
+      assert.ok(live.indexOf(guard) < firstGh, s.name);
+    }
+  });
+
+  it('retires author_can_write (its only consumer was triage routing)', () => {
+    assert.equal(authorizeJob.outputs.author_can_write, undefined);
     const perm = authorizeJob.steps.find((s) => s.id === 'perm');
-    assert.ok(
-      String(perm.env.PR_AUTHOR).includes(
-        'github.event.pull_request.user.login',
-      ),
-    );
-    assert.match(perm.run, /collaborators\/\$\{PR_AUTHOR\}\/permission/);
-    assert.match(
-      perm.run,
-      /admin\|maintain\|write\) echo "author_can_write=true"/,
-    );
+    assert.doesNotMatch(perm.run, /author_can_write/);
+    assert.equal(perm.env.PR_AUTHOR, undefined);
   });
 
   it('falls back to an ephemeral hosted runner', () => {
     assert.match(runsOn, /ubuntu-latest/);
   });
+});
 
-  it('keeps issue triage on ECS (issues carry no foreign code)', () => {
-    assert.match(runsOn, /github\.event_name == 'issues'/);
+describe('qwen-triage: token isolation contract', () => {
+  it('gives the triage job read-only permissions only', () => {
+    const perms = triageJob.permissions;
+    assert.ok(perms, 'triage must declare explicit job-level permissions');
+    for (const [scope, level] of Object.entries(perms)) {
+      assert.equal(level, 'read', `triage permission ${scope} must be read`);
+    }
+    for (const scope of [
+      'contents',
+      'issues',
+      'pull-requests',
+      'checks',
+      'actions',
+    ]) {
+      assert.equal(
+        perms[scope],
+        'read',
+        `triage needs ${scope}:read for the agent's API reads`,
+      );
+    }
+  });
+
+  it('runs the agent in a container with no write credential in its env', () => {
+    assert.equal(triageJob.container?.image, 'node:22-bookworm');
+    // runuser comes from util-linux; the tmux/verify lanes install it
+    // explicitly before launching the agent as node. Pin the install line,
+    // not a prose mention.
+    const tools = steps.find((s) => s.name === 'Install triage tools');
+    assert.ok(tools, 'the container toolchain step must exist');
+    assert.match(tools.run, /apt-get install[^\n]*util-linux/);
+    const env = triageStep.env ?? {};
+    // The agent's GitHub credential is the job's read-only GITHUB_TOKEN.
+    assert.equal(env.GH_TOKEN, '${{ secrets.GITHUB_TOKEN }}');
+    assert.ok(!JSON.stringify(env).includes('CI_BOT_PAT'));
+    assert.ok(!JSON.stringify(env).includes('QWEN_CODE_BOT_TOKEN'));
+    const run = triageStep.run;
+    assert.match(run, /runuser -u node -- env -i/);
+    // The gh/git proxy wrappers must be traversable by the agent user, or
+    // they silently fall out of PATH on a proxied runner.
+    assert.match(run, /chmod 755 "\$proxy_bin"/);
+    assert.match(run, /"GITHUB_TOKEN=\$GH_TOKEN"/);
+    assert.match(run, /"GH_TOKEN=\$GH_TOKEN"/);
+    assert.match(run, /"QWEN_TRIAGE_PUBLISH=workflow"/);
+    // The real model key stays behind the loopback proxy.
+    assert.match(run, /"OPENAI_API_KEY=\$PROXY_TOKEN"/);
+    const envBlock = run.slice(
+      run.indexOf('QWEN_ENV=('),
+      run.indexOf('timeout --kill-after'),
+    );
+    assert.ok(envBlock.length > 0, 'the env -i list must exist');
+    assert.ok(!envBlock.includes('secrets.'));
+  });
+
+  it('uploads drafts on every outcome with the non-regular-file strip', () => {
+    const sanitize = steps.find((s) => s.name === 'Sanitize triage drafts');
+    const upload = steps.find((s) => s.name === 'Upload triage drafts');
+    assert.ok(sanitize, 'drafts must be sanitized before upload');
+    assert.ok(upload, 'drafts must upload for the publisher');
+    assert.equal(sanitize.if, 'always()');
+    assert.match(sanitize.run, /-type l/);
+    // A detached agent child could re-plant symlinks between the strip and
+    // the upload (which FOLLOWS them), so lingering agent-user processes
+    // must be killed BEFORE the strip — and zombies must not count, or the
+    // check never clears (tmux/verify rule).
+    const killAt = sanitize.run.indexOf('pkill -KILL -u node');
+    const stripAt = sanitize.run.indexOf('-type l');
+    assert.ok(killAt !== -1, 'sanitize must kill lingering agent processes');
+    assert.ok(
+      killAt < stripAt,
+      'the process kill must precede the symlink strip',
+    );
+    assert.match(sanitize.run, /\$2 !~ \/\^Z\//);
+    assert.equal(upload.if, 'always()');
+    assert.match(String(upload.with.name), /triage-drafts-/);
+  });
+
+  it('keeps the drafts artifact addressable when resolve never ran', () => {
+    // Upload and download must agree on the name even when the run died
+    // before 'Resolve target number': the job output mirrors the upload's
+    // primary segment, and both sides share the same event-number fallback.
+    const upload = steps.find((s) => s.name === 'Upload triage drafts');
+    const download = publishTriageJob.steps.find(
+      (s) => s.name === 'Download triage drafts',
+    );
+    assert.ok(download, 'the publisher must download the drafts artifact');
+    assert.equal(
+      triageJob.outputs.pr_number,
+      '${{ steps.resolve.outputs.number }}',
+    );
+    const fallback = '|| github.event.issue.number';
+    assert.ok(String(upload.with.name).includes(fallback));
+    assert.ok(String(download.with.name).includes(fallback));
+  });
+
+  it('publishes drafts from a separate job that never runs agent code', () => {
+    assert.ok(publishTriageJob, 'publish-triage job must exist');
+    assert.deepEqual(publishTriageJob.needs, ['triage']);
+    assert.match(String(publishTriageJob.if), /always\(\)/);
+    assert.match(
+      String(publishTriageJob.if),
+      /needs\.triage\.result != 'skipped'/,
+    );
+    // Per-RUN group (publish-tmux rule): a per-PR group would let a second
+    // run replace a completed run's pending publisher and drop its drafts.
+    assert.match(
+      String(publishTriageJob.concurrency.group),
+      /publish-triage-\{1\}/,
+    );
+    assert.match(String(publishTriageJob.concurrency.group), /github\.run_id/);
+    assert.equal(publishTriageJob.concurrency['cancel-in-progress'], false);
+    assert.ok(publishTriageJob['timeout-minutes'] <= 30);
+    const checkout = publishTriageJob.steps.find((s) =>
+      /^Checkout/.test(s.name),
+    );
+    assert.ok(checkout, 'publisher must sparse-checkout its scripts');
+    assert.match(
+      String(checkout.with['sparse-checkout']),
+      /triage-publish\.mjs/,
+    );
+    assert.equal(checkout.with['persist-credentials'], false);
+    assert.equal(checkout.with.ref, '${{ github.sha }}');
+    const publish = publishTriageJob.steps.find(
+      (s) => s.name === 'Publish triage drafts',
+    );
+    assert.ok(publish, 'publisher must run the draft script');
+    assert.match(publish.run, /triage-publish\.mjs/);
+    assert.ok(String(publish.env.GH_TOKEN).includes('CI_BOT_PAT'));
+  });
+
+  it('inspects published reviews only after publishing (notify moved)', () => {
+    // The notify step reads the reviews THIS run posted; under token
+    // isolation those land in the publish step, so notify must follow it in
+    // the publish job — left in the agent job it would always see none.
+    const notify = publishTriageJob.steps.find(
+      (s) => s.name === 'Notify silent triage re-run',
+    );
+    assert.ok(notify, 'notify must live in publish-triage');
+    const notifyIdx = publishTriageJob.steps.indexOf(notify);
+    const publishIdx = publishTriageJob.steps.findIndex(
+      (s) => s.name === 'Publish triage drafts',
+    );
+    assert.ok(publishIdx !== -1 && notifyIdx > publishIdx);
+    assert.ok(
+      !steps.some((s) => s.name === 'Notify silent triage re-run'),
+      'notify must not remain in the agent job',
+    );
+  });
+
+  it('restores workspace ownership with the full fallback chain', () => {
+    // The header names TWO workspace controls for this job; the .git reset
+    // is pinned by qwen-runner-checkout-workflow.test.js, and this pins the
+    // other one. Without the sudo fallback a root-owned .git on the pool
+    // survives the restore, the reset step then dies, and the job never
+    // reaches the drafts download — silently.
+    const restore = publishTriageJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    assertUnconditional(
+      publishTriageJob.steps,
+      restore,
+      'qwen-triage publish-triage',
+    );
+    // assertUnconditional anchors the sudo CHOWN arm but matches chmod
+    // unanchored, so the non-sudo chmod alone satisfies it. Pin the sudo
+    // chmod arm here rather than in the shared helper (five other call
+    // sites): without it a root-owned workspace fails the plain chmod,
+    // the download step's continue-on-error swallows it, and the publish
+    // step exits 0 on "nothing to publish" — drafts silently never land.
+    assert.match(
+      restore.run,
+      /sudo -n chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'publish-triage must keep the sudo chmod fallback that recovers root-owned files',
+    );
+  });
+});
+
+describe('qwen-triage: the sparse checkout is exactly what the publisher needs', () => {
+  // No model of JS syntax here. The pool job checks out ONLY the sparse list
+  // into a workspace with no node_modules, so the guard recreates that world
+  // and loads the publisher in it: a bare specifier, a wrapped import of any
+  // length, an out-of-tree helper, and a helper missing from the list all
+  // fail the load with ERR_MODULE_NOT_FOUND — the job's actual failure mode.
+  // A regex scanner previously stood in for this and kept finding new holes
+  // (statement layout, length bounds, prose that looks like an import).
+  const entryPath = '/.github/scripts/triage-publish.mjs';
+
+  // A node_modules anywhere above the temp tree would silently satisfy a
+  // bare specifier and make the sufficiency check falsely green.
+  const assertNoResolvableModules = (root) => {
+    for (let dir = root; ; dir = dirname(dir)) {
+      assert.ok(
+        !existsSync(join(dir, 'node_modules')),
+        `${join(dir, 'node_modules')} exists above the isolated tree; the sparse-checkout guard cannot prove bare-specifier freedom here`,
+      );
+      if (dirname(dir) === dir) break;
+    }
+  };
+
+  const withSparseTree = async (entries, body) => {
+    const root = mkdtempSync(join(tmpdir(), 'qwen-sparse-'));
+    try {
+      assertNoResolvableModules(root);
+      for (const entry of entries) {
+        const from = join(repoRoot, entry);
+        assert.ok(
+          existsSync(from),
+          `sparse-checkout entry ${entry} does not exist in the repository`,
+        );
+        const to = join(root, entry);
+        mkdirSync(dirname(to), { recursive: true });
+        copyFileSync(from, to);
+      }
+      // Each tree gets a unique URL, so the ESM cache never serves a
+      // previous case's module.
+      return await body(pathToFileURL(join(root, entryPath)).href);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('loads the publisher with exactly the sparse set and nothing else', async () => {
+    const entries = sparseCheckoutEntries();
+    assert.ok(entries.includes(entryPath), 'the publisher must be listed');
+    await withSparseTree(entries, async (url) => {
+      await assert.doesNotReject(
+        import(url),
+        /ERR_MODULE_NOT_FOUND|ERR_UNSUPPORTED/,
+        'the sparse checkout must be sufficient to load the publisher: the pool workspace has no node_modules, so a bare specifier or an unlisted helper dies here',
+      );
+    });
+  });
+
+  it('every sparse entry is load-bearing', async () => {
+    const entries = sparseCheckoutEntries();
+    // The owner policy is read at call time, not import time; its necessity
+    // is pinned by the resolved-path test below instead.
+    const modules = entries.filter((entry) => entry.endsWith('.mjs'));
+    assert.ok(modules.length >= 2, 'expected the publisher and its helper');
+    for (const omitted of modules) {
+      await withSparseTree(
+        entries.filter((entry) => entry !== omitted),
+        async (url) => {
+          await assert.rejects(
+            import(url),
+            /ERR_MODULE_NOT_FOUND/,
+            `${omitted} is listed in the sparse checkout but the publisher loads without it; drop the stale entry`,
+          );
+        },
+      );
+    }
+  });
+
+  it('carries the owner policy at the path the publisher resolves', async () => {
+    // Tie the two together instead of hard-coding the expected entry: read
+    // the URL literal the publisher resolves against its own module URL,
+    // resolve it the same way, and require that exact path in the list.
+    const src = readFileSync(publisherPath, 'utf8');
+    const literals = [
+      ...src.matchAll(/new URL\(\s*'([^']+)'\s*,\s*import\.meta\.url\s*\)/g),
+    ]
+      .map((m) => m[1])
+      .filter((spec) => spec.endsWith('.json'));
+    assert.equal(
+      literals.length,
+      1,
+      'expected exactly one owner-policy URL literal in the publisher',
+    );
+    const resolved = fileURLToPath(
+      new URL(literals[0], pathToFileURL(publisherPath)),
+    );
+    const repoRelative = `/${relative(repoRoot, resolved).split(sep).join('/')}`;
+    assert.ok(
+      sparseCheckoutEntries().includes(repoRelative),
+      `the sparse checkout must carry the owner policy the publisher resolves (${repoRelative})`,
+    );
   });
 });
 
@@ -665,6 +1437,18 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
     );
   });
 
+  it('lint_and_static restores ownership unconditionally', () => {
+    // The split copied the recovery prelude into the new lane; a
+    // poisoning-recovery edit landing only in this copy would leave every
+    // other pin green while the future required check fails checkout with
+    // EACCES on the next contaminated runner.
+    assertUnconditional(
+      ciLintJob.steps,
+      ciLintOwnershipStep,
+      'ci.yml lint_and_static',
+    );
+  });
+
   it('cleanup step removes .qwen but no longer any .stale.* dirs', () => {
     assert.ok(
       ciCleanStep,
@@ -693,30 +1477,32 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
   });
 });
 
-describe('qwen-triage: maintainer resolver heredoc vs the backtick deny rule', () => {
-  it('keeps the resolver bash block backtick-free so the deny rule never fires', () => {
-    // The triage lane's permissions.deny includes run_shell_command(*`*):
-    // any command text containing a backtick is EXECUTION_DENIED before
-    // approval. A template literal (or a backticked comment) inside the
-    // resolver heredoc would therefore kill the whole command, and
-    // deferrals would silently lose their deterministic assignee.
-    const settings = assertSettingsContract(triageStep, 'triage settings');
+describe('qwen-triage: maintainer resolver lives in the publisher', () => {
+  it('keeps the backtick deny rule; the skill drafts defer instead of resolving', () => {
+    // The resolver's collaborator-permission lookup needs a write-level
+    // token, which the read-only CI agent no longer holds, so the resolver
+    // moved into triage-publish.mjs. The skill must not grow a replacement
+    // heredoc (which would also re-expose the backtick deny-rule hazard the
+    // old block had to dance around).
+    const settings = readTriageSettings();
     const deny = settings.permissions?.deny ?? [];
     assert.ok(
       deny.includes('run_shell_command(*`*)'),
       'permissions.deny must keep the backtick rule',
     );
-    const blocks = [...prSkill.matchAll(/```bash\n([\s\S]*?)\n```/g)].map(
-      (m) => m[1],
-    );
-    const resolver = blocks.find(
-      (b) => b.includes("<<'EOF'") && b.includes('collaborators'),
-    );
-    assert.ok(resolver, 'maintainer resolver heredoc block must exist');
     assert.ok(
-      !resolver.includes('`'),
-      'resolver block must contain no backtick, or the deny rule blocks it',
+      !prSkill.includes('collaborators/'),
+      'the skill must not call the collaborator-permission API',
     );
+    assert.ok(
+      !prSkill.includes('assign-issue-owner.mjs'),
+      'the resolver import must live in the publisher, not the skill',
+    );
+    assert.match(prSkill, /\{action:"defer"/);
+    const publisher = readFileSync(publisherPath, 'utf8');
+    assert.match(publisher, /collaborators/);
+    assert.match(publisher, /pickOwner/);
+    assert.match(publisher, /QWEN_MAINTAINER_HANDLE/);
   });
 });
 
@@ -758,16 +1544,19 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
   });
 });
 
-describe('qwen-triage: npm cache restore-only invariant', () => {
+describe('qwen-triage: pnpm store restore-only invariant', () => {
   for (const [jobName, jobDef] of [
     ['verify', verifyJob],
     ['tmux-testing', tmuxJob],
   ]) {
     it(`${jobName}: uses actions/cache/restore with no save path`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
-      assert.ok(cacheStep, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        cacheStep,
+        `'Restore pnpm store' step must exist in ${jobName}`,
+      );
       assert.match(
         cacheStep.uses,
         /^actions\/cache\/restore@/,
@@ -784,9 +1573,9 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       }
     });
 
-    it(`${jobName}: npm ci --cache matches the restored directory`, () => {
+    it(`${jobName}: pnpm install --store-dir matches the restored directory`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       const prepareStep = jobDef.steps.find(
         (s) => s.name === 'Install and build PR app',
@@ -801,25 +1590,25 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       );
       assert.ok(dir, 'cache path must resolve to a directory name');
       assert.ok(
-        prepareStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
-        `npm ci must use --cache "$RUNNER_TEMP/${dir}"`,
+        prepareStep.run.includes(`--store-dir "$RUNNER_TEMP/${dir}"`),
+        `pnpm install must use --store-dir "$RUNNER_TEMP/${dir}"`,
       );
     });
 
-    it(`${jobName}: clears stale npm cache before restore`, () => {
+    it(`${jobName}: clears stale pnpm store before restore`, () => {
       const clearIdx = jobDef.steps.findIndex(
-        (s) => s.name === 'Clear stale npm cache',
+        (s) => s.name === 'Clear stale pnpm store',
       );
       const restoreIdx = jobDef.steps.findIndex(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.ok(
         clearIdx !== -1,
-        `'Clear stale npm cache' step must exist in ${jobName}`,
+        `'Clear stale pnpm store' step must exist in ${jobName}`,
       );
       assert.ok(
         restoreIdx !== -1,
-        `'Restore npm cache' step must exist in ${jobName}`,
+        `'Restore pnpm store' step must exist in ${jobName}`,
       );
       assert.ok(
         clearIdx < restoreIdx,
@@ -831,7 +1620,7 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
         'clear step must rm -rf the cache directory',
       );
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       const dir = cacheStep.with.path.replace(
         /^\$\{\{\s*runner\.temp\s*\}\}\//,
@@ -845,34 +1634,34 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
 
     it(`${jobName}: reports the cache hit so a permanent miss is visible`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.equal(
         cacheStep.id,
-        'npm-cache',
+        'pnpm-store',
         'restore step needs an id so its cache-hit output is readable',
       );
       const reportStep = jobDef.steps.find(
-        (s) => s.name === 'Report npm cache hit',
+        (s) => s.name === 'Report pnpm store hit',
       );
-      assert.ok(reportStep, "'Report npm cache hit' step must exist");
+      assert.ok(reportStep, "'Report pnpm store hit' step must exist");
       assert.match(
         reportStep.run,
-        /steps\.npm-cache\.outputs\.cache-hit/,
+        /steps\.pnpm-store\.outputs\.cache-hit/,
         'report step must surface the cache-hit output',
       );
     });
   }
 });
 
-describe('qwen-triage: npm cache producer workflow', () => {
+describe('qwen-triage: pnpm store producer workflow', () => {
   const saveJob = cacheProducerDoc.jobs.save;
 
   it('triggers on push to main only', () => {
     const push = cacheProducerDoc.on.push ?? cacheProducerDoc[true]?.push;
     assert.ok(push, 'must have a push trigger');
     assert.deepEqual(push.branches, ['main']);
-    assert.deepEqual(push.paths, ['package-lock.json']);
+    assert.deepEqual(push.paths, ['pnpm-lock.yaml']);
   });
 
   it('saves with the same key and path the triage lanes restore', () => {
@@ -885,7 +1674,7 @@ describe('qwen-triage: npm cache producer workflow', () => {
       ['tmux-testing', tmuxJob],
     ]) {
       const restoreStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.equal(
         saveStep.with.path,
@@ -911,12 +1700,12 @@ describe('qwen-triage: npm cache producer workflow', () => {
     );
     assert.ok(dir, 'save path must resolve to a directory name');
     const populateStep = saveJob.steps.find(
-      (s) => s.name === 'Populate npm cache',
+      (s) => s.name === 'Populate pnpm store',
     );
-    assert.ok(populateStep, "'Populate npm cache' step must exist");
+    assert.ok(populateStep, "'Populate pnpm store' step must exist");
     assert.ok(
-      populateStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
-      `populate step must fill the saved cache directory (--cache "$RUNNER_TEMP/${dir}")`,
+      populateStep.run.includes(`--store-dir "$RUNNER_TEMP/${dir}"`),
+      `populate step must fill the saved store directory (--store-dir "$RUNNER_TEMP/${dir}")`,
     );
   });
 
@@ -1069,13 +1858,24 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
       'the scrubbed child must copy the parent-recorded diff, never re-run git under env -i',
     );
-    const recordDiffAt = recordStep.run.search(/^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m);
+    const recordDiffAt = recordStep.run.search(
+      /^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m,
+    );
     const recordReExecAt = recordStep.run.search(/exec \/usr\/bin\/env -i/);
-    const recordCpAt = recordStep.run.search(/^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m);
-    const recordInstallAt = recordStep.run.search(/^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m);
+    const recordCpAt = recordStep.run.search(
+      /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
+    );
+    const recordInstallAt = recordStep.run.search(
+      /^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m,
+    );
     assert.ok(
-      recordDiffAt !== -1 && recordReExecAt !== -1 && recordCpAt !== -1 && recordInstallAt !== -1 &&
-        recordDiffAt < recordReExecAt && recordReExecAt < recordInstallAt && recordInstallAt < recordCpAt,
+      recordDiffAt !== -1 &&
+        recordReExecAt !== -1 &&
+        recordCpAt !== -1 &&
+        recordInstallAt !== -1 &&
+        recordDiffAt < recordReExecAt &&
+        recordReExecAt < recordInstallAt &&
+        recordInstallAt < recordCpAt,
       'the diff must be recorded in the parent arm before the env -i re-exec, and copied into the recreated root-only home',
     );
     // The scrubbed child must never re-run git under env -i: the ordering
@@ -1083,7 +1883,10 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // second git in the child. Strip comments first (the child's own docs
     // name `git diff` when describing what NOT to do) before asserting.
     assert.doesNotMatch(
-      recordStep.run.slice(recordReExecAt).replace(/^\s*#.*$/gm, '').replace(/\\\n/g, ' '),
+      recordStep.run
+        .slice(recordReExecAt)
+        .replace(/^\s*#.*$/gm, '')
+        .replace(/\\\n/g, ' '),
       /\bgit\b[^\n]*\b(diff|log|show|whatchanged)\b/,
       'the scrubbed child must never re-run git under env -i — that is the failure shape of run 32227155960',
     );
@@ -2307,11 +3110,12 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // agent 120m + install/build 15m + gate ~40m (the 15m round budget is
     // checked BEFORE each reset, so the last invocation drags its reset
     // plus its -k 30 600 cap; add the OID pin and the post-gate reset)
-    // + misc ~5m ≈ 180m — the job limit must stay comfortably above the
-    // sum or the container is killed mid-run and the ship-what-ran path
-    // is bypassed (see the budget comment).
+    // + misc ~5m + java toolchain/repo/modules ≤ ~20m (Java diffs only,
+    // each download and mvn install capped) ≈ 200m — the job limit must
+    // stay comfortably above the sum or the container is killed mid-run
+    // and the ship-what-ran path is bypassed (see the budget comment).
     assert.ok(
-      verifyJob['timeout-minutes'] >= 190,
+      verifyJob['timeout-minutes'] >= 210,
       `timeout-minutes must cover the gate budget (got ${verifyJob['timeout-minutes']})`,
     );
   });
@@ -3487,12 +4291,19 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
           timeout: 30_000,
         },
       );
-      assert.equal(res.status, 0, `the gate refusal is fail-open: ${res.stderr}`);
+      assert.equal(
+        res.status,
+        0,
+        `the gate refusal is fail-open: ${res.stderr}`,
+      );
       const outputs = Object.fromEntries(
         readFileSync(out, 'utf8')
           .split('\n')
           .filter((l) => l.includes('='))
-          .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+          .map((l) => [
+            l.slice(0, l.indexOf('=')),
+            l.slice(l.indexOf('=') + 1),
+          ]),
       );
       assert.equal(outputs.flake_verdict, 'error');
       assert.match(
@@ -3859,7 +4670,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       undefined,
       'no verdict may be written on a poisoned startup',
     );
-    assert.equal(counts('a.test.js'), 0, 'no round may run on a poisoned startup');
+    assert.equal(
+      counts('a.test.js'),
+      0,
+      'no round may run on a poisoned startup',
+    );
   });
 
   it('a BASH_FUNC_exec%% import cannot skip the env -i re-exec — bash refuses it at startup', () => {
@@ -3887,7 +4702,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       undefined,
       'no verdict may be written on a poisoned startup',
     );
-    assert.equal(counts('a.test.js'), 0, 'the body must never run on a poisoned startup');
+    assert.equal(
+      counts('a.test.js'),
+      0,
+      'the body must never run on a poisoned startup',
+    );
   });
 
   it('a same-stem sibling (X.test.tsx next to changed X.test.ts) runs in ONE merged group, never attributed separately', () => {

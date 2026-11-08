@@ -100,81 +100,140 @@ describe('extensionSettings', () => {
     vi.restoreAllMocks();
   });
 
+  const ID = '12345';
+  const USER_SERVICE = 'Qwen Code Extensions test-ext 12345';
+  const userKeychain = () => new KeychainTokenStorage(USER_SERVICE);
+  const workspaceKeychain = () =>
+    new KeychainTokenStorage(`${USER_SERVICE} ${tempWorkspaceDir}`);
+  /** Setting `n`: `{ name: 'sN', description: 'dN', envVar: 'VARN' }`, with `extra` keys overriding or added. */
+  const setting = (
+    n: number,
+    extra: Partial<ExtensionSetting> = {},
+  ): ExtensionSetting => ({
+    name: `s${n}`,
+    description: `d${n}`,
+    envVar: `VAR${n}`,
+    ...extra,
+  });
+  /** The `test-ext` config; `settings` is omitted entirely when not given. */
+  const extConfig = (
+    settings?: ExtensionSetting[],
+    version = '1.0.0',
+  ): ExtensionConfig => ({
+    name: 'test-ext',
+    version,
+    ...(settings ? { settings } : {}),
+  });
+  const userContents = (config: ExtensionConfig) =>
+    getScopedEnvContents(config, ID, ExtensionSettingScope.USER);
+  /** Prepare settings into `envFile` with keychain mutations deferred until commit. */
+  const stage = (
+    config: ExtensionConfig,
+    request: (setting: ExtensionSetting) => Promise<string>,
+    envFile: string,
+  ) =>
+    maybePromptForSettings(
+      config,
+      ID,
+      request,
+      undefined,
+      undefined,
+      envFile,
+      true,
+    );
+  const userEnvPath = () => path.join(extensionDir, '.env');
+  const readText = (file: string) => fsPromises.readFile(file, 'utf-8');
+  /** Make `envPath` a symlink to a home-dir file `targetName` holding `content`; returns the target. */
+  async function linkEnv(envPath: string, targetName: string, content: string) {
+    const target = path.join(tempHomeDir, targetName);
+    await fsPromises.writeFile(target, content);
+    await fsPromises.symlink(target, envPath);
+    return target;
+  }
+  /** The write replaced the `envPath` symlink with a file and left its old target alone. */
+  async function expectLinkReplaced(
+    envPath: string,
+    target: string,
+    content: string,
+  ) {
+    expect(fs.lstatSync(envPath).isSymbolicLink()).toBe(false);
+    expect(await readText(target)).toBe(content);
+  }
+
   describe('maybePromptForSettings', () => {
     const mockRequestSetting = vi.fn(
       async (setting: ExtensionSetting) => `mock-${setting.envVar}`,
     );
+    const apiKey: ExtensionSetting = {
+      name: 'API key',
+      description: 'API key',
+      envVar: 'API_KEY',
+      sensitive: true,
+    };
+    const apiKeyConfig = extConfig([apiKey]);
+    /** Prompt with mockRequestSetting (no env-file override, keychain mutated immediately). */
+    const promptWith = (
+      config: ExtensionConfig,
+      previousConfig?: ExtensionConfig,
+      previousSettings?: Record<string, string>,
+    ) =>
+      maybePromptForSettings(
+        config,
+        ID,
+        mockRequestSetting,
+        previousConfig,
+        previousSettings,
+      );
+    /** Stage the API key config into a fresh workspace subdirectory `name`; returns the dir and the prepared mutation. */
+    async function stageIn(name: string, request: () => Promise<string>) {
+      const dir = path.join(tempWorkspaceDir, name);
+      fs.mkdirSync(dir);
+      return {
+        dir,
+        prepared: await stage(apiKeyConfig, request, path.join(dir, '.env')),
+      };
+    }
+    const bundleKeyIn = (dir: string) =>
+      (
+        JSON.parse(
+          fs.readFileSync(
+            path.join(dir, '.qwen-extension-settings.json'),
+            'utf8',
+          ),
+        ) as { bundleKey: string }
+      ).bundleKey;
 
     beforeEach(() => {
       mockRequestSetting.mockClear();
     });
 
     it('should do nothing if settings are undefined', async () => {
-      const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
-      await maybePromptForSettings(
-        config,
-        '12345',
-        mockRequestSetting,
-        undefined,
-        undefined,
-      );
+      await promptWith(extConfig());
       expect(mockRequestSetting).not.toHaveBeenCalled();
     });
 
     it('should do nothing if settings are empty', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [],
-      };
-      await maybePromptForSettings(
-        config,
-        '12345',
-        mockRequestSetting,
-        undefined,
-        undefined,
-      );
+      await promptWith(extConfig([]));
       expect(mockRequestSetting).not.toHaveBeenCalled();
     });
 
     it('defers adding sensitive settings until commit', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'API key',
-            description: 'API key',
-            envVar: 'API_KEY',
-            sensitive: true,
-          },
-        ],
-      };
-      const keychain = new KeychainTokenStorage(
-        'Qwen Code Extensions test-ext 12345',
-      );
+      const config = apiKeyConfig;
+      const keychain = userKeychain();
 
-      const commit = await maybePromptForSettings(
+      const commit = await stage(
         config,
-        '12345',
         mockRequestSetting,
-        undefined,
-        undefined,
         path.join(tempWorkspaceDir, 'staged.env'),
-        true,
       );
 
       expect(await keychain.getSecret('API_KEY')).toBeNull();
-      expect(
-        await getScopedEnvContents(config, '12345', ExtensionSettingScope.USER),
-      ).toEqual({});
+      expect(await userContents(config)).toEqual({});
       fs.renameSync(
         path.join(tempWorkspaceDir, '.qwen-extension-settings.json'),
         path.join(extensionDir, '.qwen-extension-settings.json'),
       );
-      expect(
-        await getScopedEnvContents(config, '12345', ExtensionSettingScope.USER),
-      ).toEqual({ API_KEY: 'mock-API_KEY' });
+      expect(await userContents(config)).toEqual({ API_KEY: 'mock-API_KEY' });
       await commit?.commit();
       expect(await keychain.getSecret('API_KEY')).toBe('mock-API_KEY');
       await keychain.setSecret('API_KEY', 'rotated');
@@ -183,150 +242,54 @@ describe('extensionSettings', () => {
     });
 
     it('isolates concurrent prepared sensitive settings snapshots', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'API key',
-            description: 'API key',
-            envVar: 'API_KEY',
-            sensitive: true,
-          },
-        ],
-      };
-      const firstDir = path.join(tempWorkspaceDir, 'first');
-      const secondDir = path.join(tempWorkspaceDir, 'second');
-      fs.mkdirSync(firstDir);
-      fs.mkdirSync(secondDir);
+      const first = await stageIn('first', async () => 'first-secret');
+      const second = await stageIn('second', async () => 'second-secret');
 
-      await maybePromptForSettings(
-        config,
-        '12345',
-        async () => 'first-secret',
-        undefined,
-        undefined,
-        path.join(firstDir, '.env'),
-        true,
-      );
-      await maybePromptForSettings(
-        config,
-        '12345',
-        async () => 'second-secret',
-        undefined,
-        undefined,
-        path.join(secondDir, '.env'),
-        true,
-      );
-
-      const firstSelector = JSON.parse(
-        fs.readFileSync(
-          path.join(firstDir, '.qwen-extension-settings.json'),
-          'utf8',
-        ),
-      ) as { bundleKey: string };
-      const secondSelector = JSON.parse(
-        fs.readFileSync(
-          path.join(secondDir, '.qwen-extension-settings.json'),
-          'utf8',
-        ),
-      ) as { bundleKey: string };
-      expect(firstSelector.bundleKey).not.toBe(secondSelector.bundleKey);
-      const storage = mockKeychainData['Qwen Code Extensions test-ext 12345'];
-      expect(JSON.parse(storage![firstSelector.bundleKey]!)).toEqual({
+      const firstKey = bundleKeyIn(first.dir);
+      const secondKey = bundleKeyIn(second.dir);
+      expect(firstKey).not.toBe(secondKey);
+      const storage = mockKeychainData[USER_SERVICE];
+      expect(JSON.parse(storage![firstKey]!)).toEqual({
         API_KEY: 'first-secret',
       });
-      expect(JSON.parse(storage![secondSelector.bundleKey]!)).toEqual({
+      expect(JSON.parse(storage![secondKey]!)).toEqual({
         API_KEY: 'second-secret',
       });
     });
 
     it('discards an uncommitted sensitive settings snapshot', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'API key',
-            description: 'API key',
-            envVar: 'API_KEY',
-            sensitive: true,
-          },
-        ],
-      };
-      const stagingDir = path.join(tempWorkspaceDir, 'discard');
-      fs.mkdirSync(stagingDir);
-      const prepared = await maybePromptForSettings(
-        config,
-        '12345',
+      const { dir, prepared } = await stageIn(
+        'discard',
         async () => 'temporary-secret',
-        undefined,
-        undefined,
-        path.join(stagingDir, '.env'),
-        true,
       );
-      const selector = JSON.parse(
-        fs.readFileSync(
-          path.join(stagingDir, '.qwen-extension-settings.json'),
-          'utf8',
-        ),
-      ) as { bundleKey: string };
-      const storage = mockKeychainData['Qwen Code Extensions test-ext 12345']!;
-      expect(storage[selector.bundleKey]).toBeDefined();
+      const bundleKey = bundleKeyIn(dir);
+      const storage = mockKeychainData[USER_SERVICE]!;
+      expect(storage[bundleKey]).toBeDefined();
 
       await prepared?.discard();
 
-      expect(storage[selector.bundleKey]).toBeUndefined();
+      expect(storage[bundleKey]).toBeUndefined();
     });
 
     it('deletes the previous sensitive settings snapshot after commit', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'API key',
-            description: 'API key',
-            envVar: 'API_KEY',
-            sensitive: true,
-          },
-        ],
-      };
-      await maybePromptForSettings(
-        config,
-        '12345',
-        async () => 'old-secret',
-        undefined,
-        undefined,
-        path.join(extensionDir, '.env'),
-        true,
-      );
-      const oldSelector = JSON.parse(
-        fs.readFileSync(
-          path.join(extensionDir, '.qwen-extension-settings.json'),
-          'utf8',
-        ),
-      ) as { bundleKey: string };
-      const storage = mockKeychainData['Qwen Code Extensions test-ext 12345']!;
-      storage[`${oldSelector.bundleKey}:override:API_KEY`] = 'old-override';
+      const config = apiKeyConfig;
+      await stage(config, async () => 'old-secret', userEnvPath());
+      const oldKey = bundleKeyIn(extensionDir);
+      const storage = mockKeychainData[USER_SERVICE]!;
+      storage[`${oldKey}:override:API_KEY`] = 'old-override';
 
       const stagingDir = path.join(tempWorkspaceDir, 'replacement');
       fs.mkdirSync(stagingDir);
       const prepared = await maybePromptForSettings(
         { ...config, version: '2.0.0' },
-        '12345',
+        ID,
         async () => 'new-secret',
         config,
         { API_KEY: 'old-secret' },
         path.join(stagingDir, '.env'),
         true,
       );
-      const newSelector = JSON.parse(
-        fs.readFileSync(
-          path.join(stagingDir, '.qwen-extension-settings.json'),
-          'utf8',
-        ),
-      ) as { bundleKey: string };
+      const newKey = bundleKeyIn(stagingDir);
       fs.copyFileSync(
         path.join(stagingDir, '.qwen-extension-settings.json'),
         path.join(extensionDir, '.qwen-extension-settings.json'),
@@ -334,78 +297,36 @@ describe('extensionSettings', () => {
 
       await prepared?.commit();
 
-      expect(storage[oldSelector.bundleKey]).toBeUndefined();
-      expect(
-        storage[`${oldSelector.bundleKey}:override:API_KEY`],
-      ).toBeUndefined();
-      expect(JSON.parse(storage[newSelector.bundleKey]!)).toEqual({
+      expect(storage[oldKey]).toBeUndefined();
+      expect(storage[`${oldKey}:override:API_KEY`]).toBeUndefined();
+      expect(JSON.parse(storage[newKey]!)).toEqual({ API_KEY: 'old-secret' });
+      await expect(userContents(config)).resolves.toEqual({
         API_KEY: 'old-secret',
       });
-      await expect(
-        getScopedEnvContents(config, '12345', ExtensionSettingScope.USER),
-      ).resolves.toEqual({ API_KEY: 'old-secret' });
     });
 
     it('does not fall back to stale legacy secrets when a selected bundle is missing', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'API key',
-            description: 'API key',
-            envVar: 'API_KEY',
-            sensitive: true,
-          },
-        ],
-      };
-      await maybePromptForSettings(
-        config,
-        '12345',
-        async () => 'new-secret',
-        undefined,
-        undefined,
-        path.join(extensionDir, '.env'),
-        true,
-      );
-      const selector = JSON.parse(
-        fs.readFileSync(
-          path.join(extensionDir, '.qwen-extension-settings.json'),
-          'utf8',
-        ),
-      ) as { bundleKey: string };
-      const storage = mockKeychainData['Qwen Code Extensions test-ext 12345']!;
+      const config = apiKeyConfig;
+      await stage(config, async () => 'new-secret', userEnvPath());
+      const bundleKey = bundleKeyIn(extensionDir);
+      const storage = mockKeychainData[USER_SERVICE]!;
       storage['API_KEY'] = 'stale-secret';
-      delete storage[selector.bundleKey];
+      delete storage[bundleKey];
 
-      await expect(
-        getScopedEnvContents(config, '12345', ExtensionSettingScope.USER),
-      ).rejects.toThrow('Stored extension settings bundle is missing.');
+      await expect(userContents(config)).rejects.toThrow(
+        'Stored extension settings bundle is missing.',
+      );
     });
 
     it('defers clearing sensitive settings until commit', async () => {
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'API key',
-            description: 'API key',
-            envVar: 'API_KEY',
-            sensitive: true,
-          },
-        ],
-      };
-      const keychain = new KeychainTokenStorage(
-        'Qwen Code Extensions test-ext 12345',
-      );
+      const keychain = userKeychain();
       await keychain.setSecret('API_KEY', 'old-secret');
 
       const commit = await maybePromptForSettings(
-        { name: 'test-ext', version: '2.0.0', settings: [] },
-        '12345',
+        extConfig([], '2.0.0'),
+        ID,
         mockRequestSetting,
-        previousConfig,
+        apiKeyConfig,
         { API_KEY: 'old-secret' },
         path.join(tempWorkspaceDir, 'staged.env'),
         true,
@@ -417,350 +338,166 @@ describe('extensionSettings', () => {
     });
 
     it('rejects invalid environment variable names before prompting', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'API key',
-            description: 'API key',
-            envVar: 'API_KEY\nforged',
-          },
-        ],
-      };
+      const config = extConfig([
+        { name: 'API key', description: 'API key', envVar: 'API_KEY\nforged' },
+      ]);
 
-      await expect(
-        maybePromptForSettings(
-          config,
-          '12345',
-          mockRequestSetting,
-          undefined,
-          undefined,
-        ),
-      ).rejects.toThrow(
+      await expect(promptWith(config)).rejects.toThrow(
         'Extension setting "envVar" must be a valid environment variable name.',
       );
       expect(mockRequestSetting).not.toHaveBeenCalled();
     });
 
     it('rejects invalid previous environment variable names before mutation', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '2.0.0',
-        settings: [
+      const config = extConfig(
+        [
           {
             name: 'Current key',
             description: 'Current key',
             envVar: 'API_KEY',
           },
         ],
-      };
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 'Previous key',
-            description: 'Previous key',
-            envVar: 'OLD_KEY\nforged',
-          },
-        ],
-      };
+        '2.0.0',
+      );
+      const previousConfig = extConfig([
+        {
+          name: 'Previous key',
+          description: 'Previous key',
+          envVar: 'OLD_KEY\nforged',
+        },
+      ]);
 
       await expect(
-        maybePromptForSettings(
-          config,
-          '12345',
-          mockRequestSetting,
-          previousConfig,
-          { OLD_KEY: 'previous' },
-        ),
+        promptWith(config, previousConfig, { OLD_KEY: 'previous' }),
       ).rejects.toThrow(
         'Extension setting "envVar" must be a valid environment variable name.',
       );
       expect(mockRequestSetting).not.toHaveBeenCalled();
       expect(KeychainTokenStorage).not.toHaveBeenCalled();
-      expect(fs.existsSync(path.join(extensionDir, '.env'))).toBe(false);
+      expect(fs.existsSync(userEnvPath())).toBe(false);
     });
 
     it('should prompt for all settings if there is no previous config', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1' },
-          { name: 's2', description: 'd2', envVar: 'VAR2' },
-        ],
-      };
-      await maybePromptForSettings(
-        config,
-        '12345',
-        mockRequestSetting,
-        undefined,
-        undefined,
-      );
+      const config = extConfig([setting(1), setting(2)]);
+      await promptWith(config);
       expect(mockRequestSetting).toHaveBeenCalledTimes(2);
       expect(mockRequestSetting).toHaveBeenCalledWith(config.settings![0]);
       expect(mockRequestSetting).toHaveBeenCalledWith(config.settings![1]);
     });
 
     it('should only prompt for new settings', async () => {
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [{ name: 's1', description: 'd1', envVar: 'VAR1' }],
-      };
-      const newConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1' },
-          { name: 's2', description: 'd2', envVar: 'VAR2' },
-        ],
-      };
-      const previousSettings = { VAR1: 'previous-VAR1' };
-      const expectedEnvPath = path.join(extensionDir, '.env');
-      const symlinkTarget = path.join(tempHomeDir, 'prompt-target.env');
-      await fsPromises.writeFile(symlinkTarget, 'ORIGINAL');
-      await fsPromises.symlink(symlinkTarget, expectedEnvPath);
-
-      await maybePromptForSettings(
-        newConfig,
-        '12345',
-        mockRequestSetting,
-        previousConfig,
-        previousSettings,
+      const newConfig = extConfig([setting(1), setting(2)]);
+      const expectedEnvPath = userEnvPath();
+      const symlinkTarget = await linkEnv(
+        expectedEnvPath,
+        'prompt-target.env',
+        'ORIGINAL',
       );
+
+      await promptWith(newConfig, extConfig([setting(1)]), {
+        VAR1: 'previous-VAR1',
+      });
 
       expect(mockRequestSetting).toHaveBeenCalledTimes(1);
       expect(mockRequestSetting).toHaveBeenCalledWith(newConfig.settings![1]);
-
-      const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
-      const expectedContent = 'VAR1=previous-VAR1\nVAR2=mock-VAR2\n';
-      expect(actualContent).toBe(expectedContent);
-      expect(fs.lstatSync(expectedEnvPath).isSymbolicLink()).toBe(false);
-      expect(await fsPromises.readFile(symlinkTarget, 'utf-8')).toBe(
-        'ORIGINAL',
+      expect(await readText(expectedEnvPath)).toBe(
+        'VAR1=previous-VAR1\nVAR2=mock-VAR2\n',
       );
+      await expectLinkReplaced(expectedEnvPath, symlinkTarget, 'ORIGINAL');
     });
 
     it('should clear settings if new config has no settings', async () => {
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1' },
-          {
-            name: 's2',
-            description: 'd2',
-            envVar: 'SENSITIVE_VAR',
-            sensitive: true,
-          },
-        ],
-      };
-      const newConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [],
-      };
-      const previousSettings = {
-        VAR1: 'previous-VAR1',
-        SENSITIVE_VAR: 'secret',
-      };
-      const userKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext 12345`,
-      );
-      await userKeychain.setSecret('SENSITIVE_VAR', 'secret');
-      const envPath = path.join(extensionDir, '.env');
-      const symlinkTarget = path.join(tempHomeDir, 'clear-target.env');
-      await fsPromises.writeFile(symlinkTarget, 'VAR1=previous-VAR1');
-      await fsPromises.symlink(symlinkTarget, envPath);
-
-      await maybePromptForSettings(
-        newConfig,
-        '12345',
-        mockRequestSetting,
-        previousConfig,
-        previousSettings,
-      );
-
-      expect(mockRequestSetting).not.toHaveBeenCalled();
-      const actualContent = await fsPromises.readFile(envPath, 'utf-8');
-      expect(actualContent).toBe('');
-      expect(fs.lstatSync(envPath).isSymbolicLink()).toBe(false);
-      expect(await fsPromises.readFile(symlinkTarget, 'utf-8')).toBe(
+      const previousConfig = extConfig([
+        setting(1),
+        setting(2, { envVar: 'SENSITIVE_VAR', sensitive: true }),
+      ]);
+      const keychain = userKeychain();
+      await keychain.setSecret('SENSITIVE_VAR', 'secret');
+      const envPath = userEnvPath();
+      const symlinkTarget = await linkEnv(
+        envPath,
+        'clear-target.env',
         'VAR1=previous-VAR1',
       );
-      expect(await userKeychain.getSecret('SENSITIVE_VAR')).toBeNull();
+
+      await promptWith(extConfig([]), previousConfig, {
+        VAR1: 'previous-VAR1',
+        SENSITIVE_VAR: 'secret',
+      });
+
+      expect(mockRequestSetting).not.toHaveBeenCalled();
+      expect(await readText(envPath)).toBe('');
+      await expectLinkReplaced(envPath, symlinkTarget, 'VAR1=previous-VAR1');
+      expect(await keychain.getSecret('SENSITIVE_VAR')).toBeNull();
     });
 
     it('should remove sensitive settings from keychain', async () => {
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          {
-            name: 's1',
-            description: 'd1',
-            envVar: 'SENSITIVE_VAR',
-            sensitive: true,
-          },
-        ],
-      };
-      const newConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [],
-      };
-      const previousSettings = { SENSITIVE_VAR: 'secret' };
-      const userKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext 12345`,
-      );
-      await userKeychain.setSecret('SENSITIVE_VAR', 'secret');
+      const keychain = userKeychain();
+      await keychain.setSecret('SENSITIVE_VAR', 'secret');
 
-      await maybePromptForSettings(
-        newConfig,
-        '12345',
-        mockRequestSetting,
-        previousConfig,
-        previousSettings,
+      await promptWith(
+        extConfig([]),
+        extConfig([setting(1, { envVar: 'SENSITIVE_VAR', sensitive: true })]),
+        { SENSITIVE_VAR: 'secret' },
       );
 
-      expect(await userKeychain.getSecret('SENSITIVE_VAR')).toBeNull();
+      expect(await keychain.getSecret('SENSITIVE_VAR')).toBeNull();
     });
 
     it('should remove settings that are no longer in the config', async () => {
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1' },
-          { name: 's2', description: 'd2', envVar: 'VAR2' },
-        ],
-      };
-      const newConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [{ name: 's1', description: 'd1', envVar: 'VAR1' }],
-      };
-      const previousSettings = {
-        VAR1: 'previous-VAR1',
-        VAR2: 'previous-VAR2',
-      };
-
-      await maybePromptForSettings(
-        newConfig,
-        '12345',
-        mockRequestSetting,
-        previousConfig,
-        previousSettings,
+      await promptWith(
+        extConfig([setting(1)]),
+        extConfig([setting(1), setting(2)]),
+        { VAR1: 'previous-VAR1', VAR2: 'previous-VAR2' },
       );
 
       expect(mockRequestSetting).not.toHaveBeenCalled();
-
-      const expectedEnvPath = path.join(extensionDir, '.env');
-      const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
-      const expectedContent = 'VAR1=previous-VAR1\n';
-      expect(actualContent).toBe(expectedContent);
+      expect(await readText(userEnvPath())).toBe('VAR1=previous-VAR1\n');
     });
 
     it('should reprompt if a setting changes sensitivity', async () => {
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1', sensitive: false },
-        ],
-      };
-      const newConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1', sensitive: true },
-        ],
-      };
-      const previousSettings = { VAR1: 'previous-VAR1' };
+      const newConfig = extConfig([setting(1, { sensitive: true })]);
 
-      await maybePromptForSettings(
+      await promptWith(
         newConfig,
-        '12345',
-        mockRequestSetting,
-        previousConfig,
-        previousSettings,
+        extConfig([setting(1, { sensitive: false })]),
+        {
+          VAR1: 'previous-VAR1',
+        },
       );
 
       expect(mockRequestSetting).toHaveBeenCalledTimes(1);
       expect(mockRequestSetting).toHaveBeenCalledWith(newConfig.settings![0]);
-
       // The value should now be in keychain, not the .env file.
-      const expectedEnvPath = path.join(extensionDir, '.env');
-      const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
-      expect(actualContent).toBe('');
+      expect(await readText(userEnvPath())).toBe('');
     });
 
     it('should not prompt if settings are identical', async () => {
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1' },
-          { name: 's2', description: 'd2', envVar: 'VAR2' },
-        ],
-      };
-      const newConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's1', description: 'd1', envVar: 'VAR1' },
-          { name: 's2', description: 'd2', envVar: 'VAR2' },
-        ],
-      };
-      const previousSettings = {
-        VAR1: 'previous-VAR1',
-        VAR2: 'previous-VAR2',
-      };
-
-      await maybePromptForSettings(
-        newConfig,
-        '12345',
-        mockRequestSetting,
-        previousConfig,
-        previousSettings,
+      await promptWith(
+        extConfig([setting(1), setting(2)]),
+        extConfig([setting(1), setting(2)]),
+        { VAR1: 'previous-VAR1', VAR2: 'previous-VAR2' },
       );
 
       expect(mockRequestSetting).not.toHaveBeenCalled();
-      const expectedEnvPath = path.join(extensionDir, '.env');
-      const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
-      const expectedContent = 'VAR1=previous-VAR1\nVAR2=previous-VAR2\n';
-      expect(actualContent).toBe(expectedContent);
+      expect(await readText(userEnvPath())).toBe(
+        'VAR1=previous-VAR1\nVAR2=previous-VAR2\n',
+      );
     });
 
     it('should wrap values with spaces in quotes', async () => {
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [{ name: 's1', description: 'd1', envVar: 'VAR1' }],
-      };
       mockRequestSetting.mockResolvedValue('a value with spaces');
 
-      await maybePromptForSettings(
-        config,
-        '12345',
-        mockRequestSetting,
-        undefined,
-        undefined,
-      );
+      await promptWith(extConfig([setting(1)]));
 
-      const expectedEnvPath = path.join(extensionDir, '.env');
-      const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
-      expect(actualContent).toBe('VAR1="a value with spaces"\n');
+      expect(await readText(userEnvPath())).toBe(
+        'VAR1="a value with spaces"\n',
+      );
     });
 
     it('should not attempt to clear secrets if keychain is unavailable', async () => {
-      // Arrange
       const mockIsAvailable = vi.fn().mockResolvedValue(false);
       const mockListSecrets = vi.fn();
-
       vi.mocked(KeychainTokenStorage).mockImplementation(
         () =>
           ({
@@ -772,28 +509,9 @@ describe('extensionSettings', () => {
           }) as unknown as KeychainTokenStorage,
       );
 
-      const config: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [], // Empty settings triggers clearSettings
-      };
+      // Empty settings trigger clearSettings.
+      await promptWith(extConfig([]), extConfig([setting(1)]));
 
-      const previousConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [{ name: 's1', description: 'd1', envVar: 'VAR1' }],
-      };
-
-      // Act
-      await maybePromptForSettings(
-        config,
-        '12345',
-        mockRequestSetting,
-        previousConfig,
-        undefined,
-      );
-
-      // Assert
       expect(mockIsAvailable).toHaveBeenCalled();
       expect(mockListSecrets).not.toHaveBeenCalled();
     });
@@ -860,34 +578,19 @@ describe('extensionSettings', () => {
   });
 
   describe('getScopedEnvContents', () => {
-    const config: ExtensionConfig = {
-      name: 'test-ext',
-      version: '1.0.0',
-      settings: [
-        { name: 's1', description: 'd1', envVar: 'VAR1' },
-        {
-          name: 's2',
-          description: 'd2',
-          envVar: 'SENSITIVE_VAR',
-          sensitive: true,
-        },
-      ],
-    };
-    const extensionId = '12345';
+    const config = extConfig([
+      setting(1),
+      setting(2, { envVar: 'SENSITIVE_VAR', sensitive: true }),
+    ]);
 
     it('should return combined contents from user .env and keychain for USER scope', async () => {
-      const userEnvPath = path.join(extensionDir, EXTENSION_SETTINGS_FILENAME);
-      await fsPromises.writeFile(userEnvPath, 'VAR1=user-value1');
-      const userKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext 12345`,
+      await fsPromises.writeFile(
+        path.join(extensionDir, EXTENSION_SETTINGS_FILENAME),
+        'VAR1=user-value1',
       );
-      await userKeychain.setSecret('SENSITIVE_VAR', 'user-secret');
+      await userKeychain().setSecret('SENSITIVE_VAR', 'user-secret');
 
-      const contents = await getScopedEnvContents(
-        config,
-        extensionId,
-        ExtensionSettingScope.USER,
-      );
+      const contents = await userContents(config);
 
       expect(contents).toEqual({
         VAR1: 'user-value1',
@@ -896,19 +599,15 @@ describe('extensionSettings', () => {
     });
 
     it('should return combined contents from workspace .env and keychain for WORKSPACE scope', async () => {
-      const workspaceEnvPath = path.join(
-        tempWorkspaceDir,
-        EXTENSION_SETTINGS_FILENAME,
+      await fsPromises.writeFile(
+        path.join(tempWorkspaceDir, EXTENSION_SETTINGS_FILENAME),
+        'VAR1=workspace-value1',
       );
-      await fsPromises.writeFile(workspaceEnvPath, 'VAR1=workspace-value1');
-      const workspaceKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext 12345 ${tempWorkspaceDir}`,
-      );
-      await workspaceKeychain.setSecret('SENSITIVE_VAR', 'workspace-secret');
+      await workspaceKeychain().setSecret('SENSITIVE_VAR', 'workspace-secret');
 
       const contents = await getScopedEnvContents(
         config,
-        extensionId,
+        ID,
         ExtensionSettingScope.WORKSPACE,
       );
 
@@ -920,41 +619,25 @@ describe('extensionSettings', () => {
   });
 
   describe('getEnvContents (merged)', () => {
-    const config: ExtensionConfig = {
-      name: 'test-ext',
-      version: '1.0.0',
-      settings: [
-        { name: 's1', description: 'd1', envVar: 'VAR1' },
-        { name: 's2', description: 'd2', envVar: 'VAR2', sensitive: true },
-        { name: 's3', description: 'd3', envVar: 'VAR3' },
-      ],
-    };
-    const extensionId = '12345';
+    const config = extConfig([
+      setting(1),
+      setting(2, { sensitive: true }),
+      setting(3),
+    ]);
 
     it('should merge user and workspace settings, with workspace taking precedence', async () => {
-      // User settings
-      const userEnvPath = path.join(extensionDir, EXTENSION_SETTINGS_FILENAME);
       await fsPromises.writeFile(
-        userEnvPath,
+        path.join(extensionDir, EXTENSION_SETTINGS_FILENAME),
         'VAR1=user-value1\nVAR3=user-value3',
       );
-      const userKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext ${extensionId}`,
+      await userKeychain().setSecret('VAR2', 'user-secret2');
+      await fsPromises.writeFile(
+        path.join(tempWorkspaceDir, EXTENSION_SETTINGS_FILENAME),
+        'VAR1=workspace-value1',
       );
-      await userKeychain.setSecret('VAR2', 'user-secret2');
+      await workspaceKeychain().setSecret('VAR2', 'workspace-secret2');
 
-      // Workspace settings
-      const workspaceEnvPath = path.join(
-        tempWorkspaceDir,
-        EXTENSION_SETTINGS_FILENAME,
-      );
-      await fsPromises.writeFile(workspaceEnvPath, 'VAR1=workspace-value1');
-      const workspaceKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext ${extensionId} ${tempWorkspaceDir}`,
-      );
-      await workspaceKeychain.setSecret('VAR2', 'workspace-secret2');
-
-      const contents = await getEnvContents(config, extensionId);
+      const contents = await getEnvContents(config, ID);
 
       expect(contents).toEqual({
         VAR1: 'workspace-value1',
@@ -965,81 +648,54 @@ describe('extensionSettings', () => {
   });
 
   describe('updateSetting', () => {
-    const config: ExtensionConfig = {
-      name: 'test-ext',
-      version: '1.0.0',
-      settings: [
-        { name: 's1', description: 'd1', envVar: 'VAR1' },
-        { name: 's2', description: 'd2', envVar: 'VAR2', sensitive: true },
-      ],
-    };
+    const config = extConfig([setting(1), setting(2, { sensitive: true })]);
     const mockRequestSetting = vi.fn();
+    /** updateSetting for `envVar`, answering with mockRequestSetting unless `request` is given. */
+    const update = (
+      envVar: string,
+      scope: ExtensionSettingScope,
+      request: () => Promise<string> = mockRequestSetting,
+      cfg = config,
+    ) => updateSetting(cfg, ID, envVar, request, scope);
 
     beforeEach(async () => {
-      const userEnvPath = path.join(extensionDir, '.env');
-      await fsPromises.writeFile(userEnvPath, 'VAR1=value1\n');
-      const userKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext 12345`,
-      );
-      await userKeychain.setSecret('VAR2', 'value2');
+      await fsPromises.writeFile(userEnvPath(), 'VAR1=value1\n');
+      await userKeychain().setSecret('VAR2', 'value2');
       mockRequestSetting.mockClear();
     });
 
     it('should update a non-sensitive setting in USER scope', async () => {
       mockRequestSetting.mockResolvedValue('new-value1');
-      const expectedEnvPath = path.join(extensionDir, '.env');
-      const symlinkTarget = path.join(tempHomeDir, 'update-target.env');
+      const expectedEnvPath = userEnvPath();
       await fsPromises.rm(expectedEnvPath);
-      await fsPromises.writeFile(symlinkTarget, 'VAR1=value1\n');
-      await fsPromises.symlink(symlinkTarget, expectedEnvPath);
-
-      await updateSetting(
-        config,
-        '12345',
-        'VAR1',
-        mockRequestSetting,
-        ExtensionSettingScope.USER,
-      );
-
-      const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
-      expect(actualContent).toContain('VAR1=new-value1');
-      expect(fs.lstatSync(expectedEnvPath).isSymbolicLink()).toBe(false);
-      expect(await fsPromises.readFile(symlinkTarget, 'utf-8')).toBe(
+      const symlinkTarget = await linkEnv(
+        expectedEnvPath,
+        'update-target.env',
         'VAR1=value1\n',
       );
+
+      await update('VAR1', ExtensionSettingScope.USER);
+
+      expect(await readText(expectedEnvPath)).toContain('VAR1=new-value1');
+      await expectLinkReplaced(expectedEnvPath, symlinkTarget, 'VAR1=value1\n');
     });
 
     it('should update a non-sensitive setting in WORKSPACE scope', async () => {
       mockRequestSetting.mockResolvedValue('new-workspace-value');
 
-      await updateSetting(
-        config,
-        '12345',
-        'VAR1',
-        mockRequestSetting,
-        ExtensionSettingScope.WORKSPACE,
-      );
+      await update('VAR1', ExtensionSettingScope.WORKSPACE);
 
-      const expectedEnvPath = path.join(tempWorkspaceDir, '.env');
-      const actualContent = await fsPromises.readFile(expectedEnvPath, 'utf-8');
-      expect(actualContent).toContain('VAR1=new-workspace-value');
+      expect(await readText(path.join(tempWorkspaceDir, '.env'))).toContain(
+        'VAR1=new-workspace-value',
+      );
     });
 
     it('should update a sensitive setting in USER scope', async () => {
       mockRequestSetting.mockResolvedValue('new-value2');
 
-      await updateSetting(
-        config,
-        '12345',
-        'VAR2',
-        mockRequestSetting,
-        ExtensionSettingScope.USER,
-      );
+      await update('VAR2', ExtensionSettingScope.USER);
 
-      const userKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext 12345`,
-      );
-      expect(await userKeychain.getSecret('VAR2')).toBe('new-value2');
+      expect(await userKeychain().getSecret('VAR2')).toBe('new-value2');
     });
 
     it('synchronizes legacy sensitive settings through the current backend', async () => {
@@ -1049,11 +705,11 @@ describe('extensionSettings', () => {
       try {
         await maybePromptForSettings(
           config,
-          '12345',
+          ID,
           async () => 'initial-value2',
           undefined,
           undefined,
-          path.join(extensionDir, '.env'),
+          userEnvPath(),
         );
       } finally {
         if (previousStorageOverride === undefined) {
@@ -1063,20 +719,16 @@ describe('extensionSettings', () => {
         }
       }
 
-      await updateSetting(
-        config,
-        '12345',
+      await update(
         'VAR2',
-        async () => 'new-value2',
         ExtensionSettingScope.USER,
+        async () => 'new-value2',
       );
 
       await fsPromises.rm(
         path.join(extensionDir, '.qwen-extension-settings.json'),
       );
-      await expect(
-        getScopedEnvContents(config, '12345', ExtensionSettingScope.USER),
-      ).resolves.toEqual({
+      await expect(userContents(config)).resolves.toEqual({
         VAR1: 'initial-value2',
         VAR2: 'new-value2',
       });
@@ -1085,18 +737,9 @@ describe('extensionSettings', () => {
     it('should update a sensitive setting in WORKSPACE scope', async () => {
       mockRequestSetting.mockResolvedValue('new-workspace-secret');
 
-      await updateSetting(
-        config,
-        '12345',
-        'VAR2',
-        mockRequestSetting,
-        ExtensionSettingScope.WORKSPACE,
-      );
+      await update('VAR2', ExtensionSettingScope.WORKSPACE);
 
-      const workspaceKeychain = new KeychainTokenStorage(
-        `Qwen Code Extensions test-ext 12345 ${tempWorkspaceDir}`,
-      );
-      expect(await workspaceKeychain.getSecret('VAR2')).toBe(
+      expect(await workspaceKeychain().getSecret('VAR2')).toBe(
         'new-workspace-secret',
       );
     });
@@ -1111,96 +754,63 @@ describe('extensionSettings', () => {
           }) as unknown as KeychainTokenStorage,
       );
 
-      await expect(
-        updateSetting(
-          config,
-          '12345',
-          'VAR2',
-          mockRequestSetting,
-          ExtensionSettingScope.USER,
-        ),
-      ).rejects.toThrow('write failed');
+      await expect(update('VAR2', ExtensionSettingScope.USER)).rejects.toThrow(
+        'write failed',
+      );
     });
 
     it('does not lose concurrent user-scope sensitive setting updates', async () => {
-      const sensitiveConfig: ExtensionConfig = {
-        name: 'test-ext',
-        version: '1.0.0',
-        settings: [
-          { name: 's2', description: 'd2', envVar: 'VAR2', sensitive: true },
-          { name: 's3', description: 'd3', envVar: 'VAR3', sensitive: true },
-        ],
-      };
-      await maybePromptForSettings(
+      const sensitiveConfig = extConfig([
+        setting(2, { sensitive: true }),
+        setting(3, { sensitive: true }),
+      ]);
+      await stage(
         sensitiveConfig,
-        '12345',
-        async (setting) => `initial-${setting.envVar}`,
-        undefined,
-        undefined,
-        path.join(extensionDir, '.env'),
-        true,
+        async (s) => `initial-${s.envVar}`,
+        userEnvPath(),
       );
 
       await Promise.all([
-        updateSetting(
-          sensitiveConfig,
-          '12345',
+        update(
           'VAR2',
+          ExtensionSettingScope.USER,
           async () => 'updated-VAR2',
-          ExtensionSettingScope.USER,
-        ),
-        updateSetting(
           sensitiveConfig,
-          '12345',
+        ),
+        update(
           'VAR3',
-          async () => 'updated-VAR3',
           ExtensionSettingScope.USER,
+          async () => 'updated-VAR3',
+          sensitiveConfig,
         ),
       ]);
 
-      await expect(
-        getScopedEnvContents(
-          sensitiveConfig,
-          '12345',
-          ExtensionSettingScope.USER,
-        ),
-      ).resolves.toEqual({
+      await expect(userContents(sensitiveConfig)).resolves.toEqual({
         VAR2: 'updated-VAR2',
         VAR3: 'updated-VAR3',
       });
     });
 
     it('should leave existing, unmanaged .env variables intact when updating in WORKSPACE scope', async () => {
-      // Setup a pre-existing .env file in the workspace with unmanaged variables
+      // A workspace .env with unmanaged variables; VAR1 is managed by the extension.
       const workspaceEnvPath = path.join(tempWorkspaceDir, '.env');
-      const originalEnvContent =
-        'PROJECT_VAR_1=value_1\nPROJECT_VAR_2=value_2\nVAR1=original-value'; // VAR1 is managed by extension
-      await fsPromises.writeFile(workspaceEnvPath, originalEnvContent);
-
-      // Simulate updating an extension-managed non-sensitive setting
-      mockRequestSetting.mockResolvedValue('updated-value');
-      await updateSetting(
-        config,
-        '12345',
-        'VAR1',
-        mockRequestSetting,
-        ExtensionSettingScope.WORKSPACE,
-      );
-
-      // Read the .env file after update
-      const actualContent = await fsPromises.readFile(
+      await fsPromises.writeFile(
         workspaceEnvPath,
-        'utf-8',
+        'PROJECT_VAR_1=value_1\nPROJECT_VAR_2=value_2\nVAR1=original-value',
       );
 
-      // Assert that original variables are intact and extension variable is updated
+      mockRequestSetting.mockResolvedValue('updated-value');
+      await update('VAR1', ExtensionSettingScope.WORKSPACE);
+
+      // Unmanaged variables are intact and the managed one is updated...
+      const actualContent = await readText(workspaceEnvPath);
       expect(actualContent).toContain('PROJECT_VAR_1=value_1');
       expect(actualContent).toContain('PROJECT_VAR_2=value_2');
       expect(actualContent).toContain('VAR1=updated-value');
 
-      // Ensure no other unexpected changes or deletions
+      // ...with no other additions or deletions.
       const lines = actualContent.split('\n').filter((line) => line.length > 0);
-      expect(lines).toHaveLength(3); // Should only have the three variables
+      expect(lines).toHaveLength(3);
     });
   });
 });

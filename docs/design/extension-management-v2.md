@@ -41,23 +41,31 @@ The layout is:
     ├── state.json
     ├── state.previous.json
     ├── staging/
-    ├── rollback/
+    ├── rollback/          <transaction>/ and, mid copy swap, <transaction>.partial
     └── transactions/
 ```
 
 The store and artifacts share a filesystem so artifact swaps are directory
-renames. An in-process mutex and a `proper-lockfile` lock serialize commits
+renames. On Windows a rename can be refused because a process holds a handle
+inside the artifact; the transaction then switches to a copy swap recorded as
+`swapStrategy: 'copy'` in its journal, which is not atomic - see
+[extension-store-windows-directory-lock.md](extension-store-windows-directory-lock.md).
+An in-process mutex and a `proper-lockfile` lock serialize commits
 across all V2-aware processes. Every mutation re-reads state while holding the
 lock and increments a monotonic generation, preventing lost updates.
 
 Install/update preparation happens outside the final artifact directory. The
-commit writes a `prepared` journal, moves the old artifact to rollback, moves
-staging into place, and atomically writes `state.json`. That state rename is the
+commit writes a `prepared` journal, moves the old artifact to rollback (or copies
+it, in a copy swap), moves staging into place - copied over the installed tree
+there - and atomically writes `state.json`. That state rename is the
 commit point. Before it, recovery rolls back; after it, recovery only completes
 projection and cleanup. A committed policy is never rolled back because one
-runtime refresh failed. If both a pre-commit operation and its rollback fail,
-the caller receives both errors and the journal remains for fail-closed recovery;
-the store does not continue writing through an ambiguous artifact state.
+runtime refresh failed. If both a pre-commit operation and its rollback fail, the
+caller receives both errors and the journal remains; a lock-defeated rollback is
+retried on a later operation instead of stopping every one - once a deferred
+retry window has elapsed, and only while a retry can still leave a loadable
+artifact behind; a rollback that could not is refused rather than retried, so
+reads never report an installed extension with no artifact.
 
 Store files use owner-only permissions and atomic no-follow writes. Extension
 ids, direct-child artifact paths, transaction paths, and names are validated.
@@ -137,13 +145,15 @@ revisioned credential snapshots but does not change the store, cache, runtime,
 or credentials selected by the installed artifact. Prepared mutations enter a
 separate single-concurrency FIFO commit queue in the order preparation
 finishes. Activation and uninstall enter only the commit queue; check-updates
-enters only the preparation queue. Manual refresh is serialized through the
-commit queue. Its HTTP timeout releases that lane so a stalled runtime refresh
-cannot permanently block later extension mutations; the already-started refresh
-may still settle afterward. Sensitive settings are staged as one atomic secret
-bundle under a per-prepare revision. A non-secret selector records that revision
-and secure-storage backend inside the staged artifact, so only the winning
-artifact commit activates a complete bundle. The store commit is therefore the
+enters only the preparation queue. Activation operations finish at the durable
+commit point and do not directly refresh active sessions. Manual refresh is
+serialized through the commit queue. Its HTTP timeout releases that lane so a
+stalled runtime refresh cannot permanently block later extension mutations; the
+already-started refresh may still settle afterward. Sensitive settings are
+staged as one atomic secret bundle under a per-prepare revision. A non-secret
+selector records that revision and secure-storage backend inside the staged
+artifact, so only the winning artifact commit activates a complete bundle. The
+store commit is therefore the
 durability point and releases the commit lane immediately. Extension reload,
 legacy per-key settings synchronization, manager runtime refresh, prepared-file
 cleanup, and daemon runtime reconciliation run outside it. These post-commit
@@ -170,9 +180,10 @@ limits, and archive-entry validation before extraction.
 
 ## Runtime reconciliation
 
-A successful commit invalidates local status and refreshes affected runtimes.
-Global artifact/default changes reconcile all runtimes in this daemon; an exact
-workspace override reconciles only its target. Runtime reconciliation refreshes
+A successful artifact commit invalidates local status and refreshes affected
+runtimes. Activation commits only persist policy; clients that need immediate
+application submit the independent runtime-refresh operation. Global artifact
+changes reconcile all runtimes in this daemon. Runtime reconciliation refreshes
 extension and skill caches, extension tools, hierarchical memory, active chat
 system instructions, and available commands. A failed component does not skip
 the remaining refresh components; the session RPC reports the combined failure
@@ -208,15 +219,19 @@ share the store.
 `workspace_extensions` remains the capability for the existing singular
 surface. Its handlers call the same manager/coordinator and adapt responses:
 project activation becomes a primary workspace override; user activation keeps
-the legacy rule-clearing behavior; global mutation reconciles every local
-runtime. The legacy operation endpoint maps V2 warning completion back to the
-published legacy refresh-error status.
+the legacy rule-clearing behavior. Activation through either surface is
+commit-only when `extension_activation_explicit_refresh` is advertised. The
+legacy operation endpoint maps V2 warning completion back to the published
+legacy refresh-error status.
 
 Clients must check `extension_management_v2`; neither daemon mode nor another
 workspace capability implies this API. Batch activation additionally requires
 `extension_batch_activation_v2`, because older V2 daemons expose only singular
-activation routes. The abandoned
-`workspace_qualified_extensions` proposal is not part of the protocol.
+activation routes. Clients that require activation changes to apply to active
+sessions must check `extension_activation_explicit_refresh`: when present, wait
+for the activation operation to commit and then submit the independent refresh
+operation; older daemons already refresh within the activation operation. The
+abandoned `workspace_qualified_extensions` proposal is not part of the protocol.
 
 ## Non-goals
 

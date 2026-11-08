@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { ideContextStore } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
+import { parseJsoncObject } from '../utils/jsonc-editor.js';
 import {
   getSystemDefaultsPath,
   getSystemSettingsPath,
@@ -23,6 +24,7 @@ import {
 } from './trustedFolders.js';
 import { arePathsEquivalent } from './path-comparison.js';
 import { v1ToV2Migration } from './migration/versions/v1-to-v2.js';
+import { isWorkflowAncestorDirectorySafe } from './workflow-ancestor-directory-safety.js';
 
 const MAX_TRUSTED_FOLDERS_BYTES = 1024 * 1024;
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
@@ -54,6 +56,42 @@ export interface DaemonWorkspaceTrustDecision {
   readonly error?: DaemonTrustPolicyError;
 }
 
+interface DaemonWorkflowAncestorTrustQuery {
+  readonly workspaceCwd: string;
+  readonly canonicalTargetDir: string;
+  readonly ancestorDirs: readonly string[];
+  readonly ideScopeCwd: string;
+}
+
+export function evaluateDaemonWorkflowAncestorTrust(
+  snapshot: DaemonTrustPolicySnapshot,
+  query: DaemonWorkflowAncestorTrustQuery,
+): readonly boolean[] {
+  const denied = () => query.ancestorDirs.map(() => false);
+  if (snapshot.settingsError) return denied();
+  if (!snapshot.folderTrustEnabled) {
+    return query.ancestorDirs.map(isWorkflowAncestorDirectorySafe);
+  }
+  if (
+    snapshot.trustedFoldersError ||
+    (snapshot.ideTrust === false &&
+      (arePathsEquivalent(query.workspaceCwd, query.ideScopeCwd) ||
+        arePathsEquivalent(query.canonicalTargetDir, query.ideScopeCwd)))
+  ) {
+    return denied();
+  }
+  const folders = new LoadedTrustedFolders(
+    { path: getTrustedFoldersPath(), config: { ...snapshot.trustedFolders } },
+    [],
+  );
+  if (folders.isPathTrusted(query.canonicalTargetDir) !== true) {
+    return denied();
+  }
+  return query.ancestorDirs.map(
+    (directory) => folders.isPathTrusted(directory) === true,
+  );
+}
+
 interface ReadJsonResult {
   readonly value?: Record<string, unknown>;
   readonly error?: DaemonTrustPolicyError;
@@ -77,6 +115,7 @@ async function readJsonObject(
   maxBytes: number,
   requireRegularFile: boolean,
   retryMissing = false,
+  allowTrailingComma = false,
 ): Promise<ReadJsonResult> {
   const delays = [0, 50, 200];
   let result: ReadJsonResult = {};
@@ -84,7 +123,12 @@ async function readJsonObject(
     if (delay > 0) {
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    result = await readJsonObjectOnce(filePath, maxBytes, requireRegularFile);
+    result = await readJsonObjectOnce(
+      filePath,
+      maxBytes,
+      requireRegularFile,
+      allowTrailingComma,
+    );
     if (!result.error && (!result.missing || !retryMissing)) return result;
   }
   return result;
@@ -94,6 +138,7 @@ async function readJsonObjectOnce(
   filePath: string,
   maxBytes: number,
   requireRegularFile: boolean,
+  allowTrailingComma: boolean,
 ): Promise<ReadJsonResult> {
   let stat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
@@ -141,7 +186,9 @@ async function readJsonObjectOnce(
 
   try {
     const raw = await fs.readFile(filePath, 'utf8');
-    const parsed: unknown = JSON.parse(stripJsonComments(raw));
+    const parsed: unknown = allowTrailingComma
+      ? parseJsoncObject(raw)
+      : JSON.parse(stripJsonComments(raw));
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
@@ -302,6 +349,7 @@ export async function readDaemonTrustPolicySnapshot(): Promise<DaemonTrustPolicy
     MAX_TRUSTED_FOLDERS_BYTES,
     true,
     folderTrustEnabled,
+    true,
   );
   const parsedTrustedFolders = parseTrustedFolders(
     trustedFoldersFile.value,

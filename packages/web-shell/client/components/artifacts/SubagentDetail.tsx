@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -11,6 +13,10 @@ import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFra
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
+import {
+  SubagentDetailsProvider,
+  type OpenSubagentDetails,
+} from '../../subagentDetailsContext';
 import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
@@ -119,16 +125,18 @@ function SubagentDetailContent({
   onStop,
   onRightPanelOpen,
   onArtifactsChange,
+  onOpenSubagent,
   onError,
 }: {
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
-  onStop: () => Promise<{ cancelled: boolean }>;
+  onStop?: () => Promise<{ cancelled: boolean }>;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
@@ -169,12 +177,15 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
-  const handleRightPanelOpen = (request: TurnOutputOpenRequest) => {
-    onRightPanelOpen?.({
-      ...request,
-      sourceSessionId: connection.sessionId,
-    });
-  };
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      onRightPanelOpen?.({
+        ...request,
+        sourceSessionId: connection.sessionId,
+      });
+    },
+    [connection.sessionId, onRightPanelOpen],
+  );
 
   useEffect(() => {
     if (isRunning) return;
@@ -183,7 +194,7 @@ function SubagentDetailContent({
   }, [isRunning]);
 
   const handleStop = async () => {
-    if (stopping) return;
+    if (stopping || !onStop) return;
     setStopping(true);
     setStopError('');
     try {
@@ -196,6 +207,26 @@ function SubagentDetailContent({
       setStopError(t('tasks.cancelFailed'));
     }
   };
+
+  const transcript = (
+    <MessageList
+      messages={messages}
+      pendingApproval={null}
+      loadingTranscript={connection.loadingTranscript}
+      catchingUp={connection.catchingUp}
+      isResponding={isRunning}
+      activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
+      workspaceCwd={connection.workspaceCwd || ''}
+      hideSessionTimeline
+      firstTurnMetrics={metrics}
+      includeSubagentToolUsageInMetrics={false}
+      turnFileChanges={fileChangesByTurn}
+      sourceSessionId={connection.sessionId}
+      turnArtifacts={artifactsByTurn}
+      onTurnOutputOpen={handleRightPanelOpen}
+      onError={onError}
+    />
+  );
 
   return (
     <div className={styles.detail}>
@@ -212,7 +243,7 @@ function SubagentDetailContent({
             >
               {statusLabel(metrics.status, t)}
             </Badge>
-            {isRunning && (
+            {isRunning && onStop && (
               <button
                 type="button"
                 className={styles.stopButton}
@@ -227,22 +258,13 @@ function SubagentDetailContent({
         {stopError && <div className={styles.stopError}>{stopError}</div>}
       </div>
       <div className={styles.transcript}>
-        <MessageList
-          messages={messages}
-          pendingApproval={null}
-          loadingTranscript={connection.loadingTranscript}
-          catchingUp={connection.catchingUp}
-          isResponding={isRunning}
-          activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
-          workspaceCwd={connection.workspaceCwd || ''}
-          hideSessionTimeline
-          firstTurnMetrics={metrics}
-          includeSubagentToolUsageInMetrics={false}
-          turnFileChanges={fileChangesByTurn}
-          turnArtifacts={artifactsByTurn}
-          onTurnOutputOpen={handleRightPanelOpen}
-          onError={onError}
-        />
+        {onOpenSubagent ? (
+          <SubagentDetailsProvider onOpen={onOpenSubagent}>
+            {transcript}
+          </SubagentDetailsProvider>
+        ) : (
+          transcript
+        )}
       </div>
     </div>
   );
@@ -255,6 +277,7 @@ export function SubagentDetail({
   workspaceCwd,
   onRightPanelOpen,
   onArtifactsChange,
+  onOpenSubagent,
   onError,
 }: {
   sessionId: string;
@@ -265,6 +288,11 @@ export function SubagentDetail({
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
+  ) => void;
+  onOpenSubagent?: (
+    tool: ACPToolCall,
+    sessionId: string,
+    workspaceCwd?: string,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
 }) {
@@ -286,6 +314,7 @@ export function SubagentDetail({
     key: 0,
     clientId: createDetailClientId(),
   }));
+  const availability = useDaemonAvailabilityController();
   const [resolution, setResolution] = useState<SubagentResolution>();
   const [loadError, setLoadError] = useState(false);
 
@@ -293,10 +322,19 @@ export function SubagentDetail({
     let cancelled = false;
     let hasResolved = false;
     let retryCount = 0;
+    let lastResolvedRunning = false;
+    let inFlight = false;
+    let refreshOnRecovery = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     setResolution(undefined);
     setLoadError(false);
     const refresh = async () => {
+      if (
+        inFlight ||
+        (availability && availability.getSnapshot() !== 'available')
+      )
+        return;
+      inFlight = true;
       try {
         const resolved = await workspace.client.resolveSubagentSession(
           sessionId,
@@ -304,28 +342,62 @@ export function SubagentDetail({
         );
         if (cancelled) return;
         hasResolved = true;
+        retryCount = 0;
+        lastResolvedRunning = resolved.status === 'running';
         setResolution(resolved);
-        if (resolved.status === 'running') {
+        setLoadError(false);
+        if (
+          resolved.status === 'running' &&
+          (!availability || availability.getSnapshot() === 'available')
+        ) {
           refreshTimer = setTimeout(() => void refresh(), 3_000);
         }
-      } catch {
-        if (cancelled) return;
-        if (!hasResolved && retryCount < 3) {
+      } catch (error) {
+        if (
+          cancelled ||
+          isDaemonUnavailableError(error) ||
+          (availability && availability.getSnapshot() !== 'available')
+        )
+          return;
+        if (retryCount < 3) {
           retryCount += 1;
           refreshTimer = setTimeout(() => void refresh(), 3_000);
         } else if (!hasResolved) {
           setLoadError(true);
-        } else {
-          refreshTimer = setTimeout(() => void refresh(), 3_000);
+        } else if (lastResolvedRunning) {
+          refreshTimer = setTimeout(() => void refresh(), 30_000);
+        }
+      } finally {
+        inFlight = false;
+        if (
+          refreshOnRecovery &&
+          !cancelled &&
+          (!availability || availability.getSnapshot() === 'available')
+        ) {
+          refreshOnRecovery = false;
+          if (refreshTimer) clearTimeout(refreshTimer);
+          void refresh();
         }
       }
     };
+    let wasAvailable = availability?.getSnapshot() === 'available';
+    const unsubscribeAvailability = availability?.subscribe(() => {
+      const available = availability.getSnapshot() === 'available';
+      if (available === wasAvailable) return;
+      wasAvailable = available;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      if (available && (!hasResolved || lastResolvedRunning)) {
+        if (inFlight) refreshOnRecovery = true;
+        else void refresh();
+      }
+    });
     void refresh();
     return () => {
       cancelled = true;
+      unsubscribeAvailability?.();
       if (refreshTimer) clearTimeout(refreshTimer);
     };
-  }, [instance.key, rootToolCallId, sessionId, workspace.client]);
+  }, [availability, instance.key, rootToolCallId, sessionId, workspace.client]);
 
   if (loadError) {
     return (
@@ -366,9 +438,23 @@ export function SubagentDetail({
         resolution={resolution}
         onRightPanelOpen={onRightPanelOpen}
         onArtifactsChange={onArtifactsChange}
+        onOpenSubagent={
+          onOpenSubagent
+            ? (tool, parentSessionId) =>
+                onOpenSubagent(tool, parentSessionId ?? sessionId, workspaceCwd)
+            : undefined
+        }
         onError={onError}
-        onStop={() =>
-          workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
+        onStop={
+          initialRootTool.rawOutput &&
+          typeof initialRootTool.rawOutput === 'object' &&
+          'workflowRunId' in initialRootTool.rawOutput
+            ? undefined
+            : () =>
+                workspace.client.cancelSubagentSession(
+                  sessionId,
+                  rootToolCallId,
+                )
         }
       />
     </DaemonSessionProvider>

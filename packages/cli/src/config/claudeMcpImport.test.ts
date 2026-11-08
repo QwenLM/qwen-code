@@ -456,6 +456,34 @@ describe('claude MCP import', () => {
     expect(settings.setValue).not.toHaveBeenCalled();
   });
 
+  it('imports configs saved with a UTF-8 BOM', () => {
+    fs.writeFileSync(
+      path.join(homeDir, '.claude.json'),
+      '\uFEFF' +
+        JSON.stringify({ mcpServers: { bomServer: { command: 'node' } } }),
+    );
+
+    const settings = createSettings();
+    const result = importClaudeMcpServers({
+      source: 'claude-code',
+      scope: 'user',
+      settings,
+      homeDir,
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.imported).toEqual([
+      { name: 'bomServer', source: 'Claude Code' },
+    ]);
+    expect(settings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'mcpServers',
+      expect.objectContaining({
+        bomServer: { command: 'node' },
+      }),
+    );
+  });
+
   it('reports unreadable config paths instead of treating them as absent', () => {
     fs.mkdirSync(path.join(homeDir, '.claude.json'));
     const settings = createSettings();

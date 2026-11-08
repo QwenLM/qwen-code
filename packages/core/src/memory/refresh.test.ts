@@ -28,6 +28,7 @@ import {
   didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
+  type MemoryWriteCandidate,
 } from './refresh.js';
 
 vi.mock('./indexer.js', () => ({
@@ -46,10 +47,37 @@ function createConfig(projectRoot: string, managed = true): Config {
   } as unknown as Config;
 }
 
+const toolCall = (
+  toolName: string,
+  args: Record<string, unknown>,
+  status = 'success',
+): MemoryWriteCandidate => ({ toolName, args, status });
+const writeFile = (file_path: string, status = 'success') =>
+  toolCall('write_file', { file_path }, status);
+
+function expectRefreshedOnce(config: Config) {
+  expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+  expect(config.getLlmClient().refreshSystemInstruction).toHaveBeenCalledTimes(
+    1,
+  );
+}
+
+function expectNotRefreshed(config: Config) {
+  expect(config.refreshHierarchicalMemory).not.toHaveBeenCalled();
+  expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+}
+
 describe('managed memory refresh helper', () => {
   const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   let tempDir: string;
   let projectRoot: string;
+
+  const wroteMemory = (call: MemoryWriteCandidate) =>
+    didWriteManagedMemory([call], projectRoot);
+  const wroteContext = (call: MemoryWriteCandidate) =>
+    didWriteProjectContextFile([call], projectRoot);
+  const memoryPath = (name: string) =>
+    path.join(getAutoMemoryRoot(projectRoot), name);
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-refresh-'));
@@ -75,185 +103,57 @@ describe('managed memory refresh helper', () => {
   });
 
   it('detects successful private managed-memory writes only', () => {
-    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    const memoryFile = memoryPath('project.md');
+    const teamFile = path.join(
+      projectRoot,
+      '.qwen',
+      'team-memory',
+      'shared.md',
+    );
 
+    expect(wroteMemory(writeFile(memoryFile))).toBe(true);
     expect(
-      didWriteManagedMemory(
-        [
-          {
-            toolName: 'write_file',
-            args: { file_path: memoryFile },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(true);
-    expect(
-      didWriteManagedMemory(
-        [
-          {
-            toolName: 'edit',
-            args: { file_path: memoryFile },
-            status: 'error',
-          },
-        ],
-        projectRoot,
-      ),
+      wroteMemory(toolCall('edit', { file_path: memoryFile }, 'error')),
     ).toBe(false);
-    expect(
-      didWriteManagedMemory(
-        [
-          {
-            toolName: 'write_file',
-            args: { file_path: path.join(projectRoot, 'src/file.ts') },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(false);
-    expect(
-      didWriteManagedMemory(
-        [
-          {
-            toolName: 'write_file',
-            args: {
-              file_path: path.join(
-                projectRoot,
-                '.qwen',
-                'team-memory',
-                'shared.md',
-              ),
-            },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(false);
+    expect(wroteMemory(writeFile(path.join(projectRoot, 'src/file.ts')))).toBe(
+      false,
+    );
+    expect(wroteMemory(writeFile(teamFile))).toBe(false);
   });
 
   it('supports legacy edit names and alternate file path arguments', () => {
-    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    const memoryFile = memoryPath('project.md');
 
-    expect(
-      didWriteManagedMemory(
-        [
-          {
-            toolName: 'replace',
-            args: { target_file: memoryFile },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(true);
+    expect(wroteMemory(toolCall('replace', { target_file: memoryFile }))).toBe(
+      true,
+    );
   });
 
   it('detects successful project context file writes only', () => {
+    const contextFile = path.join(projectRoot, DEFAULT_CONTEXT_FILENAME);
+
+    expect(wroteContext(writeFile(contextFile))).toBe(true);
     expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: {
-              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
-            },
-            status: 'success',
-          },
-        ],
-        projectRoot,
+      wroteContext(toolCall('edit', { file_path: DEFAULT_CONTEXT_FILENAME })),
+    ).toBe(true);
+    expect(
+      wroteContext(
+        toolCall('replace', { target_file: DEFAULT_CONTEXT_FILENAME }),
       ),
     ).toBe(true);
     expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'edit',
-            args: { file_path: DEFAULT_CONTEXT_FILENAME },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
+      wroteContext(writeFile(path.join(projectRoot, AGENT_CONTEXT_FILENAME))),
     ).toBe(true);
+    expect(wroteContext(writeFile(contextFile, 'error'))).toBe(false);
+    expect(wroteContext(writeFile(path.join(projectRoot, 'notes.md')))).toBe(
+      false,
+    );
     expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'replace',
-            args: { target_file: DEFAULT_CONTEXT_FILENAME },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(true);
-    expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: { file_path: path.join(projectRoot, AGENT_CONTEXT_FILENAME) },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(true);
-    expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: {
-              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
-            },
-            status: 'error',
-          },
-        ],
-        projectRoot,
-      ),
+      wroteContext(writeFile(path.join('docs', DEFAULT_CONTEXT_FILENAME))),
     ).toBe(false);
     expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: { file_path: path.join(projectRoot, 'notes.md') },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(false);
-    expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: {
-              file_path: path.join('docs', DEFAULT_CONTEXT_FILENAME),
-            },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
-    ).toBe(false);
-    expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: {
-              file_path: path.join(projectRoot, '..', DEFAULT_CONTEXT_FILENAME),
-            },
-            status: 'success',
-          },
-        ],
-        projectRoot,
+      wroteContext(
+        writeFile(path.join(projectRoot, '..', DEFAULT_CONTEXT_FILENAME)),
       ),
     ).toBe(false);
   });
@@ -262,55 +162,28 @@ describe('managed memory refresh helper', () => {
     setMemoryFilename('PROJECT_CONTEXT.md');
 
     expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: { file_path: path.join(projectRoot, 'PROJECT_CONTEXT.md') },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
+      wroteContext(writeFile(path.join(projectRoot, 'PROJECT_CONTEXT.md'))),
     ).toBe(true);
     expect(
-      didWriteProjectContextFile(
-        [
-          {
-            toolName: 'write_file',
-            args: {
-              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
-            },
-            status: 'success',
-          },
-        ],
-        projectRoot,
-      ),
+      wroteContext(writeFile(path.join(projectRoot, DEFAULT_CONTEXT_FILENAME))),
     ).toBe(false);
   });
 
   it('rebuilds touched indexes before refreshing the live instruction', async () => {
     const config = createConfig(projectRoot);
-    const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    const projectFile = memoryPath('project.md');
     const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');
 
     await expect(
       refreshMemoryAfterManagedWrite(config, [
-        {
-          toolName: 'write_file',
-          args: { file_path: projectFile },
-          status: 'success',
-        },
-        { toolName: 'edit', args: { file_path: userFile }, status: 'success' },
+        writeFile(projectFile),
+        toolCall('edit', { file_path: userFile }),
       ]),
     ).resolves.toBe(true);
 
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
-    expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-    expect(
-      config.getLlmClient().refreshSystemInstruction,
-    ).toHaveBeenCalledTimes(1);
+    expectRefreshedOnce(config);
     expect(
       vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[0],
     ).toBeLessThan(
@@ -325,21 +198,10 @@ describe('managed memory refresh helper', () => {
     const config = createConfig(projectRoot);
 
     await expect(
-      refreshMemoryAfterManagedWrite(config, [
-        {
-          toolName: 'write_file',
-          args: {
-            file_path: path.join(getAutoMemoryRoot(projectRoot), 'x.md'),
-          },
-          status: 'success',
-        },
-      ]),
+      refreshMemoryAfterManagedWrite(config, [writeFile(memoryPath('x.md'))]),
     ).resolves.toBe(true);
 
-    expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-    expect(
-      config.getLlmClient().refreshSystemInstruction,
-    ).toHaveBeenCalledTimes(1);
+    expectRefreshedOnce(config);
   });
 
   it('keeps refreshing the system instruction when hierarchical refresh fails', async () => {
@@ -350,29 +212,17 @@ describe('managed memory refresh helper', () => {
 
     await expect(refreshMemoryInstruction(config)).resolves.toBeUndefined();
 
-    expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-    expect(
-      config.getLlmClient().refreshSystemInstruction,
-    ).toHaveBeenCalledTimes(1);
+    expectRefreshedOnce(config);
   });
 
   it('returns false without refreshing when managed memory is unavailable', async () => {
     const config = createConfig(projectRoot, false);
 
     await expect(
-      refreshMemoryAfterManagedWrite(config, [
-        {
-          toolName: 'write_file',
-          args: {
-            file_path: path.join(getAutoMemoryRoot(projectRoot), 'x.md'),
-          },
-          status: 'success',
-        },
-      ]),
+      refreshMemoryAfterManagedWrite(config, [writeFile(memoryPath('x.md'))]),
     ).resolves.toBe(false);
 
-    expect(config.refreshHierarchicalMemory).not.toHaveBeenCalled();
-    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expectNotRefreshed(config);
   });
 
   it('returns false when refresh guard evaluation throws', async () => {
@@ -382,18 +232,9 @@ describe('managed memory refresh helper', () => {
     });
 
     await expect(
-      refreshMemoryAfterManagedWrite(config, [
-        {
-          toolName: 'write_file',
-          args: {
-            file_path: path.join(getAutoMemoryRoot(projectRoot), 'x.md'),
-          },
-          status: 'success',
-        },
-      ]),
+      refreshMemoryAfterManagedWrite(config, [writeFile(memoryPath('x.md'))]),
     ).resolves.toBe(false);
 
-    expect(config.refreshHierarchicalMemory).not.toHaveBeenCalled();
-    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expectNotRefreshed(config);
   });
 });

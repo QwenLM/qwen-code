@@ -22,7 +22,7 @@ const SCRIPT = join(
   '..',
   '..',
   'packages',
-  'desktop-shell',
+  'desktop',
   '.agents',
   'skills',
   'desktop-brand-builder',
@@ -58,7 +58,7 @@ function makeShellRoot({ withUpdater = true } = {}) {
   );
   writeFileSync(
     join(root, 'package.json'),
-    JSON.stringify({ name: 'desktop-shell', type: 'module' }),
+    JSON.stringify({ name: 'desktop', type: 'module' }),
   );
   return root;
 }

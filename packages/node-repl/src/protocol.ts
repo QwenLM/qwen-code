@@ -22,6 +22,7 @@ export interface NodeReplModuleRoot {
 
 export interface InitMessage {
   type: 'init';
+  preloadCua?: boolean;
   generation: number;
   cwd: string;
   homeDir: string;
@@ -33,6 +34,7 @@ export interface InitMessage {
 export interface ExecMessage {
   type: 'exec';
   execId: string;
+  timeoutMs: number;
   source: string;
   previousBindings: NodeReplBindingDescriptor[];
   bindingExports: Array<{
@@ -41,6 +43,11 @@ export interface ExecMessage {
     exportName: string;
   }>;
   snapshotExportName: string;
+}
+
+export interface CancelMessage {
+  type: 'cancel';
+  execId: string;
 }
 
 export interface AddModuleRootMessage {
@@ -56,6 +63,7 @@ export interface ShutdownMessage {
 export type HostToKernelMessage =
   | InitMessage
   | ExecMessage
+  | CancelMessage
   | AddModuleRootMessage
   | ShutdownMessage;
 
@@ -78,18 +86,21 @@ export interface ImageMessage {
   execId: string | null;
   data: string;
   mimeType: string;
+  metadata?: string;
 }
 
 export interface ExecResultMessage {
   type: 'execResult';
   execId: string;
-  status: 'ok' | 'error';
+  status: 'ok' | 'error' | 'cancelled' | 'timeout';
   bindingNames: string[];
   rawTextTruncated?: boolean;
   imagesDropped?: number;
   errorName?: string;
   errorMessage?: string;
   errorStack?: string;
+  errorCode?: string;
+  errorDetails?: string;
 }
 
 export interface AddModuleRootResultMessage {

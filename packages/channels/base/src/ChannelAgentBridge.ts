@@ -11,6 +11,22 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // strips it from untrusted callers and honors it only when an authenticated
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+// Marks a slash-command notice that must ride the turn's reply: a response
+// boundary clears the chunk collection, so the notice needs its own slot and
+// the producer and both bridges have to agree on the key.
+export const CHANNEL_TURN_NOTICE_META_KEY = 'turnNotice';
+export const CHANNEL_TASK_RESULT_META_KEY = 'qwen.channel.taskResult';
+export const CHANNEL_TASK_RESULT_PARTIAL_META_KEY =
+  'qwen.channel.taskResultPartial';
+export const CHANNEL_TASK_OUTPUT_META_KEY = 'qwen.channel.taskOutput';
+
+export class ChannelPromptCancelledError extends Error {
+  constructor() {
+    super('Channel task cancelled');
+  }
+}
+export const CHANNEL_BTW_METHOD = 'qwen/control/session/btw';
 // Private-parent capability handshake with the spawned `qwen --acp` child
 // (packages/core/src/utils/invocation-context.ts owns the same constants).
 // channel-base keeps a minimal dependency footprint, so the wire contract is
@@ -64,6 +80,33 @@ export interface ChannelLoopToolHandler {
   ): Promise<string | ChannelLoopToolResult>;
 }
 
+/**
+ * A platform action an adapter exposes to the agent as a client MCP tool.
+ * The handler runs in the adapter, so it owns the platform credentials and
+ * the platform-specific error mapping; the bridge only routes the call and
+ * tells the adapter which agent session invoked it.
+ */
+export interface ChannelToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  /**
+   * Channel instance that owns the tool. One bridge can serve several
+   * channels, and two instances of the same channel type register the same
+   * tool names, so the bridge only offers a tool to sessions whose channel
+   * matches this owner. Leave it unset for a tool every session may call.
+   */
+  owner?: string;
+  handler(
+    args: Record<string, unknown>,
+    context: ChannelToolContext,
+  ): Promise<string | ChannelLoopToolResult>;
+}
+
+export interface ChannelToolContext {
+  sessionId: string;
+}
+
 export interface SessionDiedEvent {
   sessionId: string;
   reason?: string;
@@ -80,10 +123,75 @@ export interface PermissionResolvedEvent {
   outcome?: RequestPermissionResponse['outcome'];
 }
 
+export interface BackgroundResponseContext {
+  taskId: string;
+  status: string;
+  /** `peer`: a message from another session; `taskId` is the message id. */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
+  toolUseId?: string;
+  label?: string;
+  turnId?: string;
+  turnComplete?: boolean;
+  partial?: boolean;
+}
+
+export function parseBackgroundResponseContext(
+  value: unknown,
+): BackgroundResponseContext | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const taskId = record['taskId'];
+  const status = record['status'];
+  const kind = record['kind'];
+  if (
+    typeof taskId !== 'string' ||
+    !taskId ||
+    typeof status !== 'string' ||
+    !status ||
+    (kind !== 'agent' &&
+      kind !== 'monitor' &&
+      kind !== 'shell' &&
+      kind !== 'workflow' &&
+      kind !== 'peer')
+  ) {
+    return undefined;
+  }
+
+  const context: BackgroundResponseContext = { taskId, status, kind };
+  for (const field of ['toolUseId', 'label', 'turnId'] as const) {
+    const fieldValue = record[field];
+    if (typeof fieldValue === 'string' && fieldValue) {
+      context[field] = fieldValue;
+    }
+  }
+  if (typeof record['turnComplete'] === 'boolean') {
+    context.turnComplete = record['turnComplete'];
+  }
+  if (typeof record['partial'] === 'boolean') {
+    context.partial = record['partial'];
+  }
+  return context;
+}
+
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
+  /**
+   * Standalone ACP bridge process exit. Daemon bridges never emit this; they
+   * report per-session death through sessionDied instead. Listeners must
+   * clear only turn-scoped transient state: crash recovery restores the
+   * sessions on a fresh bridge, so routing state must stay.
+   */
+  disconnected: [code: number | null, signal: NodeJS.Signals | null];
   textChunk: [sessionId: string, chunk: string];
-  backgroundResponse: [sessionId: string, text: string];
+  /** Also prefixes prompt()'s result, with a blank line before a non-empty body. */
+  turnNotice: [sessionId: string, notice: string];
+  backgroundResponse: [
+    sessionId: string,
+    text: string,
+    context?: BackgroundResponseContext,
+  ];
   responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
   permissionRequest: [PermissionRequestEvent];
@@ -94,6 +202,8 @@ export interface BridgeSessionInfo {
   sessionId: string;
   workspaceCwd: string;
   hasActivePrompt: boolean;
+  worktree?: { slug: string; path: string; branch: string };
+  worktreeState?: 'persisted-v1';
 }
 
 export interface ChannelAgentBridgeSessionOptions {
@@ -103,9 +213,13 @@ export interface ChannelAgentBridgeSessionOptions {
   /**
    * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
    * for new sessions and restore-time attribution for legacy sessions resumed
-   * through a channel.
+   * through a channel. Adapter tools registered with an `owner` are only
+   * offered to sessions whose sourceId matches, so a session created without it
+   * sees only ownerless tools.
    */
   sourceId?: string;
+  /** Request daemon-managed git worktree isolation for a fresh session. */
+  worktree?: Record<string, never>;
 }
 
 export interface ChannelPromptImage {
@@ -114,12 +228,19 @@ export interface ChannelPromptImage {
 }
 
 export interface ChannelAgentBridgePromptOptions {
+  outputMode?: 'per_task';
+  onTaskResult?: (result: { partial: boolean }) => void;
   images?: ChannelPromptImage[];
   imageBase64?: string;
   imageMimeType?: string;
   /** User-authored text shown in transcripts when `text` includes hidden context.
    * `''` means no user-visible text and must not be treated as unset. */
   displayText?: string;
+}
+
+export interface ChannelBtwResult {
+  sessionId: string;
+  answer: string | null;
 }
 
 /**
@@ -182,11 +303,27 @@ export interface ChannelAgentBridge {
     options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string>;
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session and return the replacement's id. Bridges without daemon-side
+   * worktree reset support omit it; callers fail closed.
+   */
+  resetWorktreeSession?(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
   prompt(
     sessionId: string,
     text: string,
     options?: ChannelAgentBridgePromptOptions,
   ): Promise<string>;
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult>;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(
@@ -207,6 +344,22 @@ export interface ChannelAgentBridge {
     command: string,
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  /**
+   * Answer a side question without interrupting the session's active turn.
+   * The result must echo the request's sessionId. Bridges whose agent
+   * connection cannot answer side questions omit it and channels fail closed.
+   */
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<{ sessionId: string; answer: string | null }>;
   listSessions?(): BridgeSessionInfo[];
   registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
+  /**
+   * Register an adapter-owned platform action for the agent session's client
+   * MCP server. Bridges without client MCP tool support omit it; adapters
+   * must then skip registration.
+   */
+  registerChannelTool?(tool: ChannelToolDefinition): void;
 }

@@ -6,6 +6,7 @@ import type {
 } from '@codemirror/autocomplete';
 import { Fzf } from 'fzf';
 import type { CommandInfo } from '../adapters/types';
+import { WEB_SHELL_LANGUAGES, languageLabel } from '../i18n';
 import type { WebShellLanguage } from '../i18n';
 import {
   compareCommandsByCategory,
@@ -20,6 +21,7 @@ export interface SkillInfo {
   name: string;
   description: string;
   argumentHint?: string;
+  extensionName?: string;
 }
 
 export type SlashCommandCompletionKind = 'command' | 'subcommand';
@@ -54,6 +56,11 @@ interface SubcommandNode {
   children?: SubcommandNode[];
 }
 
+const LANGUAGE_OPTIONS: SubcommandNode[] = WEB_SHELL_LANGUAGES.map((l) => ({
+  name: l,
+  description: languageLabel(l),
+}));
+
 const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: '管理现有 subagents' },
@@ -73,10 +80,7 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     {
       name: 'ui',
       description: '设置 UI 语言',
-      children: [
-        { name: 'en', description: 'English' },
-        { name: 'zh-CN', description: '中文' },
-      ],
+      children: LANGUAGE_OPTIONS,
     },
     {
       name: 'output',
@@ -113,10 +117,7 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
     {
       name: 'ui',
       description: 'Set UI language',
-      children: [
-        { name: 'en', description: 'English' },
-        { name: 'zh-CN', description: '中文' },
-      ],
+      children: LANGUAGE_OPTIONS,
     },
     {
       name: 'output',
@@ -242,9 +243,7 @@ function getSubcommandArgumentHint(
 ): string | undefined {
   if (!argumentHint) return undefined;
   const match = argumentHint.match(
-    new RegExp(
-      `(?:^|\\||\\[)\\s*${escapeRegExp(name)}(?:\\s+([^|\\]]+))?`,
-    ),
+    new RegExp(`(?:^|\\||\\[)\\s*${escapeRegExp(name)}(?:\\s+([^|\\]]+))?`),
   );
   const suffix = match?.[1]?.trim();
   return suffix || undefined;
@@ -334,6 +333,7 @@ export function getImplicitTabCompletion(
 
   const cmdName = match[1];
   const cmd = commands.find((c) => c.name === cmdName);
+  if (cmd?.source === 'skill') return null;
   const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
   if (cmd?.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
     return null;
@@ -353,6 +353,7 @@ export function getSlashCommandArgumentHint(
   text: string,
   commands: CommandInfo[],
   language: WebShellLanguage,
+  skillNames?: ReadonlySet<string>,
 ): string | null {
   const match = text.match(
     new RegExp(`^/${COMMAND_NAME_PATTERN}(?:\\s+(.*?))?\\s*$`),
@@ -364,6 +365,20 @@ export function getSlashCommandArgumentHint(
   if (!cmd) return null;
 
   const subcommandPath = match[2]?.trim();
+  // Session skill membership is authoritative: extension skills arrive with
+  // the shared 'plugin-command' label (and synthesized entries with no
+  // source at all), so only availableSkills tells them apart from ordinary
+  // plugin commands.
+  const isSkillBacked =
+    skillNames?.has(cmdName.toLowerCase()) === true ||
+    (cmd.source !== undefined && SKILL_BACKED_SOURCES.has(cmd.source));
+  if (isSkillBacked) {
+    const hint = cmd.argumentHint?.trim();
+    if (!hint) return null;
+    return subcommandPath
+      ? getRemainingSkillArgumentHint(hint, subcommandPath)
+      : hint;
+  }
   if (subcommandPath) {
     const parts = subcommandPath.split(/\s+/);
     if (cmdName === 'skills' && parts.length === 1) {
@@ -406,6 +421,164 @@ export function getSlashCommandArgumentHint(
   if (!nodes || nodes.length === 0) return null;
 
   return `[${nodes.map((node) => node.name).join('|')}]`;
+}
+
+type SkillHintToken =
+  | { kind: 'placeholder'; text: string; freeText: boolean }
+  | { kind: 'flag'; text: string; flags: string[]; valueHint: string | null }
+  | { kind: 'literal'; text: string; alternatives: string[] };
+
+// Source labels whose commands always take the free-form argument hint
+// path: 'skill-dir-command' (project/user skills and custom markdown
+// commands alike), 'bundled-skill', and the 'skill' label synthesized by
+// the pre-session workspace bootstrap. Extension skills share
+// 'plugin-command' with ordinary plugin commands and are recognized via
+// skillNames instead.
+const SKILL_BACKED_SOURCES = new Set([
+  'skill',
+  'skill-dir-command',
+  'bundled-skill',
+]);
+
+function splitHintParts(
+  text: string,
+  isSeparator: (ch: string) => boolean,
+): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of text) {
+    if (ch === '<' || ch === '[') depth++;
+    else if (ch === '>' || ch === ']') depth = Math.max(0, depth - 1);
+    if (depth === 0 && isSeparator(ch)) {
+      if (current) parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+function parseSkillHintToken(text: string): SkillHintToken {
+  if (text.startsWith('<') && text.endsWith('>')) {
+    return {
+      kind: 'placeholder',
+      text,
+      freeText: /\s/.test(text.slice(1, -1)),
+    };
+  }
+  if (text.startsWith('[') && text.endsWith(']')) {
+    const inner = text.slice(1, -1).trim();
+    if (inner.startsWith('--')) {
+      const spaceIdx = inner.search(/\s/);
+      const flagPart = spaceIdx === -1 ? inner : inner.slice(0, spaceIdx);
+      return {
+        kind: 'flag',
+        text,
+        flags: flagPart.split('|'),
+        valueHint: spaceIdx === -1 ? null : inner.slice(spaceIdx).trim(),
+      };
+    }
+    return { kind: 'placeholder', text, freeText: /\s/.test(inner) };
+  }
+  return { kind: 'literal', text, alternatives: text.split('|') };
+}
+
+function matchSkillHintBranch(
+  tokens: SkillHintToken[],
+  typed: string[],
+): { remaining: string[]; literals: number } | null {
+  const consumed = new Array<boolean>(tokens.length).fill(false);
+  const pendingValue = new Array<boolean>(tokens.length).fill(false);
+  let literals = 0;
+  let ti = 0;
+  while (ti < typed.length) {
+    const word = typed[ti];
+    if (word.startsWith('--')) {
+      const idx = tokens.findIndex(
+        (t, i) => !consumed[i] && t.kind === 'flag' && t.flags.includes(word),
+      );
+      if (idx !== -1) {
+        consumed[idx] = true;
+        literals++;
+        ti++;
+        const token = tokens[idx];
+        if (token.kind === 'flag' && token.valueHint) {
+          if (ti < typed.length && !typed[ti].startsWith('--')) ti++;
+          else pendingValue[idx] = true;
+        }
+        continue;
+      }
+      const prefixIdx = tokens.findIndex(
+        (t, i) =>
+          !consumed[i] &&
+          t.kind === 'flag' &&
+          t.flags.some((flag) => flag.startsWith(word)),
+      );
+      // Only a trailing prefix is still being typed; a prefix followed by
+      // more words is a completed, unmatchable argument.
+      if (prefixIdx !== -1 && ti === typed.length - 1) break;
+      return null;
+    }
+    const idx = tokens.findIndex((t, i) => !consumed[i] && t.kind !== 'flag');
+    if (idx === -1) return null;
+    const token = tokens[idx];
+    if (token.kind === 'literal') {
+      if (!token.alternatives.includes(word)) return null;
+      literals++;
+    }
+    consumed[idx] = true;
+    ti++;
+    if (token.kind === 'placeholder' && token.freeText) {
+      // Free text absorbs prose, but a flag typed after it goes back through
+      // the normal flag path instead of being advertised as still missing.
+      while (ti < typed.length && !typed[ti].startsWith('--')) ti++;
+    }
+  }
+  // The value a just-typed flag still needs comes first: it is what the
+  // matcher consumes next, regardless of its position in the template.
+  const pending: string[] = [];
+  const rest: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (pendingValue[i] && token.kind === 'flag' && token.valueHint) {
+      pending.push(token.valueHint);
+    } else if (!consumed[i]) {
+      rest.push(token.text);
+    }
+  }
+  return { remaining: [...pending, ...rest], literals };
+}
+
+function getRemainingSkillArgumentHint(
+  argumentHint: string,
+  argsText: string,
+): string | null {
+  const typed = argsText.split(/\s+/).filter(Boolean);
+  // Hints may describe alternative modes separated by top-level '|' (e.g.
+  // autofix-pr's "... | status [<pr>] | stop [<pr>]"). Prefer the branch with
+  // the most literal matches so a mode word like "status" is not swallowed by
+  // an earlier branch's optional placeholder.
+  let best: { remaining: string[]; literals: number } | null = null;
+  for (const branch of splitHintParts(argumentHint, (ch) => ch === '|')) {
+    const tokens = splitHintParts(branch.trim(), (ch) => /\s/.test(ch))
+      .map(parseSkillHintToken)
+      // Empty groups — including whitespace-only ones like '[ ]' — are
+      // malformed metadata and must not survive as renderable leftovers.
+      .filter(
+        (token) =>
+          !(
+            token.kind === 'placeholder' &&
+            token.text.slice(1, -1).trim() === ''
+          ),
+      );
+    const result = matchSkillHintBranch(tokens, typed);
+    if (result && (!best || result.literals > best.literals)) best = result;
+  }
+  if (!best || !best.remaining.length) return null;
+  return best.remaining.join(' ');
 }
 
 function getLineBounds(text: string, cursor: number) {
@@ -486,6 +659,7 @@ export function getSlashCommandCompletionResult(
   language: WebShellLanguage = 'en',
   translate: Translate = (key) => key,
   categoryOrder: CommandDisplayCategoryOrder = DEFAULT_COMMAND_CATEGORY_ORDER,
+  includeEmpty = false,
 ): SlashCommandCompletionResult | null {
   const {
     lineStart,
@@ -501,6 +675,7 @@ export function getSlashCommandCompletionResult(
   if (subMatch) {
     const [, cmdName, rest] = subMatch;
     const cmd = commands.find((c) => c.name === cmdName);
+    if (cmd?.source === 'skill') return null;
     const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
     const implicitTree =
       language === 'zh-CN'
@@ -525,6 +700,7 @@ export function getSlashCommandCompletionResult(
       return null;
     }
 
+    const isSkillList = cmdName === 'skills' && completedParts.length === 0;
     const nodes = resolveSubcommands(
       cmdName,
       completedParts,
@@ -533,18 +709,17 @@ export function getSlashCommandCompletionResult(
       cmd?.subcommands,
       cmd?.argumentHint,
     );
-    if (!nodes) return null;
+    if (!nodes && !(includeEmpty && isSkillList)) return null;
 
     const lp = currentTyping.toLowerCase();
     const prefix = `/${cmdName} ${
       completedParts.length > 0 ? completedParts.join(' ') + ' ' : ''
     }`;
-    const filteredNodes = nodes
+    const filteredNodes = (nodes ?? [])
       .filter((n) => !currentTyping || n.name.toLowerCase().includes(lp))
       .sort((a, b) =>
         currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
       );
-    const isSkillList = cmdName === 'skills' && completedParts.length === 0;
     const items = filteredNodes
       .slice(0, COMPLETION_ITEM_LIMIT)
       .map((node): SlashCommandCompletionItem => {
@@ -553,9 +728,7 @@ export function getSlashCommandCompletionResult(
           id: command,
           label: node.name,
           detail: node.description || undefined,
-          ...(node.argumentHint
-            ? { argumentHint: node.argumentHint }
-            : {}),
+          ...(node.argumentHint ? { argumentHint: node.argumentHint } : {}),
           apply: `${command} `,
           ...(isSkillList ? { type: 'skill' as const } : {}),
           ...(!node.children?.length && !node.argumentHint
@@ -564,7 +737,7 @@ export function getSlashCommandCompletionResult(
         };
       });
 
-    if (items.length === 0) return null;
+    if (items.length === 0 && !(includeEmpty && isSkillList)) return null;
     return {
       kind: 'subcommand',
       from: lineStart,
@@ -616,14 +789,13 @@ export function getSlashCommandCompletionResult(
         ...(showCommandInfo && command.description
           ? { type: 'command-info' as const }
           : {}),
-        ...(command.autoSubmit &&
-        !hasSubcommandPicker(command, language)
+        ...(command.autoSubmit && !hasSubcommandPicker(command, language)
           ? { autoSubmit: true }
           : {}),
       };
     });
 
-  if (items.length === 0) return null;
+  if (items.length === 0 && !includeEmpty) return null;
   return {
     kind: 'command',
     from: lineStart,
@@ -653,6 +825,7 @@ export function slashCompletionSource(
       const [, cmdName, rest] = subMatch;
       const commands = getCommands();
       const cmd = commands.find((c) => c.name === cmdName);
+      if (cmd?.source === 'skill') return null;
       const language = getLanguage();
       const tree =
         language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
@@ -715,9 +888,7 @@ export function slashCompletionSource(
           detail: n.description || undefined,
           ...(n.argumentHint ? { argumentHint: n.argumentHint } : {}),
           apply: `${command} `,
-          ...(n.children?.length || n.argumentHint
-            ? {}
-            : { autoSubmit: true }),
+          ...(n.children?.length || n.argumentHint ? {} : { autoSubmit: true }),
         };
       });
 

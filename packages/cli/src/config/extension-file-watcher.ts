@@ -4,16 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
-import {
-  createDebugLogger,
-  isSubpath,
-  Storage,
-  type Config,
-  type ExtensionMutationEvent,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import type { ExtensionMutationEvent } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { ExtensionRefreshState } from './extension-refresh-state.js';
 
 const debugLogger = createDebugLogger('EXTENSION_FILE_WATCHER');
@@ -28,7 +27,12 @@ const EXTENSION_FILES = new Set([
 // Keep these sets in sync with extension directory conventions. New runtime
 // directories must be classified here as either content-auto-refreshable or
 // package-stale.
-const AUTO_REFRESH_DIRS = new Set(['commands', 'skills', 'agents']);
+const AUTO_REFRESH_DIRS = new Set([
+  'commands',
+  'skills',
+  'agents',
+  'workflows',
+]);
 const STALE_DIRS = new Set(['hooks']);
 
 type WatchEvent = 'add' | 'addDir' | 'change' | 'unlink' | 'unlinkDir';
@@ -127,10 +131,10 @@ export class ExtensionFileWatcher {
     this.mutationListenerDisposer?.();
     this.mutationListenerDisposer = undefined;
     this.endPendingMutationSuppressions();
-    watcher?.close().catch((error: unknown) => {
+    closeFileWatcher(watcher).catch((error: unknown) => {
       debugLogger.warn('Extension file watcher close error:', error);
     });
-    bootstrapWatcher?.close().catch((error: unknown) => {
+    closeFileWatcher(bootstrapWatcher).catch((error: unknown) => {
       debugLogger.warn('Extension bootstrap watcher close error:', error);
     });
   }
@@ -366,7 +370,7 @@ export class ExtensionFileWatcher {
   private closeBootstrapWatcher(): void {
     const bootstrapWatcher = this.bootstrapWatcher;
     this.bootstrapWatcher = undefined;
-    bootstrapWatcher?.close().catch((error: unknown) => {
+    closeFileWatcher(bootstrapWatcher).catch((error: unknown) => {
       debugLogger.warn('Extension bootstrap watcher close error:', error);
     });
   }

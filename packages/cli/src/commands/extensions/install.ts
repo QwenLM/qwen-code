@@ -10,6 +10,8 @@ import {
   ExtensionManager,
   isExtensionCommittedWithWarningsError,
   parseInstallSource,
+  resolveExtensionTelemetryProxy,
+  resolveUsageStatisticsEnabled,
   type ExtensionScope,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
@@ -85,13 +87,17 @@ export async function handleInstall(args: InstallArgs) {
       ? () => Promise.resolve()
       : requestConsentOrFail.bind(null, requestConsentNonInteractive);
     const workspaceDir = process.cwd();
+    const settings = loadSettings(workspaceDir).merged;
     extensionManager = new ExtensionManager({
       workspaceDir,
       locale: getCurrentLanguage(),
-      isWorkspaceTrusted:
-        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+      isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
       requestConsent,
       requestChoicePlugin: requestChoicePluginNonInteractive,
+      usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+        settings.privacy?.usageStatisticsEnabled,
+      ),
+      proxy: resolveExtensionTelemetryProxy(settings.proxy),
     });
     await extensionManager.refreshCache();
 
@@ -151,7 +157,7 @@ export async function handleInstall(args: InstallArgs) {
 export const installCommand: CommandModule = {
   command: 'install <source>',
   describe: t(
-    'Installs an extension from a git repository URL, local path or archive, archive URL, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
+    'Installs an extension from a git repository URL, local path or archive, archive URL, npm package (name or @scope/name), or claude marketplace (marketplace-url:plugin-name).',
   ),
   builder: (yargs) =>
     yargs

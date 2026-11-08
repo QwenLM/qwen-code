@@ -23,6 +23,7 @@ import {
 } from '../utils/fileUtils.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import { openNoFollow } from '../utils/no-follow-open.js';
 
 /**
  * Options for reading multiple files.
@@ -295,10 +296,11 @@ async function readValidatedTextFileContent(
   signal: AbortSignal | undefined,
   displayPath: string,
 ): ReturnType<typeof readFileContent> {
-  const source = await fs.promises.open(
-    filePath,
-    (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
-  );
+  // Where O_NOFOLLOW does not exist (Windows) the helper compensates with
+  // an lstat/open/fstat identity check instead of collapsing to a plain
+  // open that follows symlinks (#8227); the validated-identity re-check
+  // below remains the second layer.
+  const source = await openNoFollow(filePath);
   try {
     const stats = await source.stat();
     if (!fileStatsMatchValidatedIdentity(stats, expected)) {
@@ -374,10 +376,9 @@ async function snapshotValidatedFile(
     | undefined;
   try {
     signal?.throwIfAborted();
-    const source = await fs.promises.open(
-      filePath,
-      (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
-    );
+    // See readValidatedTextFileContent: the helper keeps the no-follow
+    // guarantee on platforms without O_NOFOLLOW (#8227).
+    const source = await openNoFollow(filePath);
     try {
       const stats = await source.stat();
       if (!fileStatsMatchValidatedIdentity(stats, expected)) {

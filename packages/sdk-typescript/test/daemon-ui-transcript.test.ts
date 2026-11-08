@@ -1,14 +1,412 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createDaemonTranscriptState,
+  findDaemonRewindUserBlock,
   reduceDaemonTranscriptEvents,
   selectUnrecognizedDiagnostics,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../src/daemon/ui/transcript.js';
 import type { DaemonUiEvent } from '../src/daemon/ui/types.js';
 import { matchTurnEvent } from '../src/daemon/DaemonClient.js';
+import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
 
 describe('daemon transcript rewind', () => {
+  it('retains subscription quota display context through normalization and replay', () => {
+    const subscriptionQuota = {
+      type: 'subscription_quota',
+      memberType: 'pro',
+      resetAt: 1800000000,
+    };
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session',
+        message: 'quota fallback',
+        subscriptionQuota,
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'error',
+      text: 'quota fallback',
+      data: { subscriptionQuota },
+    });
+  });
+  it.each([
+    { v: 1, type: 'session_rewound', data: {} },
+    { v: 1, type: 'session_update', data: { sessionId: 'other-session' } },
+    {
+      v: 1,
+      type: 'approval_mode_changed',
+      data: {
+        sessionId: 'other-session',
+        previous: 'default',
+        next: 'plan',
+        persisted: false,
+      },
+    },
+  ])('rejects a nested or cross-session authoritative prefix: %j', (frame) => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_rewound',
+      data: {
+        sessionId: 'session',
+        promptId: 'native-A',
+        daemonPromptId: 'daemon-A',
+        targetTurnIndex: 0,
+        filesChanged: [],
+        filesFailed: [],
+        replay: [frame],
+      },
+    });
+    expect(events.some((event) => event.type === 'session.rewound')).toBe(
+      false,
+    );
+  });
+
+  it('accepts a persisted workspace approval broadcast in another session prefix', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_rewound',
+      data: {
+        sessionId: 'session',
+        promptId: 'native-A',
+        targetTurnIndex: 0,
+        filesChanged: [],
+        filesFailed: [],
+        replay: [
+          {
+            v: 1,
+            type: 'approval_mode_changed',
+            data: {
+              sessionId: 'other-session',
+              previous: 'default',
+              next: 'plan',
+              persisted: true,
+            },
+          },
+        ],
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(events.some((event) => event.type === 'session.rewound')).toBe(true);
+    expect(state.approvalMode).toBe('plan');
+  });
+
+  it('reports a tail-only replay replacement without evicting its oldest anchor', () => {
+    const onTruncation = vi.fn();
+    const before = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ onTruncation }),
+      [
+        { type: 'user.text.delta', text: 'ROOT', sourceRecordIds: ['root'] },
+        { type: 'assistant.done' },
+        { type: 'user.text.delta', text: 'A', promptId: 'a' },
+      ],
+    );
+    onTruncation.mockClear();
+    const after = reduceDaemonTranscriptEvents(before, [
+      {
+        type: 'session.rewound',
+        promptId: 'a',
+        targetTurnIndex: 1,
+        replay: [
+          { type: 'user.text.delta', text: 'ROOT', sourceRecordIds: ['root'] },
+        ],
+      },
+    ]);
+    expect(after.blocks.map((block) => 'text' in block && block.text)).toEqual([
+      'ROOT',
+    ]);
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        evictedOldest: false,
+        oldestRetainedRecordId: 'root',
+      }),
+    );
+  });
+
+  it('restores the authoritative prefix after the target was evicted locally', () => {
+    const turns: DaemonUiEvent[] = ['ROOT', 'A', 'B', 'C'].flatMap((text) => [
+      {
+        type: 'user.text.delta',
+        text,
+        promptId: `daemon-${text}`,
+        sourceRecordIds: [`record-${text}`],
+      },
+      { type: 'assistant.text.delta', text: `${text} reply` },
+      { type: 'assistant.done' },
+    ]);
+    const onTruncation = vi.fn();
+    const before = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ maxBlocks: 4, onTruncation }),
+      turns,
+    );
+    expect(before.blocks.map((block) => 'text' in block && block.text)).toEqual(
+      ['B', 'B reply', 'C', 'C reply'],
+    );
+    onTruncation.mockClear();
+    const replay = [
+      {
+        v: 1,
+        id: 100,
+        type: 'session_update',
+        promptId: 'daemon-ROOT',
+        originatorClientId: 'own-client',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'ROOT' },
+            _meta: { qwenTranscript: { sourceRecordIds: ['record-ROOT'] } },
+          },
+        },
+      },
+      {
+        v: 1,
+        id: 101,
+        type: 'session_update',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ROOT reply' },
+          },
+        },
+      },
+    ];
+    const after = reduceDaemonTranscriptEvents(
+      before,
+      normalizeDaemonEvent(
+        {
+          v: 1,
+          id: 102,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'session',
+            promptId: 'native-A',
+            daemonPromptId: 'daemon-A',
+            targetTurnIndex: 7,
+            filesChanged: [],
+            filesFailed: ['locked.txt'],
+            replay,
+          },
+        },
+        { clientId: 'own-client', suppressOwnUserEcho: true },
+      ),
+    );
+    expect(after.blocks.map((block) => 'text' in block && block.text)).toEqual([
+      'ROOT',
+      'ROOT reply',
+    ]);
+    expect(after.blocks[0]).toMatchObject({
+      kind: 'user',
+      promptId: 'daemon-ROOT',
+    });
+    expect(findDaemonRewindUserBlock(after.blocks, 'daemon-ROOT')).toBe(
+      after.blocks[0],
+    );
+    expect(after.lastEventId).toBe(102);
+    expect(after.activeUserBlockId).toBeUndefined();
+    expect(after.activeAssistantBlockId).toBeUndefined();
+    expect(onTruncation).toHaveBeenCalledTimes(1);
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'blocks',
+        blockCount: 2,
+        evictedOldest: true,
+        oldestRetainedRecordId: 'record-ROOT',
+        retainedBytes: after.retainedBytes,
+      }),
+    );
+    expect(before.blocks.map((block) => 'text' in block && block.text)).toEqual(
+      ['B', 'B reply', 'C', 'C reply'],
+    );
+    const continued = reduceDaemonTranscriptEvents(after, [
+      {
+        type: 'user.text.delta',
+        text: 'D',
+        promptId: 'daemon-D',
+        eventId: 103,
+      },
+    ]);
+    expect(
+      continued.blocks.map((block) => 'text' in block && block.text),
+    ).toEqual(['ROOT', 'ROOT reply', 'D']);
+  });
+
+  it.each([
+    { maxBlocks: 2, maxRetainedBytes: 1_000_000 },
+    { maxBlocks: 100, maxRetainedBytes: 1 },
+  ])(
+    'applies retention and rebuilds indexes when installing a prefix ($maxBlocks blocks)',
+    (budget) => {
+      const replay: DaemonUiEvent[] = [
+        {
+          type: 'user.text.delta',
+          text: 'ROOT',
+          promptId: 'root',
+          sourceRecordIds: ['root-record'],
+        },
+        { type: 'assistant.text.delta', text: 'root answer' },
+        { type: 'assistant.done' },
+        { type: 'user.text.delta', text: 'A', promptId: 'a' },
+        {
+          type: 'tool.update',
+          toolCallId: 'kept-tool',
+          status: 'completed',
+          title: 'Read',
+        },
+        { type: 'assistant.text.delta', text: 'A answer' },
+        { type: 'assistant.done' },
+      ];
+      const onTruncation = vi.fn();
+      const before = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({
+          ...budget,
+          onTruncation,
+        }),
+        [
+          {
+            type: 'tool.update',
+            toolCallId: 'discarded-tool',
+            status: 'running',
+            title: 'Old',
+          },
+          { type: 'assistant.text.delta', text: 'discarded streaming answer' },
+        ],
+      );
+      onTruncation.mockClear();
+      const after = reduceDaemonTranscriptEvents(before, [
+        {
+          type: 'session.rewound',
+          promptId: 'native-B',
+          targetTurnIndex: 5,
+          eventId: 500,
+          replay,
+        },
+      ]);
+      const expected = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(budget),
+        replay,
+      );
+      expect(after.blocks.map((block) => block.kind)).toEqual(
+        expected.blocks.map((block) => block.kind),
+      );
+      expect(
+        after.blocks.map((block) =>
+          block.kind === 'tool'
+            ? block.toolCallId
+            : 'text' in block
+              ? block.text
+              : block.kind,
+        ),
+      ).toEqual(
+        budget.maxBlocks === 2 ? ['kept-tool', 'A answer'] : ['A answer'],
+      );
+      expect(after.retainedBytes).toBe(expected.retainedBytes);
+      expect(after.lastEventId).toBe(500);
+      expect(after.toolBlockByCallId['discarded-tool']).toBeUndefined();
+      expect(after.currentToolCallId).toBeUndefined();
+      expect(after.activeAssistantBlockId).toBeUndefined();
+      expect(after.activeUserBlockId).toBeUndefined();
+      for (const [index, block] of after.blocks.entries()) {
+        expect(after.blockIndexById[block.id]).toBe(index);
+        if (block.kind === 'tool')
+          expect(after.toolBlockByCallId[block.toolCallId]).toBe(block.id);
+      }
+      expect(onTruncation.mock.calls.length).toBeGreaterThan(0);
+      for (const [notification] of onTruncation.mock.calls) {
+        expect(notification.blockCount).toBe(after.blocks.length);
+        expect(notification.retainedBytes).toBe(after.retainedBytes);
+      }
+    },
+  );
+
+  it.each([
+    { name: 'empty', replay: [] },
+    {
+      name: 'non-empty',
+      replay: [
+        { type: 'user.text.delta', text: 'ROOT', promptId: 'daemon-ROOT' },
+        { type: 'assistant.text.delta', text: 'ROOT reply' },
+      ] satisfies DaemonUiEvent[],
+    },
+  ])(
+    'installs a $name authoritative prefix over a resync latch',
+    ({ name, replay }) => {
+      const before = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        [
+          {
+            type: 'user.text.delta',
+            text: 'paged stale turn',
+            promptId: 'stale',
+          },
+          {
+            type: 'session.state_resync_required',
+            reason: 'test',
+            lastDeliveredId: 2,
+            earliestAvailableId: 9,
+          },
+        ],
+      );
+      const after = reduceDaemonTranscriptEvents(before, [
+        {
+          type: 'session.rewound',
+          promptId: 'native-first',
+          targetTurnIndex: 0,
+          eventId: 20,
+          replay,
+        },
+      ]);
+      if (name === 'empty') {
+        expect(after.blocks).toEqual([]);
+        expect(after.retainedBytes).toBe(0);
+        expect(Object.keys(after.blockIndexById)).toEqual([]);
+      } else {
+        expect(
+          after.blocks.map((block) => 'text' in block && block.text),
+        ).toEqual(['ROOT', 'ROOT reply']);
+        expect(after.retainedBytes).toBeGreaterThan(0);
+      }
+      expect(after.awaitingResync).toBe(false);
+      expect(after.lastResyncRequired).toBeUndefined();
+      expect(after.lastEventId).toBe(20);
+      const continued = reduceDaemonTranscriptEvents(after, [
+        { type: 'user.text.delta', text: 'fresh' },
+      ]);
+      expect(continued.blocks).toHaveLength(name === 'empty' ? 1 : 3);
+    },
+  );
+
+  it('keeps a replay-less rewind blocked while resync is pending', () => {
+    const before = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: 'A' },
+      { type: 'assistant.text.delta', text: 'A reply' },
+      { type: 'user.text.delta', text: 'B' },
+      {
+        type: 'session.state_resync_required',
+        reason: 'test',
+        lastDeliveredId: 2,
+        earliestAvailableId: 9,
+      },
+    ]);
+    const after = reduceDaemonTranscriptEvents(before, [
+      { type: 'session.rewound', promptId: 'native-A', targetTurnIndex: 0 },
+    ]);
+    expect(after.blocks).toEqual(before.blocks);
+    expect(after.awaitingResync).toBe(true);
+    expect(after.lastResyncRequired).toEqual(before.lastResyncRequired);
+  });
+
   it('drops the target user turn and later transcript blocks', () => {
     const events: DaemonUiEvent[] = [
       { type: 'user.text.delta', text: 'first' },
@@ -39,6 +437,90 @@ describe('daemon transcript rewind', () => {
     ).toEqual(['first', 'first answer']);
     expect(state.activeUserBlockId).toBeUndefined();
     expect(state.activeAssistantBlockId).toBeUndefined();
+  });
+
+  it('numbers a legacy rewind target past an injected mid-turn row', () => {
+    // The renderer never numbers `mid_turn_message_injected` (it renders as a
+    // system row), so the legacy turn index must skip it too: index 1 is the
+    // second real prompt, not the row injected during the first turn.
+    const events: DaemonUiEvent[] = [
+      { type: 'user.text.delta', text: 'first' },
+      { type: 'assistant.done' },
+      {
+        type: 'user.text.delta',
+        text: 'injected',
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+      { type: 'user.text.delta', text: 'second' },
+      { type: 'assistant.text.delta', text: 'second answer' },
+      { type: 'assistant.done' },
+      {
+        type: 'session.rewound',
+        promptId: 'session########1',
+        targetTurnIndex: 1,
+      },
+    ];
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 1 },
+    );
+
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['first', 'injected']);
+  });
+
+  it('preserves earlier background notifications and replies when rewinding a user turn', () => {
+    const retainedEvents: DaemonUiEvent[] = [
+      { type: 'user.text.delta', text: 'review' },
+      { type: 'assistant.text.delta', text: 'review conclusion' },
+      { type: 'assistant.done' },
+      {
+        type: 'user.text.delta',
+        text: 'typecheck completed',
+        meta: { source: 'background_notification', qwenDiscreteMessage: true },
+      },
+      { type: 'assistant.text.delta', text: 'typecheck confirmed' },
+      { type: 'assistant.done' },
+      {
+        type: 'user.text.delta',
+        text: 'tests completed',
+        meta: { source: 'background_notification', qwenDiscreteMessage: true },
+      },
+      { type: 'assistant.text.delta', text: '943 tests passed' },
+      { type: 'assistant.done' },
+    ];
+    const replayed = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      retainedEvents,
+      { now: 1 },
+    );
+    expect(replayed.blocks).toHaveLength(6);
+
+    const rewound = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...retainedEvents,
+        { type: 'user.text.delta', text: 'hello' },
+        { type: 'assistant.text.delta', text: 'hello answer' },
+        { type: 'assistant.done' },
+        {
+          type: 'session.rewound',
+          promptId: 'session########1',
+          targetTurnIndex: 1,
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(rewound.blocks).toEqual(replayed.blocks);
+    expect(rewound.activeUserBlockId).toBeUndefined();
+    expect(rewound.activeAssistantBlockId).toBeUndefined();
   });
 
   it('preserves the unrecognized diagnostics sidechannel on rewind (#8823)', () => {
@@ -646,5 +1128,323 @@ describe('unrecognized diagnostics stay out of the chat transcript', () => {
       state.unrecognizedDiagnostics,
     );
     expect(selectUnrecognizedDiagnostics(state)).toHaveLength(1);
+  });
+});
+
+it('preserves local command identity on read-only status results', () => {
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState({ now: 1 }),
+    [
+      {
+        type: 'user.text.delta',
+        text: '/tools',
+        promptId: 'local-command:tools',
+      },
+      {
+        type: 'status',
+        text: 'Tools list',
+        promptId: 'local-command:tools',
+        clearActiveText: false,
+      },
+    ],
+    { now: 1 },
+  );
+  expect(state.blocks.map((block) => block.promptId)).toEqual([
+    'local-command:tools',
+    'local-command:tools',
+  ]);
+  expect(
+    state.blocks.every((block) => block.id.startsWith('local-command:tools:')),
+  ).toBe(true);
+  expect(new Set(state.blocks.map((block) => block.id)).size).toBe(2);
+});
+
+describe('tool name carried only by the lifecycle metadata', () => {
+  const producerFrame = (patch: Record<string, unknown> = {}) => ({
+    v: 1 as const,
+    id: 1,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call_update' as const,
+        toolCallId: 'call-1',
+        _meta: {
+          toolLifecycle: {
+            v: 1,
+            kind: 'tool',
+            sessionId: 'session',
+            executionId: 'exec-1',
+            callId: 'call-1',
+            toolName: 'read_file',
+            phase: 'ended',
+            executionStatus: 'success',
+            startedAt: 100,
+            endedAt: 120,
+            executionDurationMs: 20,
+            outcome: 'success',
+          },
+        },
+        ...patch,
+      },
+    },
+  });
+  const createdFrame = {
+    v: 1 as const,
+    id: 0,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId: 'call-1',
+        status: 'in_progress',
+      },
+    },
+  };
+
+  it('names an existing block from the producer lifecycle frame', () => {
+    const created = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(createdFrame),
+      { now: 1 },
+    );
+    expect(created.blocks).toHaveLength(1);
+    expect(created.blocks[0]).toMatchObject({ kind: 'tool', title: 'Tool' });
+
+    const named = reduceDaemonTranscriptEvents(
+      created,
+      normalizeDaemonEvent(producerFrame()),
+      { now: 2 },
+    );
+    expect(named.blocks).toHaveLength(1);
+    expect(named.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      // The human-readable title is never replaced by the bare tool name.
+      title: 'Tool',
+    });
+  });
+
+  it('keeps an explicit title and _meta.toolName ahead of the lifecycle name', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            toolLifecycle: producerFrame().data.update._meta.toolLifecycle,
+            toolName: 'explicit_tool',
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'explicit_tool',
+      title: 'Output retained',
+    });
+  });
+
+  it('does not rename an already-named block from a later lifecycle frame', () => {
+    const explicit = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            toolLifecycle: producerFrame().data.update._meta.toolLifecycle,
+            toolName: 'explicit_tool',
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    const afterLifecycle = reduceDaemonTranscriptEvents(
+      explicit,
+      // The lifecycle stream normally ends after the result frame; the name
+      // must not overwrite the explicit one.
+      normalizeDaemonEvent(producerFrame()),
+      { now: 2 },
+    );
+    expect(afterLifecycle.blocks).toHaveLength(1);
+    expect(afterLifecycle.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'explicit_tool',
+      title: 'Output retained',
+    });
+  });
+
+  it('drops a lifecycle name that fails the v1 validator when a status rides along', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            // Schema bump: the metadata-only arm already rejects `v !== 1`;
+            // the status-bearing path must make the same decision.
+            toolLifecycle: {
+              ...producerFrame().data.update._meta.toolLifecycle,
+              v: 2,
+            },
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      title: 'Output retained',
+    });
+    expect(state.blocks[0].toolName).toBeUndefined();
+  });
+
+  // Producer-shaped create frame: the literal `createTranscriptToolCallStartUpdate`
+  // emits (title + content + locations + kind + rawInput + `_meta.toolName`).
+  const startFrame = {
+    v: 1 as const,
+    id: 2,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId: 'call-1',
+        status: 'pending',
+        title: 'Read file',
+        content: [],
+        locations: [],
+        kind: 'read',
+        rawInput: {},
+        _meta: { toolName: 'read_file', provenance: 'builtin' },
+      },
+    },
+  };
+  const lifecycleFrame = (phase: 'started' | 'ended') => ({
+    v: 1 as const,
+    id: 3,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call_update' as const,
+        toolCallId: 'call-1',
+        _meta: {
+          toolLifecycle: {
+            v: 1,
+            kind: 'tool',
+            sessionId: 'session',
+            executionId: 'exec-1',
+            callId: 'call-1',
+            toolName: 'read_file',
+            phase,
+            executionStatus: phase === 'ended' ? 'success' : 'running',
+            startedAt: 100,
+            ...(phase === 'ended'
+              ? {
+                  endedAt: 120,
+                  executionDurationMs: 20,
+                  outcome: 'success',
+                }
+              : {}),
+          },
+        },
+      },
+    },
+  });
+
+  it('a name-only frame for an unseen call id creates no card and a later create frame still builds one', () => {
+    const attached = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(lifecycleFrame('started')),
+      { now: 1 },
+    );
+    // Name-only frames never create a card, even for an unseen call id.
+    expect(attached.blocks).toHaveLength(0);
+
+    const created = reduceDaemonTranscriptEvents(
+      attached,
+      normalizeDaemonEvent(startFrame),
+      { now: 2 },
+    );
+    expect(created.blocks).toHaveLength(1);
+    expect(created.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      title: 'Read file',
+    });
+  });
+
+  it('seeds the late name when the status frame carries none', () => {
+    const attached = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(lifecycleFrame('started')),
+      { now: 1 },
+    );
+    const completed = reduceDaemonTranscriptEvents(
+      attached,
+      normalizeDaemonEvent({
+        v: 1 as const,
+        id: 4,
+        type: 'session_update' as const,
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update' as const,
+            toolCallId: 'call-1',
+            status: 'completed',
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    expect(completed.blocks).toHaveLength(1);
+    expect(completed.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      title: 'read_file',
+      status: 'completed',
+    });
+  });
+
+  it('bounds the parked names and evicts the oldest first', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    for (let i = 0; i < 257; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          v: 1 as const,
+          id: 100 + i,
+          type: 'session_update' as const,
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update' as const,
+              toolCallId: `call-${i}`,
+              _meta: {
+                toolLifecycle: {
+                  v: 1,
+                  kind: 'tool',
+                  sessionId: 'session',
+                  executionId: `exec-${i}`,
+                  callId: `call-${i}`,
+                  toolName: 'read_file',
+                  phase: 'started',
+                  executionStatus: 'running',
+                  startedAt: 100,
+                },
+              },
+            },
+          },
+        }),
+        { now: 2 },
+      );
+    }
+    const parked = Object.keys(state.pendingToolNameByCallId);
+    expect(parked).toHaveLength(256);
+    // Oldest first: `call-0` is evicted, the newest entry survives.
+    expect(state.pendingToolNameByCallId['call-0']).toBeUndefined();
+    expect(state.pendingToolNameByCallId['call-256']).toBe('read_file');
+    // Parking a name must never create a card on its own.
+    expect(state.blocks).toHaveLength(0);
   });
 });

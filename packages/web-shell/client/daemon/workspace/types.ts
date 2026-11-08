@@ -12,7 +12,11 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonSubscriptionActivation,
   DaemonCapabilities,
+  DaemonChannelEvent,
+  DaemonChannelEventsQuery,
+  DaemonChannelEventsSnapshot,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
@@ -25,6 +29,7 @@ import type {
   DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonGitCloneJob,
   DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
@@ -56,6 +61,8 @@ import type {
   DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
+  DaemonWorkspaceExtensionSummaries,
+  DaemonExtensionEntry,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
@@ -63,7 +70,14 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
+  DaemonWorkspaceMcpConfigStatus,
+  DaemonMcpConfigMutationResult,
+  DaemonMcpConfigScope,
+  DaemonWorkspaceRuntimeStatus,
   DaemonWorkspaceMcpInitializeResult,
+  DaemonWorkspaceMcpReloadResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
@@ -78,6 +92,7 @@ import type {
   DaemonSkillMutationResult,
   DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
+  DaemonBrand,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonModelDeleteRequest,
@@ -100,6 +115,7 @@ import type {
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   DaemonRevisionRequest,
+  SetUserLanguageResult,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -148,6 +164,29 @@ export interface DaemonWorkspaceContextValue {
   status: DaemonWorkspaceStatus;
   error?: Error;
   capabilities?: DaemonCapabilities;
+  /**
+   * Web Shell branding resolved by the daemon from the operator settings scopes
+   * (system defaults, user, system). Fetched once per client instance beside
+   * capabilities; stays `undefined` while the fetch is in flight and on a
+   * daemon too old to have the route (whose 404 settles the fetch). A daemon
+   * that answered "no brand configured" resolves to an empty object `{}` —
+   * read that as "use the built-in brand", not as "still loading" (the SDK
+   * publishes the same contract). See
+   * {@link DaemonWorkspaceContextValue.brandSettled} to tell "no value yet"
+   * from "the definitive answer arrived" — consumers that clear cached
+   * branding must key on that flag rather than on `brand === undefined`, or
+   * they never fire on the most common deployment.
+   */
+  brand?: DaemonBrand;
+  /**
+   * True once this client's brand fetch has reached a definitive outcome:
+   * the daemon answered (with a brand or `{}`), or answered 404 (no route,
+   * so no brand will ever exist there). A retryable failure — a 503 while
+   * the runtime starts, a 429, a transport error — is unknown rather than
+   * absent and leaves this false, so cached chrome survives a blip.
+   * Per-client: resets to false when the client instance changes.
+   */
+  brandSettled?: boolean;
   getCapabilities?: () => Promise<DaemonCapabilities>;
   /**
    * Force a fresh `/capabilities` fetch and push the result into the
@@ -159,6 +198,17 @@ export interface DaemonWorkspaceContextValue {
    * shows without a full page reload.
    */
   refreshCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Re-issue the brand fetch for the current client, for the recovery path.
+   * A retryable failure (503, 429, transport) leaves the brand unsettled —
+   * without a re-ask, the in-app chrome renders built-in for the page's
+   * lifetime while the tab keeps the cached white-label. A no-op unless the
+   * brand is genuinely missing (`brand === undefined && !brandSettled`), so
+   * an already-resolved brand is never blanked mid-session and a definitive
+   * 404 outcome is not turned back into "loading". The same 404-only settle
+   * rule applies to the retry.
+   */
+  refreshBrand?: () => void;
   actions: DaemonWorkspaceActions;
 }
 
@@ -233,11 +283,26 @@ export interface DaemonScheduledTaskRun {
   sessionId?: string;
   /** The daemon could not create the fresh session requested for this run. */
   sessionDispatchFailed?: boolean;
+  /** How the task's gate decided this fire; quiet fires are never recorded. */
+  gate?: 'delivered' | 'failed' | 'blocked';
   /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
    * precondition withheld the prompt. Never written now, but kept so the UI can
    * still mark such stored entries "skipped" instead of showing them as ordinary
    * successful runs. Absent = a real dispatched run. */
   withheld?: boolean;
+}
+
+/** Summary of a gated task's recent gate runs, as the daemon keeps it. */
+export interface DaemonScheduledTaskGateStatus {
+  /** Fire time (epoch ms) of the most recent gate run. */
+  lastAt: number;
+  lastOutcome: 'quiet' | 'delivered' | 'failed' | 'blocked';
+  /** Quiet fires since the last delivery. */
+  quietSinceDelivery: number;
+  lastDeliveredAt?: number;
+  /** Failed and blocked fires since the last quiet or delivered one. */
+  consecutiveFailures: number;
+  lastError?: string;
 }
 
 export interface DaemonScheduledTask {
@@ -247,6 +312,12 @@ export interface DaemonScheduledTask {
   prompt: string;
   recurring: boolean;
   enabled: boolean;
+  /** Shell command the owning session runs at each fire outside the model;
+   * silence skips the fire, output wakes the session. Null for an ungated task.
+   * Views carry it whether or not the daemon advertises `scheduled_task_gate`;
+   * the capability says whether POST and PATCH accept it. */
+  gate?: string | null;
+  gateStatus?: DaemonScheduledTaskGateStatus | null;
   createdAt: number;
   lastFiredAt: number | null;
   /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
@@ -258,6 +329,10 @@ export interface DaemonScheduledTask {
   /** `persistent` reuses the task's bound session; `per_run` creates a fresh
    * child session for every scheduled or manual fire. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for each fresh per-run session. */
+  modelServiceId?: string | null;
+  /** Named group assigned to each fresh per-run session. */
+  groupId?: string | null;
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -283,6 +358,13 @@ export interface DaemonCreateScheduledTaskRequest {
   sessionId?: string | null;
   /** Defaults to `persistent` when omitted. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service for fresh per-run sessions. */
+  modelServiceId?: string;
+  /** Named group for fresh per-run sessions. */
+  groupId?: string;
+  /** Gate command; only to a daemon advertising `scheduled_task_gate`, and
+   * only on a recurring task. */
+  gate?: string;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -294,6 +376,12 @@ export interface DaemonUpdateScheduledTaskRequest {
   recurring?: boolean;
   enabled?: boolean;
   sessionMode?: 'persistent' | 'per_run';
+  /** Null clears the selected model. */
+  modelServiceId?: string | null;
+  /** Null clears the selected group. */
+  groupId?: string | null;
+  /** Null (or '') removes the gate. */
+  gate?: string | null;
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -306,9 +394,8 @@ export interface DaemonAddWorkspaceResult {
 }
 
 /**
- * One session's active `/goal`. Goals live in the owning session's memory and
- * only advance while it is resident, so this list covers exactly the goals that
- * are actually running — a session that isn't loaded contributes nothing.
+ * One resident session's incomplete `/goal`, read from its persisted Goal
+ * runtime. Paused and blocked goals are included; unloaded sessions are not.
  */
 export interface DaemonGoal {
   /** The session driving this goal; its transcript is the goal's history. */
@@ -316,10 +403,10 @@ export interface DaemonGoal {
   /** The session's label, or null — the UI falls back to the id. */
   displayName: string | null;
   condition: string;
-  /** Judge turns completed; 0 before the first stop-hook evaluation. */
+  /** Canonical Goal turns completed so far. */
   iterations: number;
   setAt: number;
-  /** The judge's verdict on the most recent turn, when it has run. */
+  /** Why the Goal last stopped, or the verifier's most recent reason. */
   lastReason?: string;
   /**
    * The owning session is mid-turn. For a goal session that is almost always
@@ -340,6 +427,71 @@ export interface DaemonGoalList {
    */
   droppedCount: number;
 }
+
+/**
+ * One `/autofix-pr` watch of a workspace's clone, as `qwen autofix-pr status`
+ * lists it (`GET /autofix-pr/watches`, advertised as `autofix_pr_watches`).
+ */
+export interface DaemonAutofixPrWatch {
+  pr: number;
+  /** `<owner>/<repo>`. */
+  repo: string;
+  host: string;
+  url: string;
+  headRefName: string;
+  /** The PR head the watch knows of. */
+  headSha: string;
+  pushes: number;
+  maxPushes: number;
+  /** The session that owns the watch: maybe no session of this daemon. */
+  session: string;
+  preparedAt: string | null;
+  /** The last run of the watch's own gate. */
+  lastCheck: string | null;
+  /** Whether `lastCheck` is within two of the watch's intervals. */
+  checkedRecently: boolean;
+  /** The last round's snapshot. */
+  lastRound: string | null;
+  /** The gate saw the PR end, and the watch was not cleaned up. */
+  stopped: 'merged' | 'closed' | null;
+  /** The task `schedule` recorded, or null for a `--once` round. */
+  watch: {
+    every: number;
+    reply: boolean;
+    instructions: string;
+    task?: string;
+  } | null;
+  /** A `cleanup` that kept the worktree ended the watch. */
+  ended: { at: string; reason: string } | null;
+  /** Items the watch left for a person, newest last. */
+  needsHuman: Array<{ sha: string; at: string; text: string }>;
+  worktreeExists: boolean;
+  /** A background fix's attempt: `fresh` while it has not ended. */
+  fix: {
+    attempt: string | null;
+    startedAt: string | null;
+    fresh: boolean;
+  } | null;
+}
+
+/** The `GET /autofix-pr/watches` payload. */
+export interface DaemonAutofixPrWatchList {
+  /** False when no git repository is found for the workspace. */
+  available: boolean;
+  /** The clone's main worktree: two workspaces of one clone list the same
+   * watches. */
+  root?: string;
+  /** When the daemon read the files, for comparing `lastCheck` with. */
+  now?: string;
+  watches: DaemonAutofixPrWatch[];
+  /** State files that could not be read, with the reason. */
+  unreadable?: Array<{ pr: number; error: string }>;
+}
+
+/** One entry of a Channel's event journal (`GET .../channels/events`). */
+export type DaemonChannelEventEntry = DaemonChannelEvent;
+
+export type DaemonChannelEventList = DaemonChannelEventsSnapshot;
 
 export interface DaemonWorkspacePathSuggestion {
   name: string;
@@ -367,7 +519,26 @@ export type DaemonWorkspaceDirectoryPickerResult =
       selected: false;
     };
 
-export interface DaemonWorkspaceActions {
+export interface DaemonWorkspaceActions
+  extends Pick<
+    DaemonClient,
+    | 'getSubscriptionConfig'
+    | 'startSubscriptionLogin'
+    | 'getSubscriptionLogin'
+    | 'cancelSubscriptionLogin'
+    | 'getSubscriptionUserInfo'
+    | 'getSubscriptionDefaultModel'
+    | 'signOutSubscription'
+  > {
+  activateSubscription(options?: {
+    workspaceCwd?: string;
+    signal?: AbortSignal;
+  }): Promise<DaemonSubscriptionActivation>;
+  setUiLanguage(
+    language: string,
+    scope: 'user' | 'workspace',
+    workspaceCwd?: string,
+  ): Promise<SetUserLanguageResult>;
   // Sessions
   listSessions(
     options?: DaemonSessionListPageOptions,
@@ -375,9 +546,10 @@ export interface DaemonWorkspaceActions {
   listSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage>;
-  listSessionGroups(): Promise<DaemonSessionGroupCatalog>;
+  listSessionGroups(workspaceCwd?: string): Promise<DaemonSessionGroupCatalog>;
   createSessionGroup(
     input: DaemonSessionGroupInput,
+    workspaceCwd?: string,
   ): Promise<DaemonSessionGroup>;
   updateSessionGroup(
     groupId: string,
@@ -427,9 +599,11 @@ export interface DaemonWorkspaceActions {
   channelPairing: DaemonChannelPairingActions;
 
   // MCP
+  ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
+  loadMcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus>;
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
-  reloadMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
+  reloadMcp(): Promise<DaemonWorkspaceMcpReloadResult>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   loadMcpResources(
     serverName: string,
@@ -443,6 +617,20 @@ export interface DaemonWorkspaceActions {
     request: DaemonRuntimeMcpAddRequest,
   ): Promise<DaemonRuntimeMcpAddResult>;
   removeRuntimeMcpServer(name: string): Promise<DaemonRuntimeMcpRemoveResult>;
+  setMcpServer(
+    name: string,
+    scope: DaemonMcpConfigScope,
+    config: Record<string, unknown>,
+  ): Promise<DaemonMcpConfigMutationResult>;
+  removeMcpServer(
+    name: string,
+    scope: DaemonMcpConfigScope,
+  ): Promise<DaemonMcpConfigMutationResult>;
+  setMcpServerEnabled(
+    name: string,
+    scope: DaemonMcpConfigScope,
+    enabled: boolean,
+  ): Promise<DaemonMcpConfigMutationResult>;
 
   // Daemon status (read-only)
   loadDaemonStatus(
@@ -471,6 +659,8 @@ export interface DaemonWorkspaceActions {
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
+  loadExtensionSummaries(): Promise<DaemonWorkspaceExtensionSummaries>;
+  loadExtensionDetails(name: string): Promise<DaemonExtensionEntry>;
 
   // Tools
   preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
@@ -489,8 +679,18 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
-  loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
-  readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
+  loadMemoryStatus(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus>;
+  /**
+   * `opts.maxBytes` is how a caller accepts partial content: without a window
+   * argument the daemon refuses any file above its own read cap instead of
+   * silently handing back a truncated file.
+   */
+  readWorkspaceFile(
+    filePath: string,
+    opts?: { maxBytes?: number },
+  ): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 
   generateContent(
@@ -552,6 +752,16 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
 
+  /** The `/autofix-pr` watches of a workspace's clone; `workspaceId` as for
+   * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */
+  listAutofixPrWatches(workspaceId?: string): Promise<DaemonAutofixPrWatchList>;
+
+  /** The provider workspace's Channel event journal, newest last. A scoped
+   * workspace reads its own through its client. */
+  listChannelEvents(
+    query?: DaemonChannelEventsQuery,
+  ): Promise<DaemonChannelEventList>;
+
   // Goals (session-scoped runtimes, listed workspace-wide)
   listGoals(): Promise<DaemonGoalList>;
   controlGoal(
@@ -562,7 +772,7 @@ export interface DaemonWorkspaceActions {
   clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
   // Providers / env (read-only diagnostics)
-  loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;
+  loadProviders(workspaceCwd?: string): Promise<DaemonWorkspaceProvidersStatus>;
   loadEnv(): Promise<DaemonWorkspaceEnvStatus>;
   loadPreflight(): Promise<DaemonWorkspacePreflightStatus>;
 
@@ -642,6 +852,12 @@ export interface DaemonWorkspaceActions {
     options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
   addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
+  startGitWorkspaceClone(input: {
+    url: string;
+    target: string;
+  }): Promise<{ jobId: string }>;
+  getGitWorkspaceCloneJob(jobId: string): Promise<DaemonGitCloneJob>;
+  cancelGitWorkspaceClone(jobId: string): Promise<DaemonGitCloneJob>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
@@ -650,6 +866,17 @@ export interface DaemonWorkspaceActions {
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,
   ): Promise<DaemonWorkspaceCapability>;
+  listWorkspaceDirectories(
+    workspaceSelector: string,
+  ): Promise<DaemonWorkspaceDirectories>;
+  addWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
+  removeWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },

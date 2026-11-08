@@ -29,7 +29,24 @@ export type FakeOpenAIResponse = {
   model?: string;
   content?: string;
   contentChunks?: string[];
+  /**
+   * Reasoning text, emitted on the wire as `reasoning_content` — the field the
+   * OpenAI-compatible converter reads into a thought part. Streamed as one
+   * delta per entry of `reasoningChunks`, or as a single delta otherwise, and
+   * always before the content deltas of the same choice.
+   */
+  reasoning?: string;
+  reasoningChunks?: string[];
+  errorContent?: string;
   disconnectAfterContentChunks?: number;
+  /**
+   * Streaming-only: pause the response once this many content deltas have been
+   * written across the whole response, and resume when `holdUntil` resolves.
+   * Awaiting the handler only holds a turn before the first byte; a test that
+   * needs the CLI genuinely mid-stream has to stop the stream itself.
+   */
+  holdAfterChunks?: number;
+  holdUntil?: Promise<void>;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
   choices?: FakeOpenAIChoice[];
@@ -47,6 +64,15 @@ export type FakeOpenAIChoice = {
   index: number;
   content?: string;
   contentChunks?: string[];
+  reasoning?: string;
+  reasoningChunks?: string[];
+  /**
+   * Streaming-only mid-stream provider error: emits one chunk carrying this
+   * string as `delta.content` together with `finish_reason: 'error_finish'`,
+   * then ends the stream. Mirrors gateways that report upstream failures as
+   * stream content instead of an HTTP error status.
+   */
+  errorContent?: string;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
 };
@@ -54,6 +80,10 @@ export type FakeOpenAIChoice = {
 export type FakeOpenAIRequest = {
   body: JsonObject;
   headers: IncomingHttpHeaders;
+  transport: {
+    closedAt?: number;
+    writableEndedAtClose?: boolean;
+  };
 };
 
 export type FakeOpenAIServer = {
@@ -119,11 +149,16 @@ export async function startFakeOpenAIServer(
       }
 
       const requestIndex = requests.length;
-      requests.push({ body, headers: req.headers });
+      const transport: FakeOpenAIRequest['transport'] = {};
+      res.once('close', () => {
+        transport.closedAt = performance.now();
+        transport.writableEndedAtClose = res.writableEnded;
+      });
+      requests.push({ body, headers: req.headers, transport });
 
       const response = await handler({ body, requestIndex });
       if (body['stream'] === true) {
-        writeStreamed(
+        await writeStreamed(
           res,
           getModel(body),
           response,
@@ -254,6 +289,9 @@ function writeNonStreamed(
         message: {
           role: 'assistant',
           content: choice.content ?? choice.contentChunks?.join('') ?? null,
+          ...(choiceReasoning(choice)
+            ? { reasoning_content: choiceReasoning(choice) }
+            : {}),
           ...(choice.toolCalls ? { tool_calls: choice.toolCalls } : {}),
         },
         finish_reason: finishReason(choice),
@@ -263,12 +301,12 @@ function writeNonStreamed(
   );
 }
 
-function writeStreamed(
+async function writeStreamed(
   res: ServerResponse,
   model: string,
   message: FakeOpenAIResponse,
   keepAlive: boolean,
-): void {
+): Promise<void> {
   res.writeHead(200, {
     'cache-control': 'no-cache',
     connection: keepAlive ? 'keep-alive' : 'close',
@@ -295,9 +333,27 @@ function writeStreamed(
     res.write(`data: ${JSON.stringify(payload)}\n\n`, callback);
   };
 
+  const holdAfterChunks = message.holdAfterChunks ?? -1;
+  let contentDeltas = 0;
+  const sendContent = async (choiceIndex: number, content: string) => {
+    send(chunk(choiceIndex, { content }));
+    contentDeltas += 1;
+    if (contentDeltas === holdAfterChunks) await message.holdUntil;
+  };
+
   const choices = responseChoices(message);
   for (const [choicePosition, choice] of choices.entries()) {
     send(chunk(choice.index, { role: 'assistant' }));
+    if (choice.errorContent !== undefined) {
+      send(
+        chunk(choice.index, { content: choice.errorContent }, 'error_finish'),
+      );
+      continue;
+    }
+    for (const reasoning of choice.reasoningChunks ??
+      (choice.reasoning ? [choice.reasoning] : [])) {
+      send(chunk(choice.index, { reasoning_content: reasoning }));
+    }
     for (const [contentIndex, content] of (
       choice.contentChunks ?? []
     ).entries()) {
@@ -305,10 +361,10 @@ function writeStreamed(
         send(chunk(choice.index, { content }), () => res.destroy());
         return;
       }
-      send(chunk(choice.index, { content }));
+      await sendContent(choice.index, content);
     }
     if (!choice.contentChunks && choice.content) {
-      send(chunk(choice.index, { content: choice.content }));
+      await sendContent(choice.index, choice.content);
     }
     for (const [toolIndex, toolCall] of (choice.toolCalls ?? []).entries()) {
       send(
@@ -373,11 +429,20 @@ function responseChoices(message: FakeOpenAIResponse): FakeOpenAIChoice[] {
         index: 0,
         content: message.content,
         contentChunks: message.contentChunks,
+        reasoning: message.reasoning,
+        reasoningChunks: message.reasoningChunks,
+        errorContent: message.errorContent,
         toolCalls: message.toolCalls,
         finishReason: message.finishReason,
       },
     ]
   );
+}
+
+function choiceReasoning(
+  choice: Pick<FakeOpenAIChoice, 'reasoning' | 'reasoningChunks'>,
+): string | undefined {
+  return choice.reasoningChunks?.join('') ?? choice.reasoning;
 }
 
 function finishReason(

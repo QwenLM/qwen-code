@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import { EventBus } from './eventBus.js';
+import { createTranscriptExecutionLifecycleUpdate } from './transcript-replay.js';
 import type { BridgeEvent } from './eventBus.js';
 
 function makeTextChunk(id: number, text: string): BridgeEvent {
@@ -207,6 +208,7 @@ type ChunkIdentity = {
   parentToolCallId?: string;
   subagentType?: string;
   sourceRecordIds?: string[];
+  agent?: unknown;
   promptId?: string;
   originatorClientId?: string;
   sessionId?: string;
@@ -220,7 +222,8 @@ function withIdentity(
   if (
     identity.parentToolCallId !== undefined ||
     identity.subagentType !== undefined ||
-    identity.sourceRecordIds !== undefined
+    identity.sourceRecordIds !== undefined ||
+    identity.agent !== undefined
   ) {
     update['_meta'] = {
       ...(identity.parentToolCallId === undefined
@@ -229,6 +232,7 @@ function withIdentity(
       ...(identity.subagentType === undefined
         ? {}
         : { subagentType: identity.subagentType }),
+      ...(identity.agent === undefined ? {} : { agent: identity.agent }),
       ...(identity.sourceRecordIds === undefined
         ? {}
         : {
@@ -250,6 +254,83 @@ function withIdentity(
 }
 
 describe('TurnBoundaryCompactionEngine', () => {
+  it('preserves independent lifecycle transitions without constructing compacted tool cards', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    for (const [id, phase] of [
+      [1, 'started'],
+      [2, 'ended'],
+    ] as const)
+      engine.ingest({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'orphan',
+            _meta: { toolLifecycle: { v: 1, phase } },
+          },
+        },
+      });
+    engine.ingest(makeTurnComplete(3));
+    const frames = engine.snapshot().compactedTurns;
+    expect(frames).toHaveLength(3);
+    expect(
+      frames
+        .slice(0, 2)
+        .map(
+          (event) =>
+            (event.data as { update: { sessionUpdate: string } }).update
+              .sessionUpdate,
+        ),
+    ).toEqual(['tool_call_update', 'tool_call_update']);
+  });
+
+  it.each([undefined, 'parent-tool'])(
+    'preserves request lifecycle frames after a turn completes (parent=%s)',
+    (parentToolCallId) => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const frames: BridgeEvent[] = [];
+      for (const executionId of ['attempt-1', 'attempt-2']) {
+        for (const phase of ['started', 'ended'] as const) {
+          frames.push({
+            v: 1,
+            id: frames.length + 1,
+            type: 'session_update',
+            data: {
+              update: createTranscriptExecutionLifecycleUpdate(
+                {
+                  v: 1,
+                  kind: 'request',
+                  sessionId: 'session',
+                  promptId: 'prompt',
+                  executionId,
+                  model: 'model',
+                  startedAt: 100,
+                  ...(phase === 'started'
+                    ? { phase }
+                    : {
+                        phase,
+                        endedAt: 110,
+                        durationMs: 10,
+                        outcome: 'success',
+                      }),
+                },
+                { extra: { parentToolCallId } },
+              ),
+            },
+          });
+        }
+      }
+      frames.forEach((frame) => engine.ingest(frame));
+      engine.ingest(makeTextChunk(5, 'answer'));
+      engine.ingest(makeTurnComplete(6));
+      const snapshot = engine.snapshot();
+      expect(snapshot.compactedTurns.slice(0, 4)).toEqual(frames);
+      expect(snapshot.liveJournal).toEqual([]);
+    },
+  );
+
   describe('basic compaction', () => {
     it('merges consecutive text chunks into a single event on turn_complete', () => {
       const engine = new TurnBoundaryCompactionEngine();
@@ -575,6 +656,85 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
     });
 
+    it('degrades retained App html oldest-first instead of evicting the App turn', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 1000 });
+
+      engine.ingest(
+        makeToolCallUpdate(1, 'app-1', 'completed', {
+          rawOutput: {
+            type: 'mcp_app',
+            html: 'x'.repeat(400),
+            fallbackText: 'first chart',
+          },
+        }),
+      );
+      engine.ingest(makeTurnComplete(2));
+      engine.ingest(
+        makeToolCallUpdate(3, 'app-2', 'completed', {
+          rawOutput: {
+            type: 'mcp_app',
+            html: 'y'.repeat(400),
+            fallbackText: 'second chart',
+          },
+        }),
+      );
+      engine.ingest(makeTurnComplete(4));
+
+      const snap = engine.snapshot();
+      const appOutputs = snap.compactedTurns
+        .filter(
+          (event) =>
+            (event.data as { update?: { rawOutput?: { type?: string } } })
+              ?.update?.rawOutput?.type === 'mcp_app',
+        )
+        .map(
+          (event) =>
+            (
+              event.data as {
+                update: { rawOutput: { html: string; fallbackText: string } };
+              }
+            ).update.rawOutput,
+        );
+      // Both App turns stay in the window — the oldest loses only its
+      // html. Pre-degrade, the first turn was evicted outright and the
+      // oversized second turn followed it on the next segment.
+      expect(appOutputs).toEqual([
+        { type: 'mcp_app', html: '', fallbackText: 'first chart' },
+        {
+          type: 'mcp_app',
+          html: 'y'.repeat(400),
+          fallbackText: 'second chart',
+        },
+      ]);
+      expect(
+        snap.compactedTurns.some((event) => event.type === 'history_truncated'),
+      ).toBe(false);
+    });
+
+    it('preserves the newest App when evicting older text makes it fit', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 1000 });
+      engine.ingest(makeTextChunk(1, 'x'.repeat(800)));
+      engine.ingest(makeTurnComplete(2));
+      engine.ingest(
+        makeToolCallUpdate(3, 'app', 'completed', {
+          rawOutput: {
+            type: 'mcp_app',
+            html: 'y'.repeat(400),
+            fallbackText: 'chart',
+          },
+        }),
+      );
+      engine.ingest(makeTurnComplete(4));
+      const events = engine.snapshot().compactedTurns;
+      expect(events.some((event) => event.type === 'history_truncated')).toBe(
+        true,
+      );
+      expect(events.find((event) => event.id === 3)).toHaveProperty(
+        'data.update.rawOutput.html',
+        'y'.repeat(400),
+      );
+    });
+
     it('retains the newest oversized live turn without a truncation marker', () => {
       const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 128 });
 
@@ -788,6 +948,38 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal).toHaveLength(1);
       expect(extractTexts(snap.liveJournal)).toEqual(['firstsecond']);
       expect(snap.liveJournal.map((event) => event.id)).toEqual([2]);
+    });
+
+    it('merges consecutive subagent chunks carrying the agent identity stamp', () => {
+      const identity = {
+        parentToolCallId: 'tool-a',
+        subagentType: 'explore',
+        agent: { agentName: '/root/explore', depth: 1, kind: 'subagent' },
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), identity));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), identity));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(1);
+      expect(extractTexts(snap.liveJournal)).toEqual(['firstsecond']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([2]);
+    });
+
+    it('keeps chunks discrete when the agent stamp is not a record', () => {
+      const identity = {
+        parentToolCallId: 'tool-a',
+        subagentType: 'explore',
+        agent: 'explore',
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), identity));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), identity));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(2);
+      expect(extractTexts(snap.liveJournal)).toEqual(['first', 'second']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([1, 2]);
     });
 
     it.each([
@@ -1161,7 +1353,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       );
     });
 
-    it('retains nested usage frames in the summary journal', () => {
+    it('omits nested usage frames from the summary journal', () => {
       const engine = new TurnBoundaryCompactionEngine();
       const usage = makeTextChunkWithParent(1, '', 'agent-1');
       (
@@ -1172,7 +1364,7 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       expect(
         engine.snapshot('summary').liveJournal.map((event) => event.id),
-      ).toEqual([1]);
+      ).toEqual([]);
     });
 
     it('excludes parented tool frames from the summary journal under cap pressure', () => {

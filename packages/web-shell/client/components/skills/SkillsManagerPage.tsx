@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
@@ -10,11 +17,13 @@ import {
   SparklesIcon,
 } from 'lucide-react';
 import {
+  useConnection,
   useSkills,
   useWorkspace,
   type DaemonWorkspaceSkillStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import type { DaemonSkillMutationResult } from '@qwen-code/sdk/daemon';
 import {
   filterSkills,
   preserveSkillSelection,
@@ -83,6 +92,8 @@ interface SkillsManagerPageProps {
   onClose: () => void;
   onUseSkill: (name: string) => void;
   embedded?: EmbeddedManagerPage;
+  workspaceCwd?: string;
+  workspaceControl?: ReactNode;
 }
 
 function skillLevelLabel(
@@ -160,8 +171,11 @@ export function SkillsManagerPage({
   onClose,
   onUseSkill,
   embedded,
+  workspaceCwd,
+  workspaceControl,
 }: SkillsManagerPageProps) {
   const { t } = useI18n();
+  const connection = useConnection();
   const workspace = useWorkspace();
   const {
     status,
@@ -169,10 +183,14 @@ export function SkillsManagerPage({
     loading,
     error,
     reload,
+    reloadConfig,
+    ensureRuntime,
     setEnabled,
     install,
+    installArchive,
+    lookupInstallAttempt,
     remove,
-  } = useSkills({ autoLoad: true });
+  } = useSkills({ autoLoad: true, workspaceCwd });
   const canToggleSkills =
     workspace.capabilities?.features.includes(
       'workspace_skill_settings_toggle',
@@ -189,6 +207,7 @@ export function SkillsManagerPage({
   const [installOpen, setInstallOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [listNotice, setListNotice] = useState<string | null>(null);
+  const [installWarning, setInstallWarning] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
     skillName: string;
     text: string;
@@ -199,6 +218,30 @@ export function SkillsManagerPage({
     () => displayedSkills.find((skill) => skill.name === selectedName),
     [displayedSkills, selectedName],
   );
+  const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
+  const toggleScopeEpoch = useRef(0);
+  const archiveScope = useMemo(
+    () => ({ active: true }),
+    // Each owner needs a distinct token for callbacks captured before a switch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [targetWorkspaceCwd, workspace.client],
+  );
+  useLayoutEffect(() => {
+    archiveScope.active = true;
+    setNotice(null);
+    setBusySkill(null);
+    setListNotice(null);
+    setInstallWarning(null);
+    return () => {
+      archiveScope.active = false;
+      toggleScopeEpoch.current += 1;
+    };
+  }, [archiveScope]);
+  const targetsActiveWorkspace =
+    connection.workspaceCwd !== undefined
+      ? targetWorkspaceCwd === connection.workspaceCwd
+      : connection.sessionId === undefined &&
+        targetWorkspaceCwd === workspace.workspaceCwd;
   const filteredSkills = useMemo(
     () => filterSkills(displayedSkills, query, levelFilter, statusFilter),
     [displayedSkills, levelFilter, query, statusFilter],
@@ -223,16 +266,28 @@ export function SkillsManagerPage({
   }, [displayedSkills]);
 
   useEffect(() => {
+    void ensureRuntime();
+  }, [ensureRuntime]);
+
+  useEffect(() => {
     embedded?.onDetailChange(Boolean(selectedSkill));
   }, [embedded, selectedSkill]);
 
-  async function toggleSkill(skill: DaemonWorkspaceSkillStatus) {
-    const enabled = skill.status === 'disabled';
+  async function toggleSkill(
+    skill: DaemonWorkspaceSkillStatus,
+    enabled = skill.status === 'disabled',
+  ) {
+    const epoch = toggleScopeEpoch.current;
+    const isCurrent = () => epoch === toggleScopeEpoch.current;
     setBusySkill(skill.name);
     setNotice(null);
     try {
-      const result = await setEnabled(skill.name, enabled);
-      const refreshed = await reload();
+      const result = await setEnabled(skill.name, enabled, {
+        clientId: targetsActiveWorkspace ? connection.clientId : undefined,
+      });
+      if (!isCurrent()) return;
+      const refreshed = await reloadConfig();
+      if (!isCurrent()) return;
       const refreshedSkill = refreshed?.skills.find(
         (item) => item.name.toLowerCase() === skill.name.toLowerCase(),
       );
@@ -243,19 +298,21 @@ export function SkillsManagerPage({
           ? t('skills.settingUnchanged')
           : !refreshedSkill
             ? t('skills.settingUpdated')
-            : refreshedSkill.status === expectedStatus
+            : refreshedSkill.status === expectedStatus &&
+                refreshedSkill.status !== skill.status
               ? t(enabled ? 'skills.enabled' : 'skills.disabled')
               : t('skills.settingUpdatedAvailabilityUnchanged'),
         error: false,
       });
     } catch (toggleError) {
+      if (!isCurrent()) return;
       setNotice({
         skillName: skill.name,
         text: toggleErrorMessage(toggleError, t),
         error: true,
       });
     } finally {
-      setBusySkill(null);
+      if (isCurrent()) setBusySkill(null);
     }
   }
 
@@ -263,9 +320,31 @@ export function SkillsManagerPage({
     request: Parameters<typeof install>[0],
   ): Promise<void> {
     setListNotice(null);
+    setInstallWarning(null);
     await install(request);
     setListNotice(t('skills.install.succeeded', { name: request.name.trim() }));
-    await reload().catch(() => undefined);
+    await reloadConfig().catch(() => undefined);
+  }
+
+  async function completeArchiveInstall(
+    result: DaemonSkillMutationResult,
+  ): Promise<void> {
+    if (!archiveScope.active) return;
+    let warning = result.activationWarning;
+    await reloadConfig().catch(() => undefined);
+    if (!archiveScope.active) return;
+    try {
+      await ensureRuntime({ throwOnError: true });
+    } catch (error) {
+      warning ??= error instanceof Error ? error.message : String(error);
+    }
+    if (!archiveScope.active) return;
+    setListNotice(t('skills.install.succeeded', { name: result.skillName }));
+    setInstallWarning(
+      warning
+        ? t('skills.install.activationWarning', { detail: warning })
+        : null,
+    );
   }
 
   async function deleteSkill(): Promise<void> {
@@ -277,7 +356,7 @@ export function SkillsManagerPage({
       setDeleteOpen(false);
       setSelectedName(null);
       setListNotice(t('skills.delete.succeeded', { name: selectedSkill.name }));
-      await reload().catch(() => undefined);
+      await reloadConfig().catch(() => undefined);
     } catch (deleteError) {
       setDeleteOpen(false);
       setNotice({
@@ -297,6 +376,18 @@ export function SkillsManagerPage({
     setSelectedName(null);
     void reload();
   }
+
+  const toggleNotice =
+    notice && (!selectedSkill || notice.skillName === selectedSkill.name) ? (
+      <ManagementNotice
+        tone={notice.error ? 'error' : 'success'}
+        noticeKey={notice.text}
+        closeLabel={t('common.close')}
+        onDismiss={() => setNotice(null)}
+      >
+        {notice.text}
+      </ManagementNotice>
+    ) : null;
 
   const standaloneNavigation = (
     <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
@@ -333,27 +424,42 @@ export function SkillsManagerPage({
   );
   const navigation = embedded ? (
     selectedSkill ? (
-      <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
-        <BreadcrumbList className="h-8 text-sm">
-          <BreadcrumbItem>
-            <BreadcrumbLink asChild>
-              <button
-                type="button"
-                onClick={() => {
-                  returnToList();
-                  embedded.onDetailChange(false);
-                }}
-              >
-                {t('skills.title')}
-              </button>
-            </BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <BreadcrumbPage>{selectedSkill.name}</BreadcrumbPage>
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
+      <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center gap-3 border-b bg-background px-5 py-3">
+        <Breadcrumb className="min-w-0 flex-1">
+          <BreadcrumbList className="h-8 text-sm">
+            {embedded.onBack ? (
+              <BreadcrumbItem>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={embedded.onBack}
+                  aria-label={t('common.back')}
+                >
+                  <ArrowLeftIcon />
+                </Button>
+              </BreadcrumbItem>
+            ) : null}
+            <BreadcrumbItem>
+              <BreadcrumbLink asChild>
+                <button
+                  type="button"
+                  onClick={() => {
+                    returnToList();
+                    embedded.onDetailChange(false);
+                  }}
+                >
+                  {t('skills.title')}
+                </button>
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>{selectedSkill.name}</BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+        {workspaceControl}
+      </div>
     ) : null
   ) : (
     standaloneNavigation
@@ -390,7 +496,9 @@ export function SkillsManagerPage({
               </div>
             </div>
             <Button
-              disabled={selectedSkill.status === 'disabled'}
+              disabled={
+                selectedSkill.status === 'disabled' || !targetsActiveWorkspace
+              }
               onClick={() => onUseSkill(selectedSkill.name)}
             >
               <PlayIcon data-icon="inline-start" />
@@ -432,6 +540,15 @@ export function SkillsManagerPage({
                         : 'skills.disable',
                     )}
                   </DropdownMenuItem>
+                  {selectedSkill.status === 'disabled' &&
+                  selectedSkill.lockedScope ? (
+                    <DropdownMenuItem
+                      disabled={busySkill !== null || !canToggleSkills}
+                      onSelect={() => void toggleSkill(selectedSkill, false)}
+                    >
+                      {t('skills.disableInWorkspace')}
+                    </DropdownMenuItem>
+                  ) : null}
                   {canManageSkills &&
                   (selectedSkill.level === 'project' ||
                     selectedSkill.level === 'user') ? (
@@ -448,16 +565,7 @@ export function SkillsManagerPage({
             </DropdownMenu>
           </div>
 
-          {notice?.skillName === selectedSkill.name ? (
-            <ManagementNotice
-              tone={notice.error ? 'error' : 'success'}
-              noticeKey={notice.text}
-              closeLabel={t('common.close')}
-              onDismiss={() => setNotice(null)}
-            >
-              {notice.text}
-            </ManagementNotice>
-          ) : null}
+          {toggleNotice}
 
           {message || selectedSkill.error ? (
             <Alert variant="destructive">
@@ -592,6 +700,8 @@ export function SkillsManagerPage({
           </Alert>
         ) : null}
 
+        {toggleNotice}
+
         {listNotice ? (
           <ManagementNotice
             tone="success"
@@ -600,6 +710,16 @@ export function SkillsManagerPage({
             onDismiss={() => setListNotice(null)}
           >
             {listNotice}
+          </ManagementNotice>
+        ) : null}
+        {installWarning ? (
+          <ManagementNotice
+            tone="error"
+            noticeKey={installWarning}
+            closeLabel={t('common.close')}
+            onDismiss={() => setInstallWarning(null)}
+          >
+            {installWarning}
           </ManagementNotice>
         ) : null}
 
@@ -745,6 +865,20 @@ export function SkillsManagerPage({
         open={installOpen}
         onOpenChange={setInstallOpen}
         onInstall={installSkill}
+        archive={
+          workspace.capabilities?.features.includes('skill_archive_install')
+            ? {
+                limits: workspace.capabilities.limits,
+                install: async (request, scope) => {
+                  setListNotice(null);
+                  setInstallWarning(null);
+                  return installArchive(request, scope);
+                },
+                lookup: lookupInstallAttempt,
+                committed: completeArchiveInstall,
+              }
+            : undefined
+        }
       />
     </div>
   );

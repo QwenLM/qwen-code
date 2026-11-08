@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import type React from 'react';
 import { createContext, useContext } from 'react';
 import { type Key } from '../hooks/useKeypress.js';
 import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import { type McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import { type ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import {
   type EditorType,
   type ApprovalMode,
@@ -42,6 +45,7 @@ export interface UIActions {
     scope: SettingScope,
   ) => void;
   handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
+  handleOutputStyleSelect: (styleName: string | undefined) => void;
   auth: AuthController['actions'];
   handleEditorSelect: (
     editorType: EditorType | undefined,
@@ -55,6 +59,7 @@ export interface UIActions {
   closeModelDialog: () => void;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
+    advisorModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
@@ -63,7 +68,6 @@ export interface UIActions {
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
-  dismissProviderUpdate: () => void;
   closeTrustDialog: () => void;
   closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;
@@ -72,6 +76,9 @@ export interface UIActions {
   handleCommandMigrationComplete: (result: CommandMigrationNudgeResult) => void;
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   handleMcpApprovalSelect: (choice: McpApprovalChoice) => void;
+  handleProjectHooksApprovalSelect: (
+    choice: ProjectHooksApprovalChoice,
+  ) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
@@ -81,10 +88,18 @@ export interface UIActions {
     options?: {
       deferUntilIdle?: boolean;
       submittedPrompt?: string;
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      pasteExpansions?: ReadonlyMap<string, string>;
     },
   ) => void;
+  // The composer registers its own submit path (large-paste expansion, epoch
+  // bump, stash cleanup) so the vim-mode Enter can run it instead of calling
+  // handleFinalSubmit directly.
+  registerPromptSubmit?: (handler: ((value: string) => void) | null) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
+  setPendingPastes?: React.Dispatch<React.SetStateAction<Map<string, string>>>;
   popAllQueuedMessages: () => string | null;
   invalidateSubmittedPromptProvenance: () => void;
   // Welcome back dialog

@@ -4,16 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isAbsolute } from 'node:path';
-import { open, type FileHandle } from 'node:fs/promises';
+import { isAbsolute, parse, relative, sep } from 'node:path';
+import { constants } from 'node:fs';
+import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import {
   ConfigurationError,
+  parseAutoRecallInstanceConfig,
   parseDialect,
   parseInstanceConfig,
 } from './schemas.js';
 import type {
+  AutoRecallRuntimeConfiguration,
   DialectV1,
-  InstanceConfigV1,
+  InstanceConfigV2,
+  InstanceConfigV3,
+  InstanceConfigBase,
   RuntimeConfiguration,
   ScopeLocation,
 } from './types.js';
@@ -21,11 +26,34 @@ import type {
 const CONFIG_ENV = 'QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG';
 const MAX_CONFIG_BYTES = 64 * 1024;
 
-export async function loadRuntimeConfiguration(options: {
-  presets: ReadonlyMap<string, unknown>;
-  env?: NodeJS.ProcessEnv;
-}): Promise<RuntimeConfiguration> {
+export async function loadRuntimeConfiguration(
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<RuntimeConfiguration> {
   const env = options.env ?? process.env;
+  return loadConfiguration(env, parseInstanceConfig);
+}
+
+export async function loadAutoRecallRuntimeConfiguration(
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<AutoRecallRuntimeConfiguration> {
+  const env = options.env ?? process.env;
+  const runtime = await loadConfiguration(env, parseAutoRecallInstanceConfig);
+  const repositoryRoot = await resolveRepositoryRoot(
+    runtime.instance.autoRecall.repositoryRoot,
+  );
+  return {
+    ...runtime,
+    instance: {
+      ...runtime.instance,
+      autoRecall: { repositoryRoot },
+    },
+  };
+}
+
+async function loadConfiguration<T extends InstanceConfigV2 | InstanceConfigV3>(
+  env: NodeJS.ProcessEnv,
+  parseInstance: (value: unknown) => T,
+): Promise<{ instance: T; dialect: DialectV1; credential: string }> {
   const configPath = readRequiredEnvironment(env, CONFIG_ENV);
   if (!isAbsolute(configPath)) {
     throw new ConfigurationError(
@@ -33,15 +61,15 @@ export async function loadRuntimeConfiguration(options: {
     );
   }
 
-  const instance = parseInstanceConfig(await readConfigFile(configPath));
-  const preset = options.presets.get(instance.preset);
-  if (preset === undefined) {
-    throw new ConfigurationError('Mem0 extension preset is unknown.');
+  const instance = parseInstance(await readConfigFile(configPath, 'instance'));
+  if (!isAbsolute(instance.dialectPath)) {
+    throw new ConfigurationError(
+      'Mem0 extension dialect path must be absolute.',
+    );
   }
-  const dialect = parseDialect(preset);
-  if (dialect.id !== instance.preset) {
-    throw new ConfigurationError('Mem0 extension preset is invalid.');
-  }
+  const dialect = parseDialect(
+    await readConfigFile(instance.dialectPath, 'dialect'),
+  );
 
   validateInstance(instance, dialect);
   return {
@@ -51,11 +79,16 @@ export async function loadRuntimeConfiguration(options: {
   };
 }
 
-async function readConfigFile(path: string): Promise<unknown> {
+export async function readConfigFile(
+  path: string,
+  kind: 'instance' | 'dialect',
+): Promise<unknown> {
   let source: Buffer;
   let file: FileHandle | undefined;
   try {
-    file = await open(path, 'r');
+    // A blocked FIFO open can outlive even the Hook's explicit process exit.
+    file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    if (!(await file.stat()).isFile()) throw new Error('Not a regular file.');
     source = Buffer.allocUnsafe(MAX_CONFIG_BYTES + 1);
     let offset = 0;
     while (offset < source.byteLength) {
@@ -71,23 +104,27 @@ async function readConfigFile(path: string): Promise<unknown> {
     source = source.subarray(0, offset);
   } catch {
     throw new ConfigurationError(
-      'Mem0 extension configuration is unavailable.',
+      `Mem0 extension ${kind} configuration is unavailable.`,
     );
   } finally {
     await file?.close().catch(() => undefined);
   }
   if (source.byteLength > MAX_CONFIG_BYTES) {
-    throw new ConfigurationError('Mem0 extension configuration is invalid.');
+    throw new ConfigurationError(
+      `Mem0 extension ${kind} configuration is invalid.`,
+    );
   }
   try {
     return JSON.parse(source.toString('utf8')) as unknown;
   } catch {
-    throw new ConfigurationError('Mem0 extension configuration is invalid.');
+    throw new ConfigurationError(
+      `Mem0 extension ${kind} configuration is invalid.`,
+    );
   }
 }
 
 function validateInstance(
-  instance: InstanceConfigV1,
+  instance: InstanceConfigV2 | InstanceConfigV3,
   dialect: DialectV1,
 ): void {
   validateEndpoint(instance);
@@ -97,7 +134,7 @@ function validateInstance(
   validateScope(instance, dialect);
 }
 
-function validateEndpoint(instance: InstanceConfigV1): void {
+export function validateEndpoint(instance: InstanceConfigBase): void {
   let origin: URL;
   try {
     origin = new URL(instance.endpoint.origin);
@@ -123,7 +160,7 @@ function validateEndpoint(instance: InstanceConfigV1): void {
   throw new ConfigurationError('Mem0 extension endpoint is invalid.');
 }
 
-function validateStaticPath(path: string, allowEmpty: boolean): void {
+export function validateStaticPath(path: string, allowEmpty: boolean): void {
   if (path === '' && allowEmpty) return;
   if (
     !path.startsWith('/') ||
@@ -157,17 +194,61 @@ function validateDialectSemantics(dialect: DialectV1): void {
     dialect.search.appIdLocation,
   ];
   if (locations.some((location) => location.startsWith('json'))) {
-    throw new ConfigurationError('Mem0 extension preset is invalid.');
+    throw new ConfigurationError('Mem0 extension dialect is invalid.');
   }
 }
 
-function validateScope(instance: InstanceConfigV1, dialect: DialectV1): void {
+function validateScope(
+  instance: InstanceConfigV2 | InstanceConfigV3,
+  dialect: DialectV1,
+): void {
   requireScopeValue(instance.scope.userId, dialect.search.userIdLocation);
   requireScopeValue(instance.scope.agentId, dialect.search.agentIdLocation);
   requireScopeValue(instance.scope.appId, dialect.search.appIdLocation);
 }
 
-function requireScopeValue(
+export async function resolveRepositoryRoot(value: string): Promise<string> {
+  if (!isAbsolute(value)) {
+    throw new ConfigurationError('Mem0 extension repository root is invalid.');
+  }
+  try {
+    const resolved = await realpath(value);
+    if (
+      !(await stat(resolved)).isDirectory() ||
+      parse(resolved).root === resolved
+    ) {
+      throw new ConfigurationError(
+        'Mem0 extension repository root is invalid.',
+      );
+    }
+    return resolved;
+  } catch (error) {
+    if (error instanceof ConfigurationError) throw error;
+    throw new ConfigurationError('Mem0 extension repository root is invalid.');
+  }
+}
+
+export async function isWithinRepository(
+  repositoryRoot: string,
+  candidate: string,
+): Promise<boolean> {
+  if (!isAbsolute(candidate)) return false;
+  try {
+    const resolved = await realpath(candidate);
+    if (!(await stat(resolved)).isDirectory()) return false;
+    const pathFromRoot = relative(repositoryRoot, resolved);
+    return (
+      pathFromRoot === '' ||
+      (!pathFromRoot.startsWith(`..${sep}`) &&
+        pathFromRoot !== '..' &&
+        !isAbsolute(pathFromRoot))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function requireScopeValue(
   value: string | undefined,
   location: ScopeLocation,
 ): void {
@@ -175,19 +256,22 @@ function requireScopeValue(
   throw new ConfigurationError('Mem0 extension scope is invalid.');
 }
 
-function readRequiredEnvironment(env: NodeJS.ProcessEnv, name: string): string {
+export function readRequiredEnvironment(
+  env: NodeJS.ProcessEnv,
+  name: string,
+): string {
   const value = env[name];
   const trimmed = value?.trim();
   if (!value || !trimmed || trimmed === '${' + name + '}') {
     throw new ConfigurationError(
-      'Mem0 extension configuration is unavailable.',
+      'Mem0 extension instance configuration is unavailable.',
     );
   }
   return value;
 }
 
 export function buildSearchUrl(
-  instance: InstanceConfigV1,
+  instance: InstanceConfigV2 | InstanceConfigV3,
   dialect: DialectV1,
 ): URL {
   const url = new URL(instance.endpoint.origin);

@@ -138,7 +138,7 @@ Timeouts are nested:
 
 - Provider request: `autoRecall.timeoutMs`, at most 5000 milliseconds.
 - Hook internal wall-clock budget: 6500 milliseconds, which aborts the provider signal.
-- Qwen command Hook: 8000 milliseconds.
+- Qwen command Hook: 8 seconds.
 
 The internal budget exists because Qwen's outer command timeout terminates its shell child and cannot be relied upon to clean up every descendant request on every platform. The POSIX example uses shell `exec` so Node owns the child PID. The Windows example uses native PowerShell invocation; CI exercises the internal timeout path so Node normally exits before Qwen's outer deadline.
 

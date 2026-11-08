@@ -1,0 +1,34 @@
+{
+  "id": "opentui-noflicker-offline",
+  "description": "Offline OpenTUI no-flicker gate: the real OpenTUI backend streams its scripted demo (no model credentials) with ZERO full-screen clears and balanced DEC 2026 under PTY capture. Runs on fork PRs where secrets.QWEN_API_KEY is unavailable; maintainers with credentials get the live-model opentui-noflicker gate instead.",
+  "proves": "fixed (real OpenTUI renderer, scripted stream) has 0 full-screen clears and 0 unbalanced DEC 2026 against a base fixture that must fail; a both-pass means the fixture lost its injected defect and the run proves nothing.",
+  "doesNotProve": "live-model streaming behavior; visual identity; ink-vs-opentui parity.",
+  "expectBaseFailure": true,
+  "terminal": { "rows": 30, "columns": 100 },
+  "timeoutMs": 30000,
+  "input": [],
+  "env": { "TERM": "xterm-256color" },
+  "compareParams": [],
+  "commands": {
+    "base": {
+      "argv": [
+        "node",
+        "scripts/tui-parity/fixtures/emitters/tui-emitter.mjs",
+        "--frames",
+        "3",
+        "--clears-per-frame",
+        "1",
+        "--dups",
+        "2"
+      ]
+    },
+    "fixed": {
+      "argv": ["bun", "packages/cli/scripts/opentui-demo-harness.tsx"]
+    }
+  },
+  "thresholds": {
+    "maxFullScreenClears": 0,
+    "maxDuplicateEvents": 3,
+    "maxDec2026Unbalanced": 0
+  }
+}

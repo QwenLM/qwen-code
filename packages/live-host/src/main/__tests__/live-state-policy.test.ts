@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { LiveStatus } from '../../shared/protocol.ts';
 import {
+  canChangeLiveVisualInput,
   canToggleLive,
   isActiveLiveCall,
   projectLiveStatusForCapture,
   shouldCaptureLiveAudio,
+  shouldCaptureLiveVisual,
   shouldRenderSetup,
+  shouldRequestVisualSourceChange,
+  shouldShowCameraPreview,
   shouldStopLiveOnToggle,
 } from '../live-state-policy.ts';
 
@@ -50,6 +54,105 @@ describe('Live Host state policy', () => {
     assert.equal(
       shouldCaptureLiveAudio(status('listening', true), false),
       false,
+    );
+  });
+
+  it('activates visual capture only for a configured active call', () => {
+    assert.equal(
+      shouldCaptureLiveVisual(
+        { state: 'listening', callId: 'call-1' },
+        { source: 'screen', mode: 'on-demand' },
+      ),
+      true,
+    );
+    assert.equal(
+      shouldCaptureLiveVisual(
+        { state: 'idle', callId: undefined },
+        { source: 'camera', mode: 'live-feed' },
+      ),
+      false,
+    );
+    assert.equal(
+      shouldCaptureLiveVisual(
+        { state: 'stopping', callId: 'call-1' },
+        { source: 'camera', mode: 'live-feed' },
+      ),
+      false,
+    );
+    assert.equal(
+      shouldCaptureLiveVisual(
+        { state: 'listening', callId: 'call-1' },
+        undefined,
+      ),
+      false,
+    );
+  });
+
+  it('shows a selected camera preview while the usable orb is visible', () => {
+    const camera = { source: 'camera' as const };
+    assert.equal(
+      shouldShowCameraPreview(status('idle', true), camera, true),
+      true,
+    );
+    assert.equal(
+      shouldShowCameraPreview(status('listening', true), camera, true),
+      true,
+    );
+    assert.equal(
+      shouldShowCameraPreview(status('stopping', true), camera, true),
+      false,
+    );
+    assert.equal(
+      shouldShowCameraPreview(status('idle', true), { source: 'screen' }, true),
+      false,
+    );
+    assert.equal(
+      shouldShowCameraPreview(status('idle', true), camera, false),
+      false,
+    );
+    assert.equal(
+      shouldShowCameraPreview(status('unavailable', false), camera, true),
+      false,
+    );
+  });
+
+  it('allows visual settings to escape an unavailable source', () => {
+    const visualInput = { source: 'screen', mode: 'on-demand' };
+    assert.equal(
+      canChangeLiveVisualInput(
+        { state: 'unavailable', callId: undefined },
+        visualInput,
+        true,
+      ),
+      true,
+    );
+    assert.equal(
+      canChangeLiveVisualInput(
+        { state: 'stopping', callId: 'call-1' },
+        visualInput,
+        true,
+      ),
+      false,
+    );
+    assert.equal(
+      canChangeLiveVisualInput(
+        { state: 'idle', callId: undefined },
+        visualInput,
+        false,
+      ),
+      false,
+    );
+  });
+
+  it('honors a rapid source rollback while the first selection is pending', () => {
+    assert.equal(shouldRequestVisualSourceChange('screen', 'screen'), false);
+    assert.equal(
+      shouldRequestVisualSourceChange('screen', 'screen', 'camera'),
+      true,
+    );
+    assert.equal(
+      shouldRequestVisualSourceChange('screen', 'camera', 'camera'),
+      true,
     );
   });
 

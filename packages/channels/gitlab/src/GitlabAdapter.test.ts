@@ -231,6 +231,34 @@ describe('GitlabChannel', () => {
       ch.disconnect();
     });
 
+    it('normalizes per-group allowedUsers to lowercase for the group sender gate', async () => {
+      const config = makeConfig({
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['Alice'] } },
+      });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+
+      const groupGate = (
+        ch as unknown as {
+          senderGateFor(target: { isGroup: boolean; chatId: string }): {
+            isAllowed: (senderId: string) => boolean;
+          };
+        }
+      ).senderGateFor({ isGroup: true, chatId: 'owner/repo' });
+      expect(groupGate.isAllowed('alice')).toBe(true);
+      expect(groupGate.isAllowed('bob')).toBe(false);
+      expect(ch.config.groups['*']?.allowedUsers).toEqual(['alice']);
+      ch.disconnect();
+    });
+
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+      expect(ch.config.operators).toEqual(['alice']);
+      ch.disconnect();
+    });
+
     it('does not warn about groupPolicy when pairing is configured', async () => {
       const stderr = vi
         .spyOn(process.stderr, 'write')
@@ -400,6 +428,34 @@ describe('GitlabChannel', () => {
         'Full issue description',
       );
       expect(mockApi.Issues.show).toHaveBeenCalled();
+    });
+
+    it('dispatches provider-generated assignment todos', async () => {
+      const configured = makeConfig({
+        action_prompt_template: {
+          mentioned: 'Mentioned: %description%',
+          assigned: 'Assigned: %description%',
+        },
+      });
+      channel = new TestableGitlabChannel(
+        'test-gitlab',
+        configured,
+        makeBridge(),
+      );
+      await initWithoutLoop();
+
+      const todo = makeTodo({
+        action_name: 'assigned',
+        target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+      });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
+      mockApi.Issues.show.mockResolvedValueOnce({
+        description: 'Please fix this',
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.text).toContain('Please fix this');
     });
 
     it('skips todo authored by bot', async () => {

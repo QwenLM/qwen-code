@@ -5,9 +5,13 @@
  */
 
 import type React from 'react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Box, type DOMElement } from 'ink';
 import { MainContent } from '../components/MainContent.js';
+import {
+  ScrollContext,
+  type ScrollActions,
+} from '../contexts/ScrollContext.js';
 import { UpdateNotification } from '../components/UpdateNotification.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
@@ -19,17 +23,30 @@ import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
 import { getLiveAgentPanelVpMaxRows } from '../components/background-view/liveAgentPanelVisibility.js';
+import { ContextMenuOverlay } from '../context-menu/ContextMenuOverlay.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
 import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
-import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import {
+  getDialogMaxHeight,
+  getBtwAnswerMaxRows,
+} from '../utils/layoutUtils.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
   const footerRef = useRef<DOMElement>(null);
+  const scrollActionsRef = useRef<ScrollActions | null>(null);
+  const scrollActions = useMemo<ScrollActions>(
+    () => ({
+      scrollBy: (delta: number) => scrollActionsRef.current?.scrollBy(delta),
+      hasScrollableTranscript: () =>
+        scrollActionsRef.current?.hasScrollableTranscript() ?? false,
+    }),
+    [],
+  );
   const { refreshStatic } = useUIActions();
   const { activeView, agents } = useAgentViewState();
   const { columns: terminalWidth } = useTerminalSize();
@@ -44,7 +61,18 @@ export const DefaultAppLayout: React.FC = () => {
     uiState.terminalHeight,
     uiState.staticExtraHeight,
   );
-  const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
+  const constrainDialogHeight =
+    uiState.constrainHeight &&
+    !uiState.auth.isAuthDialogOpen &&
+    !uiState.auth.authError;
+  const dialogHeight = constrainDialogHeight ? dialogMaxHeight : undefined;
+  // The /btw answer viewport only exists in VP mode. Its ScrollableList arms
+  // SGR mouse tracking (bypassVpGate), which must not happen on the non-VP
+  // main screen where the terminal keeps native scrollback — so the row budget
+  // stays undefined there and the panel renders the whole answer.
+  const btwAnswerMaxRows = uiState.useTerminalBuffer
+    ? getBtwAnswerMaxRows(uiState.terminalHeight)
+    : undefined;
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -78,9 +106,12 @@ export const DefaultAppLayout: React.FC = () => {
           </Box>
         </>
       ) : (
-        <>
+        <ScrollContext.Provider value={scrollActions}>
           {/* Main view: conversation history + main composer / dialogs */}
-          <MainContent footerRef={footerRef} />
+          <MainContent
+            footerRef={footerRef}
+            scrollActionsRef={scrollActionsRef}
+          />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
@@ -91,7 +122,7 @@ export const DefaultAppLayout: React.FC = () => {
                 flexDirection="column"
                 width={uiState.mainAreaWidth}
                 height={dialogHeight}
-                overflow={uiState.constrainHeight ? 'hidden' : undefined}
+                overflow={constrainDialogHeight ? 'hidden' : undefined}
               >
                 <DialogManager
                   terminalWidth={uiState.terminalWidth}
@@ -112,6 +143,7 @@ export const DefaultAppLayout: React.FC = () => {
                     <BtwMessage
                       btw={uiState.btwItem.btw}
                       containerWidth={uiState.mainAreaWidth}
+                      maxAnswerRows={btwAnswerMaxRows}
                     />
                   </Box>
                 )}
@@ -155,11 +187,15 @@ export const DefaultAppLayout: React.FC = () => {
               />
             )}
           </Box>
-        </>
+        </ScrollContext.Provider>
       )}
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
       {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}
+
+      {/* Right-click context menu: absolutely-positioned overlay, drawn last
+          so it paints over the transcript. Renders nothing while closed. */}
+      <ContextMenuOverlay />
     </Box>
   );
 };

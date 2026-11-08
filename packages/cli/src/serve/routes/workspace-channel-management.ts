@@ -6,8 +6,20 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
-import { sanitizeLogText } from '@qwen-code/channel-base';
+import {
+  channelEventScopeDir,
+  CHANNEL_EVENT_MAX_READ,
+  CHANNEL_EVENT_TYPES,
+  readChannelEvents,
+  sanitizeLogText,
+} from '@qwen-code/channel-base';
+import type {
+  ChannelEventQuery,
+  ChannelEventType,
+} from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
+import { readSettingsSnapshot } from '../../config/settings.js';
+import { channelLinkMetaForEvents } from '../channel-link-meta.js';
 import type {
   ChannelPairingApprovalSubject,
   ChannelManagementService,
@@ -47,6 +59,13 @@ interface RegisterWorkspaceChannelManagementRoutesDeps {
     res: Response,
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
+  /**
+   * The daemon's boot-time environment snapshot. Parent-process runtimes
+   * without an overlay resolve settings variables against it; reading the
+   * live process environment here would couple a read-only route to shared
+   * mutable state.
+   */
+  daemonEnv: Readonly<NodeJS.ProcessEnv>;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
@@ -226,6 +245,103 @@ function parsePairingApprovalSubject(
   return undefined;
 }
 
+function sendInvalidEventsQuery(res: Response, detail: string): undefined {
+  res.status(400).json({
+    error: detail,
+    code: 'invalid_channel_management_request',
+  });
+  return undefined;
+}
+
+/**
+ * Parses the read-only event journal query. `type` and `channel` accept a
+ * comma-separated list so a client can ask for a pre-filtered slice without
+ * loading the whole tail.
+ */
+function parseEventsQuery(
+  req: Request,
+  res: Response,
+): Omit<ChannelEventQuery, 'scopeDirs'> | undefined {
+  const rawLimit = req.query['limit'];
+  let limit: number | undefined;
+  if (rawLimit !== undefined) {
+    const parsed =
+      typeof rawLimit === 'string' && /^\d+$/.test(rawLimit)
+        ? Number(rawLimit)
+        : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      return sendInvalidEventsQuery(res, '`limit` must be a positive integer.');
+    }
+    limit = Math.min(parsed, CHANNEL_EVENT_MAX_READ);
+  }
+
+  const rawTypes = req.query['type'];
+  let types: ChannelEventType[] | undefined;
+  if (rawTypes !== undefined) {
+    if (typeof rawTypes !== 'string') {
+      return sendInvalidEventsQuery(
+        res,
+        '`type` must be a comma-separated list of event types.',
+      );
+    }
+    const values = rawTypes.split(',').map((value) => value.trim());
+    if (values.some((value) => value.length === 0)) {
+      return sendInvalidEventsQuery(
+        res,
+        '`type` must be a comma-separated list of event types.',
+      );
+    }
+    if (
+      values.some(
+        (value) => !CHANNEL_EVENT_TYPES.includes(value as ChannelEventType),
+      )
+    ) {
+      return sendInvalidEventsQuery(
+        res,
+        `\`type\` accepts only: ${CHANNEL_EVENT_TYPES.join(', ')}.`,
+      );
+    }
+    types = values as ChannelEventType[];
+  }
+
+  // Repeat `channel` for each instance, like `type`: a Channel name is a
+  // portable path component and may legally contain a comma, which a joined
+  // list could not represent.
+  const rawChannel = req.query['channel'];
+  let channels: string[] | undefined;
+  if (rawChannel !== undefined) {
+    const values = Array.isArray(rawChannel) ? rawChannel : [rawChannel];
+    if (values.some((value) => typeof value !== 'string')) {
+      return sendInvalidEventsQuery(
+        res,
+        '`channel` must repeat one Channel name per parameter.',
+      );
+    }
+    const names = (values as string[]).filter((value) => value.length > 0);
+    if (names.length > 0) channels = names;
+  }
+
+  const rawSince = req.query['since'];
+  let since: number | undefined;
+  if (rawSince !== undefined) {
+    const parsed = typeof rawSince === 'string' ? Date.parse(rawSince) : NaN;
+    if (!Number.isFinite(parsed)) {
+      return sendInvalidEventsQuery(
+        res,
+        '`since` must be an ISO 8601 timestamp.',
+      );
+    }
+    since = parsed;
+  }
+
+  return {
+    ...(limit !== undefined ? { limit } : {}),
+    ...(types ? { types } : {}),
+    ...(channels ? { channels } : {}),
+    ...(since !== undefined ? { since } : {}),
+  };
+}
+
 function errorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object') return undefined;
   try {
@@ -253,6 +369,7 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_runtime_owner_mismatch', 409],
   ['channel_worker_not_enabled', 409],
   ['channel_service_conflict', 409],
+  ['channel_control_workspace_limit_reached', 409],
   ['channel_worker_start_failed', 502],
   ['channel_worker_stop_failed', 500],
   ['daemon_draining', 503],
@@ -397,6 +514,64 @@ export function registerWorkspaceChannelManagementRoutes(
       try {
         noStore(res);
         res.status(200).json(await resolved.run(() => resolved.service.list()));
+      } catch (error) {
+        sendManagementError(res, error);
+      }
+    });
+
+    app.get(`${prefix}/channels/events`, async (req, res) => {
+      // Reading the journal needs the resolved workspace only: it is a
+      // read-only view of files this workspace's Channels wrote, so it must
+      // not depend on a Channel management service being available.
+      const runtime = resolveRuntime(req, res);
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!validateClient(req, res, runtime)) return;
+      const query = parseEventsQuery(req, res);
+      if (!query) return;
+      try {
+        noStore(res);
+        // A managed Channel's working directory must canonicalize to this
+        // workspace, so its journal lives in the workspace's own scope.
+        const scopeDir = channelEventScopeDir(runtime.workspaceCwd);
+        const result = await readChannelEvents({
+          scopeDirs: [scopeDir],
+          ...query,
+        });
+        // The management listing is scope-local, but workers run with the
+        // merged settings; attach non-secret link metadata so events of
+        // user/system-scope channels owned by this workspace stay linkable.
+        // readSettingsSnapshot is side-effect-free (no process.env writes,
+        // no corruption recovery) and resolves ${VAR} against the runtime's
+        // effective environment, so one workspace's read can neither leak
+        // into another's nor mutate the daemon. A corrupt or unreadable
+        // settings layer throws; the journal itself must stay readable, so
+        // degrade to unlinked rows instead of a 500.
+        let channelLinkMeta: Record<string, unknown> = {};
+        try {
+          channelLinkMeta = channelLinkMetaForEvents(
+            result.events,
+            runtime.workspaceCwd,
+            (cwd) => {
+              const loaded = readSettingsSnapshot(cwd, {
+                environment: runtime.env.effectiveEnv ?? deps.daemonEnv,
+                workspaceTrusted: runtime.trusted,
+              });
+              const merged = loaded.merged as {
+                channels?: Record<string, unknown>;
+              };
+              return merged.channels ?? {};
+            },
+          );
+        } catch {
+          // Link metadata is best-effort decoration on a diagnostic view.
+        }
+        res
+          .status(200)
+          .json(
+            Object.keys(channelLinkMeta).length > 0
+              ? { ...result, channelLinkMeta }
+              : result,
+          );
       } catch (error) {
         sendManagementError(res, error);
       }

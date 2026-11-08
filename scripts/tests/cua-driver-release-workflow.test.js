@@ -24,7 +24,7 @@ const powershellInstaller = readFileSync(
 describe('CUA SDK release workflow', () => {
   it('fails closed when a driver production dispatch disables notarization', () => {
     expect(workflow).toContain(
-      '"${{ inputs.dry_run }}" != "true" && "${{ inputs.node_repl_only }}" != "true" && "${{ inputs.notarize }}" != "true"',
+      '"${{ inputs.dry_run }}" != "true" && "${{ inputs.notarize }}" != "true"',
     );
   });
 
@@ -41,9 +41,7 @@ describe('CUA SDK release workflow', () => {
 
   it('smokes the high-level ComputerUse runtime from a clean package', () => {
     expect(packageVerifier).toContain('await ComputerUse.create(');
-    expect(packageVerifier).toContain(
-      'await computer.supportsObservationRevision()',
-    );
+    expect(packageVerifier).toContain('await computer.appCall("click"');
     expect(workflow).toContain('await ComputerUse.create(');
     expect(workflow).toContain('await computer.close()');
   });
@@ -52,6 +50,27 @@ describe('CUA SDK release workflow', () => {
     expect(shellInstaller).toMatch(/^CUA_DRIVER_RS_BAKED_VERSION="[^"\n]+"$/mu);
     expect(powershellInstaller).toMatch(
       /^\$Script:CuaDriverRsBakedVersion = "[^"\n]+"$/mu,
+    );
+  });
+
+  it('keeps historical Windows UIAccess assets installable', () => {
+    expect(powershellInstaller).toContain(
+      '$SignedUiaRequiredFrom = [version]"0.20.3"',
+    );
+    expect(powershellInstaller).toContain(
+      '$LegacyUiaRequiredFrom = [version]"0.2.8"',
+    );
+    expect(powershellInstaller).toMatch(
+      /\$requiresSignedUia = \[version\]\$version -ge \$SignedUiaRequiredFrom/,
+    );
+    expect(powershellInstaller).toMatch(
+      /elseif \(\$requiresLegacyUia\) \{[\s\S]*?cua-driver-uia\.exe/,
+    );
+    expect(powershellInstaller).toContain(
+      "@('qwen-cua-driver-uia.exe', 'cua-driver-uia.exe')",
+    );
+    expect(powershellInstaller).toMatch(
+      /if \(\$requiresSignedUia\) \{[\s\S]*?release archive is missing required qwen-cua-driver-uia\.exe[\s\S]*?Get-AuthenticodeSignature/,
     );
   });
 });

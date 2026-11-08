@@ -5,8 +5,24 @@
  */
 
 import express, { type RequestHandler } from 'express';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import request from 'supertest';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  appendChannelEvent,
+  channelEventFilePath,
+  channelEventScopeDir,
+} from '@qwen-code/channel-base';
 import type {
   ChannelManagementService,
   ChannelMutationResult,
@@ -15,13 +31,28 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { ChannelControlWorkspaceLimitError } from '../channel-control-capacity.js';
+import { channelLinkMetaForEvents } from '../channel-link-meta.js';
 import { registerWorkspaceChannelManagementRoutes } from './workspace-channel-management.js';
+
+// Wrap the real helper so one test can force a settings-loading failure and
+// witness the journal route's degrade-to-plain-text path; every other test
+// keeps the real implementation.
+vi.mock('../channel-link-meta.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../channel-link-meta.js')>();
+  return {
+    ...actual,
+    channelLinkMetaForEvents: vi.fn(actual.channelLinkMetaForEvents),
+  };
+});
 
 function runtime(
   workspaceId: string,
   workspaceCwd: string,
   trusted = true,
   provenance?: WorkspaceRuntime['provenance'],
+  env?: WorkspaceRuntime['env'],
 ): WorkspaceRuntime {
   return {
     workspaceId,
@@ -29,6 +60,7 @@ function runtime(
     primary: workspaceId === 'primary',
     trusted,
     provenance,
+    env: env ?? { mode: 'parent-process', overlayKeys: [] },
     bridge: {},
   } as WorkspaceRuntime;
 }
@@ -79,8 +111,21 @@ function service(): ChannelManagementService {
   };
 }
 
-function mount(secondaryTrusted = true) {
-  const primary = runtime('primary', '/work/primary');
+function mount(
+  secondaryTrusted = true,
+  primaryOverrides?: {
+    cwd?: string;
+    env?: WorkspaceRuntime['env'];
+    daemonEnv?: NodeJS.ProcessEnv;
+  },
+) {
+  const primary = runtime(
+    'primary',
+    primaryOverrides?.cwd ?? '/work/primary',
+    true,
+    undefined,
+    primaryOverrides?.env,
+  );
   const secondary = runtime('secondary', '/work/secondary', secondaryTrusted);
   const primaryService = service();
   const secondaryService = service();
@@ -113,6 +158,7 @@ function mount(secondaryTrusted = true) {
       }
       return id;
     },
+    daemonEnv: primaryOverrides?.daemonEnv ?? process.env,
   });
   return { app, primaryService, secondaryService };
 }
@@ -123,6 +169,25 @@ const auth = (test: request.Test) =>
     .set('X-Qwen-Client-Id', 'client-1');
 
 describe('workspace Channel management routes', () => {
+  it.each([
+    '/workspace/channels/bot/start',
+    '/workspaces/secondary/channels/bot/start',
+  ])('returns 409 for capacity on %s', async (url) => {
+    const test = mount();
+    vi.mocked(test.primaryService.start).mockRejectedValue(
+      new ChannelControlWorkspaceLimitError(),
+    );
+    vi.mocked(test.secondaryService.start).mockRejectedValue(
+      new ChannelControlWorkspaceLimitError(),
+    );
+    const response = await request(test.app)
+      .post(url)
+      .set('authorization', 'Bearer secret')
+      .send({});
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('channel_control_workspace_limit_reached');
+  });
+
   it('lists catalog and sanitized instances without mutation auth', async () => {
     const { app, primaryService, secondaryService } = mount();
 
@@ -166,6 +231,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (req, res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app).get('/workspace/channel-types');
@@ -202,6 +268,20 @@ describe('workspace Channel management routes', () => {
         {
           key: 'questionCard',
           label: 'Question Card',
+          kind: 'object',
+          properties: [
+            { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+            {
+              key: 'timeoutMs',
+              label: 'Timeout (ms)',
+              kind: 'number',
+              exclusiveMinimum: 0,
+            },
+          ],
+        },
+        {
+          key: 'permissionCard',
+          label: 'Permission Card',
           kind: 'object',
           properties: [
             { key: 'enabled', label: 'Enabled', kind: 'boolean' },
@@ -292,6 +372,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (_req, _res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app)
@@ -323,6 +404,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (_req, _res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app).get(
@@ -363,6 +445,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (req, res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app).get('/workspace/channels');
@@ -682,5 +765,398 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.upsert).not.toHaveBeenCalled();
     expect(primaryService.remove).not.toHaveBeenCalled();
     expect(primaryService.setStartup).not.toHaveBeenCalled();
+  });
+});
+
+describe('workspace Channel event journal', () => {
+  let qwenHome: string;
+  let savedQwenHome: string | undefined;
+
+  beforeEach(() => {
+    savedQwenHome = process.env['QWEN_HOME'];
+    qwenHome = mkdtempSync(join(tmpdir(), 'channel-events-route-'));
+    process.env['QWEN_HOME'] = qwenHome;
+  });
+
+  afterEach(() => {
+    rmSync(qwenHome, { recursive: true, force: true });
+    if (savedQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = savedQwenHome;
+  });
+
+  function append(cwd: string, index: number, channel = 'bot') {
+    const inbound = index % 2 === 0;
+    appendChannelEvent(channel, cwd, {
+      at: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+      type: inbound ? 'inbound' : 'poll',
+      outcome: inbound ? 'skipped' : 'ok',
+      ...(inbound ? { reason: 'reason_filter' } : {}),
+      repository: 'owner/repo',
+      number: 42,
+    });
+  }
+
+  it('serves a workspace journal newest-last without operator auth', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    append('/work/primary', 2);
+    append('/work/primary', 3, 'other');
+
+    const response = await request(app).get(
+      '/workspace/channels/events?limit=2',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body.truncated).toBe(true);
+    expect(response.body.events).toHaveLength(2);
+    expect(response.body.events.at(-1)).toMatchObject({
+      channel: 'other',
+      type: 'poll',
+      outcome: 'ok',
+    });
+  });
+
+  it('filters by type and channel', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    append('/work/primary', 2);
+
+    const byType = await request(app).get(
+      '/workspace/channels/events?type=inbound',
+    );
+    expect(byType.body.events).toHaveLength(1);
+    expect(byType.body.events[0].reason).toBe('reason_filter');
+
+    const byChannel = await request(app).get(
+      '/workspace/channels/events?channel=other',
+    );
+    expect(byChannel.body.events).toEqual([]);
+  });
+
+  it('takes one repeatable parameter per channel name, commas included', async () => {
+    const { app } = mount();
+    append('/work/primary', 1, 'bot');
+    append('/work/primary', 2, 'a,b');
+    append('/work/primary', 3, 'other');
+
+    const repeated = await request(app).get(
+      '/workspace/channels/events?channel=bot&channel=other',
+    );
+    expect(
+      repeated.body.events.map((event: { channel: string }) => event.channel),
+    ).toEqual(['bot', 'other']);
+
+    const commaNamed = await request(app).get(
+      '/workspace/channels/events?channel=a%2Cb',
+    );
+    expect(commaNamed.body.events).toHaveLength(1);
+    expect(commaNamed.body.events[0].channel).toBe('a,b');
+  });
+
+  it('reads only the resolved workspace scope', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    append('/work/secondary', 2);
+
+    const primary = await request(app).get('/workspace/channels/events');
+    const secondary = await request(app).get(
+      '/workspaces/secondary/channels/events',
+    );
+
+    expect(primary.body.events).toHaveLength(1);
+    expect(secondary.body.events).toHaveLength(1);
+    expect(primary.body.events[0].at).not.toBe(secondary.body.events[0].at);
+  });
+
+  it('does not serve an untrusted workspace journal', async () => {
+    const { app } = mount(false);
+    const response = await request(app).get(
+      '/workspaces/secondary/channels/events',
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it.each([
+    ['limit=0', '`limit` must be a positive integer.'],
+    ['type=bogus', '`type` accepts only: inbound, outbound, task, poll.'],
+    ['since=yesterday', '`since` must be an ISO 8601 timestamp.'],
+  ])('rejects %s with 400', async (query, message) => {
+    const { app } = mount();
+    const response = await request(app).get(
+      `/workspace/channels/events?${query}`,
+    );
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_channel_management_request');
+    expect(response.body.error).toBe(message);
+  });
+
+  it('clamps an oversized limit to the maximum page', async () => {
+    const { app } = mount();
+    const path = channelEventFilePath('bot', '/work/primary');
+    mkdirSync(dirname(path), { recursive: true });
+    const line = JSON.stringify({
+      at: new Date(2026, 0, 1).toISOString(),
+      channel: 'bot',
+      type: 'poll',
+      outcome: 'ok',
+    });
+    writeFileSync(path, `${line}\n`.repeat(501));
+
+    const response = await request(app).get(
+      '/workspace/channels/events?limit=100000',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toHaveLength(500);
+    expect(response.body.truncated).toBe(true);
+  });
+
+  it('reports a failure instead of an empty journal when the scope is unreadable', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    const dir = channelEventScopeDir('/work/primary');
+    chmodSync(dir, 0o000);
+    try {
+      const response = await request(app).get('/workspace/channels/events');
+      expect(response.status).toBe(500);
+      expect(response.body.code).toBe('channel_management_failed');
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
+  it('attaches link metadata for a user-scope channel owned by the workspace', async () => {
+    // The documented GitHub setup: the channel lives in user settings with
+    // cwd pointing at the project, so the scope-local management listing
+    // has no entry for it even though its journal rows appear here.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'my-github': {
+            type: 'github',
+            token: 'super-secret',
+            baseUrl: 'https://ghe.example.com/api/v3',
+            cwd: '/work/primary',
+          },
+        },
+      }),
+    );
+    const { app } = mount();
+    append('/work/primary', 1, 'my-github');
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.channelLinkMeta).toEqual({
+      'my-github': {
+        type: 'github',
+        baseUrl: 'https://ghe.example.com/api/v3',
+        webOrigin: 'https://ghe.example.com',
+      },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('super-secret');
+  });
+
+  it('keeps link metadata workspace-isolated by channel cwd', async () => {
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'primary-gh': { type: 'github', cwd: '/work/primary' },
+          'secondary-gh': { type: 'github', cwd: '/work/secondary' },
+        },
+      }),
+    );
+    const { app } = mount();
+    append('/work/primary', 1, 'primary-gh');
+    append('/work/primary', 2, 'secondary-gh');
+    append('/work/secondary', 3, 'secondary-gh');
+
+    const primary = await request(app).get('/workspace/channels/events');
+    const secondary = await request(app).get(
+      '/workspaces/secondary/channels/events',
+    );
+
+    expect(primary.body.channelLinkMeta).toEqual({
+      'primary-gh': { type: 'github', webOrigin: 'https://github.com' },
+    });
+    expect(secondary.body.channelLinkMeta).toEqual({
+      'secondary-gh': { type: 'github', webOrigin: 'https://github.com' },
+    });
+  });
+
+  it('omits link metadata when no journal channel resolves in the merged settings', async () => {
+    const { app } = mount();
+    append('/work/primary', 1, 'deleted-channel');
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toHaveLength(1);
+    expect(response.body).not.toHaveProperty('channelLinkMeta');
+  });
+
+  it('still serves the journal when link metadata resolution fails', async () => {
+    vi.mocked(channelLinkMetaForEvents).mockImplementationOnce(() => {
+      throw new Error('settings unavailable');
+    });
+    const { app } = mount();
+    append('/work/primary', 1);
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toHaveLength(1);
+    expect(response.body).not.toHaveProperty('channelLinkMeta');
+  });
+
+  it('never loads the workspace .env into the daemon process environment', async () => {
+    const ws = mkdtempSync(join(tmpdir(), 'channel-link-meta-ws-'));
+    const sentinel = 'QWEN_LINK_META_SENTINEL';
+    const savedSentinel = process.env[sentinel];
+    delete process.env[sentinel];
+    try {
+      mkdirSync(join(ws, '.qwen'), { recursive: true });
+      writeFileSync(join(ws, '.env'), `${sentinel}=leaked-from-workspace\n`);
+      writeFileSync(
+        join(ws, '.qwen', '.env'),
+        `${sentinel}=leaked-from-workspace\n`,
+      );
+      writeFileSync(
+        join(ws, '.qwen', 'settings.json'),
+        JSON.stringify({ channels: { 'ws-gh': { type: 'github' } } }),
+      );
+      const { app } = mount(true, { cwd: ws });
+      append(ws, 1, 'ws-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.channelLinkMeta).toEqual({
+        'ws-gh': { type: 'github', webOrigin: 'https://github.com' },
+      });
+      expect(process.env[sentinel]).toBeUndefined();
+    } finally {
+      if (savedSentinel === undefined) delete process.env[sentinel];
+      else process.env[sentinel] = savedSentinel;
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a corrupt workspace settings file untouched and degrades', async () => {
+    const ws = mkdtempSync(join(tmpdir(), 'channel-link-meta-corrupt-'));
+    try {
+      mkdirSync(join(ws, '.qwen'), { recursive: true });
+      const corrupt = '{"channels": ';
+      const settingsPath = join(ws, '.qwen', 'settings.json');
+      writeFileSync(settingsPath, corrupt);
+      const { app } = mount(true, { cwd: ws });
+      append(ws, 1, 'ws-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.events).toHaveLength(1);
+      expect(response.body).not.toHaveProperty('channelLinkMeta');
+      expect(readFileSync(settingsPath, 'utf8')).toBe(corrupt);
+      expect(existsSync(`${settingsPath}.corrupted`)).toBe(false);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves metadata against the runtime effective environment', async () => {
+    const overlayHome = mkdtempSync(join(tmpdir(), 'channel-link-meta-env-'));
+    try {
+      // The process QWEN_HOME (qwenHome) configures no channels; only the
+      // runtime overlay's home does, so a process-env read would find nothing.
+      writeFileSync(
+        join(overlayHome, 'settings.json'),
+        JSON.stringify({
+          channels: {
+            'overlay-gh': {
+              type: 'github',
+              baseUrl: 'https://overlay.example/api/v3',
+            },
+          },
+        }),
+      );
+      const { app } = mount(true, {
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_HOME'],
+          effectiveEnv: { ...process.env, QWEN_HOME: overlayHome },
+        },
+      });
+      append('/work/primary', 1, 'overlay-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.channelLinkMeta).toEqual({
+        'overlay-gh': {
+          type: 'github',
+          baseUrl: 'https://overlay.example/api/v3',
+          webOrigin: 'https://overlay.example',
+        },
+      });
+    } finally {
+      rmSync(overlayHome, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves metadata from the boot snapshot when it disagrees with the process environment', async () => {
+    // R2-2: the daemonEnv branch must be behaviorally pinned — a live
+    // process.env read would resolve nothing here and stay green otherwise.
+    const bootHome = mkdtempSync(join(tmpdir(), 'channel-link-meta-boot-'));
+    try {
+      writeFileSync(
+        join(bootHome, 'settings.json'),
+        JSON.stringify({ channels: { 'boot-gh': { type: 'github' } } }),
+      );
+      // The process QWEN_HOME (qwenHome) configures no channels.
+      const { app } = mount(true, {
+        daemonEnv: { ...process.env, QWEN_HOME: bootHome },
+      });
+      append('/work/primary', 1, 'boot-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.channelLinkMeta).toEqual({
+        'boot-gh': { type: 'github', webOrigin: 'https://github.com' },
+      });
+    } finally {
+      rmSync(bootHome, { recursive: true, force: true });
+    }
+  });
+
+  it('emits the resolved web origin for a whitespace-padded baseUrl', async () => {
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'padded-gh': {
+            type: 'github',
+            baseUrl: ' https://api.github.com/ ',
+          },
+        },
+      }),
+    );
+    const { app } = mount();
+    append('/work/primary', 1, 'padded-gh');
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.channelLinkMeta).toEqual({
+      'padded-gh': {
+        type: 'github',
+        baseUrl: ' https://api.github.com/ ',
+        webOrigin: 'https://github.com',
+      },
+    });
   });
 });
