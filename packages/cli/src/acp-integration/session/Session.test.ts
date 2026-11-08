@@ -4566,6 +4566,32 @@ describe('Session', () => {
       expect(execute).toHaveBeenCalledTimes(1);
     });
 
+    it('reports the turn as max_tokens when the output limit left the answer truncated', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'Half an ans' }] },
+                  finishReason: FinishReason.MAX_TOKENS,
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(result.stopReason).toBe('max_tokens');
+    });
+
     it('runs the edit a retry produces after a cut-off attempt', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
 
@@ -5382,6 +5408,25 @@ describe('Session', () => {
       const result = await prompt();
 
       expect(result.stopReason).toBe(stopReason);
+    });
+
+    it('reports a turn whose exhausted output recovery stayed truncated as max_tokens', async () => {
+      // Bounded recovery gives the response up when it runs out of attempts,
+      // so the round ends with the response still cut off and the client
+      // would otherwise read the partial answer as complete.
+      useSharedRounds([text('Half an ans'), finished(FinishReason.MAX_TOKENS)]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('max_tokens');
+    });
+
+    it('reports a completed turn as end_turn', async () => {
+      useSharedRounds([text('Done.'), finished(FinishReason.STOP)]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
     });
 
     it('rejects a prompt whose model round the client stopped as a loop', async () => {

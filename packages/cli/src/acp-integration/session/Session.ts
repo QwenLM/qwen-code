@@ -1024,6 +1024,8 @@ type SharedRoundResult =
       streamStartTime: number;
       requestRouteKey: string;
       channelDeliveryResponseBlock: ChannelDeliveryResponseBlock | undefined;
+      /** The round's last response ended truncated at the output limit. */
+      maxTokensTruncated: boolean;
       /** The round's last response stopped on its own. */
       stoppedOnItsOwn: boolean;
     };
@@ -8042,8 +8044,13 @@ export class Session implements SessionContext {
             // Whether the client ran the turn's memory tasks, which it does
             // when a round's response stops on its own.
             let memoryTasksRanInClient = false;
+            // Whether the turn's last model response ended truncated at the
+            // output limit. A bounded MAX_TOKENS recovery that ran out its
+            // attempts leaves the response truncated with no other trace, so
+            // the turn's stop reason is the only place an ACP client can see
+            // that the answer is incomplete.
+            let truncatedAtOutputLimit = false;
             let restorePostAnswerNoticesAttached = false;
-
             // conversation_finished must fire on every terminal path of the
             // turn — restore of ask_user_question, the loop below's
             // cancel/abort/no-stream early-returns, and API-error throws —
@@ -8367,12 +8374,12 @@ export class Session implements SessionContext {
                     },
                   });
                   if (roundResult.ended) return roundResult.ended;
-                  ({
-                    usageMetadata,
+                  ({                    usageMetadata,
                     streamStartTime,
                     requestRouteKey,
                     channelDeliveryResponseBlock,
                   } = roundResult);
+                  truncatedAtOutputLimit = roundResult.maxTokensTruncated;
                   memoryTasksRanInClient =
                     roundResult.stoppedOnItsOwn &&
                     !stopHookCapped &&
@@ -8508,6 +8515,11 @@ export class Session implements SessionContext {
                           responseCapture.agentOutput.observeFinishReason(
                             candidate.finishReason,
                           );
+                          if (candidate.finishReason) {
+                            truncatedAtOutputLimit =
+                              candidate.finishReason ===
+                              FinishReason.MAX_TOKENS;
+                          }
                         }
 
                         if (
@@ -8742,13 +8754,22 @@ export class Session implements SessionContext {
                     goalTurn,
                     channelTurn,
                   );
+              // Recovery is bounded: exhausting its attempts leaves the answer
+              // cut off, and reporting a normal stop would let the client
+              // treat it as complete.
+              const stopReason =
+                truncatedAtOutputLimit &&
+                result.stopReason === 'end_turn' &&
+                !pendingSend.signal.aborted
+                  ? 'max_tokens'
+                  : result.stopReason;
               this.#recordPromptCompletionEffects(
                 result,
                 responseCapture,
                 isFreshUserTurn,
                 { channelTurn, sharedModelRound, memoryTasksRanInClient },
               );
-              return { stopReason: result.stopReason };
+              return { stopReason };
             } finally {
               logConversationFinishedEvent(
                 this.config,
@@ -8836,6 +8857,10 @@ export class Session implements SessionContext {
     let roundStop: AgentLoopStopReason | undefined;
     let streamFailed = false;
     let responseOpened = false;
+    // The finish reason the round's last response ended on. A bounded
+    // MAX_TOKENS recovery that ran out resolves the round here with no other
+    // trace of the truncation, so the turn's stop reason needs it.
+    let lastFinishReason: string | undefined;
     // A response cut short for queued input is given up, as
     // `responseInterrupt.watch` gives it up on the current path.
     const cutForInput = () =>
@@ -8978,6 +9003,7 @@ export class Session implements SessionContext {
                 responseCapture.agentOutput.observeFinishReason(
                   event.value.reason,
                 );
+                if (event.value.reason) lastFinishReason = event.value.reason;
                 if (event.value.reason === FinishReason.MAX_TOKENS) {
                   attempt.outputTruncated = true;
                 }
@@ -9174,14 +9200,20 @@ export class Session implements SessionContext {
       };
     }
     await showBackgroundResponse();
-    return {
-      usageMetadata,
-      streamStartTime,
-      requestRouteKey,
-      channelDeliveryResponseBlock,
-      // The client runs the turn's memory tasks when a response stops on
-      // its own.
-      stoppedOnItsOwn:
+              return {
+                usageMetadata,
+                streamStartTime,
+                requestRouteKey,
+                channelDeliveryResponseBlock,
+                // A bounded output recovery that exhausted its attempts ends
+                // here with the response still truncated. Reporting the
+                // turn's stop as `max_tokens` is what lets an ACP client
+                // tell an unresolved output limit from a completed answer.
+                maxTokensTruncated:
+                  lastFinishReason === FinishReason.MAX_TOKENS,
+                // The client runs the turn's memory tasks when a response
+                // stops on its own.
+                stoppedOnItsOwn:
         roundType !== SendMessageType.Steer &&
         functionCalls.length === 0 &&
         !streamFailed &&
