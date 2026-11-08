@@ -96,6 +96,14 @@ output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 
+`stallAlertRetries` (default 30, roughly five minutes at the ten-second retry
+interval) sets how many consecutive identical failures a slot may accumulate
+before the manager logs `STALL ALERT` instead of the ordinary retry line. The
+counter resets whenever a cycle succeeds or the failure changes. A stall alert
+means the slot is serving no jobs and needs reconciliation; the manager keeps
+retrying and never exits on its own, so systemd does not restart it. Alert on
+that journal marker rather than on service state.
+
 ## Install and operate
 
 Install `manager.mjs` in `/opt/qwen-ephemeral-runner/`, install the supplied
@@ -129,6 +137,14 @@ period, and cleans up its containers. The next start reconciles abandoned
 resources first. A cleanup or ambiguous registration error blocks that slot;
 inspect its state and GitHub runner list before manual reconciliation. Never
 remove unrelated runners or run a global Docker prune.
+
+A container or network whose slot state was lost is reconciled from its
+`qwen.instance` label, so an interrupted `docker create` no longer wedges the
+slot permanently. Resources whose label does not identify this pool and slot,
+or that disagree about the identity, still block it for manual reconciliation.
+A runner deletion GitHub rejects (for example while it still reports the runner
+busy) keeps the slot state and is retried, instead of dropping the only record
+that can remove the registration.
 
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service

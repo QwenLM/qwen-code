@@ -114,6 +114,26 @@ fails, the failure is recorded and retried instead of endlessly requesting new
 identities. Host failures cannot clean up immediately, so recovery must reclaim
 before accepting new work.
 
+Retrying is only safe when each attempt can still reach the resource it must
+reclaim. Two self-perpetuating stalls were observed on hz4 on 2026-11-08 and are
+now closed. First, killing the `docker create` client on its command timeout
+does not stop the daemon, so a container could appear after cleanup had already
+deleted the slot state; cleanup then refused to touch an unidentifiable
+container, and the only code that could delete it sat behind that refusal. Such
+resources are now identified by their `qwen.instance` label, which must match
+this pool and slot and be unambiguous; anything else still blocks the slot.
+Second, a rejected JIT request deleted the local slot state while a leftover
+registration kept owning the display name, so every retry was rejected and the
+record needed to delete that registration was gone. A definitive rejection now
+reconciles the name instead of discarding the state, and a runner deletion
+GitHub rejects retains the state for the next attempt.
+
+Because these faults leave the process alive, systemd supervision cannot detect
+them. A slot that accumulates `stallAlertRetries` consecutive identical failures
+logs a `STALL ALERT` naming the slot, the count and the error, and the counter
+resets on any successful cycle or changed error. This is the operator signal for
+a slot that is consuming no jobs; alert on it rather than on service state.
+
 ## Minimal but necessary deployment boundary
 
 - Use an ECS dedicated to external CI; do not share a host with existing runners

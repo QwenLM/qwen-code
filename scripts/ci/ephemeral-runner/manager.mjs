@@ -101,7 +101,9 @@ function validate(c) {
     !Number.isFinite(c.shutdownGraceSeconds) ||
     !(c.shutdownGraceSeconds >= 0) ||
     !Number.isSafeInteger(c.minDiskBytes) ||
-    c.minDiskBytes < 0
+    c.minDiskBytes < 0 ||
+    (c.stallAlertRetries !== undefined &&
+      (!Number.isInteger(c.stallAlertRetries) || c.stallAlertRetries < 1))
   )
     throw new Error('Invalid manager configuration');
 }
@@ -132,6 +134,7 @@ export function createManager(config, dependencies = {}) {
   const lockPath = join(stateDir, 'manager.lock');
   const slotPath = (slot) => join(stateDir, `slot-${slot}.json`);
   const log = (message) => console.log(`[${config.poolId}] ${message}`);
+  const stallAlertRetries = config.stallAlertRetries ?? 30;
   function parseJson(text) {
     try {
       return JSON.parse(text);
@@ -212,6 +215,56 @@ export function createManager(config, dependencies = {}) {
     return (await run('docker', args)).trim().split('\n').filter(Boolean);
   }
 
+  // A killed `docker create` CLI can still leave a container behind after the
+  // slot state is gone, so the instance label is the surviving identity.
+  async function recoverIdentity(slot, containers, networks) {
+    const prefix = `qwen-${config.poolId}-${slot}-`;
+    const names = new Set();
+    const inspect = async (args, id) => {
+      try {
+        return (await run('docker', [...args, id])).trim();
+      } catch {
+        return '';
+      }
+    };
+    for (const id of containers)
+      names.add(
+        await inspect(
+          ['inspect', '--format', '{{index .Config.Labels "qwen.instance"}}'],
+          id,
+        ),
+      );
+    for (const id of networks)
+      names.add(
+        await inspect(
+          [
+            'network',
+            'inspect',
+            '--format',
+            '{{index .Labels "qwen.instance"}}',
+          ],
+          id,
+        ),
+      );
+    const identified = [...names].filter((name) => {
+      const bare = name.replace(/^ecs-/, '');
+      return (
+        bare.startsWith(prefix) &&
+        /^[0-9a-f-]{36}$/.test(bare.slice(prefix.length))
+      );
+    });
+    if (identified.length !== 1)
+      throw new Error(
+        'Container has no recorded runner identity; manual reconciliation required',
+      );
+    log(`slot ${slot}: recovered runner identity from resource labels`);
+    return {
+      name: identified[0],
+      runnerName: runnerName(slot),
+      uncertain: false,
+    };
+  }
+
   async function listRunners() {
     const output = await gh([
       '--paginate',
@@ -262,9 +315,7 @@ export function createManager(config, dependencies = {}) {
     const containers = await listContainers(slot);
     const networks = await listNetworks(slot);
     if ((containers.length || networks.length) && !state?.name)
-      throw new Error(
-        'Container has no recorded runner identity; manual reconciliation required',
-      );
+      state = await recoverIdentity(slot, containers, networks);
     for (const id of containers) {
       try {
         const logs = await run('docker', ['logs', '--tail', '10000', id]);
@@ -339,7 +390,15 @@ export function createManager(config, dependencies = {}) {
             `/repos/${config.repo}/actions/runners/${runner.id}`,
           ]);
         } catch (error) {
-          if (error.status !== 404) throw error;
+          if (error.status === 404) continue;
+          // GitHub rejects deletion while it still considers the runner busy.
+          // Keep the state so the next cycle retries the same identity instead
+          // of orphaning a registration that blocks its own replacement.
+          throw new Error(
+            `Runner ${runner.id} deletion was rejected${
+              error.status ? ` (HTTP ${error.status})` : ''
+            }; retaining slot state to retry`,
+          );
         }
       }
     }
@@ -393,7 +452,11 @@ export function createManager(config, dependencies = {}) {
       );
     } catch (error) {
       if (error.status >= 400 && error.status < 500 && error.status !== 408) {
-        await rm(slotPath(slot), { force: true });
+        // The request was definitively rejected, so it created no runner, but a
+        // registration left by an earlier failed cleanup still owns this display
+        // name and would reject every retry. Reconcile it instead of dropping
+        // the only state that can still delete it.
+        await cleanup(slot, { ...state, uncertain: false });
       } else {
         await cleanup(slot, state);
       }
@@ -578,17 +641,29 @@ export function createManager(config, dependencies = {}) {
       await Promise.all(
         Array.from({ length: config.slots }, async (_, i) => {
           const slot = i + 1;
+          let failures = 0;
+          let lastMessage;
           while (!stopping) {
             try {
               const result = await cycle(slot);
+              failures = 0;
+              lastMessage = undefined;
               if (result?.earlyExit && !stopping) {
                 log(`slot ${slot}: backing off 60 s before replenishing`);
                 await wait(60000);
               }
             } catch (error) {
-              log(
-                `slot ${slot}: ${error.message}; retrying without replenishing`,
-              );
+              failures = error.message === lastMessage ? failures + 1 : 1;
+              lastMessage = error.message;
+              if (failures % stallAlertRetries === 0)
+                log(
+                  `STALL ALERT slot ${slot}: no runner replenished after ${failures} consecutive identical failures ` +
+                    `(${error.message}); this slot serves no jobs until it is reconciled`,
+                );
+              else
+                log(
+                  `slot ${slot}: ${error.message}; retrying without replenishing`,
+                );
               await wait(10000);
             }
           }
