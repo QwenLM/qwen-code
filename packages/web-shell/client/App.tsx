@@ -24255,14 +24255,15 @@ export function App({
                   <div className={styles.fullPageBody}>
                     <ScheduledTasksDialog
                       onRunPrompt={runTaskManually}
-                      // Registered workspaces (multi-workspace daemons only) so
-                      // the page aggregates every project's schedule and the New
-                      // form can target one; absent/single → primary-only view.
+                      // Registered workspaces let the page aggregate schedules
+                      // and the New form target a project; absent/single →
+                      // primary-only view.
                       workspaces={
                         lockedWorkspaceCwd
                           ? visibleWorkspaces
                           : ordinaryWorkspaces
                       }
+                      primaryWorkspaceCwd={workspace.capabilities?.workspaceCwd}
                       lockedWorkspace={lockedWorkspaceCapability}
                       currentSession={
                         currentSessionSummary
@@ -24279,6 +24280,12 @@ export function App({
                       )}
                       gateAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_gate',
+                      )}
+                      deliveryAvailable={workspace.capabilities?.features?.includes(
+                        'channel_delivery',
+                      )}
+                      observedContactsAvailable={workspace.capabilities?.features?.includes(
+                        'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
                       onCreateViaChat={() => {
