@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { PR_BINDING_ROLES } from '@qwen-code/channel-base';
 import { plugin } from './index.js';
-import { PR_WATCH_EVENTS } from './GithubAdapter.js';
+import {
+  PR_NOTIFICATION_REASONS,
+  PR_WATCH_EVENTS,
+  REPO_FILTER_MODES,
+} from './GithubAdapter.js';
 
 function validate(overrides: Record<string, unknown>): string | undefined {
   return plugin.management?.validateConfig?.({
@@ -75,5 +80,43 @@ describe('github plugin validateConfig', () => {
     expect(field?.options?.map((option) => option.value)).toEqual([
       ...PR_WATCH_EVENTS,
     ]);
+  });
+
+  it('builds the repoFilterMode UI options from the adapter vocabulary', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'repoFilterMode',
+    );
+    // The settings store's enum branch requires membership in this option
+    // list, and the editor always submits the seeded value: dropping options
+    // or a mode would reject every Web Shell save with no other test red.
+    expect(field?.options?.map((option) => option.value)).toEqual([
+      ...REPO_FILTER_MODES,
+    ]);
+    expect(field?.default).toBe('off');
+  });
+
+  it('describes and groups every boundSessionActions key for management UIs', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'boundSessionActions',
+    );
+    const options = field?.options ?? [];
+    const baseCount =
+      1 + PR_WATCH_EVENTS.length + PR_NOTIFICATION_REASONS.length;
+    expect(options).toHaveLength(baseCount * (1 + PR_BINDING_ROLES.length));
+    expect(new Set(options.map((option) => option.value)).size).toBe(
+      options.length,
+    );
+    expect([...new Set(options.map((option) => option.group))]).toEqual([
+      'any',
+      ...PR_BINDING_ROLES,
+    ]);
+    const byValue = new Map(options.map((option) => [option.value, option]));
+    for (const option of options) {
+      expect(option.description).toBeTruthy();
+      // Role-qualified keys reuse their base event's description; the role's
+      // meaning is carried by the picker group header instead.
+      const base = option.value.replace(/^(review|verify|fix):/, '');
+      expect(option.description).toBe(byValue.get(base)?.description);
+    }
   });
 });

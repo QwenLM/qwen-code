@@ -6,7 +6,8 @@
 
 // `qwen autofix-pr cleanup`: end a watch. The worktree, its branch and the
 // state file go away together, unless the worktree or the branch still holds
-// work the PR does not have; then all three stay so the user can pick it up.
+// work the PR does not have, or another checkout has the branch; then all
+// three stay so the user can pick it up.
 
 import type { CommandModule } from 'yargs';
 import {
@@ -40,7 +41,9 @@ import {
 } from './state.js';
 import { assertNoFixInFlight } from './fix.js';
 import {
+  branchHolder,
   checkoutHoldsWork,
+  freeing,
   remoteRef,
   untrustedCheckoutGit,
   untrustedGitfile,
@@ -271,6 +274,49 @@ export function runCleanup(
   }
   if (state && !force) assertStoppable(state);
 
+  // The watch has ended all the same when all three are kept. A round of it
+  // that still runs — a fire queued before its task was deleted, a second
+  // process of the session — is refused by its helpers, or it would discard
+  // what is kept; and `resume` does not start its task again. A start does.
+  const endKept = (reason: string) => {
+    if (!state) return;
+    withWatchLock(paths, prNumber, () => {
+      const current = readState(paths.statePath);
+      if (!current) return;
+      // Taken over meanwhile: the watch is the new owner's, and goes on.
+      if (!force) assertStoppable(current);
+      assertNoFixInFlight(paths, prNumber);
+      const { watch: _ended, ...rest } = current;
+      // Ended under this session, as a stop of its own would.
+      writeState(paths.statePath, {
+        ...rest,
+        sessionId: currentSessionId(),
+        ended: { at: new Date().toISOString(), reason },
+      });
+      // Its gate answers `watch_ended` from now on and checks nothing,
+      // so no check of it may look recent.
+      rmSync(paths.checkedPath, { force: true });
+    });
+  };
+
+  // A branch another checkout has is one git refuses to delete, --force or
+  // not, and the worktree would be gone before git said so: all three stay
+  // until that checkout lets the branch go.
+  const holder = branchHolder(root, paths.worktreePath, paths.branch);
+  if (holder) {
+    const reason = `${paths.branch} is checked out in ${holder.path}`;
+    endKept(reason);
+    writeStdoutLine(
+      JSON.stringify({
+        removed: false,
+        worktreePath: paths.worktreePath,
+        heldBy: holder.path,
+        reason: `kept because ${reason}${freeing(holder, root)}; then run \`qwen autofix-pr cleanup ${prNumber}\` again`,
+      }),
+    );
+    return;
+  }
+
   if (!force) {
     const reason = unsavedWork(
       paths,
@@ -279,29 +325,7 @@ export function runCleanup(
       state ? trustAnchor(state) : repoRoot(),
     );
     if (reason) {
-      // The watch has ended all the same. A round of it that still runs —
-      // a fire queued before its task was deleted, a second process of the
-      // session — is refused by its helpers, or it would discard what is
-      // kept; and `resume` does not start its task again. A start does.
-      if (state) {
-        withWatchLock(paths, prNumber, () => {
-          const current = readState(paths.statePath);
-          if (!current) return;
-          // Taken over meanwhile: the watch is the new owner's, and goes on.
-          assertStoppable(current);
-          assertNoFixInFlight(paths, prNumber);
-          const { watch: _ended, ...rest } = current;
-          // Ended under this session, as a stop of its own would.
-          writeState(paths.statePath, {
-            ...rest,
-            sessionId: currentSessionId(),
-            ended: { at: new Date().toISOString(), reason },
-          });
-          // Its gate answers `watch_ended` from now on and checks nothing,
-          // so no check of it may look recent.
-          rmSync(paths.checkedPath, { force: true });
-        });
-      }
+      endKept(reason);
       writeStdoutLine(
         JSON.stringify({
           removed: false,

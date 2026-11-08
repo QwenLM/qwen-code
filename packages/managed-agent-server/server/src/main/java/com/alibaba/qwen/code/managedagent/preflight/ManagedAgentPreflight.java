@@ -87,6 +87,7 @@ public final class ManagedAgentPreflight {
     static final String CONFIG_LOCATION_ENV =
             "SPRING_CONFIG_ADDITIONAL_LOCATION";
     static final String ONLINE_ARG = "--online";
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WORKER_ARG = "managed-runtime-worker";
     // The kernel appends this to /proc/<pid>/cwd once the directory is removed.
     private static final String DELETED_SUFFIX = " (deleted)";
@@ -769,7 +770,7 @@ public final class ManagedAgentPreflight {
     // A Harness string reaches a root-run report, so only a version's shape.
     private static String qwenCodeVersion(String body) {
         try {
-            JsonNode version = new ObjectMapper().readTree(body)
+            JsonNode version = JSON.readTree(body)
                     .path("qwenCodeVersion");
             return version.isTextual()
                     && QWEN_CODE_VERSION.matcher(version.asText()).matches()
@@ -790,7 +791,7 @@ public final class ManagedAgentPreflight {
 
     static String manifestQwenCodeVersion(Path manifest) {
         try {
-            JsonNode version = new ObjectMapper().readTree(manifest.toFile())
+            JsonNode version = JSON.readTree(manifest.toFile())
                     .path("compatibility").path("qwenCodeVersion");
             return version.isTextual() ? version.asText() : null;
         } catch (IOException | RuntimeException error) {
@@ -1633,7 +1634,7 @@ public final class ManagedAgentPreflight {
 
     static String expectedSchemaVersion(Path manifest) {
         try {
-            JsonNode root = new ObjectMapper().readTree(manifest.toFile());
+            JsonNode root = JSON.readTree(manifest.toFile());
             JsonNode value = root.path("compatibility")
                     .path("databaseSchema").path("latestMigrationVersion");
             return value.isTextual() ? value.asText() : null;
@@ -1738,11 +1739,30 @@ public final class ManagedAgentPreflight {
         return trimmed;
     }
 
+    /**
+     * The verdict the upgrade command takes on the Harness base URL: "skip"
+     * with the Harness disabled, where the server never reads it, as
+     * {@link #harnessCheck} returns before it reads the value; otherwise
+     * whether {@link #harnessOrigin} takes it. The single Harness's connector
+     * refuses to start on any other, even when that row skips or fails for
+     * another reason first. Pooled, the row skips before it reads the value,
+     * but each member's connector checks it by the same rule, and the pool's
+     * refresh drops a member whose connector refuses it, so such a pool
+     * accepts no Session.
+     */
+    static String harnessUrlVerdict(ManagedAgentProperties.Harness harness) {
+        if (!harness.isEnabled()) {
+            return "skip";
+        }
+        String base = harness.getBaseUrl();
+        return String.valueOf(base != null && harnessOrigin(base) != null);
+    }
+
     // Nothing the URL contains reaches the report, so a typo cannot print
     // credentials. Null unless it is an HTTP origin without user information,
     // a query or a fragment; the getUserInfo check is what keeps credentials
     // out, since every URL that carries them is rejected here.
-    private static URI harnessOrigin(String base) {
+    static URI harnessOrigin(String base) {
         try {
             URI origin = URI.create(base);
             String scheme = origin.getScheme();

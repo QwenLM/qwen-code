@@ -37,6 +37,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 // The agent trusts a client that presents the capability it was started with.
 const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
@@ -141,7 +142,8 @@ const VOLATILE_KEYS = new Set([
 const CONTINUATION_PROMPT_ID =
   /(########\d+)_(?:stop_hook|todo_stop_guard)_\d+/g;
 
-const DATE_REMINDER = '<system-reminder>\nThe current date is:';
+const DATE_REMINDER =
+  /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
 
 const toolResults = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'tool').length;
@@ -155,7 +157,7 @@ const userTurns = (messages: JsonObject[]) =>
 
 const isDateReminder = (part: unknown) =>
   typeof (part as JsonObject)?.['text'] === 'string' &&
-  ((part as JsonObject)['text'] as string).startsWith(DATE_REMINDER);
+  DATE_REMINDER.test((part as JsonObject)['text'] as string);
 
 /** Removes the date reminder the client adds when the date changed. */
 function withoutDateReminder(content: unknown): unknown {
@@ -281,6 +283,8 @@ const allowOnce = () => ({
       });
       const dir = rig.testDir!;
       scenario.prepare?.(rig);
+      // Snapshot the fixture's home writes before the child can touch it.
+      const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
       let streamingIndex = 0;
       server = await startFakeOpenAIServer(
         ({ body }) =>
@@ -299,6 +303,16 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      // Project hooks need both authorities available: enable the trust
+      // feature (the inherited rig trust store grants the workspace; no
+      // trust-store file here because the request snapshot encodes this
+      // directory's tree) and record the approval an interactive user
+      // would give for scenarios that declare hooks.
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      );
+      if (scenario.settings?.['hooks']) approveProjectHooks(qwenHome, dir);
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         OPENAI_API_KEY: 'fake-key',
@@ -514,13 +528,10 @@ const allowOnce = () => ({
         }
       }
       // The scratch runtime keeps the session runtime's `tmp/<hash>` and
-      // `usage/` out of the workspace; pin what TestRig wrote there instead
-      // of relying on the snapshot diff, which only trips on the losing side
-      // of a race.
-      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual([
-        'settings.json',
-        'trustedFolders.json',
-      ]);
+      // `usage/` out of the workspace. Comparing against the pre-run listing
+      // avoids copying TestRig's seeded names, and a leak fails here directly
+      // rather than only when the request equality loses a race.
+      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
@@ -999,7 +1010,74 @@ const allowOnce = () => ({
       expect(Date.now() - started).toBeLessThan(30_000);
     }, 120_000);
 
-    it('sends the date reminder with a prompt, as other surfaces do', async () => {
+    it("blocks a write in plan mode with the scheduler's notice, as other surfaces do", async () => {
+      const written: boolean[] = [];
+      const { current, shared } = await both({
+        name: 'a write in plan mode',
+        prompts: ['Write the file.'],
+        settings: { tools: { approvalMode: 'plan' } },
+        reply: (messages, dir) => {
+          if (toolResults(messages) === 0)
+            return {
+              toolCalls: [write(join(dir, 'out.txt'), 'no\n', 'call_no')],
+            };
+          // The batch has settled by the time its results are sent back.
+          written.push(existsSync(join(dir, 'out.txt')));
+          return { content: 'Understood.' };
+        },
+      });
+      // The notice is the text of the blocked call's failed update.
+      const notice = (run: Run) => {
+        const failed = run.updates.filter(
+          (update) =>
+            (update as JsonObject)['toolCallId'] === 'call_no' &&
+            (update as JsonObject)['status'] === 'failed',
+        ) as JsonObject[];
+        expect(failed).toHaveLength(1);
+        const content = failed[0]['content'] as JsonObject[];
+        expect(content).toHaveLength(1);
+        return (content[0]['content'] as JsonObject)['text'] as string;
+      };
+      /** Puts a placeholder wherever a string value is the notice. */
+      const withoutNotice = (value: unknown, text: string): unknown =>
+        JSON.parse(JSON.stringify(value), (_key, child: unknown) =>
+          child === text ? '<PLAN MODE NOTICE>' : child,
+        );
+      const currentNotice = notice(current);
+      const sharedNotice = notice(shared);
+
+      expect(currentNotice).toMatch(
+        /^Plan mode is active\. The tool "write_file" cannot be executed because it modifies the system\. .*exit_plan_mode/,
+      );
+      expect(sharedNotice).toMatch(
+        /^Tool blocked by plan mode: "write_file" is not a read-only tool\. .*call exit_plan_mode/,
+      );
+      expect(shared.stopReasons).toEqual(current.stopReasons);
+      // Both loops block the write before it runs and ask nothing; only the
+      // notice the model and the client see differs.
+      expect(current.permissions).toEqual([]);
+      expect(shared.permissions).toEqual([]);
+      expect(current.requests).toHaveLength(2);
+      expect(withoutNotice(shared.requests, sharedNotice)).toEqual(
+        withoutNotice(current.requests, currentNotice),
+      );
+      expect(withoutNotice(shared.updates, sharedNotice)).toEqual(
+        withoutNotice(current.updates, currentNotice),
+      );
+      // The model gets the notice as the call's result on each loop.
+      expect(JSON.stringify(current.requests[1])).toContain(
+        JSON.stringify(currentNotice),
+      );
+      expect(JSON.stringify(shared.requests[1])).toContain(
+        JSON.stringify(sharedNotice),
+      );
+      // One reading per run, current first, and neither wrote the file.
+      expect(written).toEqual([false, false]);
+    }, 120_000);
+
+    it('adds no date reminder to a first prompt, as other surfaces do', async () => {
+      // The startup context already carries today's date; the client adds a
+      // reminder only once the date changes.
       const { current, shared } = await both({
         name: 'date reminder',
         prompts: ['Say hello.'],
@@ -1007,7 +1085,7 @@ const allowOnce = () => ({
       });
 
       expect(current.dateReminders).toBe(0);
-      expect(shared.dateReminders).toBe(1);
+      expect(shared.dateReminders).toBe(0);
     }, 120_000);
   },
 );

@@ -410,7 +410,6 @@ const SETTINGS_SCHEMA = {
     description:
       'Model providers configuration keyed by provider id (a built-in provider protocol such as "openai" or "gemini", or a custom id mapped via providerProtocol). Each entry is an array of model configurations. OpenAI-compatible models can select wireApi: "chat-completions" or "responses"; omitting wireApi keeps the declared protocol (Chat Completions under openai). Released openai-responses declarations remain readable; new setup writes openai plus wireApi.',
     showInDialog: false,
-    mergeStrategy: MergeStrategy.REPLACE,
   },
 
   // Maps a custom modelProviders provider id to its SDK protocol (AuthType).
@@ -423,7 +422,6 @@ const SETTINGS_SCHEMA = {
     description:
       'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry. New OpenAI configurations map to openai and select wireApi per model; released openai-responses mappings remain readable.',
     showInDialog: false,
-    mergeStrategy: MergeStrategy.REPLACE,
   },
 
   plansDirectory: {
@@ -4380,6 +4378,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      FileChanged: {
+        type: 'array',
+        label: 'File Changed Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a watched file is added, changed, or deleted in a local session.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
     },
   },
 
@@ -4558,7 +4568,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The interactive TUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests and runs its tool batches through it, while its turn continuation, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
         showInDialog: true,
       },
       agentCollaboration: {

@@ -136,7 +136,7 @@ class ManagedStoreDecompositionTest {
                 claimTurn/5::REQUIRED:DEFAULT:false renewTurn/5::REQUIRED:DEFAULT:false releaseTurnLease/4::REQUIRED:DEFAULT:false
                 markTurnRecoveryBlocked/6::REQUIRED:DEFAULT:false markTurnFailureRecovery/5::REQUIRED:DEFAULT:false requestRecoveryRecheck/3::REQUIRED:DEFAULT:false
                 parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
-                bindHarness/5::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
+                bindHarness/5::REQUIRED:DEFAULT:false bindSessionHarness/3::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
                 withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
                 retractContinuationOutput/6::REQUIRED:DEFAULT:false retractHarnessTurnOutput/7::REQUIRED:DEFAULT:false retractHarnessTurnOutput/10::REQUIRED:DEFAULT:false
                 recordHarnessEvents/6::REQUIRED:DEFAULT:false cancelUnadmittedTurn/4::REQUIRED:DEFAULT:false cancelBeforeAdmission/4::REQUIRED:DEFAULT:false
@@ -148,7 +148,7 @@ class ManagedStoreDecompositionTest {
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
-                lockPublicationWriter/6:- acquireWriter/4::REQUIRED:DEFAULT:false acquireWriter/5::REQUIRED:DEFAULT:false
+                lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::REQUIRED:DEFAULT:false acquireWriter/5::REQUIRED:DEFAULT:false
                 renewWriter/4::REQUIRED:DEFAULT:false renewWriter/5::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false
                 sealWriter/5::REQUIRED:DEFAULT:false quiesceOwnership/4::REQUIRED:DEFAULT:false releaseOwnership/4::REQUIRED:DEFAULT:false
                 blockRecovery/4::REQUIRED:DEFAULT:false commit/4::REQUIRED:DEFAULT:false commit/5::REQUIRED:DEFAULT:false
