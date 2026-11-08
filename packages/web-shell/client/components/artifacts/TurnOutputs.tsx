@@ -15,9 +15,11 @@ import {
   artifactDisplayName,
   formatArtifactSize,
   downloadWorkspaceFile,
+  getArtifactImageMimeType,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
+  normalizeArtifactMimeType,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
@@ -683,12 +685,16 @@ export function getFileChangePreviewContent(change: TurnOutputFileChange) {
 
 function isRenderedArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
-  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  // Match the panel's own predicates so a card never says Open for an artifact
+  // the panel renders: normalise mime parameters (text/html; charset=utf-8) and
+  // honour image/* mime even when the path has no extension.
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     artifact.kind === 'html' ||
     isRenderedFilePath(path) ||
     mimeType === 'text/html' ||
-    mimeType === 'text/markdown'
+    mimeType === 'text/markdown' ||
+    Boolean(getArtifactImageMimeType(artifact))
   );
 }
 

@@ -729,6 +729,11 @@ describe('TurnOutputs artifact downloads', () => {
     );
     expect(preview).toBeDefined();
     expect(preview?.disabled).toBe(false);
+    // The rendered action carries the eye icon, not the external-link icon.
+    expect(preview?.querySelector('svg.lucide-eye')).not.toBeNull();
+    expect(
+      preview?.querySelector('svg.lucide-square-arrow-out-up-right'),
+    ).toBeNull();
     expect(
       buttons.find((button) => button.textContent?.trim() === 'Open'),
     ).toBeUndefined();
@@ -826,6 +831,138 @@ describe('TurnOutputs artifact downloads', () => {
     expect(preview?.disabled).toBe(true);
     act(() => preview?.click());
     expect(onOpenRequest).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('labels a rendered HTML artifact Preview in zh-CN', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <TurnOutputs
+            turnId="turn-html-zh"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-artifact-zh',
+                kind: 'html',
+                storage: 'workspace',
+                status: 'available',
+                title: 'ask-details.html',
+                workspacePath: '.qwen/tmp/ask-details.html',
+                mimeType: 'text/html',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const preview = buttons.find(
+      (button) => button.textContent?.trim() === '预览',
+    );
+    expect(preview).toBeDefined();
+    expect(preview?.querySelector('svg.lucide-eye')).not.toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it('labels an image artifact identified by mime alone Preview', () => {
+    // The panel renders an image/* mime even when the path has no extension;
+    // the card must agree rather than fall back to Open.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-image-mime"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'image-mime-artifact',
+                kind: 'image',
+                storage: 'workspace',
+                status: 'available',
+                title: 'diagram',
+                workspacePath: 'out/diagram',
+                mimeType: 'image/png',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
+  it('labels an HTML artifact with a charset mime parameter Preview', () => {
+    // text/html; charset=utf-8 normalises to text/html, which the panel
+    // renders; the card must not keep Open on the raw parameterised string.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-html-charset"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-charset-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'page-param',
+                workspacePath: 'out/page-param',
+                mimeType: 'text/html; charset=utf-8',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeUndefined();
 
     act(() => root.unmount());
   });
