@@ -8,7 +8,7 @@ import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
 import { getAllowedDaemonOrigin } from './client/config/daemon';
 
-const daemonTarget = process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170';
+const daemonTarget = process.env['QWEN_DAEMON_URL'] || 'http://127.0.0.1:4170';
 
 // WHATWG URL keeps the brackets an IPv6 literal needs inside a URL, but a TCP
 // probe takes the bare address; `[::1]` reaches DNS and fails with ENOTFOUND.

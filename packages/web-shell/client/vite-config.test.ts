@@ -325,7 +325,7 @@ describe('Web Shell daemon proxy failure', () => {
     (options.configure as (proxy: EventEmitter) => void)(proxy);
     proxy.emit(
       'error',
-      new Error('connect ECONNREFUSED 127.0.0.1:4170'),
+      new Error('connect ECONNREFUSED 127.0.0.1:44170'),
       {} as IncomingMessage,
       res,
     );
