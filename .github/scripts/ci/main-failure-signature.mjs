@@ -421,9 +421,9 @@ export function renderFailureComment({
   // the failure. The download step narrows the list the same way; without it
   // here a five-shard matrix names five failures for one lane.
   const timedOut =
-    timedOutJobIds === undefined
-      ? undefined
-      : new Set([...timedOutJobIds].map((id) => String(id)));
+    timedOutJobIds?.length
+      ? new Set([...timedOutJobIds].map((id) => String(id)))
+      : undefined;
   const reported = jobs.filter((job) => {
     if (!['failure', 'cancelled'].includes(job.conclusion)) return false;
     if (cancellationKind !== 'timeout') return true;

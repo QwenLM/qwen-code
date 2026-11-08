@@ -1528,3 +1528,43 @@ test('names only the timed-out lane, not every sibling the timeout cancelled', (
   assert.match(comment, /shard 1\/5/);
   assert.doesNotMatch(comment, /shard [2-5]\/5/);
 });
+
+test('falls back to the step shape when the curated timeout set is empty', () => {
+  // `download` creates the timed-out-jobs file unconditionally, so a failed
+  // read reaches the renderer as `[]`, not `undefined`. Treating an empty set
+  // as authoritative drops every cancelled job and the report names no lane.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '41743539611',
+      runUrl: 'https://example.com/run',
+    },
+    cancellationKind: 'timeout',
+    timedOutJobIds: [],
+    jobs: [
+      {
+        name: 'E2E Test - sandbox:docker - shard 1/5',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job/1',
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          { name: 'Run E2E tests', conclusion: 'failure' },
+          { name: 'Upload artifacts', conclusion: 'cancelled' },
+        ],
+      },
+      {
+        name: 'E2E Test - sandbox:docker - shard 2/5',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job/2',
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          { name: 'Run E2E tests', conclusion: 'cancelled' },
+          { name: 'Upload artifacts', conclusion: 'skipped' },
+        ],
+      },
+    ],
+  });
+  assert.match(comment, /shard 1\/5/);
+  assert.doesNotMatch(comment, /shard 2\/5/);
+});
