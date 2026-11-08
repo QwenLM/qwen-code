@@ -249,6 +249,7 @@ interface GithubComment {
   node_id?: string;
   body?: string;
   created_at?: string | null;
+  updated_at?: string | null;
   user?: { login?: string } | null;
 }
 
@@ -3230,6 +3231,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         times[comment.node_id || String(comment.id)] = comment.created_at;
       }
     }
+    this.recordEditedMentions(ctx, comments);
     return comments.filter(
       (comment) =>
         comment.user?.login !== this.botUsername &&
@@ -3237,6 +3239,51 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           (comment.created_at > ctx.windowSince &&
             comment.created_at <= ctx.maxUpdatedAt)),
     );
+  }
+
+  /**
+   * GitHub notifies a mention that an edit adds to an older comment, but the
+   * lanes read only comments created in the window. Journal such a comment
+   * once per window, so the notification it raised is not consumed without a
+   * trace (unless it arrives after the cursor has passed the edit, as a late
+   * notification for a new comment can). The edit time has no upper bound: a later edit (or a notification
+   * stamped before the edit) leaves the comment newer than the window, and
+   * once the window commits nothing reads it again. A later window that
+   * reads the thread again can record it once more.
+   */
+  private recordEditedMentions(
+    ctx: NotificationContext,
+    comments: readonly GithubComment[],
+  ): void {
+    const botUsername = this.botUsername;
+    if (!botUsername) return;
+    for (const comment of comments) {
+      if (
+        comment.user?.login === botUsername ||
+        !comment.created_at ||
+        comment.created_at > ctx.windowSince ||
+        !comment.updated_at ||
+        comment.updated_at <= ctx.windowSince ||
+        !testBotMention(comment.body || '', botUsername)
+      ) {
+        continue;
+      }
+      const key = comment.node_id || String(comment.id);
+      // An edit to a comment the channel already took is not a new request.
+      if (this.cursor.dispatchedComments?.includes(key)) continue;
+      if (!this.journalOncePerWindow(`edited_comment\0${key}`)) continue;
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'edited_comment',
+        triggerKind: 'comment',
+        repository: ctx.chatId,
+        thread: ctx.threadId,
+        number: ctx.issueNumber,
+        messageId: key,
+        actor: (comment.user?.login || 'unknown').toLowerCase(),
+      });
+    }
   }
 
   private async fetchIssueMeta(ctx: NotificationContext): Promise<GithubMeta> {
