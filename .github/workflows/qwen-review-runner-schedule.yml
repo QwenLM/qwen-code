@@ -11,7 +11,8 @@ name: 'Qwen Review Runner Schedule'
 # QWEN_REVIEW_DAY_RUNNER_COUNT is the number of online managed runners that
 # stay on `ecs-review` in the `day` pool. Unset falls back to 40; if the
 # count exceeds the online fleet the pool truncates with a warning rather
-# than failing the whole tick.
+# than failing the whole tick, and one online runner is always left on CI
+# so the day pool can never consume the entire fleet.
 #
 # QWEN_REVIEW_FLEET_NAME_PATTERN is the regex source that decides which
 # runners this schedule manages. Unset falls back to `^ecs-qwen-hz[1-6]-\d+$`.
@@ -25,7 +26,7 @@ name: 'Qwen Review Runner Schedule'
 on:
   schedule:
     - cron: '0 9 * * *' # 17:00 Asia/Shanghai: whole fleet on review
-    - cron: '0 21 * * *' # 05:00 Asia/Shanghai: CI, REVIEW_DAY_HOSTS on review
+    - cron: '0 21 * * *' # 05:00 Asia/Shanghai: CI, QWEN_REVIEW_DAY_RUNNER_COUNT on review
   workflow_dispatch:
     inputs:
       pool:
@@ -75,6 +76,9 @@ jobs:
           RUNNER_ADMIN_TOKEN: '${{ secrets.RUNNER_ADMIN_PAT }}'
           POOL: "${{ github.event_name == 'workflow_dispatch' && inputs.pool || (github.event.schedule == '0 9 * * *' && 'review' || 'day') }}"
           REVIEW_DAY_RUNNER_COUNT: "${{ vars.QWEN_REVIEW_DAY_RUNNER_COUNT || '40' }}"
-          QWEN_REVIEW_FLEET_NAME_PATTERN: "${{ vars.QWEN_REVIEW_FLEET_NAME_PATTERN || '^ecs-qwen-hz[1-6]-\\d+$' }}"
+          # Empty when the repository variable is unset; the script's own
+          # fallback then supplies the default, so the fleet pattern default
+          # lives in exactly one place.
+          QWEN_REVIEW_FLEET_NAME_PATTERN: '${{ vars.QWEN_REVIEW_FLEET_NAME_PATTERN }}'
         run: |
           node .github/scripts/review-runner-schedule.mjs "$GITHUB_REPOSITORY" "$POOL" "$REVIEW_DAY_RUNNER_COUNT"

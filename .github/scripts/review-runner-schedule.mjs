@@ -65,6 +65,14 @@ export function planLabels(runners, mode, dayCount = 0, fleetName) {
     throw new Error('mode must be review, day or ci');
   }
   const eligible = runners.filter((r) => isManagedRunner(r, fleet));
+  // Orphaned: still carries a managed label but is no longer eligible (lost
+  // the arch label, gained a reserved one, or fell outside a narrowed fleet
+  // pattern). Nothing unlabels them, so the summary must name them.
+  const orphaned = runners.filter(
+    (r) =>
+      !isManagedRunner(r, fleet) &&
+      r.labels.some((l) => MANAGED_LABELS.includes(l.name)),
+  );
   if (mode === 'day') {
     if (!Number.isInteger(dayCount) || dayCount < 1) {
       throw new Error(
@@ -76,13 +84,14 @@ export function planLabels(runners, mode, dayCount = 0, fleetName) {
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   const onlineSorted = sorted.filter((r) => r.status === 'online');
-  // Soft cap: an over-large count truncates to whatever is online, with a
-  // warning the operator can read in the run summary. Hard-failing here
-  // would leave every runner in its previous pool (potentially the whole
-  // fleet on review at 05:00) until somebody notices.
-  const effectiveDayCount =
-    mode === 'day' ? Math.min(dayCount, onlineSorted.length) : 0;
-  const truncated = mode === 'day' && dayCount > onlineSorted.length;
+  // Reserve: the day pool may never consume the whole online fleet. CI jobs
+  // select the `ecs-qwen` label across ~40 workflow files, and nothing
+  // reconciles the pools until the next tick — an over-large count that
+  // kept every online runner on review would leave CI with no eligible
+  // runner for the whole daytime half.
+  const keepBudget = mode === 'day' ? Math.max(onlineSorted.length - 1, 0) : 0;
+  const effectiveDayCount = mode === 'day' ? Math.min(dayCount, keepBudget) : 0;
+  const truncated = mode === 'day' && dayCount > keepBudget;
   const keep = new Set(
     mode === 'day'
       ? onlineSorted.slice(0, effectiveDayCount).map((r) => r.name)
@@ -109,6 +118,7 @@ export function planLabels(runners, mode, dayCount = 0, fleetName) {
     requestedDayCount: dayCount,
     effectiveDayCount,
     onlineManaged: onlineSorted.length,
+    orphanedNames: orphaned.map((r) => r.name).sort(),
   };
 }
 
@@ -163,9 +173,14 @@ async function main() {
     ]),
   );
   const runners = pages.flatMap((page) => page.runners);
-  if (!runners.some((r) => isManagedRunner(r, fleetName))) {
+  if (!runners.some((r) => fleetName.test(r.name))) {
     throw new Error(
       `no runner matches QWEN_REVIEW_FLEET_NAME_PATTERN (${fleetName.source})`,
+    );
+  }
+  if (!runners.some((r) => isManagedRunner(r, fleetName))) {
+    throw new Error(
+      `runners match the fleet pattern but none is eligible (need the ${REQUIRED_ARCH_LABEL} label, without reserved labels like ecs-qwen-release-host)`,
     );
   }
   const plan = planLabels(runners, mode, dayCount, fleetName);
@@ -216,15 +231,24 @@ async function main() {
           ...plan.keptNames.map((name) => `  - ${name}`),
         ]
       : []),
-    ...(plan.truncated
+    ...(plan.orphanedNames.length
       ? [
-          `- ::warning::requested ${plan.requestedDayCount} day runners but only ${plan.onlineManaged} are online — pool truncated`,
+          `- orphaned managed labels (${plan.orphanedNames.length}, not eligible but still labelled; labels left untouched):`,
+          ...plan.orphanedNames.map((name) => `  - ${name}`),
         ]
       : []),
     `- ${plan.actions.length} runners to switch`,
     ...results.map((r) => r.message),
   ].join('\n');
   console.log(summary);
+  if (plan.truncated) {
+    // Workflow commands must start at column 0 — inside a summary bullet
+    // the runner renders the marker as literal text and the annotation
+    // never fires.
+    console.log(
+      `::warning::requested ${plan.requestedDayCount} day runners but only ${plan.onlineManaged} are eligible and online — pool truncated (1 runner reserved for CI)`,
+    );
+  }
   if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
   }
