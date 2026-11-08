@@ -360,6 +360,21 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not attribute a review body creation (out of scope, different id table)', () => {
+    // Review bodies are not delivered by the watch, and a review-object id is
+    // not an inline review-comment id; neither spelling may credit the session.
+    const ghReview = shellResult(
+      'gh pr review 42 --approve --body "LGTM"',
+      'https://github.com/o/r/pull/42#pullrequestreview-123',
+    );
+    expect(extractPostedCommentIds(ghReview)).toEqual([]);
+    const apiReview = shellResult(
+      'gh api repos/o/r/pulls/42/reviews -X POST -f event=COMMENT -f body=summary',
+      '{"id":999}',
+    );
+    expect(extractPostedCommentIds(apiReview)).toEqual([]);
+  });
+
   it('ignores non-shell tool results and malformed entries', () => {
     expect(extractPostedCommentIds(null)).toEqual([]);
     expect(extractPostedCommentIds({})).toEqual([]);

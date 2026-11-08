@@ -393,15 +393,17 @@ replayed. A comment-only channel (no `prWatchEvents`) issues no per-poll
 fails fast and aborts the watch pass (the same rule as the state watch), so it
 never sleep-retries ahead of task recovery and notification intake. Delivery
 reuses the bound-session contract: role-aware templates (`comment` /
-`fix:comment` / `default`), stable comment-id dedupe (shared with the
-notification lanes), backpressure and dead-letter, and dormant wake. The watch
-only consumes a comment when it delivers it to at least one bound session: a
-comment its narrower `comment` class cannot route (for example when only
-`fix:mention` is configured) is left unconsumed so the notification lanes can
-still deliver it under the thread's own reason, and the cursor is not advanced
-past a comment whose delivery was not durably claimed. A watched comment with no
-remaining bound target is never answered in public. Inline review comments carry
-the file path and line in the prompt. Attribution is best-effort and fails open
+`fix:comment` / `default`), stable comment-id dedupe, backpressure and
+dead-letter, and dormant wake. The watch and the notification lanes are
+sender-disjoint (same-account vs other-account), so they never deliver the same
+comment. A same-account comment with no deliverable target — because its
+narrower `comment` class matches no template (for example when only
+`fix:mention` is configured) or every bound target authored it — is dropped with
+a `comment_watch_no_target` journal row; the notification lanes can never see a
+same-account comment, so nothing else delivers it. The cursor is not advanced
+past a comment whose delivery was not durably claimed. A watched comment is
+never answered in public. Inline review comments carry the file path and line
+in the prompt. Attribution is best-effort and fails open
 toward delivery: a posting method that leaves no recognizable comment-creation
 result in the transcript is not attributed, so such a comment may be delivered
 once to its author's session (the stable id still bounds it to a single

@@ -22946,6 +22946,56 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
       });
 
+      it('withholds a same-account comment only from its author among multiple role targets', async () => {
+        // The central fix/verify topology: two roles bound to the PR, the fix
+        // session authored the comment. Exclusion must be per-target — the
+        // verify session still receives it. Mutating the filter to "any
+        // excluded session drops all targets" reds this case.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: {
+              'fix:comment': 'Address the findings (fix).',
+              'verify:comment': 'Re-verify the findings.',
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: ['fix', 'verify'].map((role) =>
+            makeBinding({
+              sessionId: `${role}-session`,
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role,
+                },
+              ],
+            }),
+          ),
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'fix-session' ? new Set(['ic:555']) : new Set(),
+          );
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe(
+          'verify-session',
+        );
+      });
+
       it('delivers a same-account comment under a sender allowlist that excludes the channel account', async () => {
         // The recommended senders:allowlist policy excludes the channel's own
         // login; the private comment watch must still deliver (sender gate
@@ -22997,6 +23047,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
         expect(prompt).toContain('inline review comment by @test-bot');
         expect(prompt).toContain('src/a.ts');
+        expect(prompt).toContain('(line 12, RIGHT)');
         expect(prompt).toContain('guard this branch');
       });
 
@@ -23222,6 +23273,165 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         ).cursor;
         expect(cursor.dispatchedCommentTimes?.['IC_555']).toBe(
           '2026-07-02T10:00:00.000Z',
+        );
+      });
+
+      it('caps a deliverable burst at the batch size and resumes before the tail', async () => {
+        // 21 deliverable comments (none self-authored) must enter the capped
+        // branch: 20 dispatch this pass, and the cursor resumes before the last
+        // processed comment so the tail drains next pass instead of dropping.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        const burst = Array.from({ length: 21 }, (_, i) => ({
+          id: 1000 + i,
+          node_id: `IC_${1000 + i}`,
+          body: `finding ${i}`,
+          created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+          user: { login: 'test-bot' },
+        }));
+        mockOctokit.rest.issues.listComments.mockResolvedValue(burst);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(20);
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-02T10:00:18.000Z',
+        );
+      });
+
+      it('skips the fetch inside the recheck interval', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: Date.now(),
+          },
+        });
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('is on by default when prCommentWatch is omitted', async () => {
+        await initChannel(
+          { deliverToBoundSessions: true, prWatchEvents: [] },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('drains a merged binding in a comment-only channel (no perpetual fetch)', async () => {
+        // watchOnePr (the only prState writer) is skipped for comment-only
+        // channels, so without draining on the binding's terminal state a
+        // merged PR would be comment-fetched every interval forever.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'merged',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('shares one burst budget across watched PRs in a pass', async () => {
+        // Two due PRs with 21 deliverable comments each: a per-PR cap would
+        // claim 40 tasks in one poll; the pass-wide budget claims 20 and leaves
+        // the second PR's cursor untouched so its tail resumes next pass.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        const seeded = {
+          headSha: 'sha-1',
+          prState: 'open',
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+        };
+        seedWatchState({
+          'owner/repo#42': { ...seeded },
+          'owner/repo#43': { ...seeded },
+        });
+        mockPull({});
+        const burstFor = (pr: number) =>
+          Array.from({ length: 21 }, (_, i) => ({
+            id: pr * 1000 + i,
+            node_id: `IC_${pr}_${i}`,
+            body: `finding ${i}`,
+            created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+            user: { login: 'test-bot' },
+          }));
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('pull_number' in params) return [];
+            if ('issue_number' in params)
+              return params['issue_number'] === 42
+                ? burstFor(42)
+                : burstFor(43);
+            return [];
+          },
+        );
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(20);
+        expect(readWatchState().entries['owner/repo#43']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
         );
       });
     });

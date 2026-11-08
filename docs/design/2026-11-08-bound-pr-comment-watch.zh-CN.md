@@ -25,41 +25,45 @@
 
 ## 目标
 
-- 当 `deliverToBoundSessions` 为 true 时，轮询每个绑定 PR 的**会话评论与行内 review 评论**，把每条新评论投递进每一个**没有发过它**的绑定会话。
-- 无标记、无 mention：不需要隐藏 HTML 标记、不需要 `@bot`、不需要 sender 白名单豁免。同账号的其他会话/agent/本人评论，以及异账号评论，都投递。
-- 仅当目标会话自己发过某条评论时才对其抑制（防回环）。
+- 当 `deliverToBoundSessions` 为 true 时，轮询每个绑定 PR 的**同账号会话评论与行内 review 评论**，把每条新评论投递进每一个**没有发过它**的绑定会话。本监视恰好补上通知 lane 看不到的缺口：GitHub 不会就账号自己的活动给它发通知。异账号评论会产生通知，仍由通知 lane 处理（见非目标）。
+- 无标记、无 mention：不需要隐藏 HTML 标记、不需要 `@bot`。同账号的其他会话/agent/本人评论无论有无标记都投递；仅当发送者是 channel 自身 login 时，这条私有 lane 才豁免 sender 门禁。
+- 仅当目标会话自己发过某条评论时才对其抑制（防回环）；排除按目标逐个执行，因此 fix/verify 组合仍会投递给非作者。
 - 复用现有绑定投递契约：角色感知路由、稳定键去重、死信/背压、休眠唤醒、仅私有（绝不公开回复）。
-- 随 `deliverToBoundSessions` 默认开启；提供一个 operator 关闭开关。
+- 随 `deliverToBoundSessions` 默认开启；operator 关闭开关（`prCommentWatch: false`）可禁用。
 
 ## 非目标
 
 - Webhook 推送接入（仍是未来工作）。
-- 改动四个 PR 状态事件、`prWatchEvents`、或通知驱动的评论 lane（它们照旧；新监视是增量的，并按评论 id 与之去重）。
-- 公开回复：没有剩余绑定目标的被监视评论私有退休，绝不在公开作答。
-- 归因任何本地 transcript 之外发布的评论（例如人在 github.com 上）。那些没有本地作者证据，投递给所有绑定会话，这是正确的。
-- 在*通知* lane 里读行内 review 评论（现有限制）；本监视直接抓取它们。
+- 改动四个 PR 状态事件、`prWatchEvents`、或通知驱动的评论 lane（它们照旧；新监视是增量的）。
+- **异账号评论。** 它们会产生 GitHub 通知，由通知 lane 按线程自身的 reason/角色模板投递。watch 不得消费它们：仅解析较窄的 `comment` 类可能只触达已配置角色的一个子集而饿死其余角色。两条路径按发送者互斥，因此不需要也不可能跨路径去重。
+- **review 正文**（经 `gh pr review` / `pulls/<n>/reviews` 发布的 verdict/总结）。watch 只抓会话评论与行内 review 评论；review 正文两者都不是，也没有任何 lane 读它。review 对象的 id 还与行内 review 评论处于不同的 id 表，因此归因不识别 review 创建。投递 review 正文可作为后续工作（带独立键空间的第三次抓取）。
+- 公开回复：没有剩余可投递目标的被监视评论私有退休并记一条 journal，绝不在公开作答。
+- 归因任何本地 transcript 之外发布的评论（例如人在 github.com 上用另一账号）。那些没有本地作者证据；同账号的投递给所有绑定会话，这是正确的。
+- 在*通知* lane 里读行内 review 评论（现有限制）。本监视直接抓取它们，但只投递 channel 自身账号的；其他账号的行内 review 评论今天没有任何 lane 投递。
 
 ## 设计
 
 ### 1. 轮询 —— channel PR watch
 
-在现有每 PR watch pass（`watchOnePr`）里增加评论观测，受 `deliverToBoundSessions` 与关闭开关门禁，独立于 `prWatchEvents`：
+独立的 `watchPrComments` 与 `watchOnePr` 一起在每 PR watch pass 中运行，受 `deliverToBoundSessions` 与关闭开关门禁，独立于 `prWatchEvents`。仅评论的 channel（`prWatchEvents` 为空）完全跳过 `watchOnePr`，因此不付每轮 `pulls.get`：
 
-- 抓取绑定 PR 的会话评论（`issues.listComments`）与行内 review 评论（`pulls.listReviewComments`）。为控制 API 成本，仅当 PR 的 `updated_at` 自上次评论观测以来前进、或周期性复查间隔到期时才抓取（与 CI 复查同形），并用 `since` 游标分页。
-- 在 `PrWatchEntry` 里持久化每 PR 评论游标（最近见到的评论时间戳/id 与上次抓取时间）。首次观测静默基线化（不回填积压），与状态 watch 约定一致。
-- 每条新评论成为一个带**稳定身份**的候选事件（会话评论：`issuecomment-<id>`；行内：`reviewcomment-<id>`），使 poll、重启、多 channel 实例都按 GitHub id 去重。
-- 每 pass 限制候选数量；仅在投递意图被持久化认领后才记录游标（与聚合 lane 相同的崩溃窗口规则）。
+- 抓取绑定 PR 的会话评论（`issues.listComments`）与行内 review 评论（`pulls.listReviewComments`），用 `since` 游标分页。按固定间隔复查（`COMMENT_RECHECK_INTERVAL_MS`，2 分钟）；没有 `updated_at` 快路径。两个抓取沿用状态 watch 的限流快速退出重试判断，并把共享凭据/限流错误交给本轮中止逻辑。
+- 只有**同账号**评论成为候选（`user.login` 等于 channel 的 `botUsername`）；异账号评论留给通知 lane。
+- 在 `PrWatchEntry` 里持久化每 PR 评论游标（`commentBaseline`、`commentSince`、`commentLastFetchAt`）。首次观测静默基线化（不回填积压）。游标下取整到整秒，因为 GitHub 按秒粒度比较 `since`。仅评论的 channel 依据绑定的终态排空 merged/closed 绑定（没有 `state_change` 可观测），因此不会被永久评论抓取。
+- 每个候选的**去重身份**是评论的 `node_id`（缺失时退回 `String(id)`），记入 `dispatchedComments`，并把 `created_at` 记入 `dispatchedCommentTimes` 使该键可被逐出。归因键是独立的：`ic:<id>` / `rc:<id>`（见 §2）。
+- 作者排除先于批次上限执行，避免自己发的评论占满批次位、卡住游标。**pass 级预算**（`MAX_WATCH_COMMENTS_PER_PASS`，由本轮所有被监视 PR 共享）约束停机突发；发现预算已耗尽的 PR 保留游标、下一轮续跑，被封顶的 PR 在其最后处理的评论之前续跑，使尾部排出而不丢弃。
+- 游标不会越过投递意图未被持久化认领的评论（`dispatchEnvelope` 返回 false 时保留 `commentSince` 以便重试）。没有任何可投递目标的同账号评论记一条 `comment_watch_no_target` skip 行——通知 lane 永远看不到它，所以该行是它唯一的痕迹。
 
 ### 2. 归因 —— daemon 已发评论查询
 
 新增只读路由，返回某会话**发过**的评论标识集合，源自其 transcript：
 
-- 扫描 `<chatsDir>/<sessionId>.jsonl` 的 `tool_result` 条目。当所执行命令是评论/review **创建**（识别模式：`gh pr comment`、`gh issue comment`、`gh pr review`，以及 `gh api`/`curl` POST 到 `issues/<n>/comments`、`pulls/<n>/comments`、`pulls/<n>/reviews`）时，把该结果输出里的评论 id 归因给该会话。从结果输出提取 id（`issuecomment-(\d+)`、`discussion_r(\d+)`、以及评论/review JSON 的 `"id"`），归一化为 `ic:<id>` / `rc:<id>`。
-- 读取/列表不归因（只有创建归因），所以仅查看过某评论的会话仍会收到该事件。
-- 增量：按会话以 transcript 水位（size/mtime + 已扫描偏移）为键缓存；只重扫追加的行。transcript 不可读时返回空集并记日志（对投递 fail-open：宁可投递也不静默丢弃），绝不成为剪枝绑定的理由。
+- 扫描 `<chatsDir>/<sessionId>.jsonl` 的 `tool_result` 条目。当所执行命令是评论**创建**（识别模式：`gh pr comment`、`gh issue comment`，以及 `gh api`/`curl` POST 到 `issues/<n>/comments` 或 `pulls/<n>/comments`）时，把评论 id 归因给该会话。review 正文（`gh pr review`、`pulls/<n>/reviews`）超出范围、不被识别。只收割**创建形态的响应**——恰好一条评论 URL（`issuecomment-(\d+)` / `discussion_r(\d+)`）、单个 JSON 对象的顶层 `id`、或一行纯数字——归一化为 `ic:<id>` / `rc:<id>` 并键到创建自身的集合。复合的「创建 && 列表」或正文引用他人评论 URL 属歧义，不归因任何内容（fail-open）。
+- 读取/列表不归因（只有创建归因）：显式 GET 即便带字段参数也被否决，链尾的 `stat -f` 或引号内的 `grep 'gh pr comment'` 属读取，`curl -G` 属读取。仅查看过某评论的会话仍会收到该事件。
+- 增量：按会话以 transcript 水位（size/mtime + 已扫描偏移）为键缓存，受 FIFO 扫描缓存上限约束；只重扫追加的行。transcript 不可读/缺失时返回空集（对投递 fail-open：宁可投递也不静默丢弃），绝不成为剪枝绑定的理由。查询以非 200 或请求异常失败时，worker 记一条节流诊断，使由此产生的自投递回环可与「安静的 PR」区分。
 - 给 `ChannelBoundSessions` 增加 `postedCommentIds(sessionId): Promise<ReadonlySet<string>>`；daemon worker 通过新路由实现。standalone 模式缺失 → 不抑制（今天的行为）。
 
-所有权：该路由像 prompt 路由一样解析会话所属 workspace runtime，只读该会话的 transcript，并像其他会话路由一样鉴权。它只读，不新增写面。
+所有权：该路由从调用方声明的 `workspaceCwd` 解析会话所属 workspace runtime，像兄弟路由 `/sessions/pr-bindings` 一样以项目成员闸门（`sessionPrSidecarBelongsToCurrentProject`）门禁读取，使调用方无法扫描外来项目的 transcript，只读活跃 transcript，并像其他会话路由一样鉴权。它只读，不新增写面。
 
 ### 3. 投递 —— channel
 
@@ -70,26 +74,49 @@
 3. 经现有绑定 prompt 路径（`claimInboundTask` + `deliverToBoundSession`）投递给剩余目标，用稳定评论 id 作事件/幂等键。复用角色模板（`fix:comment` / `comment` / `default`）、死信、背压与唤醒。
 4. 若无剩余目标（都发过它，或没有绑定），私有退休并记一条 journal；绝不回退公开回复。
 
-prompt envelope 携带：作者 login、评论正文（sanitize + 码点上限）、评论 URL，行内评论还带文件路径、行/侧与有界的 diff-hunk 上下文。所有 GitHub 内容标记为不可信事件数据；回复留在会话内。
+prompt envelope 携带：作者 login、评论正文（sanitize + 码点上限）、评论 URL，行内评论还带文件路径与行/侧（不带 diff-hunk 上下文）。metadata 身份行渲染最近观测到的 PR 标题，因此只要观测过标题，`%title%` 绑定动作变量就有值（从未观测过标题的仅评论 pass 渲染为空）。所有 GitHub 内容标记为不可信事件数据；回复留在会话内。
 
 ### 4. 防回环与边界
 
-- 自身评论由归因抑制，fix 会话的回复不会再次触发它自己。
+- 自身评论由归因抑制，fix 会话的回复不会再次触发它自己。排除按目标逐个执行：在 fix 会话作者了评论的 fix/verify 组合里，verify 会话仍会收到。
 - 归因漏判（某种不留可识别创建结果的发布方式）可能回声一条自身评论；稳定 id 去重把它限制为单次投递，并予以文档化。本仓库 skill 主流的基于 `gh` 的发布被覆盖。
 - 部分绑定快照绝不剪枝 watch 状态，且延迟而非消费（fail-closed，与状态 watch 一致）。
-- 通知 lane 也可能投递同一条评论（异账号的 `author`/`mention` 线程）；共享的稳定评论 id 在两条路径间去重。
+- watch 与通知 lane **按发送者互斥**（同账号 vs 异账号），因此永远不会投递同一条评论，也不会触发跨路径去重。watch 的私有投递仅在发送者是 channel 自身 login 时豁免 sender 门禁（推荐的 `senders: allowlist` 策略排除该账号）；公开/通知路径继续拒绝白名单之外的发送者。
 
 ## 受影响文件
 
-- `packages/channels/github/src/GithubAdapter.ts` —— watch pass 的评论观测、候选 → 过滤后的绑定投递、游标字段、关闭开关配置、行内评论抓取。
+- `packages/channels/github/src/GithubAdapter.ts` —— `watchPrComments`、候选 → 按目标过滤的绑定投递、游标字段、pass 级预算、仅评论终态排空、无目标 journal 行、标题透传、关闭开关配置、行内评论抓取。
 - `packages/channels/base/src/types.ts` —— `ChannelBoundSessions.postedCommentIds`。
-- `packages/cli/src/commands/channel/daemon-worker.ts` —— 通过新路由实现访问器。
-- `packages/cli/src/serve/routes/session-posted-comments.ts`（新增）+ 路由注册 —— transcript 归因查询。
+- `packages/channels/base/src/ChannelBase.ts` —— 私有同账号 lane 的 `waiveGroupSender` 预检选项。
+- `packages/cli/src/serve/server/posted-comment-attribution.ts`（新增）—— transcript 创建检测与 `ic:`/`rc:` 归因键。
+- `packages/cli/src/commands/channel/daemon-worker.ts` —— 通过新路由实现访问器，带节流失败诊断。
+- `packages/cli/src/serve/routes/session-posted-comments.ts`（新增）+ 路由注册 —— 带项目成员闸门的 transcript 归因查询。
+- `packages/web-shell/client/components/channels/*` + i18n —— 尊重声明的布尔默认值，并把 `prCommentWatch` 登记进绑定面板。
 - `docs/users/features/channels/github.md` —— 文档化默认开启的评论监视、归因与关闭开关。
 - 每个改动文件的同址测试；`.qwen/e2e-tests/` 下的 E2E 计划。
 
+## 约束
+
+- 归因 fail-open：证据缺失绝不得把「判不准」变成「本会话发过」；收窄归因只会投递更多，绝不抑制更多。
+- 仅私有：被监视评论绝不在公开作答；没有可投递目标的评论记 journal，而非静默消费。
+- 通知 lane 与公开 sender 门禁不变；sender 豁免仅作用于私有同账号绑定 lane。
+- review 对象的 id 不得进入 `rc:` 命名空间（行内 review 评论用不同的 id 表）。
+- 游标与去重必须在重启、限流中止后仍不越过评论、不重复投递。
+
+## 验证
+
+- 单测：adapter 评论 watch 套件（同账号范围、按目标排除、游标精度、批次上限、pass 级预算、间隔门、默认开启、终态排空、无目标 journal、标题）；归因检测器（创建形态收割、GET/`-G` 否决、引号感知分段、`ic:`/`rc:` 字面量钉子）；路由（信任 + 项目成员闸门）；worker 访问器（fail-open + 节流诊断）；web-shell 编辑器默认值一致性。
+- 变异见证：每个承重守卫（sender 豁免、按目标排除、无目标 journal、标题、终态排空、pass 预算、归因诊断）在移除时让一条点名的用例变红。
+
+## 验收标准
+
+- 一个绑定会话发布的同账号评论，在推荐的 `senders: allowlist` 策略下、无需标记或 mention，投递给每一个没有发过它的其他绑定会话。
+- 作者会话收不到自己的评论；仅读取过评论的会话仍会收到。
+- 异账号评论与 review 正文不被 watch 消费。
+- UI 创建/编辑的 channel 保持监视默认开启；显式 `prCommentWatch: false` 禁用它。
+
 ## 开放问题
 
-1. 归因精度：创建模式检测（已选）vs 宽泛的“任何 tool_result 提及”。创建检测忠于“本会话发出”，并避免抑制会话仅读过的评论；奇异的静默发布是文档化的残余。
-2. 多绑定 PR 下的评论抓取节奏与上限（API 预算）；先用 `updated_at` + 周期复查形状与现有 `prWatchLimit`。
-3. 行内评论 prompt 形状：在正文上限内包含多少 diff-hunk 上下文。
+1. 归因精度：不留可识别创建结果的奇异静默发布是文档化的残余（一次自回声，受稳定 id 去重约束）。
+2. review 正文投递（带独立键空间的第三次抓取）可作为后续工作，此处不涉及。
+3. watch 感知的去重环逐出下界（使仅同账号 channel 的环在没有通知时也能收缩）需要独立的 watch 环或按 lane 标记的键才安全；作为后续跟进。

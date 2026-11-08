@@ -357,6 +357,21 @@ export function createBoundSessionsAccessor(
   // I/O failure behind it, so without this line the cause would be logged
   // nowhere; throttled because the route is polled every channel cycle.
   let workerDowngradeStreak = 0;
+  // Consecutive authorship lookups that failed with a non-200 or a thrown
+  // request. Each fail-open empty set makes the bound session receive its own
+  // comments (the self-delivery loop the watch exists to prevent), so the
+  // cause must not be silent; throttled like the sibling downgrade line
+  // because the lookup runs on every comment-watch pass. A 200 empty set is
+  // NOT a failure (it is indistinguishable from a quiet PR by design).
+  let attributionFailureStreak = 0;
+  const noteAttributionFailure = (cause: string): void => {
+    attributionFailureStreak += 1;
+    if (attributionFailureStreak === 1 || attributionFailureStreak % 60 === 0) {
+      process.stderr.write(
+        `[channel-worker] posted-comment authorship lookup failed (${cause}); delivering without authorship exclusion (${attributionFailureStreak} consecutive failures); check that the worker and the daemon run the same version\n`,
+      );
+    }
+  };
   // requestRest's timer covers the connection through response headers
   // only; the signal also bounds body consumption so a half-open connection
   // cannot hang the poll loop indefinitely.
@@ -699,7 +714,10 @@ export function createBoundSessionsAccessor(
           `/sessions/${encodeURIComponent(sessionId)}/posted-comments?workspaceCwd=${encodeURIComponent(cwd)}`,
           { signal: requestSignal() },
         );
-        if (!res.ok) return new Set<string>();
+        if (!res.ok) {
+          noteAttributionFailure(`HTTP ${res.status}`);
+          return new Set<string>();
+        }
         const body = (await res.json()) as { ids?: unknown };
         const ids = new Set<string>();
         if (Array.isArray(body.ids)) {
@@ -707,8 +725,12 @@ export function createBoundSessionsAccessor(
             if (typeof id === 'string') ids.add(id);
           }
         }
+        attributionFailureStreak = 0;
         return ids;
-      } catch {
+      } catch (err) {
+        noteAttributionFailure(
+          (err instanceof Error ? err.message : String(err)).slice(0, 200),
+        );
         return new Set<string>();
       } finally {
         if (res) await discardBody(res);

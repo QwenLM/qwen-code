@@ -536,11 +536,13 @@ const CI_PENDING_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
 const COMMENT_RECHECK_INTERVAL_MS = 2 * 60 * 1000;
 
 /**
- * Per-pass cap on watched comments, mirroring the aggregate lane's batch cap:
- * commentSince survives a restart, so after a long outage every comment in the
- * gap would otherwise become eligible at once, each as its own durable task and
- * prompt. The cursor resumes before the last processed comment when capped, so
- * the tail drains over subsequent passes instead of being dropped.
+ * Pass-wide budget on watched comments, shared by every watched PR in a single
+ * watch pass (not a per-PR cap): commentSince survives a restart, so after a
+ * long outage every comment in the gap would otherwise become eligible at once,
+ * each as its own durable task and prompt — a per-PR cap would still claim up to
+ * this many × watched-PR tasks in one poll. A PR that finds the budget spent
+ * keeps its cursor and resumes next pass; a capped PR resumes before its last
+ * processed comment so the tail drains over subsequent passes, never dropped.
  */
 const MAX_WATCH_COMMENTS_PER_PASS = 20;
 
@@ -6586,10 +6588,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // the PR: pruning it here would re-add the closed PR as a first
         // observation on the next poll (query oscillation) and lose the
         // terminal record. Binding retention and active polling are
-        // separate concerns.
+        // separate concerns. A comment-only channel subscribes no state
+        // event, so there is no state_change to observe and watchOnePr (the
+        // only prState writer) never runs: drain on the binding's terminal
+        // state alone, else merged/closed bindings would be comment-fetched
+        // forever. A reopened binding flips back to open and resumes.
         if (
           (pr.state === 'merged' || pr.state === 'closed') &&
-          this.prWatchState.entries[key]?.prState === 'closed'
+          (this.prWatchState.entries[key]?.prState === 'closed' ||
+            this.prWatchEvents.size === 0)
         ) {
           continue;
         }
@@ -6719,6 +6726,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] PR watch cap exceeded: watching ${watched.length}/${active.size} bound PRs (open first, most recent; open limit ${limit}); not watched: ${excluded.join(', ')}\n`,
       );
     }
+    // One burst budget for the whole pass: after an outage every watched PR
+    // can be due at once, and a per-PR cap would claim up to cap × watched-PR
+    // durable tasks in a single poll. PRs that find it spent keep their cursor
+    // and resume next pass.
+    const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
     for (const [key, candidate] of watched) {
       try {
         // The state observation costs a pulls.get per watched PR per poll; skip
@@ -6729,7 +6741,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         // Additive comment watch: isolates its own failures so a comment
         // fetch problem never skips the state transitions above.
-        await this.watchPrComments(key, candidate.chatId, candidate.number);
+        await this.watchPrComments(
+          key,
+          candidate.chatId,
+          candidate.number,
+          commentBudget,
+        );
       } catch (err) {
         if (isWatchPassAbortError(err)) {
           // Shared credential/rate-limit failure: abort the rest of the
@@ -7108,6 +7125,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     key: string,
     chatId: string,
     number: number,
+    budget: { remaining: number },
   ): Promise<void> {
     if (
       !this.deliverToBoundSessions ||
@@ -7135,6 +7153,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       entry.commentLastFetchAt !== undefined &&
       now - entry.commentLastFetchAt < COMMENT_RECHECK_INTERVAL_MS
     ) {
+      return;
+    }
+    // The burst budget is shared by every watched PR in this pass. A PR that
+    // arrives after it is spent fetches nothing and keeps its cursor untouched,
+    // so its tail resumes on the next pass instead of being skipped past.
+    if (budget.remaining <= 0) {
       return;
     }
     const [owner, repo] = chatId.split('/');
@@ -7384,9 +7408,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
 
-    // Cap the per-pass burst; the cursor resumes before the last processed
-    // comment when capped so the tail drains over subsequent passes.
-    const batch = deliverable.slice(0, MAX_WATCH_COMMENTS_PER_PASS);
+    // Cap the burst against the pass-wide budget shared by all watched PRs;
+    // the cursor resumes before the last processed comment when capped so the
+    // tail drains over subsequent passes.
+    const batch = deliverable.slice(
+      0,
+      Math.min(MAX_WATCH_COMMENTS_PER_PASS, budget.remaining),
+    );
+    budget.remaining -= batch.length;
     const capped = deliverable.length > batch.length;
 
     let allSettled = true;

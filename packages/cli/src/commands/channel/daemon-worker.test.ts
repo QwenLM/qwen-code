@@ -4619,7 +4619,7 @@ describe('createBoundSessionsAccessor', () => {
     expect(requestRest).not.toHaveBeenCalled();
   });
 
-  it('postedCommentIds fail-open: a non-200 answer yields an empty set', async () => {
+  it('postedCommentIds fail-open: a non-200 answer yields an empty set and names the cause', async () => {
     const requestRest = vi
       .fn()
       .mockResolvedValueOnce(bindingsResponse())
@@ -4627,9 +4627,67 @@ describe('createBoundSessionsAccessor', () => {
     const accessor = createBoundSessionsAccessor(makeClient(requestRest));
     await accessor.listPrBindings();
 
-    const ids = await accessor.postedCommentIds!('session-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const ids = await accessor.postedCommentIds!('session-1');
+      expect(ids.size).toBe(0);
+      const lines = stderr.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('authorship lookup failed'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('HTTP 500');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 
-    expect(ids.size).toBe(0);
+  it('postedCommentIds: a 200 empty set is not a failure and logs nothing', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(200, { ids: [] }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const ids = await accessor.postedCommentIds!('session-1');
+      expect(ids.size).toBe(0);
+    } finally {
+      stderr.mockRestore();
+    }
+    const lines = stderr.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('authorship lookup failed'));
+    expect(lines).toHaveLength(0);
+  });
+
+  it('postedCommentIds: consecutive failures log once, then reset on success', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(500, {}))
+      .mockResolvedValueOnce(jsonResponse(500, {}))
+      .mockResolvedValueOnce(jsonResponse(200, { ids: [] }))
+      .mockResolvedValueOnce(jsonResponse(500, {}));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await accessor.postedCommentIds!('session-1');
+      await accessor.postedCommentIds!('session-1');
+      await accessor.postedCommentIds!('session-1'); // success resets the streak
+      await accessor.postedCommentIds!('session-1'); // first failure again
+      const lines = stderr.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('authorship lookup failed'));
+      // Two failure streaks (fail,fail then fail), each logged on its first
+      // occurrence only; the second failure of the first streak is throttled.
+      expect(lines).toHaveLength(2);
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('lists and validates PR bindings', async () => {

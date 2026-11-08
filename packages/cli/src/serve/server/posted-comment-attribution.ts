@@ -37,24 +37,26 @@ export function reviewCommentKey(id: string | number): string {
 const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'shell']);
 
 /**
- * Commands that CREATE a comment or review. Reads/lists (`gh pr view`,
- * `gh api` GET, `listComments`) deliberately do not match, so inspecting a
- * comment never suppresses its delivery. Subcommand patterns are tested on the
- * quote-stripped stage; path patterns on a quote-unwrapped copy (a quoted
- * collection path still counts).
+ * Commands that CREATE a comment. Reads/lists (`gh pr view`, `gh api` GET,
+ * `listComments`) deliberately do not match, so inspecting a comment never
+ * suppresses its delivery. Subcommand patterns are tested on the quote-stripped
+ * stage; path patterns on a quote-unwrapped copy (a quoted collection path
+ * still counts). Review bodies (`gh pr review`, `pulls/<n>/reviews`) are out of
+ * scope — the watch does not deliver them — and a review-object id lives in a
+ * different id table than inline review comments, so neither pattern is
+ * recognized here.
  */
 const SUBCOMMAND_PATTERNS: readonly RegExp[] = [
   /\bgh\s+pr\s+comment\b/,
   /\bgh\s+issue\s+comment\b/,
-  /\bgh\s+pr\s+review\b/,
 ];
 
 const PATH_PATTERNS: readonly RegExp[] = [
-  // gh api / curl writing to a comments or reviews collection.
-  /\bgh\s+api\b[\s\S]*?\b(?:issues|pulls)\/\d+\/(?:comments|reviews)\b[\s\S]*?(?:-X\s+POST|--method\s+POST|-f\s|--field\s|-F\s|--raw-field\s|--input\s)/,
-  /\bcurl\b[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/(?:comments|reviews)\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)/,
+  // gh api / curl writing to a comments collection.
+  /\bgh\s+api\b[\s\S]*?\b(?:issues|pulls)\/\d+\/comments\b[\s\S]*?(?:-X\s+POST|--method\s+POST|-f\s|--field\s|-F\s|--raw-field\s|--input\s)/,
+  /\bcurl\b[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/comments\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)/,
   // curl commonly puts the write flags before the URL.
-  /\bcurl\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/(?:comments|reviews)\b/,
+  /\bcurl\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/comments\b/,
 ];
 
 /**
