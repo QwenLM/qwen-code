@@ -167,7 +167,7 @@ async function fixture(t) {
       failDelete = v;
     },
     setRunner: (value) => {
-      runner = value;
+      runner = { status: 'offline', busy: false, ...value };
     },
     addOrphanContainer(labels) {
       const id = `container-orphan-${containers.size}`;
@@ -581,6 +581,94 @@ test('startup reclaims a live container before replenishing after a crash', asyn
     f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
       .length,
     1,
+  );
+});
+
+test('multi-identity orphan pile without slot state self-heals instead of stalling', async (t) => {
+  // hz4 incident: address-pool exhaustion left several `Created`
+  // containers per slot, each with a different qwen.instance, and no
+  // slot state. recoverIdentity refuses to pick one — but with no state
+  // every leftover is an orphan, so the cycle must sweep them all and
+  // replenish instead of failing identically forever.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  const orphanA = f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  const orphanB = f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  const orphanNetwork = f.addForeignNetwork({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-cccccccc-cccc-4ccc-cccc-cccccccccccc',
+  });
+  // A registration orphaned by one of the swept containers, under this
+  // slot's suffixed naming scheme.
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef', busy: true });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const removedOrphans = f.calls.filter(
+    (c) =>
+      c.program === 'docker' &&
+      c.args[0] === 'rm' &&
+      (c.args.includes(orphanA) || c.args.includes(orphanB)),
+  );
+  assert.equal(removedOrphans.length, 2, 'both orphan containers removed');
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'network' &&
+        c.args[1] === 'rm' &&
+        c.args.includes(orphanNetwork),
+    ),
+    'orphan network removed',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'orphaned registration swept by the slot naming scheme',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenished in the same cycle',
+  );
+});
+
+test('the identity-less sweep never deletes an online registration', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-deadbeef',
+    status: 'online',
+    busy: true,
+  });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'an online registration may belong to a live runner elsewhere',
   );
 });
 
@@ -1025,20 +1113,40 @@ test('an orphaned container is reclaimed from its instance label', async (t) => 
   );
 });
 
-test('an orphaned container with an unidentifiable label still blocks replacement', async (t) => {
+test('a foreign-labeled orphan is removed but registration sweeping stays blocked', async (t) => {
   const f = await fixture(t);
-  f.addOrphanContainer({
+  const foreign = f.addOrphanContainer({
     'qwen.pool': 'trial',
     'qwen.slot': '1',
     'qwen.instance': 'ecs-qwen-other-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
   });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
   const manager = createManager(f.config, { command: f.command });
   await assert.rejects(manager.cycle(1), /manual reconciliation/);
-  await assert.rejects(manager.cycle(1), /manual reconciliation/);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes(foreign),
+    ),
+    'the foreign-labeled resource in our slot namespace is still removed',
+  );
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'registrations are never swept by name on a foreign identity',
+  );
+  await manager.cycle(1);
   assert.equal(
     f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
       .length,
-    0,
+    1,
+    'replenishes on the next cycle once the foreign resource is gone',
   );
 });
 
@@ -1062,8 +1170,12 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
   );
 });
 
-test('disagreeing resource labels are reported as ambiguous, not missing', async (t) => {
+test('disagreeing labels keep reporting while Docker refuses removals', async (t) => {
   const f = await fixture(t);
+  const manager = createManager(f.config, { command: f.command });
+  // While Docker refuses removals the pile cannot be swept, so an
+  // ambiguous identity must delete nothing and keep reporting.
+  f.setFailRemove(true);
   f.addOrphanContainer({
     'qwen.pool': 'trial',
     'qwen.slot': '1',
@@ -1074,12 +1186,12 @@ test('disagreeing resource labels are reported as ambiguous, not missing', async
     'qwen.slot': '1',
     'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
   });
-  const manager = createManager(f.config, { command: f.command });
-  await assert.rejects(manager.cycle(1), /labels disagree/);
+  await assert.rejects(manager.cycle(1), /docker unavailable/);
   assert.equal(
-    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
     0,
-    'an ambiguous identity still deletes nothing',
+    'no replacement while the ambiguous pile survives',
   );
 });
 

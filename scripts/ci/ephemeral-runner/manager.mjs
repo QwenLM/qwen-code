@@ -261,11 +261,8 @@ export function createManager(config, dependencies = {}) {
     return (await run('docker', args)).trim().split('\n').filter(Boolean);
   }
 
-  // A killed `docker create` CLI can still leave a container behind after the
-  // slot state is gone, so the instance label is the surviving identity.
-  async function recoverIdentity(slot, containers, networks) {
-    const prefix = `qwen-${config.poolId}-${slot}-`;
-    const names = new Set();
+  async function collectIdentities(containers, networks) {
+    const names = [];
     const inspect = async (args, id) => {
       try {
         return (await run('docker', [...args, id])).trim();
@@ -274,14 +271,14 @@ export function createManager(config, dependencies = {}) {
       }
     };
     for (const id of containers)
-      names.add(
+      names.push(
         await inspect(
           ['inspect', '--format', '{{index .Config.Labels "qwen.instance"}}'],
           id,
         ),
       );
     for (const id of networks)
-      names.add(
+      names.push(
         await inspect(
           [
             'network',
@@ -292,7 +289,14 @@ export function createManager(config, dependencies = {}) {
           id,
         ),
       );
-    const identified = [...names].filter((name) => {
+    return names;
+  }
+
+  // A killed `docker create` CLI can still leave a container behind after the
+  // slot state is gone, so the instance label is the surviving identity.
+  async function recoverIdentity(slot, names) {
+    const prefix = `qwen-${config.poolId}-${slot}-`;
+    const identified = [...new Set(names)].filter((name) => {
       const bare = name.replace(/^ecs-/, '');
       return (
         bare.startsWith(prefix) &&
@@ -365,15 +369,34 @@ export function createManager(config, dependencies = {}) {
   async function cleanup(slot, state) {
     const containers = await listContainers(slot);
     const networks = await listNetworks(slot);
-    if ((containers.length || networks.length) && !state?.name)
-      state = await recoverIdentity(slot, containers, networks);
+    let orphanLabels = null;
+    if ((containers.length || networks.length) && !state?.name) {
+      orphanLabels = await collectIdentities(containers, networks);
+      try {
+        state = await recoverIdentity(slot, orphanLabels);
+      } catch (error) {
+        // No slot state means no cycle of this manager is live for the
+        // slot (cycles are serial per slot), so EVERY leftover resource
+        // is an orphan — including the multi-identity pile a wedged
+        // Docker left behind on hz4 (several `Created` containers per
+        // slot after address-pool exhaustion). Refusing to pick one
+        // identity there stalled 15/30 slots for 960 identical retries
+        // each. Delete the resources without a GitHub identity instead;
+        // any registrations they owned are swept by name below. A
+        // partially-failed sweep throws and the next cycle retries.
+        log(
+          `slot ${slot}: ${error.message}; sweeping orphaned resources without a recorded identity`,
+        );
+        state = null;
+      }
+    }
     for (const id of containers) {
       try {
         const logs = await run('docker', ['logs', '--tail', '10000', id]);
         await writeFile(
           join(
             logDir,
-            `${state?.name || `slot-${slot}`}-${id.slice(0, 12)}.log`,
+            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.log`,
           ),
           logs.slice(-1024 * 1024),
           { mode: 0o600 },
@@ -389,7 +412,10 @@ export function createManager(config, dependencies = {}) {
           { binary: true },
         );
         await writeFile(
-          join(logDir, `${state.name}-${id.slice(0, 12)}.tar`),
+          join(
+            logDir,
+            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
+          ),
           archive,
           { mode: 0o600 },
         );
@@ -406,6 +432,55 @@ export function createManager(config, dependencies = {}) {
     for (const id of networks) await run('docker', ['network', 'rm', id]);
     if ((await listNetworks(slot)).length)
       throw new Error('Network cleanup failed');
+    if (!state?.name && orphanLabels) {
+      // The identity-less sweep above removed the resources but could not
+      // target their registrations. Sweep every registration this slot's
+      // naming scheme owns so an orphan cannot block its replacement —
+      // but only when every removed resource carried this slot's identity
+      // prefix. A foreign or missing instance label means the pile may
+      // belong to another pool sharing the host; deleting our slot's
+      // registrations by name would then be guesswork, so stay blocked.
+      const prefix = `qwen-${config.poolId}-${slot}-`;
+      const identifiable = (name) =>
+        typeof name === 'string' &&
+        name.replace(/^ecs-/, '').startsWith(prefix);
+      if (!orphanLabels.every(identifiable))
+        throw new Error(
+          'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
+        );
+      // A registration still online may belong to a live runner outside
+      // this host's view; only sweep ones GitHub already reports offline.
+      const owned = (await listRunners()).filter(
+        (runner) =>
+          typeof runner.name === 'string' &&
+          runner.status !== 'online' &&
+          (runner.name === runnerName(slot) ||
+            (runner.name.startsWith(`${runnerName(slot)}-`) &&
+              /^[0-9a-f]{8}$/.test(
+                runner.name.slice(runnerName(slot).length + 1),
+              ))),
+      );
+      for (const runner of owned) {
+        if (!Number.isSafeInteger(runner.id) || runner.id < 1)
+          throw new Error(
+            'Ambiguous runner identity; manual reconciliation required',
+          );
+        try {
+          await gh([
+            '-X',
+            'DELETE',
+            `/repos/${config.repo}/actions/runners/${runner.id}`,
+          ]);
+        } catch (error) {
+          if (error.status === 404) continue;
+          throw new Error(
+            `Runner ${runner.id} deletion was rejected${
+              error.status ? ` (HTTP ${error.status})` : ''
+            }; retrying on the next cycle`,
+          );
+        }
+      }
+    }
     if (state?.name) {
       const all = await listRunners();
       // A recorded runnerName is exact. A label-recovered identity carries
