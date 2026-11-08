@@ -131,11 +131,11 @@ class ManagedUserMessageStoreTest {
     @Test
     void admitsClaimedSeedThroughTheRealSchemaAdapterAndKeepsTheQueueBarrier() {
         Message first = command("first", submit("first")).messages().getFirst();
-        assertCode("user_message_queue_pending", () -> store.insertTurnCommand(TENANT, "queue-test", "ordinary-key",
+        assertCode("user_message_queue_pending", () -> store.insertTurnCommandAsActor(TENANT, "queue-test", "ordinary-key",
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR));
         jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
 
-        var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:" + first.id(),
+        var admission = store.insertTurnCommandAsActor(TENANT, "queue-test", "user-queue:" + first.id(),
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR);
         assertThat(admission.turnId()).isNotBlank();
     }

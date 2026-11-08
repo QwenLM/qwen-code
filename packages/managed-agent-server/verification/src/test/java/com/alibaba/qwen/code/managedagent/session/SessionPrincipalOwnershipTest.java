@@ -237,21 +237,31 @@ class SessionPrincipalOwnershipTest {
         var tasks = new ManagedTaskService(f.service, records, events);
         f.tx.executeWithoutResult(status -> {
             String id = f.create(SessionPrincipal.ofUser("tenant", "user"), "create");
+            // A null actor keeps the trusted internal tenant-scoped read
+            // (R2-5): the pages load, and only a missing task 404s. The
+            // HTTP boundary passes its verified principal and never
+            // travels the null-actor overloads.
+            assertThat(tasks.listPublicTasks("tenant", null, id, null, 10).data()).isEmpty();
+            assertThat(tasks.queryWebShellTasks("tenant", null, id, null, 10).data()).isEmpty();
             for (Runnable route : List.<Runnable>of(
-                    () -> tasks.listPublicTasks("tenant", null, id, null, 10),
                     () -> tasks.getPublicTask("tenant", null, id, "missing"),
-                    () -> tasks.queryWebShellTasks("tenant", null, id, null, 10),
                     () -> tasks.getWebShellTask("tenant", null, id, "missing"),
                     () -> tasks.listPublicTaskEvents("tenant", null, id, "missing", null, 10),
                     () -> tasks.queryWebShellTaskEvents("tenant", null, id, "missing", null, 10))) {
                 assertThatThrownBy(route::run).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(404);
-                    assertThat(error.getCode()).isEqualTo("session_not_found");
+                    assertThat(error.getCode()).isEqualTo("task_not_found");
                 });
             }
             assertThat(tasks.listPublicTasks("tenant", "user", id, null, 10).data()).isEmpty();
             assertThat(tasks.queryWebShellTasks("tenant", "user", id, null, 10).data()).isEmpty();
             denied(() -> tasks.listPublicTasks("other-tenant", "user", id, null, 10));
+            // A named non-owner still meets the ownership gate's 404.
+            assertThatThrownBy(() -> tasks.listPublicTasks("tenant", "intruder", id, null, 10))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(404);
+                        assertThat(error.getCode()).isEqualTo("session_not_found");
+                    });
         });
     }
 

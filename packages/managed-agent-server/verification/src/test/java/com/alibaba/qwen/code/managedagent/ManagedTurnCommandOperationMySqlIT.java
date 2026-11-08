@@ -56,7 +56,7 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
         Map<String, Admission> ended = new HashMap<>();
         Map<String, Admission> running = new HashMap<>();
         for (String session : List.of(sessionId, other)) {
-            Admission turn = store.insertTurnCommand(TENANT, "SUBMIT_TURN",
+            Admission turn = store.insertTurnCommandAsActor(TENANT, "SUBMIT_TURN",
                     session + "-ended", "digest-ended", session, INPUT,
                     "sha256:" + "c".repeat(64), "actor");
             assertThat(store.claimTurn(TENANT, session, turn.turnId(), OWNER,
@@ -65,7 +65,7 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
                     "hosted_harness_unavailable", "gone");
             settledCancels(session, turn.turnId(), 1000);
             ended.put(session, turn);
-            running.put(session, store.insertTurnCommand(TENANT,
+            running.put(session, store.insertTurnCommandAsActor(TENANT,
                     "SUBMIT_TURN", session + "-running", "digest-running",
                     session, INPUT, "sha256:" + "c".repeat(64), "actor"));
         }
@@ -78,13 +78,13 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
                     status -> {
                         // A cancel of the running Turn stays pending and
                         // holds its new row until this transaction ends.
-                        assertThat(store.insertCancelCommand(TENANT,
+                        assertThat(store.insertCancelCommandAsActor(TENANT,
                                 "CANCEL_TURN", session + "-cancel-running",
                                 "cancel-digest", session,
                                 running.get(session).turnId(), "actor")
                                 .commandEffect()).isTrue();
                         await(pending);
-                        return store.insertCancelCommand(TENANT, "CANCEL_TURN",
+                        return store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN",
                                 session + "-cancel-ended", "cancel-digest",
                                 session, ended.get(session).turnId(), "actor");
                     })));

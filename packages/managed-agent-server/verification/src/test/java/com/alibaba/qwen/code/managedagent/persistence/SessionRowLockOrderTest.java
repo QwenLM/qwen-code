@@ -155,6 +155,7 @@ class SessionRowLockOrderTest {
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "JdbcSessionRecoveryRepository.java",
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
+            "ExternalWorkspaceRetirementService.java",
             "HostedCleanupDebtStore.java",
             "ManagedActionStore.java", "ManagedToolDetailsStore.java",
             "ManagedToolResultProjector.java", "ManagedUserMessageStore.java",
@@ -194,6 +195,12 @@ class SessionRowLockOrderTest {
                     // both factories only construct an exception.
                     Map.entry("ExternalStorageRegistrationStore.java",
                             Set.of("ExternalStorageRegistrationStore.unavailable/0")),
+                    // blocked/0 only constructs the retirement refusal;
+                    // TerminationVerifier.verify/1 is the trusted host's
+                    // out-of-package callback, which reads no Managed row.
+                    Map.entry("ExternalWorkspaceRetirementService.java",
+                            Set.of("ExternalWorkspaceRetirementService.blocked/0",
+                                    "TerminationVerifier.verify/1")),
                     // Same-package lifecycle refusals share this local name;
                     // both factories only construct an exception.
                     Map.entry("HarnessPlacementStore.java",
@@ -286,10 +293,12 @@ class SessionRowLockOrderTest {
                                     "WorkspaceCsiApplicationHistory.readFrozenOwner/2")),
                     Map.entry("WorkspaceCsiApplicationInventory.java",
                             Set.of("Cell.bytes/0|Row.bytes/0|Snapshot.bytes/0",
+                                    "Cell.bool/0",
                                     "Cell.equals/1",
                                     "Cell.hashCode/0",
                                     "Cell.isNull/0",
                                     "Cell.kind/0",
+                                    "Cell.number/0",
                                     "Cell.text/0",
                                     "Encoder.write/1",
                                     "FrozenOwnerReader.read/2|Inspection.read/2",
@@ -404,7 +413,7 @@ class SessionRowLockOrderTest {
         // lockers no helper name would find, and the create entries, whose
         // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
-                "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
+                "insertTurnCommand", "insertTurnCommandAsActor", "insertCancelCommand", "insertCancelCommandAsActor", "changeSessionModel", "changeSessionApproval",
                 "requireMcpManagement", "requireMcpSettingsCommit",
                 "requireConfigurationCommit", "requireExtensionManagement",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
@@ -488,8 +497,9 @@ class SessionRowLockOrderTest {
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
-                        "insertSession", "insertSessionCommand", "insertTurn",
-                        "insertTurnCommand", "insertWorkspaceSessionCommand",
+                        "insertSession", "insertSessionCommand",
+                        "insertPrincipalSessionCommand", "insertTurn",
+                        "insertTurnCommand", "insertTurnCommandAsActor", "insertCancelCommandAsActor", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
                         "markTurnRecoveryBlocked", "markTurnFailureRecovery",
                         "requestRecoveryRecheck",
@@ -518,6 +528,11 @@ class SessionRowLockOrderTest {
         assertThat(audit.exemptions())
                 .containsExactly("ItemRow.toRecord/0",
                         "ManagedAgentStore.insertSessionCommand/9",
+                        // The actor-carrying list delegate and the
+                        // principal-carrying read share name and arity;
+                        // both are read-only pages that reach neither
+                        // the session lock nor the turn row.
+                        "ManagedAgentStore.listSessions/7",
                         "ManagedAgentStore.readMap/1",
                         "ManagedAgentStore.renameDelivery/2");
         // The harvest is asserted against the bytecode's own enumeration,
@@ -588,7 +603,9 @@ class SessionRowLockOrderTest {
         // is whatever the locker/reader intersection computed.
         Set<String> orderAudited = new TreeSet<>(sessionLockers);
         orderAudited.retainAll(turnReaders);
-        assertThat(orderAudited).containsExactly("ManagedActionStore.java",
+        assertThat(orderAudited).containsExactly(
+                "ExternalWorkspaceRetirementService.java",
+                "ManagedActionStore.java",
                 "ManagedUserMessageStore.java",
                 "WorkspaceRecoveryStore.java");
         // ManagedActionStore.admit takes the tenant lock before the

@@ -517,7 +517,7 @@ public class ManagedSchemaSessionStoreTest {
         String turn =
                 tx.execute(
                                 status ->
-                                        store.insertTurnCommand(
+                                        store.insertTurnCommandAsActor(
                                                 tenant,
                                                 "SUBMIT_TURN",
                                                 "retract-turn",
@@ -626,7 +626,7 @@ public class ManagedSchemaSessionStoreTest {
         String turn =
                 tx.execute(
                                 status ->
-                                        store.insertTurnCommand(
+                                        store.insertTurnCommandAsActor(
                                                 tenant,
                                                 "SUBMIT_TURN",
                                                 "partial-turn",

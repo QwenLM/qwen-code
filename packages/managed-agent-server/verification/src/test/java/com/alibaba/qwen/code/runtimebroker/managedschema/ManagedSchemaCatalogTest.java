@@ -45,7 +45,7 @@ class ManagedSchemaCatalogTest {
                 statement.execute("DELETE FROM catalog_fixture.table_constraints");
                 Connection connection = mariaDb(data, product, 1, 1);
                 ManagedSchemaCatalog.requireApplicationCatalog(connection);
-                ManagedSchemaCatalog.validateChecks(connection, "ma_operation", "");
+                ManagedSchemaCatalog.validateChecks(connection, "ma_operation");
             }
         }
     }
@@ -60,7 +60,7 @@ class ManagedSchemaCatalogTest {
                     update.setString(1, expression);
                     update.executeUpdate();
                     assertThrows(SQLException.class,
-                            () -> ManagedSchemaCatalog.validateChecks(connection, "ma_operation", ""));
+                            () -> ManagedSchemaCatalog.validateChecks(connection, "ma_operation"));
                 }
             }
         }
@@ -122,10 +122,10 @@ class ManagedSchemaCatalogTest {
     void rejectsUnexpectedMySqlChecksEvenWhenTheyAreNotEnforced() throws Exception {
         try (var data = fixture(true); var statement = data.createStatement()) {
             assertThrows(SQLException.class,
-                    () -> ManagedSchemaCatalog.validateChecks(data, "ma_operation", ""));
+                    () -> ManagedSchemaCatalog.validateChecks(data, "ma_operation"));
             statement.execute("UPDATE catalog_fixture.table_constraints SET enforced='NO'");
             assertThrows(SQLException.class,
-                    () -> ManagedSchemaCatalog.validateChecks(data, "ma_operation", ""));
+                    () -> ManagedSchemaCatalog.validateChecks(data, "ma_operation"));
         }
     }
 

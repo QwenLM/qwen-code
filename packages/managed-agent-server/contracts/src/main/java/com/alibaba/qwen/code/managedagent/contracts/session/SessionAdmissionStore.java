@@ -154,7 +154,7 @@ public interface SessionAdmissionStore {
      * OPERATOR's own retry of his own key — and not only the creator. The
      * default drops the actor for implementations that cannot record it.
      */
-    public default Admission insertTurnCommand(String tenantId, String operation,
+    public default Admission insertTurnCommandAsActor(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
@@ -176,7 +176,7 @@ public interface SessionAdmissionStore {
             String turnId);
 
     /** The actor-carrying twin of {@link #insertTurnCommand}. */
-    public default Admission insertCancelCommand(String tenantId, String operation,
+    public default Admission insertCancelCommandAsActor(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
         return insertCancelCommand(tenantId, operation, idempotencyKey,

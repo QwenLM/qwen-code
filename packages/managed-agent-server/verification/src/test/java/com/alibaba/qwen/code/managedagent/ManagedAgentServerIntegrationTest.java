@@ -979,7 +979,7 @@ class ManagedAgentServerIntegrationTest {
         CyclicBarrier gate = new CyclicBarrier(2);
         Callable<Admission> submit = () -> {
             gate.await();
-            return store.insertTurnCommand(tenant, "SUBMIT_TURN",
+            return store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                     "concurrent-turn", "sha256:" + "a".repeat(64),
                     sessionId, input, "sha256:" + "b".repeat(64), "owner");
         };
@@ -1007,7 +1007,7 @@ class ManagedAgentServerIntegrationTest {
                 "type", "text", "text", "batch"));
         String owner = "batch-owner";
         Admission turn = new TransactionTemplate(transactionManager).execute(status -> {
-            Admission admitted = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+            Admission admitted = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                     "batch-turn", "sha256:" + "b".repeat(64),
                     session.sessionId(), input, "sha256:" + "c".repeat(64), "owner");
             assertThat(store.claimTurn(tenant, session.sessionId(),
@@ -1162,7 +1162,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = session.sessionId();
         String owner = "identity-owner";
         Admission turn = new TransactionTemplate(transactionManager).execute(status -> {
-            Admission admitted = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+            Admission admitted = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                     "identity-turn", "sha256:" + "e".repeat(64), sessionId,
                     List.of(Map.of("type", "text", "text", "hi")),
                     "sha256:" + "f".repeat(64), "owner");
@@ -1249,7 +1249,7 @@ class ManagedAgentServerIntegrationTest {
                 "sha256:" + "7".repeat(64), "qwen-code", null, null,
                 List.of(), null);
         String sessionId = session.sessionId();
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "retract-identity-turn", "sha256:" + "8".repeat(64),
                 sessionId, List.of(), "sha256:" + "9".repeat(64), "owner");
         String owner = "retract-identity-owner";
@@ -1346,7 +1346,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "environment-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission first = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission first = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "environment-turn-1", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(),
                 "sha256:" + "3".repeat(64), "owner");
@@ -1355,7 +1355,7 @@ class ManagedAgentServerIntegrationTest {
                 owner, Duration.ofMinutes(1))).isPresent();
         store.cancelBeforeAdmission(tenant, session.sessionId(),
                 first.turnId(), owner);
-        Admission second = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission second = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "environment-turn-2", "sha256:" + "4".repeat(64),
                 session.sessionId(), List.of(),
                 "sha256:" + "5".repeat(64), "owner");
@@ -1385,7 +1385,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "retry-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "retry-turn", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(),
                 "sha256:" + "3".repeat(64), "owner");
@@ -1425,7 +1425,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "blocked-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "blocked-turn", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(),
                 "sha256:" + "3".repeat(64), "owner");
@@ -1480,7 +1480,7 @@ class ManagedAgentServerIntegrationTest {
         } else {
             assertThat(store.findDispatchable(Long.MAX_VALUE, 100)).doesNotContain(target);
         }
-        store.insertCancelCommand(tenant, "CANCEL_TURN", "blocked-cancel",
+        store.insertCancelCommandAsActor(tenant, "CANCEL_TURN", "blocked-cancel",
                 "sha256:" + "4".repeat(64), session.sessionId(),
                 turn.turnId(), "owner");
         assertThat(store.findDispatchable(Long.MAX_VALUE, 100))
@@ -1503,7 +1503,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "blocked-create-2",
                 "sha256:" + "5".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn2 = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn2 = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "blocked-turn-2", "sha256:" + "6".repeat(64),
                 session2.sessionId(), List.of(),
                 "sha256:" + "7".repeat(64), "owner");
@@ -1523,7 +1523,7 @@ class ManagedAgentServerIntegrationTest {
         String tenant = "tenant-harness-recheck-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant, "owner", "CREATE_SESSION", "create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null, List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(), "sha256:" + "3".repeat(64), "owner");
         store.claimTurn(tenant, session.sessionId(), turn.turnId(), "first", Duration.ofMinutes(1)).orElseThrow();
         assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), "first", "boot")).isTrue();
@@ -1565,7 +1565,7 @@ class ManagedAgentServerIntegrationTest {
         Admission session = store.insertSessionCommand(tenant, "owner",
                 "CREATE_SESSION", "reset-create", "sha256:" + "4".repeat(64),
                 "qwen-code", null, null, List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "reset-turn", "sha256:" + "5".repeat(64),
                 session.sessionId(), List.of(), "sha256:" + "6".repeat(64), "owner");
         String owner = "reset-owner";
@@ -1671,7 +1671,7 @@ class ManagedAgentServerIntegrationTest {
         jdbc.update("UPDATE ma_session SET harness_boot_id ="
                         + " 'boot-old' WHERE tenant_id = ? AND session_id = ?",
                 tenant, session.sessionId());
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "exempt-turn", "sha256:" + "8".repeat(64),
                 session.sessionId(), List.of(), "sha256:" + "9".repeat(64), "owner");
         HarnessHttpFailure writerConflict = mock(HarnessHttpFailure.class);
@@ -1750,7 +1750,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "takeover-create",
                 "sha256:" + "d".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "takeover-turn", "sha256:" + "e".repeat(64),
                 session.sessionId(), List.of(),
                 "sha256:" + "f".repeat(64), "owner");
@@ -1788,7 +1788,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "recovery-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "recovery-turn", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(Map.of(
                         "type", "text", "text", "recover")),
@@ -1863,7 +1863,7 @@ class ManagedAgentServerIntegrationTest {
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
                 List.of(), null);
         String sessionId = session.sessionId();
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "stale-owner-turn", "sha256:" + "5".repeat(64), sessionId,
                 List.of(Map.of("type", "text", "text", "stale")),
                 "sha256:" + "6".repeat(64), "owner");
@@ -1953,7 +1953,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "null-epoch-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission first = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission first = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "null-epoch-first", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(Map.of(
                         "type", "text", "text", "first")),
@@ -1972,7 +1972,7 @@ class ManagedAgentServerIntegrationTest {
                         "boot-old:epoch-0:5", new ProjectedEvent(
                                 "turn.completed", Map.of(), true,
                                 "COMPLETED", null, null))));
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "null-epoch-turn", "sha256:" + "4".repeat(64),
                 session.sessionId(), List.of(Map.of(
                         "type", "text", "text", "lost reply")),
@@ -2009,7 +2009,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "retract-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "retract-turn", "sha256:" + "5".repeat(64),
                 session.sessionId(), List.of(),
                 "sha256:" + "6".repeat(64), "owner");
@@ -2092,7 +2092,7 @@ class ManagedAgentServerIntegrationTest {
                 "CREATE_SESSION", "inband-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "inband-turn", "sha256:" + "5".repeat(64),
                 session.sessionId(), List.of(),
                 "sha256:" + "6".repeat(64), "owner");
@@ -2202,7 +2202,7 @@ class ManagedAgentServerIntegrationTest {
         String tenant = "tenant-bounded-" + caseName + "-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant, "owner", "CREATE_SESSION", "bounded-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null, List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "bounded-turn",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN", "bounded-turn",
                 "sha256:" + "5".repeat(64), session.sessionId(), List.of(), "sha256:" + "6".repeat(64), "owner");
         String owner = "bounded-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
@@ -2459,7 +2459,7 @@ class ManagedAgentServerIntegrationTest {
         try {
             List<Map<String, Object>> input =
                     List.of(Map.of("type", "text", "text", "hold"));
-            Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+            Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                     "unavailable-turn",
                     new RequestDigests().digest(Map.of("sessionId", sessionId,
                             "input", input)),

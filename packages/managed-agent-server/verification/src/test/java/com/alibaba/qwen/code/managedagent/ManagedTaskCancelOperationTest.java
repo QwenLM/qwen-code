@@ -487,10 +487,10 @@ class ManagedTaskCancelOperationTest {
         ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
         String liveKey = "child-stop sha256:" + "1".repeat(64);
         String endedKey = "child-stop sha256:" + "2".repeat(64);
-        assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN", liveKey,
+        assertThat(store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN", liveKey,
                 "digest-live", sessionId, "turn-live", "owner").commandEffect())
                 .isTrue();
-        assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN",
+        assertThat(store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN",
                 endedKey, "digest-ended", sessionId, "turn-ended", "owner")
                 .commandEffect()).isFalse();
         assertThat(relay.turnCancelRequested(TENANT, sessionId, "turn-live"))

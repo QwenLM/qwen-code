@@ -784,7 +784,7 @@ class ManagedExtensionRecordStoreTest {
         commitDomain(journal, "stop-1", "child_run", childAgent(sessionId,
                 "sent", "admitted", "intent", null, inputResource),
                 List.of(inputResource));
-        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getPublicTask(TENANT, null, sessionId, taskId)
                 .actionCapabilities()).containsExactly("cancel");
         ObjectNode attached = childAgent(sessionId, "sent", "running",
                 "running_attached", "binding-1", inputResource);
@@ -795,26 +795,26 @@ class ManagedExtensionRecordStoreTest {
         dispatching.putNull("childSessionId");
         commitDomain(journal, "stop-2", "child_run", dispatching, List.of());
         // #13746 F2: no child Session is named before the attach records it.
-        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getPublicTask(TENANT, null, sessionId, taskId)
                 .childSessionId()).isNull();
-        assertThat(tasks.getWebShellTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getWebShellTask(TENANT, null, sessionId, taskId)
                 .childSessionId()).isNull();
         commitDomain(journal, "stop-3", "child_run", attached, List.of());
         // From the attach on, both surfaces name it, on detail and list.
-        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getPublicTask(TENANT, null, sessionId, taskId)
                 .childSessionId()).isEqualTo("session-child");
-        assertThat(tasks.listPublicTasks(TENANT, TENANT, sessionId, null, 10)
+        assertThat(tasks.listPublicTasks(TENANT, null, sessionId, null, 10)
                 .data().getFirst().childSessionId())
                 .isEqualTo("session-child");
-        assertThat(tasks.getWebShellTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getWebShellTask(TENANT, null, sessionId, taskId)
                 .childSessionId()).isEqualTo("session-child");
-        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+        assertThat(tasks.queryWebShellTasks(TENANT, null, sessionId, null,
                 10).data().getFirst().childSessionId())
                 .isEqualTo("session-child");
         ObjectNode stopping = attached.deepCopy();
         stopping.put("stopRequested", true);
         commitDomain(journal, "stop-4", "child_run", stopping, List.of());
-        var stopped = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        var stopped = tasks.getPublicTask(TENANT, null, sessionId, taskId);
         assertThat(stopped.state()).isEqualTo("running");
         assertThat(stopped.runtimeState()).isEqualTo("draining");
         // Requests coalesce: a stop already recorded still takes a cancel.
@@ -824,14 +824,14 @@ class ManagedExtensionRecordStoreTest {
         jdbc.update("UPDATE ma_session SET status = 'CLOSING'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT,
                 sessionId);
-        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getPublicTask(TENANT, null, sessionId, taskId)
                 .actionCapabilities()).isEmpty();
-        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+        assertThat(tasks.queryWebShellTasks(TENANT, null, sessionId, null,
                 10).data().getFirst().actionCapabilities()).isEmpty();
         jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT,
                 sessionId);
-        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+        assertThat(tasks.queryWebShellTasks(TENANT, null, sessionId, null,
                 10).data().getFirst().actionCapabilities())
                 .containsExactly("cancel");
         var target = records.findTaskTarget(TENANT, sessionId, taskId)
@@ -849,12 +849,12 @@ class ManagedExtensionRecordStoreTest {
                 .put("execution", "settled");
         cancelled.withObject("/run/delivery").put("state", "cancelled");
         commitDomain(journal, "stop-5", "child_run", cancelled, List.of());
-        var settled = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        var settled = tasks.getPublicTask(TENANT, null, sessionId, taskId);
         assertThat(settled.state()).isEqualTo("cancelled");
         assertThat(settled.actionCapabilities()).isEmpty();
         // The settled run keeps naming the child that carries its output.
         assertThat(settled.childSessionId()).isEqualTo("session-child");
-        var events = tasks.listPublicTaskEvents(TENANT, TENANT, sessionId,
+        var events = tasks.listPublicTaskEvents(TENANT, null, sessionId,
                 taskId, null, 20);
         assertThat(events.data())
                 .extracting(event -> event.state() + "/"
@@ -886,7 +886,7 @@ class ManagedExtensionRecordStoreTest {
         commitDomain(journal, "stop-1", "child_run", workflow(childAgent(
                 sessionId, "sent", "admitted", "intent", null,
                 inputResource)), List.of(inputResource));
-        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getPublicTask(TENANT, null, sessionId, taskId)
                 .actionCapabilities()).containsExactly("cancel");
         ObjectNode attached = workflow(childAgent(sessionId, "sent",
                 "running", "running_attached", "binding-1", inputResource));
@@ -899,12 +899,12 @@ class ManagedExtensionRecordStoreTest {
                 List.of());
         commitDomain(journal, "stop-3", "child_run", attached, List.of());
         // #13746 F2: a workflow child names its Session like a child agent.
-        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+        assertThat(tasks.getPublicTask(TENANT, null, sessionId, taskId)
                 .childSessionId()).isEqualTo("session-child");
         ObjectNode stopping = attached.deepCopy();
         stopping.put("stopRequested", true);
         commitDomain(journal, "stop-4", "child_run", stopping, List.of());
-        var stopped = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        var stopped = tasks.getPublicTask(TENANT, null, sessionId, taskId);
         assertThat(stopped.state()).isEqualTo("running");
         assertThat(stopped.runtimeState()).isEqualTo("draining");
         // Requests coalesce: a stop already recorded still takes a cancel.
@@ -922,10 +922,10 @@ class ManagedExtensionRecordStoreTest {
                 .put("execution", "settled");
         cancelled.withObject("/run/delivery").put("state", "cancelled");
         commitDomain(journal, "stop-5", "child_run", cancelled, List.of());
-        var settled = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        var settled = tasks.getPublicTask(TENANT, null, sessionId, taskId);
         assertThat(settled.state()).isEqualTo("cancelled");
         assertThat(settled.actionCapabilities()).isEmpty();
-        var events = tasks.listPublicTaskEvents(TENANT, TENANT, sessionId,
+        var events = tasks.listPublicTaskEvents(TENANT, null, sessionId,
                 taskId, null, 20);
         assertThat(events.data())
                 .extracting(event -> event.state() + "/"
@@ -1134,7 +1134,7 @@ class ManagedExtensionRecordStoreTest {
                 ManagedExtensionProjection.recordKey(sessionId,
                         "channel_delivery",
                         delivery.path("deliveryId").asText()));
-        var planned = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        var planned = tasks.getPublicTask(TENANT, null, sessionId, taskId);
         assertThat(planned.kind()).isEqualTo("channel_delivery");
         assertThat(planned.state()).isEqualTo("pending");
         assertThat(planned.runtimeState()).isNull();
@@ -1149,7 +1149,7 @@ class ManagedExtensionRecordStoreTest {
                 .put("state", "sending");
         commitDomain(journal, "sending-task", "channel_delivery", sending,
                 List.of());
-        var claimed = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        var claimed = tasks.getPublicTask(TENANT, null, sessionId, taskId);
         assertThat(claimed.state()).isEqualTo("running");
         assertThat(claimed.actionCapabilities()).isEmpty();
         // A planned one the cancel settled reads cancelled, with its
@@ -1171,7 +1171,7 @@ class ManagedExtensionRecordStoreTest {
         String otherTask = ManagedExtensionProjection.taskId(
                 ManagedExtensionProjection.recordKey(sessionId,
                         "channel_delivery", otherId));
-        var settled = tasks.getPublicTask(TENANT, TENANT, sessionId,
+        var settled = tasks.getPublicTask(TENANT, null, sessionId,
                 otherTask);
         assertThat(settled.state()).isEqualTo("cancelled");
         assertThat(settled.actionCapabilities()).isEmpty();
@@ -2380,7 +2380,7 @@ class ManagedExtensionRecordStoreTest {
                 racing);
         String cursor = com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId, 2);
         assertThatThrownBy(() -> service.queryWebShellTaskEvents(TENANT,
-                TENANT, sessionId, taskId, cursor, 10))
+                null, sessionId, taskId, cursor, 10))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("cursor_expired");
                 });
@@ -2402,14 +2402,14 @@ class ManagedExtensionRecordStoreTest {
         String taskId = ManagedExtensionProjection.taskId(
                 ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
                         monitor.required("monitorId").textValue()));
-        var page = tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+        var page = tasks.queryWebShellTaskEvents(TENANT, null, sessionId,
                 taskId, null, 10);
         assertThat(page.data()).hasSize(1);
         assertThat(page.nextCursor()).isEqualTo(
                 com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId, 1));
         // An as-of-now explicit cursor still admits: the floor did not move
         // past it while the read was happening.
-        assertThat(tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+        assertThat(tasks.queryWebShellTaskEvents(TENANT, null, sessionId,
                 taskId, page.nextCursor(), 10).data()).isEmpty();
     }
 

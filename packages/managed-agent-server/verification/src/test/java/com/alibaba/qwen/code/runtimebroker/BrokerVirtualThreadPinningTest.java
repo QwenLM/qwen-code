@@ -288,7 +288,7 @@ class BrokerVirtualThreadPinningTest {
                 RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> reference) {
             return CompletableFuture.completedFuture(
-                Map.of("state", "is_cancel_requested"));
+                Map.of("state", "cancel_requested"));
         }
 
         @Override

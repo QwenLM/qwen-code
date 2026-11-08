@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskPage;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskPage;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
@@ -59,7 +60,7 @@ public class ManagedTaskService {
         Viewed<TaskPage> viewed = page(principal, sessionId, cursor, limit);
         TaskPage page = viewed.value();
         return new PublicList<>("list", page.tasks().stream()
-                .map(task -> publicTask(principal.tenantId(), sessionId, task,
+                .map(task -> publicTask(viewed.tenantId(), sessionId, task,
                         viewed.sessionActive())).toList(),
                 page.hasMore(), nextCursor(page));
     }
@@ -73,7 +74,7 @@ public class ManagedTaskService {
     public PublicTask getPublicTask(SessionPrincipal principal,
             String sessionId, String taskId) {
         Viewed<TaskRow> viewed = task(principal, sessionId, taskId);
-        return publicTask(principal.tenantId(), sessionId, viewed.value(),
+        return publicTask(viewed.tenantId(), sessionId, viewed.value(),
                 viewed.sessionActive());
     }
 
@@ -89,11 +90,11 @@ public class ManagedTaskService {
         Viewed<TaskPage> viewed = page(principal, sessionId, cursor, limit);
         TaskPage page = viewed.value();
         return new WebShellTaskPage(page.tasks().stream()
-                .map(task -> webShellTask(principal.tenantId(), sessionId,
+                .map(task -> webShellTask(viewed.tenantId(), sessionId,
                         task,
                         viewed.sessionActive()))
                 .toList(), nextCursor(page), page.hasMore(),
-                records.activeChildCount(principal.tenantId(), sessionId));
+                records.activeChildCount(viewed.tenantId(), sessionId));
     }
 
     public WebShellTask getWebShellTask(String tenantId, String actorId,
@@ -105,7 +106,7 @@ public class ManagedTaskService {
     public WebShellTask getWebShellTask(SessionPrincipal principal,
             String sessionId, String taskId) {
         Viewed<TaskRow> viewed = task(principal, sessionId, taskId);
-        return webShellTask(principal.tenantId(), sessionId, viewed.value(),
+        return webShellTask(viewed.tenantId(), sessionId, viewed.value(),
                 viewed.sessionActive());
     }
 
@@ -122,7 +123,7 @@ public class ManagedTaskService {
         ResolvedPage page = eventPage(principal, sessionId, taskId, after,
                 limit);
         return new PublicList<>("list", page.page().events().stream()
-                .map(event -> publicEvent(principal.tenantId(), sessionId,
+                .map(event -> publicEvent(page.tenantId(), sessionId,
                         taskId, event)).toList(),
                 page.page().hasMore(), page.nextCursor());
     }
@@ -140,31 +141,32 @@ public class ManagedTaskService {
         ResolvedPage page = eventPage(principal, sessionId, taskId, after,
                 limit);
         return new WebShellPage<>(page.page().events().stream()
-                .map(event -> webShellEvent(principal.tenantId(), sessionId,
+                .map(event -> webShellEvent(page.tenantId(), sessionId,
                         taskId, event))
                 .toList(), page.nextCursor(), page.page().hasMore());
     }
 
     private static SessionPrincipal legacyPrincipal(String tenantId, String actorId) {
-        // 旧空主体会以空租户查询 Session 并返回 404，保留该不可见语义。
-        if (actorId == null) {
-            throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
-        }
-        return SessionPrincipal.ofUser(tenantId, actorId);
+        // The null-actor read stays tenant-scoped through the readable
+        // overload's null-principal arm; a named non-owner still meets
+        // the ownership gate's 404. The principal-carrying routes the
+        // HTTP boundary uses never travel this helper.
+        return actorId == null ? null : SessionPrincipal.ofUser(tenantId, actorId);
     }
 
     /** A read result with whether its Session is active: a task's
      * {@code cancel} is an action only an active Session admits. */
-    private record Viewed<T>(T value, boolean sessionActive) {
+    private record Viewed<T>(T value, boolean sessionActive, String tenantId) {
     }
 
     private Viewed<TaskPage> page(SessionPrincipal principal, String sessionId,
             String cursor, int limit) {
-        boolean active = "ACTIVE".equals(sessions.requireReadableSession(
-                principal, sessionId).status());
-        return new Viewed<>(pageOf(principal.tenantId(), sessionId, cursor,
+        SessionRecord session = sessions.requireReadableSession(
+                principal, sessionId);
+        boolean active = "ACTIVE".equals(session.status());
+        return new Viewed<>(pageOf(session.tenantId(), sessionId, cursor,
                         limit),
-                active);
+                active, session.tenantId());
     }
 
     private TaskPage pageOf(String tenantId, String sessionId, String cursor,
@@ -199,17 +201,18 @@ public class ManagedTaskService {
 
     private Viewed<TaskRow> task(SessionPrincipal principal, String sessionId,
             String taskId) {
-        boolean active = "ACTIVE".equals(sessions.requireReadableSession(
-                principal, sessionId).status());
-        return new Viewed<>(records.findTask(principal.tenantId(), sessionId,
+        SessionRecord session = sessions.requireReadableSession(
+                principal, sessionId);
+        boolean active = "ACTIVE".equals(session.status());
+        return new Viewed<>(records.findTask(session.tenantId(), sessionId,
                         taskId)
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "task_not_found", "The task was not found.")),
-                active);
+                active, session.tenantId());
     }
 
     /** A read page plus its required, never null next cursor. */
-    private record ResolvedPage(EventPage page, String nextCursor) {
+    private record ResolvedPage(EventPage page, String nextCursor, String tenantId) {
     }
 
     /**
@@ -221,8 +224,7 @@ public class ManagedTaskService {
      */
     private ResolvedPage eventPage(SessionPrincipal principal,
             String sessionId, String taskId, String after, int limit) {
-        task(principal, sessionId, taskId);
-        String tenantId = principal.tenantId();
+        String tenantId = task(principal, sessionId, taskId).tenantId();
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "invalid_limit",
                     "Limit must be between 1 and 100.");
@@ -259,7 +261,7 @@ public class ManagedTaskService {
             nextCursor = com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
                     last.sequence());
         }
-        return new ResolvedPage(page, nextCursor);
+        return new ResolvedPage(page, nextCursor, tenantId);
     }
 
     private static String nextCursor(TaskPage page) {

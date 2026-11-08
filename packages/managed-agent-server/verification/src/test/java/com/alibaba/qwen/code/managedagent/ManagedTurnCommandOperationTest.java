@@ -729,12 +729,12 @@ class ManagedTurnCommandOperationTest {
     }
 
     Admission submit(String key, String digest) {
-        return store.insertTurnCommand(TENANT, "SUBMIT_TURN", key, digest,
+        return store.insertTurnCommandAsActor(TENANT, "SUBMIT_TURN", key, digest,
                 sessionId, INPUT, "sha256:" + "c".repeat(64), "owner");
     }
 
     Admission cancel(String key, String digest, Admission turn) {
-        return store.insertCancelCommand(TENANT, "CANCEL_TURN", key, digest,
+        return store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN", key, digest,
                 sessionId, turn.turnId(), "owner");
     }
 

@@ -60,7 +60,7 @@ class ManagedAgentReplayOutageTest {
         Admission session = store.insertSessionCommand(tenant, "owner",
                 "CREATE_SESSION", "outage-create", "digest-create",
                 "qwen-code", null, null, List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "outage-submit", digests.digest(Map.of("sessionId",
                         session.sessionId(), "input", input)),
                 session.sessionId(), input, "payload", "owner");

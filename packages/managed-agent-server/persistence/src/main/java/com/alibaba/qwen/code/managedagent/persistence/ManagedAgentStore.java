@@ -1616,7 +1616,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
-        return insertTurnCommand(tenantId, operation, idempotencyKey,
+        return insertTurnCommandAsActor(tenantId, operation, idempotencyKey,
                 requestDigest, sessionId, input, payloadDigest,
                 (String) null);
     }
@@ -1624,8 +1624,9 @@ public class ManagedAgentStore implements AgentStateStore {
     // The actor-carrying variant records the caller on the command
     // receipt, so the receipt's replay answers the actor who recorded it —
     // an OPERATOR's own retry of his own key — and not only the creator.
+    // A distinct name keeps the arity-8 pair off the audit resolver's tie.
     @Transactional
-    public Admission insertTurnCommand(String tenantId, String operation,
+    public Admission insertTurnCommandAsActor(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
@@ -1761,13 +1762,14 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
-        return insertCancelCommand(tenantId, operation, idempotencyKey,
+        return insertCancelCommandAsActor(tenantId, operation, idempotencyKey,
                 requestDigest, sessionId, turnId, (String) null);
     }
 
-    // The actor-carrying twin of insertTurnCommand's overload.
+    // The actor-carrying twin of insertTurnCommand's overload; the
+    // distinct name keeps the arity-7 pair off the audit resolver's tie.
     @Transactional
-    public Admission insertCancelCommand(String tenantId, String operation,
+    public Admission insertCancelCommandAsActor(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
         return insertCancelCommand(tenantId, operation, idempotencyKey,
@@ -4157,7 +4159,7 @@ public class ManagedAgentStore implements AgentStateStore {
                                             row.getString("session_id"),
                                             row.getString("parent_session_id"),
                                             row.getString("workspace_id"),
-                                            (Long) row.getObject("workspace_generation"),
+                                            row.getObject("workspace_generation", Long.class),
                                             row.getString("workspace_storage_id"),
                                             row.getBoolean("creator_can_execute")),
                             arguments.toArray());
@@ -7419,15 +7421,27 @@ public class ManagedAgentStore implements AgentStateStore {
         ManagedSchemaIntegrity.validate("ma_session", source);
         String agent = (String) source.get("agent_id");
         String profile = (String) source.get("tool_profile");
-        boolean publicAgent = "qwen-code".equals(agent);
-        boolean selectedPolicy = (publicAgent && source.get("agent_definition_digest") == null
-                        || !publicAgent && source.get("agent_definition_digest") != null)
+        // Mirror the INSERT's SQL arms under three-valued logic: a NULL
+        // agent_id or digest makes the comparison UNKNOWN, and a CASE
+        // whose condition is not TRUE writes NULL. A two-valued Java
+        // rewrite would validate a candidate the INSERT never writes.
+        Boolean publicAgent = agent == null ? null : "qwen-code".equals(agent);
+        Object digest = source.get("agent_definition_digest");
+        Boolean policyAgent = publicAgent == null ? null
+                : publicAgent ? digest == null : digest != null;
+        boolean profileListed = Set.of("hosted-workspace-files/1",
+                        "hosted-workspace-shell/1", "hosted-workspace-files/3",
+                        "hosted-workspace-external-files/1")
+                .contains(profile == null ? "" : profile);
+        Boolean externalArm = !"hosted-workspace-external-files/1".equals(profile)
+                ? Boolean.TRUE
+                : publicAgent == null ? null
+                        : publicAgent && digest == null
+                                && source.get("parent_session_id") == null;
+        boolean selectedPolicy = Boolean.TRUE.equals(policyAgent)
                 && source.get("workspace_id") != null
-                && Set.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                        "hosted-workspace-files/3", "hosted-workspace-external-files/1").contains(profile == null ? "" : profile)
-                && (!"hosted-workspace-external-files/1".equals(profile)
-                        || publicAgent && source.get("agent_definition_digest") == null
-                                && source.get("parent_session_id") == null);
+                && profileListed
+                && Boolean.TRUE.equals(externalArm);
         Object mode = source.get("selected_approval_mode") == null
                 ? source.get("approval_mode") : source.get("selected_approval_mode");
         ManagedSchemaIntegrity.validate("ma_turn", ManagedSchemaIntegrity.row(

@@ -59,7 +59,7 @@ class RecoverySettlementStoreTest {
             Admission session = store.insertSessionCommand(TENANT, "owner", "CREATE_SESSION", "create-key",
                     "create-digest", "qwen-code", "1", null, List.of(), null);
             sessionId = session.sessionId();
-            turnId = store.insertTurnCommand(TENANT, "SUBMIT_TURN", "submit-key", "submit-digest",
+            turnId = store.insertTurnCommandAsActor(TENANT, "SUBMIT_TURN", "submit-key", "submit-digest",
                     sessionId, List.of(Map.of("type", "text", "text", "task")), "payload", "owner").turnId();
             assertThat(store.claimTurn(TENANT, sessionId, turnId, OWNER, Duration.ofMinutes(1)))
                     .isPresent();
@@ -187,7 +187,7 @@ class RecoverySettlementStoreTest {
     }
 
     protected void cancel() {
-        transactions.executeWithoutResult(status -> assertThat(store.insertCancelCommand(TENANT,
+        transactions.executeWithoutResult(status -> assertThat(store.insertCancelCommandAsActor(TENANT,
                 "CANCEL_TURN", "cancel-key", "cancel-digest", sessionId, turnId, "owner").commandEffect()).isTrue());
     }
 

@@ -40,7 +40,7 @@ class ManagedAgentStoreLocaleTest {
         Admission session = store.insertSessionCommand("tenant-locale", "owner",
                 "CREATE_SESSION", "create-key", "digest-create", "qwen-code",
                 "1", null, List.of(), null);
-        Admission turn = store.insertTurnCommand("tenant-locale", "SUBMIT",
+        Admission turn = store.insertTurnCommandAsActor("tenant-locale", "SUBMIT",
                 "submit-key", "digest-submit", session.sessionId(),
                 List.of(Map.of("type", "text", "text", "hi")), "payload", "owner");
 

@@ -39,7 +39,7 @@ class ManagedAgentTurnDeferralTest {
         Admission session = store.insertSessionCommand(tenant, "owner",
                 "CREATE_SESSION", "create-key", "digest-create", "qwen-code",
                 "1", null, List.of(), null);
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT",
+        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT",
                 "submit-key", "digest-submit", session.sessionId(),
                 List.of(Map.of("type", "text", "text", "hi")), "payload", "owner");
         long now = System.currentTimeMillis();

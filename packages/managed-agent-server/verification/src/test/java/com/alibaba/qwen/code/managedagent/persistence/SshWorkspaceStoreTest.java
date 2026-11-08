@@ -97,6 +97,26 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
     }
 
+    @Test
+    void theOwnerGrantWriterRefusesADriftedRoleBeforePersisting() {
+        var drifted = new SshWorkspaceStore(jdbc,
+                new DataSourceTransactionManager(jdbc.getDataSource())) {
+            @Override
+            protected String ownerRole() {
+                return "OWNER ";
+            }
+        };
+        var operation = drifted.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
+        var intent = drifted.claim("tenant", "actor", operation.operationId(), "owner");
+        assertThat(intent).isNotNull();
+        drifted.reserve(intent, "owner", registration(intent));
+        assertThatThrownBy(() -> drifted.complete(intent, "owner"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ck_ma_access_role");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace_access", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isZero();
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void createsPromptedSshSessionsWithoutALocalMountAndKeepsAdmissionGates(boolean shell) {
@@ -146,7 +166,7 @@ class SshWorkspaceStoreTest {
                 .build()))).isInstanceOf(ManagedAgentException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isEqualTo(1);
         jdbc.update("UPDATE ma_turn SET status = 'COMPLETED' WHERE tenant_id = ? AND session_id = ?", "tenant", admitted.sessionId());
-        assertThat(transaction.execute(ignored -> sessions.insertTurnCommand("tenant", "CREATE_TURN", "next-turn", "next-digest",
+        assertThat(transaction.execute(ignored -> sessions.insertTurnCommandAsActor("tenant", "CREATE_TURN", "next-turn", "next-digest",
                 admitted.sessionId(), input, "next-payload", "actor")).turnId()).isNotEqualTo(admitted.turnId());
     }
 
@@ -209,7 +229,7 @@ class SshWorkspaceStoreTest {
                 .selection(new WorkspaceSelection(intent.workspaceId(), "."))
                 .build()));
         jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", WorkspaceToolProfiles.MCP, "tenant", remote.sessionId());
-        assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertTurnCommand("tenant", "CREATE_TURN", "unsupported-turn", "digest",
+        assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertTurnCommandAsActor("tenant", "CREATE_TURN", "unsupported-turn", "digest",
                 remote.sessionId(), List.of(Map.of("type", "text", "text", "Read")), "payload", "actor"))).isInstanceOf(ManagedAgentException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?", Integer.class, "tenant", remote.sessionId())).isZero();
     }

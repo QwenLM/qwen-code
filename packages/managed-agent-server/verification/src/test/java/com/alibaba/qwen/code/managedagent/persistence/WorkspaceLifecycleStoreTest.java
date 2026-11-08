@@ -690,7 +690,7 @@ class WorkspaceLifecycleStoreTest {
     @Test
     void terminalPublicTurnWithoutJournalSettlementStillBlocksClose() throws Exception {
         var fixture = fixture();
-        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommandAsActor("tenant", "SUBMIT_TURN",
                 "original-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
         fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
                 "dispatch-owner", Duration.ofMinutes(1)));
@@ -712,7 +712,7 @@ class WorkspaceLifecycleStoreTest {
         assertThat(fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
                 + " WHERE journal_revision = 1", byte[].class)).isEqualTo(genesis);
 
-        var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+        var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommandAsActor("tenant", "CANCEL_TURN",
                 "cancel-failed-turn", "digest", fixture.session, turn, "owner"));
         assertThat(cancel.commandEffect()).isFalse();
         var operations = fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class);
@@ -741,13 +741,13 @@ class WorkspaceLifecycleStoreTest {
         fixture.transactions.executeWithoutResult(ignored -> journal.open());
         byte[] genesis = fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
                 + " WHERE journal_revision = 1", byte[].class);
-        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommandAsActor("tenant", "SUBMIT_TURN",
                 "ambiguous-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
         fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
                 "dispatch-owner", Duration.ofMinutes(1)));
         fixture.transactions.executeWithoutResult(ignored -> fixture.store.markSubmissionAttempted("tenant", fixture.session,
                 turn, "dispatch-owner"));
-        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommandAsActor("tenant", "CANCEL_TURN",
                 "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
         switch (cut) {
             case "sealed-idle" -> fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");

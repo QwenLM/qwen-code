@@ -69,17 +69,58 @@ class ManagedWorkspaceRolesMySqlIT {
         assertThat(jdbc.queryForList("SELECT DISTINCT role FROM"
                 + " ma_workspace_access", String.class))
                 .containsExactly("OWNER");
-        // The domain rule the writers route through still refuses every
-        // case/space variant before persistence.
+        // The engine itself no longer refuses a drifted role (the baseline
+        // carries no CHECK), so the writer's pre-insert validation is the
+        // only guard; prove that by letting a raw padded write land.
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
+                + " workspace_id, actor_id, role) VALUES ('tenant',"
+                + " 'workspace-raw', ?, 'OWNER ')",
+                "raw".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " ma_workspace_access WHERE role = 'OWNER'", Integer.class))
+                .as("MySQL PAD SPACE matches the padded role: only the writer's guard can refuse it")
+                .isEqualTo(2);
+        jdbc.update("DELETE FROM ma_workspace_access WHERE workspace_id = 'workspace-raw'");
+        // Each rejected variant travels the SAME writer path: the store
+        // validates the literal it is about to insert, so a writer that
+        // stops validating lets a padded role reach MySQL's PAD SPACE
+        // comparison and this case reds.
+        int index = 0;
         for (String rejected : List.of("NONE", "SPECTATOR", "reader",
                 "READER ", "OPERATOR ", "OWNER ", "REA DER")) {
-            assertThatThrownBy(() -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                    "ma_workspace_access",
-                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row("role", rejected)))
-                    .as("role %s must be rejected before persistence", rejected)
+            index++;
+            String variant = rejected;
+            var drifted = new SshWorkspaceStore(jdbc,
+                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(data)) {
+                @Override
+                protected String ownerRole() {
+                    return variant;
+                }
+            };
+            var attempt = drifted.begin("tenant", "actor", "key-" + index,
+                    "mac", "/work/variant-" + index, "Variant");
+            var claimed = drifted.claim("tenant", "actor",
+                    attempt.operationId(), "owner");
+            assertThat(claimed).isNotNull();
+            java.util.Map<String, Object> variantIdentity = java.util.Map.of(
+                    "root", "/work/variant-" + index, "hostId", "host",
+                    "device", "1", "inode", String.valueOf(100 + index),
+                    "birthTime", "3");
+            var variantMarker = new java.util.LinkedHashMap<String, Object>(variantIdentity);
+            variantMarker.put("version", 2);
+            variantMarker.put("tenantId", claimed.tenantId());
+            variantMarker.put("storageId", claimed.storageId());
+            variantMarker.put("registrationId", claimed.registrationId());
+            drifted.reserve(claimed, "owner", java.util.Map.of(
+                    "nodeId", claimed.nodeId(), "identity", variantIdentity,
+                    "marker", variantMarker, "qwenVersion", "0.25.1"));
+            assertThatThrownBy(() -> drifted.complete(claimed, "owner"))
+                    .as("role %s must be rejected by the writer before persistence", rejected)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("ck_ma_access_role");
         }
+        // The rejected variants rolled back with their transactions: only
+        // the canonical OWNER grant persisted.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace_access",
                 Integer.class)).isEqualTo(1);
     }

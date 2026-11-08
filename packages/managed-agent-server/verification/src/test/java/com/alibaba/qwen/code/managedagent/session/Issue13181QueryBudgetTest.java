@@ -331,7 +331,7 @@ class Issue13181QueryBudgetTest {
                     "digest", "qwen-code", null, "s-" + index, List.of(), null)
                     .sessionId();
             plainIds.add(sessionId);
-            String turnId = fixture.store.insertTurnCommand(plain,
+            String turnId = fixture.store.insertTurnCommandAsActor(plain,
                     "SUBMIT_TURN", "turn-" + index + "-" + UUID.randomUUID(),
                     "digest",
                     sessionId, List.of(Map.of("type", "text", "text", "hi")),
@@ -718,7 +718,7 @@ class Issue13181QueryBudgetTest {
         assertThat(view.capabilities().workspaceTurns()).isFalse();
         assertThat(JSON.valueToTree(view).path("capabilities").path("modelChange").asBoolean()).isTrue();
         // Busy admission remains separate from support and authorization.
-        fixture.store.insertTurnCommand(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest", "owner");
+        fixture.store.insertTurnCommandAsActor(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest", "owner");
         assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isTrue();
     }
 
@@ -917,14 +917,14 @@ class Issue13181QueryBudgetTest {
         // Two Turns admitted out of gmt_create order: the turn.accepted
         // sequence makes turn-b the latest even though turn-a's gmt_create
         // is later.
-        String turnA = fixture.store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        String turnA = fixture.store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "order-a-" + UUID.randomUUID(), "digest", sessionId,
                 List.of(Map.of("type", "text", "text", "a")), "digest", "owner")
                 .turnId();
         fixture.jdbc.update("UPDATE ma_turn SET status ="
                         + " 'COMPLETED' WHERE tenant_id = ? AND turn_id = ?",
                 tenant, turnA);
-        String turnB = fixture.store.insertTurnCommand(tenant, "SUBMIT_TURN",
+        String turnB = fixture.store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
                 "order-b-" + UUID.randomUUID(), "digest", sessionId,
                 List.of(Map.of("type", "text", "text", "b")), "digest", "owner")
                 .turnId();

@@ -49,7 +49,7 @@ class ReplayFloorRetractionTest {
         String tenant = "retraction-" + UUID.randomUUID();
         String session = session(tenant);
         var turn =
-                store.insertTurnCommand(
+                store.insertTurnCommandAsActor(
                         tenant,
                         "SUBMIT_TURN",
                         UUID.randomUUID().toString(),
@@ -176,7 +176,7 @@ class ReplayFloorRetractionTest {
         String tenant = "reissued-items-" + UUID.randomUUID();
         String session = session(tenant);
         String turn =
-                store.insertTurnCommand(
+                store.insertTurnCommandAsActor(
                                 tenant,
                                 "SUBMIT_TURN",
                                 "turn",

@@ -26,7 +26,6 @@ final class ManagedSchemaCatalog {
                         + "]*)");
     private static final Pattern PRIMARY = Pattern.compile("PRIMARY KEY \\(([^)]+)\\)");
     private static final Pattern UNIQUE = Pattern.compile("UNIQUE(?: KEY [a-z_]+)? \\(([^)]+)\\)");
-    private static final Pattern CHECK = Pattern.compile("CONSTRAINT ([a-z_]+) CHECK");
     private static final Pattern INDEX =
             Pattern.compile("CREATE (UNIQUE )?INDEX ([a-z_]+) ON (ma_[a-z_]+) \\(([^;]+)\\);");
     private static final Pattern INLINE_INDEX = Pattern.compile("INDEX ([a-z_]+)\\s*\\(([^)]+)\\)");
@@ -167,7 +166,7 @@ final class ManagedSchemaCatalog {
             validateColumns(connection, name, body);
             validateGeneratedColumns(connection, name, body);
             validateKeys(connection, name, body, ddl);
-            validateChecks(connection, name, body);
+            validateChecks(connection, name);
             validateForeignKeys(connection, name);
         }
         if (!declared.equals(ManagedSchemaContract.TABLES)) {
@@ -458,13 +457,12 @@ final class ManagedSchemaCatalog {
         }
     }
 
-    static void validateChecks(Connection connection, String name, String body)
+    static void validateChecks(Connection connection, String name)
             throws SQLException {
         Map<String, String> actual = new HashMap<>();
-        String enforcement = isMariaDb(connection) ? "'YES'" : "t.ENFORCED";
         try (var statement =
                 connection.prepareStatement(
-                        "SELECT t.CONSTRAINT_NAME, c.CHECK_CLAUSE, " + enforcement + " FROM"
+                        "SELECT t.CONSTRAINT_NAME, c.CHECK_CLAUSE FROM"
                             + " INFORMATION_SCHEMA.TABLE_CONSTRAINTS t JOIN"
                             + " INFORMATION_SCHEMA.CHECK_CONSTRAINTS c ON c.CONSTRAINT_SCHEMA ="
                             + " t.CONSTRAINT_SCHEMA AND c.CONSTRAINT_NAME = t.CONSTRAINT_NAME WHERE"
@@ -474,6 +472,9 @@ final class ManagedSchemaCatalog {
             statement.setString(2, storedName(connection, name));
             try (var result = statement.executeQuery()) {
                 while (result.next()) {
+                    // Every declared CHECK is refused, enforced or not:
+                    // the migrated baseline carries none, and a NOT
+                    // ENFORCED declaration is drift the same way.
                     actual.put(lower(result.getString(1)), result.getString(2));
                 }
             }
@@ -485,77 +486,6 @@ final class ManagedSchemaCatalog {
 
     private static String schema(Connection connection) throws SQLException {
         return connection.getSchema() == null ? connection.getCatalog() : connection.getSchema();
-    }
-
-    private static List<String> checkShape(String expression) {
-        List<String> flat = expressionTokens(expression);
-        if (flat.contains("case")) {
-            return flat;
-        }
-        String portable = portableExpression(expression);
-        var matcher =
-                Pattern.compile(
-                                "'(?:[^']|'')*'|[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+|>=|<=|<>|!=|[()=+*/<>-]")
-                        .matcher(portable);
-        List<String> tokens = new ArrayList<>();
-        while (matcher.find()) {
-            String token = matcher.group();
-            String normalized = token.startsWith("'") ? token : lower(token);
-            tokens.add("octet_length".equals(normalized) ? "length" : normalized);
-        }
-        return booleanShape(numericBooleans(tokens));
-    }
-
-    private static List<String> booleanShape(List<String> tokens) {
-        while (!tokens.isEmpty() && "(".equals(tokens.getFirst())) {
-            int depth = 0;
-            int closing = -1;
-            for (int index = 0; index < tokens.size(); index++) {
-                if ("(".equals(tokens.get(index))) {
-                    depth++;
-                } else if (")".equals(tokens.get(index)) && --depth == 0) {
-                    closing = index;
-                    break;
-                }
-            }
-            if (closing != tokens.size() - 1) {
-                break;
-            }
-            tokens = tokens.subList(1, closing);
-        }
-        for (String operator : List.of("or", "and")) {
-            int depth = 0;
-            int start = 0;
-            List<List<String>> operands = new ArrayList<>();
-            for (int index = 0; index < tokens.size(); index++) {
-                String token = tokens.get(index);
-                if ("(".equals(token)) {
-                    depth++;
-                } else if (")".equals(token)) {
-                    depth--;
-                } else if (depth == 0 && operator.equals(token)) {
-                    operands.add(booleanShape(tokens.subList(start, index)));
-                    start = index + 1;
-                }
-            }
-            if (!operands.isEmpty()) {
-                operands.add(booleanShape(tokens.subList(start, tokens.size())));
-                List<String> result = new ArrayList<>(List.of("(", operator));
-                for (List<String> operand : operands) {
-                    if (operand.size() > 3
-                            && "(".equals(operand.getFirst())
-                            && operator.equals(operand.get(1))) {
-                        result.addAll(operand.subList(2, operand.size() - 1));
-                    } else {
-                        result.addAll(operand);
-                        result.add(",");
-                    }
-                }
-                result.add(")");
-                return result;
-            }
-        }
-        return tokens.stream().filter(token -> !List.of("(", ")").contains(token)).toList();
     }
 
     private static String portableExpression(String expression) {

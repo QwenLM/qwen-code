@@ -333,14 +333,14 @@ class ManagedSchemaMySqlIT {
             insert.executeUpdate();
         }
         try {
-            try (var invalid =
-                    connection.prepareStatement(
-                            "UPDATE ma_session SET is_resource_gc_completed=2 WHERE tenant_id=? AND"
-                                    + " session_id=?")) {
-                invalid.setBytes(1, tenant);
-                invalid.setBytes(2, session);
-                assertThrows(SQLException.class, invalid::executeUpdate);
-            }
+            // The baseline carries no CHECK constraints: the domain rule
+            // lives in ManagedSchemaIntegrity, so an out-of-domain boolean
+            // is refused there, not by the engine.
+            IllegalArgumentException rejected = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> ManagedSchemaIntegrity.validate("ma_session",
+                            ManagedSchemaIntegrity.row("is_resource_gc_completed", 2)));
+            assertTrue(rejected.getMessage().contains("ck_ma_session_resource_gc"));
             try (var insert =
                     connection.prepareStatement(
                             "INSERT INTO"

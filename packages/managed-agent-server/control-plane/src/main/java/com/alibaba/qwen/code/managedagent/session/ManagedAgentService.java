@@ -1014,6 +1014,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (recorded != null && !recorded.sessionId().equals(sessionId)) {
             SessionRecord requested = store.requireSession(tenantId, sessionId);
             inputPolicy.requireSubmitterRole(requested, principal);
+            // The key is tenant-global: a Workspace-bound receipt of
+            // another Session answers idempotency_conflict to the
+            // requested Session's own operator (the submitter role above
+            // already certified that), never the recorded-Session grant
+            // probe's 404 for a Session the caller owns. An unbound
+            // receipt keeps the owner-scoped uniform 404 that never
+            // names the live key to a non-owner.
+            SessionRecord recordedSession = store.requireSession(tenantId,
+                    recorded.sessionId());
+            if (recordedSession.workspace() != null) {
+                throw new ManagedAgentException(409, "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
             requireRecordedSessionGrant(recorded, requested, principal);
         }
         if (recorded != null && recorded.sessionId().equals(sessionId)) {
@@ -2228,9 +2241,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public SessionRecord requireReadableSession(SessionPrincipal principal,
             String sessionId) {
-        String tenantId = principal == null ? null : principal.tenantId();
-        SessionRecord session = inputPolicy.requireVisibleSession(tenantId,
-                sessionId);
+        SessionRecord session;
+        if (principal == null) {
+            // The trusted internal read without a principal resolves the
+            // Session by its globally unique id. The HTTP boundary always
+            // passes its verified principal, and the ownership gate below
+            // still refuses every named non-owner.
+            session = inputPolicy.requireVisibleSession(
+                    store.findSessionById(sessionId).orElseThrow(() ->
+                            new ManagedAgentException(404,
+                                    "session_not_found",
+                                    "The Session was not found.")));
+        } else {
+            session = inputPolicy.requireVisibleSession(
+                    principal.tenantId(), sessionId);
+        }
         requireReadGrant(session, principal);
         return session;
     }
@@ -2244,6 +2269,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     void requireReadGrant(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
+            // The principal-less internal read stays tenant-scoped; a
+            // recorded ownership row refuses every named non-owner
+            // below, and the write paths enforce their own principal
+            // requirements independently of this read gate.
+            if (principal == null) {
+                return;
+            }
             store.requireSessionOwnership(session.tenantId(),
                     session.sessionId(), principal);
             return;

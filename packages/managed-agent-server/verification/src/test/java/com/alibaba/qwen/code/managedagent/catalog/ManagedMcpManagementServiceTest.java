@@ -38,6 +38,9 @@ class ManagedMcpManagementServiceTest {
     @BeforeEach
     void setUp() {
         when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        when(session.workspace()).thenReturn(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "ws", 1, "storage", ".", "config", 1));
         when(sessions.requireReadableSession(any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class), eq("session")))
                 .thenReturn(session);
         when(store.requireMcpManagement(eq("tenant"), anyString(), eq("session"), any())).thenReturn(session);
