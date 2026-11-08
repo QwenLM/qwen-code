@@ -213,6 +213,7 @@ export function createJavaManagedAgentProvider(
         { sessionId, cursor: request.cursor, limit: 100 },
         request.signal,
       ),
+    exportConsistency: 'live',
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -653,7 +654,10 @@ export function createJavaManagedAgentProvider(
           ).values(),
         ];
       },
-      async respond(action, optionId, command) {
+      async respond(action, response, command) {
+        if ((action.kind === 'question') !== (typeof response !== 'string')) {
+          throw new Error('Action response kind does not match the request');
+        }
         const accepted = await client.respondAction(
           {
             requestId: managedRequestId(),
@@ -661,10 +665,11 @@ export function createJavaManagedAgentProvider(
             sessionId: action.sessionId,
             actionId: action.actionId,
             response: {
-              kind: 'permission',
               inputRevision: action.inputRevision,
               policyRevision: action.policyRevision,
-              optionId,
+              ...(typeof response === 'string'
+                ? { kind: 'permission' as const, optionId: response }
+                : response),
             },
           },
           command.signal,
@@ -879,6 +884,12 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
+      if (
+        !Number.isSafeInteger(transcript.coveredSequence) ||
+        transcript.coveredSequence < 0
+      ) {
+        throw new Error('Invalid message transcript coverage.');
+      }
       const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
@@ -889,7 +900,8 @@ export function createJavaManagedAgentProvider(
           (left, right) => left.id - right.id,
         ),
         olderCursor: transcript.olderCursor ?? undefined,
-        lastEventId: transcript.lastSequence,
+        lastEventId: transcript.coveredSequence,
+        history: 'items',
       };
     },
     async createSession(request, command) {
@@ -1170,7 +1182,7 @@ function requireContextCompressionOperation(
 }
 
 function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
-  if (action.kind !== 'permission' || action.state !== 'requested') return [];
+  if (action.state !== 'requested') return [];
   return [
     {
       actionId: action.actionId,
@@ -1180,9 +1192,16 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       toolName: action.toolName,
       inputRevision: action.inputRevision,
       policyRevision: action.policyRevision,
+      createdAt: action.createdAt,
       expiresAt: action.expiresAt,
-      options: action.options.map(({ id, label }) => ({ id, label })),
-      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
+      ...(action.kind === 'question'
+        ? { kind: 'question' as const, questions: action.questions }
+        : {
+            options: action.options.map(({ id, label }) => ({ id, label })),
+            ...(action.inputPreview
+              ? { inputPreview: action.inputPreview }
+              : {}),
+          }),
     },
   ];
 }

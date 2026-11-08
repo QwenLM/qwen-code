@@ -51,24 +51,25 @@
     3. 停止 Harness。
     4. 控制面显示为 `failed` 时说明原因：在 `SuccessExitStatus=143` 之前安装的 unit 每次停止后都会这样。
 - **`backup`**
-  - 前置条件：两个 unit 都已停止，服务端 cgroup 为空；`backup-tools` 和 `runtime-state` 两行没有 FAIL。
+  - 前置条件：两个 unit 都已停止，服务端 cgroup 为空；新版本尚未安装；`backup-tools` 和 `runtime-state` 两行没有 FAIL；`--to` 是新目录，或是属于 root 的空目录。
   - 执行：
-    - 用 `mysqldump` 写出 `database.sql`，凭据放在备份目录之外某个临时目录里的选项文件中传入；
-    - 写出 `runtime-state.tar`、包含版本目录之外配置的 `configuration.tar`，以及按版本目录内路径记录其中配置的 `release-config.tar`；
+    - 用 `mysqldump` 写出 `database.sql`，凭据放在备份目录之外某个临时目录里的选项文件中传入。`--defaults-file` 让它成为唯一的选项文件，之后读取的选项文件（如 `~/.my.cnf`）无法替换凭据；
+    - 写出 `runtime-state.tar`、包含版本目录之外配置的 `configuration.tar`，以及按版本目录内路径记录其中配置的 `release-config.tar`。链接形式的配置文件连同它指向的文件一起归档；
     - 最后写入 `backup.json`，记录前面这些文件；
-    - 任一步失败时删除已写出的内容。
+    - 任一步失败或被信号中止时删除已写出的内容。
 - **`install`**
   - 前置条件：两个 unit 都已停止；备份仍与当前部署相符；`check` 没有 FAIL。
   - 执行：
-    1. 把新版本复制到 `<分发路径>-releases/<version>` 并校验副本，任一步失败时删除副本。该位置已有目录时，只有其 `SHA256SUMS` 与新分发产物相同、且文件与之相符时才会使用。
-    2. 复制已安装版本 `config/` 中的运维文件。
-    3. 用一次 `rename` 替换分发链接。第一次运行改为把已安装的目录移入版本目录，再在原位置放一个链接；第二次 `rename` 失败时把目录移回原处。
+    1. 删除之前被杀掉的 install 留下的内容：部分副本、分发路径旁的 `.upgrade-<8 位十六进制>` 链接，以及将要使用的版本目录中的 `.tmp-` 运维文件。`check` 在 `layout` 行列出它们。
+    2. 把新版本复制到 `<分发路径>-releases/<version>`，校验副本，并把 `SHA256SUMS` 列出的文件设为所有账号可读；任一步失败时删除副本。该位置已有目录时，只有其 `SHA256SUMS` 与新分发产物相同、且文件与之相符时才会使用，并同样把其中列出的文件设为所有账号可读，因为直接解压到那里的版本保留着解压时的权限。
+    3. 复制已安装版本 `config/` 中的运维文件。
+    4. 用一次 `rename` 替换分发链接。第一次运行改为把已安装的目录移入版本目录，再在原位置放一个链接；第二次 `rename` 失败时把目录移回原处。移回也失败时保留链接，并给出两条 `mv -T` 命令。
 - **`start`**
   - 前置条件：新版本已安装；服务端 unit 已停止；Broker 配置已修改。
   - 执行：
-    1. 启动 Harness 并等待其端口就绪。
+    1. 启动 Harness（之前某次 `start` 留下正在运行的 Harness 时改为重启），并等待其端口就绪。
     2. 通过 `systemd-run`，按 unit 的用户、工作目录和环境运行已安装版本的 `--check`。unit 的 `Environment=` 赋值写进一个 `0600` 的环境文件传入，而不是放在 `systemd-run` 的命令行上，因为每个本地用户都能读到命令行。
-    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。单次探测最多等待 5 秒。unit 失败时报告为失败；到 `--timeout` 仍未健康时保持运行，拒绝信息会指明 `verify` 和 `stop`。
+    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。单次探测最多等待 5 秒。unit 退出时会被停止并报告：显示 `failed`、处于 `auto-restart` 等待，或 `NRestarts` 比刚启动时多，都算退出，因为分发的 unit 使用 `Restart=on-failure`，进程退出后 systemd 会重新运行它，而不是让它停在失败状态。重启后本能起来的 unit 也是如此：运行新版本迁移的这次启动中出现了退出，应先读日志再信任该版本，而不是在重试时放行。先探测健康再看 unit 也改变不了这一点，因为轮询每秒一次，而 `RestartSec=5s` 会让退出的 unit 在 `auto-restart` 中停留 5 秒。到 `--timeout` 仍未健康时保持运行，拒绝信息会指明 `verify` 和 `stop`。
 - **`verify`**
   - 前置条件：两个 unit 都在运行。
   - 执行：
@@ -76,31 +77,31 @@
     - 读取 actuator，只探测一次，这次探测可以用满 `--timeout`；
     - 指定 `--tenant` 时，在 `--turn` 创建 Session 之前读取最近的 Session 及其 Item，指定 `--actor` 时通过服务端的可信 actor 请求头以该 actor 的身份读取；
     - 指定 `--turn` 时，在新 Session 中运行一个 Turn，这会调用模型；轮询遇到 `5xx` 应答或连接中断时会继续；
-    - 服务端解析出的配置为签名认证时，跳过两项 API 读取。
+    - 服务端解析出的配置为签名认证时，跳过两项 API 读取；指定了 `--turn` 时，用一行 `turn` 说明这一点。
     - 任何请求都不会超过 `--timeout`。
 
-各阶段不保存状态文件，而是每次重新读取 unit、文件和链接，因此因崩溃中断的阶段可以直接重新运行。再次运行 `stop` 不会重复已经完成的操作；`install` 会复用同一构建的副本。rename 完成、版本已经安装之后再次运行 `install`，它会在读取备份之前说明已经安装并指明下一步是 `start`：此时再做的备份会把新版本记录为要退回的版本。重新运行无法弥补的只有一个窗口：第一次 install 的两次 rename 之间发生崩溃。此时分发路径缺失，新链接以 `<分发路径>.upgrade-<后缀>` 留在旁边；每个阶段都会报告这一状态，并给出完成安装所需的 `mv -T` 命令。
+各阶段不保存状态文件，而是每次重新读取 unit、文件和链接，因此因崩溃中断的阶段可以直接重新运行。`SIGINT`、`SIGTERM` 和 `SIGHUP` 会删除阶段失败时本会删除的临时文件、部分备份或副本；否则 Node 收到这些信号会直接退出，不执行 `finally` 块。删不掉的文件会被列出，其余的照样删除，命令仍按该信号的退出码退出。Node 要等它正在等待的命令（如 `mysqldump`、`systemd-run`）返回后才执行这段清理；`SIGKILL` 则什么都不清理，包括监管进程在该命令返回前补发的 `SIGKILL`。这时会留下一个 `${TMPDIR:-/tmp}/qwen-managed-agent-upgrade-*` 目录，里面是选项文件，或以服务端 unit 身份运行的命令读取的内容：`unit.env`、`launcher.env` 和 jar。选项文件和环境文件属于 root、权限 `0600`，所在目录只有 root 能列出；请删除该目录。再次运行 `stop` 不会重复已经完成的操作；`install` 会复用同一构建的副本。rename 完成、版本已经安装之后再次运行 `install`，它会在读取备份之前说明已经安装并指明下一步是 `start`：此时再做的备份会把新版本记录为要退回的版本。重新运行无法弥补的只有一个窗口：第一次 install 的两次 rename 之间发生崩溃。此时分发路径缺失，新链接以 `<分发路径>.upgrade-<后缀>` 留在旁边；每个阶段都会报告这一状态，并给出完成安装所需的 `mv -T` 命令。
 
 ### check 的各行
 
-| 行              | FAIL                                                                                                       | WARN                                                              |
-| --------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `distribution`  | 有文件与 `SHA256SUMS` 不符                                                                                 |                                                                   |
-| `deployment`    | unit 未加载，服务端启动的不是分发产物中的启动脚本，新 manifest 无法读取，或 install 被中断                 |                                                                   |
-| `version`       | 版本相同或更旧                                                                                             |                                                                   |
-| `database`      | 已安装数据库执行过的脚本被修改或删除；可重复脚本被删除；新增的版本化脚本没有排在数据库执行过的最新脚本之后 | 有脚本要执行，包括有变化的可重复脚本；无法读取 jar                |
-| `java`、`node`  | 低于 manifest 的最低版本，或找不到                                                                         | 版本范围无法解析                                                  |
-| `qwen-code`     |                                                                                                            | Harness 运行的版本与 manifest 不同                                |
-| `harness-env`   |                                                                                                            | 存在 `QWEN_HOSTED_HARNESS_BROKER_ARGS`，或 Broker token 设了两份  |
-| `config`        | 已安装版本的 `config/` 中有非文件项                                                                        |                                                                   |
-| `unit-files`    |                                                                                                            | 两个版本之间 unit 模板有变化                                      |
-| `layout`        | 版本目录位于任一分发产物内部，或与 install 要移动的目录不在同一文件系统                                    |                                                                   |
-| `backup-tools`  | `--mysqldump` 指定的客户端未安装，或数据源不是单主机 MySQL URL                                             | （指定 `--skip-database` 时为 SKIP）                              |
-| `runtime-state` | 无法解析服务端的配置且未传 `--runtime-state`；`--runtime-state` 不是目录                                   | 解析出的目录不存在（未配置或传 `--runtime-state none` 时为 SKIP） |
+| 行              | FAIL                                                                                                       | WARN                                                                |
+| --------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `distribution`  | 有文件与 `SHA256SUMS` 不符                                                                                 |                                                                     |
+| `deployment`    | unit 未加载，服务端启动的不是分发产物中的启动脚本，新 manifest 无法读取，或 install 被中断                 |                                                                     |
+| `version`       | 版本相同或更旧                                                                                             |                                                                     |
+| `database`      | 已安装数据库执行过的脚本被修改或删除；可重复脚本被删除；新增的版本化脚本没有排在数据库执行过的最新脚本之后 | 有脚本要执行，包括有变化的可重复脚本；无法读取 jar                  |
+| `java`、`node`  | 低于 manifest 的最低版本，或找不到                                                                         | 版本范围无法解析                                                    |
+| `qwen-code`     |                                                                                                            | Harness 运行的版本与 manifest 不同;比它新的版本经运维测试过可以保留 |
+| `harness-env`   |                                                                                                            | 存在 `QWEN_HOSTED_HARNESS_BROKER_ARGS`，或 Broker token 设了两份    |
+| `config`        | 已安装版本的 `config/` 中有非文件项                                                                        |                                                                     |
+| `unit-files`    |                                                                                                            | 两个版本之间 unit 模板有变化                                        |
+| `layout`        | 版本目录位于任一分发产物内部，或与 install 要移动的目录不在同一文件系统                                    |                                                                     |
+| `backup-tools`  | `--mysqldump` 指定的客户端未安装，或数据源不是单主机 MySQL URL                                             | （指定 `--skip-database` 时为 SKIP）                                |
+| `runtime-state` | 无法解析服务端的配置且未传 `--runtime-state`；`--runtime-state` 不是目录                                   | 解析出的目录不存在（未配置或传 `--runtime-state none` 时为 SKIP）   |
 
-`check` 接受后续阶段的选项，并把它们写进打印的计划，因此这些行描述的正是运维将要执行的那次运行。`stop` 和 `install` 会重复 `backup-tools` 以上的所有行；`backup` 重复最后两行。
+`check` 接受后续阶段的选项，并把它们写进打印的计划，因此这些行描述的正是运维将要执行的那次运行。每个取值都按 shell 规则加引号，其中的控制字符按其字节写成 `$'...'` 里的三位八进制转义，因此计划行不会把控制字符带到终端。bash、ksh 和 zsh 能把它读回原值，紧跟其后的数字也不受影响（若用 `\x` 转义，ksh 会把后面的十六进制数字一并读进去）；作为 dash 的 `/bin/sh` 不认识 `$'...'`，因此这样的行要粘贴到前三种 shell 中运行。`stop` 和 `install` 会重复 `backup-tools` 以上的所有行；`backup` 重复最后两行。
 
-`database` 行从两个服务端 jar 中读取 Flyway 脚本：取 manifest 中的控制面组件，读取 `BOOT-INF/classes/db/**/` 下按 Flyway 规则命名的版本化、撤销和可重复脚本。与 Flyway 一样，`V`、`U`、`R` 前缀区分大小写，`.sql` 后缀不区分。一个简短的 zip 读取器沿中央目录找到条目，再用 `zlib` 解压，因此早于本改动的版本也能比较。决定这一行结果的是脚本内容，而不是 manifest 中的版本字符串：即使两个 manifest 都写版本 `1`，脚本有变化也会报 FAIL。Flyway 会重新执行有变化的可重复脚本，因此这种情况报 WARN；可重复脚本被删除则会导致校验失败。服务端保持 `outOfOrder` 关闭，此时 Flyway 还会拒绝版本号没有排在数据库执行过的最新脚本之后的新版本化脚本，版本按各段逐一比较。读取器在 jar 中一个脚本都没找到时，视为无法读取而不是没有变化，因为没有哪个服务端会不带 schema 发布。
+`database` 行从两个服务端 jar 中读取 Flyway 脚本：取 manifest 中的控制面组件，读取 jar 的 classpath 上 `db/**/` 下按 Flyway 规则命名的版本化、撤销和可重复脚本，即 `BOOT-INF/classes/db/**/`，以及 `BOOT-INF/lib/` 中每个嵌套 jar 根目录下的 `db/**/`：服务端拆分为多个模块后，脚本随模块的 jar 发布。Spring Boot 以不压缩的方式存放嵌套 jar，因此读取器直接在原位读取它的目录；压缩过的嵌套 jar Spring Boot 不会加载，因此跳过。无论脚本放在哪里，都以路径作为名称，所以从 classes 挪进某个模块的脚本视为没有变化。同一路径出现两次时，内容相同则视为同一个脚本；内容不同时，Flyway 拿到哪一份取决于类加载器，因此这一行视该 jar 为无法读取，并写明两份分别来自哪里（`BOOT-INF/classes` 或哪个嵌套 jar）。打包工具为时间戳或对齐而在 local header 中加入的 extra field（中央目录不一定重复记录）会在读取每个条目的数据前跳过。与 Flyway 一样，`V`、`U`、`R` 前缀区分大小写，`.sql` 后缀不区分。一个简短的 zip 读取器沿中央目录找到条目，再用 `zlib` 解压，因此早于本改动的版本也能比较。决定这一行结果的是脚本内容，而不是 manifest 中的版本字符串：即使两个 manifest 都写版本 `1`，脚本有变化也会报 FAIL。Flyway 会重新执行有变化的可重复脚本，因此这种情况报 WARN；可重复脚本被删除则会导致校验失败。服务端保持 `outOfOrder` 关闭，此时 Flyway 还会拒绝版本号没有排在数据库执行过的最新脚本之后的新版本化脚本，版本按各段逐一比较。读取器在 jar 中一个脚本都没找到时，视为无法读取而不是没有变化，因为没有哪个服务端会不带 schema 发布。
 
 `harness-env` 报 WARN 而不是 FAIL：备份必须保留旧版本读取的文件，所以修改发生在 `backup` 之后；修改完成之前，`start` 会拒绝执行。
 
@@ -108,11 +109,21 @@
 
 Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directory`：服务端 `application.yml` 所映射的变量 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`；Spring 默认位置和 launcher 的 `SPRING_CONFIG_ADDITIONAL_LOCATION` 中的每个配置文件；import 或 profile 引入的文件；`SPRING_APPLICATION_JSON`；系统属性；命令行参数；以及该属性在 relaxed binding 下的每种写法。本命令前几轮自己读取这份清单，并对识别出的来源拒绝执行，结果每一轮都发现有遗漏。Spring 的配置解析没有一份封闭的清单，因此命令不再自己读取。
 
-改为由 `check` 和 `backup` 询问服务端。服务端 jar 中有一个主类 `ResolvedConfiguration`，它按 `SpringApplication` 在创建 context 之前的方式准备环境：命令行参数、进程环境，以及 class path 上的所有 environment post-processor，由它们加载配置文件、import 和 profile。随后它绑定服务端的属性，在固定前缀之后用一行打印：状态目录（与服务端一样按工作目录转成绝对路径）及其来源、认证模式和可信 actor 请求头。它不启动 context，不输出日志，也不建立任何连接。
+改为由 `check` 和 `backup` 询问服务端。服务端 jar 中有一个主类 `ResolvedConfiguration`，它按 `SpringApplication` 在创建 context 之前的方式准备环境：命令行参数、进程环境，以及 class path 上的所有 environment post-processor，由它们加载配置文件、import 和 profile。随后它绑定服务端的属性，在固定前缀之后用一行打印：状态目录（与服务端一样按工作目录转成绝对路径）及其来源、认证模式、可信 actor 请求头，以及下文所述的监听 URL。它不启动 context，不输出日志，也不建立任何连接。
 
-命令通过 `systemd-run`，按控制面 unit 运行服务端的方式运行它：使用该 unit 的账号、工作目录、环境文件和 `Environment=` 赋值，以及 unit `PATH` 上的 `java`，并带上 launcher 唯一的默认值，即 `SPRING_CONFIG_ADDITIONAL_LOCATION` 未设置或为空时使用 `config/application.yml`。运行的是本版本的 jar：它被复制到服务账号能读取的位置，因此不受压缩包解压位置的影响；通过 `PropertiesLauncher` 加 `loader.main` 启动，因此没有该类的旧 jar 会直接失败，而不会启动一个服务端。`verify` 在 `install` 之后运行，使用已安装的 jar，并从同一份输出读取认证模式。admin 启动脚本以 `resolved-configuration` 命令运行同一个类，供其他布局的手工流程使用。
+命令通过 `systemd-run`，按控制面 unit 运行服务端的方式运行它：使用该 unit 的账号、工作目录、环境文件和 `Environment=` 赋值，以及 unit `PATH` 上的 `java`，并带上 launcher 唯一的默认值，即 `SPRING_CONFIG_ADDITIONAL_LOCATION` 未设置或为空时使用 `config/application.yml`。运行的是本版本的 jar：它被复制到服务账号能读取的位置，因此不受压缩包解压位置的影响；通过 `PropertiesLauncher` 加 `loader.main` 启动，因此没有该类的旧 jar 会直接失败，而不会启动一个服务端。`start` 和 `verify` 在 `install` 之后运行，使用已安装的 jar；`verify` 从同一份输出读取认证模式。admin 启动脚本以 `resolved-configuration` 命令运行同一个类，供其他布局的手工流程使用。
 
 有两种情况留给运维处理。一是 jar 无法解析配置，例如 import 指向的文件不存在，这时服务端同样会拒绝启动。二是 `systemctl show` 打印 `ExecStart` 参数时用空格拼接且不加引号，命令无法准确地转交 unit 传给 launcher 的参数。这两种情况下，`backup` 都会拒绝执行，直到 `--runtime-state <目录>` 指明目录，或用 `--runtime-state none` 表示部署不保存 Runtime 状态。缺少数据库所引用的 Runtime 状态的备份无法一致地恢复，因此悄悄漏掉状态的备份比拒绝更糟。配置中没有指定目录时（例如未开启工具路径的部署），`backup` 不归档 Runtime 状态，并打印说明。
+
+### 监听 URL
+
+`start` 等待 Harness 的端口和控制面的健康端点，`verify` 探测该端点并读取 API。这些地址都可能设置在 `server.env` 看不到的地方：`config/application.yml` 中的 `server.port`、relaxed 形式的 `SERVER_ADDRESS`、命令行参数，或者把 actuator 移到独立监听上的 `management.server.port`。只从 `server.env` 推算时，`start` 会在一个无人监听的端口上等满 `--timeout`。因此两个阶段都从同一份 `ResolvedConfiguration` 输出中取得 URL：
+
+- **控制面：** `server.address` 绑定的地址、`server.port` 绑定的端口；启用 `server.ssl` 时用 `https`。通配地址经其地址族的回环接口访问，其他地址按绑定的地址访问。
+- **健康端点：** 遵循 Spring Boot 关于 management 端口的规则（`ManagementPortType`）。未设置或与服务端端口相同时，它与服务端共用监听；为负数时关闭 HTTP 端点；其他值则在 `management.server.address` 上打开独立监听（未设置时绑定所有接口），位于 `management.server.base-path` 之下，并沿用服务端的 TLS，除非 `management.server.ssl` 替换它。两种情况下都应用 `management.endpoints.web.base-path` 和 `health` 的路径映射；路径映射为空白时 Spring Boot 会忽略它，仍使用名称 `health`。
+- **Harness：** `qwen.managed-agent.harness.base-url`，即控制面访问它所用的 URL，以及 preflight 对它的判定：其 harness 行是否把这个未经 trim 的取值当作 Harness origin 接受；Harness 被禁用时判定为 `skip`，此时没有任何地方读取这个值。
+
+每个阶段只检查自己会拨号的 URL：两个阶段都会探测健康端点，只有 `verify --tenant` 会读取 API，而且只在其 session 行确实要读时才读：auth mode 为 `open`，且给了 `--actor` 时服务端配置了可信 actor header。阶段只会因这些 URL 拒绝执行。端口为 0（启动时选取）或负数时没有可等待的 URL，因此该阶段会拒绝执行，直到 `--server-url` 指定一个。`fetch` 会拒绝拨号的 URL，同样会被拒绝，而不是在根本发不出去的探测上等满 `--timeout`：保留了 zone 的 IPv6 链路本地地址（URL 无法携带 zone）、Fetch 标准屏蔽的端口（例如 6000），以及 `--server-url` 给出的非 `http`/`https` URL（例如 `proxy.test:8443`）或带用户名、密码的 URL。带 query 或 fragment 的 `--server-url` 同样会被拒绝，因为 `/actuator/health` 和 API 路径是拼接在它后面的，会落进 query 或 fragment 里；URL 解析器读不出用户信息、却仍带有 `@` 的 `--server-url` 也会被拒绝：它可能是以数字开头的密码的剩余部分，例如 `https://svc:12/s3cret@cp.example.com` 会被解析成主机 `svc`、端口 `12`，拨号会连到错误的主机，打印又会泄露密码。这样的 `@` 与路径里的 `@` 无法区分，因此路径带 `@` 的取值同样会被拒绝，应改写为 `%40`。取值在拼接路径之前先按原样判定：`--server-url "https://$HOST"` 在 `HOST` 未设置时留下的 `https:` 不是 URL，尽管 `https:/actuator/health` 能解析成主机 `actuator`。`check` 以同样的方式判定 `--server-url`，因为它打印的计划会重复这个选项。`start` 要在 Harness URL 上等待 Harness，因此会拒绝不是 `http` 或 `https` 的取值：`proxy.test:8443` 这样的不透明取值根本没有可等待的主机。除此之外，对于服务端 Harness 连接器不接受的 Harness URL，`start` 会在重启 Harness 之前拒绝，依据的是服务端配置解析器转达的服务端自身判定：preflight 和连接器都按 `java.net.URI` 的方式读取未经 trim 的取值，只接受带主机名、且不带用户信息、query 或 fragment 的 `http` 或 `https` URL，因此带用户信息、query、fragment、带下划线的主机名、空用户名或带首尾空白的取值都会在重启 Harness 之前被拒绝；只有当取值本身显示出一个服务端同样会给出的原因时，拒绝提示才会写明：用户名或密码、query 或 fragment，或 authority 中的 `@`（`java.net.URI` 在 `//` 之后读取 authority，直到 `/`、`?` 或 `#`）。Harness 被禁用时没有任何地方读取这个值，因此不再对它提其他要求。启用 pool 时，preflight 的 harness 行在读取该值之前就跳过，但每个 pool 成员的连接器都按同一规则检查它，连接器拒绝的成员会被 pool 丢弃，因此照样要判定。无法解析配置时没有判定，`start` 只接受朴素的 `http` 或 `https` URL，这是命令自己的规则，比服务端的更窄：`java.net.URI` 认可的主机名（最后一个 label 以字母开头，只有一个 label 时除外；完整域名末尾的点可有可无）、点分四段的 IPv4 地址，或带方括号的 IPv6 地址（可以像 `::ffff:127.0.0.1` 那样以 IPv4 地址结尾），可选端口（可以为空），以及只含 URI 路径允许字符的路径，其中 `%` 只能作为 `%20` 这类转义的开头，按未经 trim 的原样读取。在 `java.net.URI` 认作主机的写法中，它只拒绝 `fetch` 所用的 URL 解析器会读成别的地址的写法：该解析器读成数字的单个 label，即全为数字（例如 `1234` 读成 `0.0.4.210`）或 `0x` 加十六进制数字；以及带前导零的 IPv4 段，会被读成八进制（例如 `010.0.0.1` 读成 `8.0.0.1`）。`4harness` 这类以数字开头的单 label 名字（容器可能使用）会被接受。这样，被禁用的 Harness 的取值可能被白白拒绝，但若放行，可能启动一个不接收任何 Session 的 pool。其余情况由 preflight 判定，例如 Harness 是否应答。拒绝提示或报告行打印 URL 时，无论它能否解析，用户信息都显示为 `***`，`start` 的三种结果和 `verify` 的 health 行也不例外：最后一个 `@` 之前的内容全部显示为 `***`，因为密码中可能含有 `/`、`?` 或 `#`，使 authority 提前结束；以数字开头的这类密码甚至能解析成功，被读成端口，其余部分落进路径、query 或 fragment（`http://svc:2024#Secret@harness:4170`）。探测发出后仍失败时，会说明原因：`start` 的超时提示和 `verify` 的 health 行给出健康端点最后一次的应答，例如 `HTTP 503, status DOWN` 或 `self-signed certificate`；应答文本中的控制字符显示为 `�`，文本在 200 个码点处截断，因此端点既无法移动光标、拆开一行，也无法把报告刷出屏幕。不是字符串的 status 显示为它的 JSON；嵌套太深无法写出时显示为 `[unprintable]`；空串显示为 `""`。`0`、`false` 和空串同样是 status，只有 `null` 与缺失一样不代表任何值。两个阶段打印的 URL 来自配置或命令行，其中的控制字符同样会被替换；拒绝提示或某一行以 JSON 形式引用的值也是如此，例如被拒绝的 URL、无法放进路由的 Session id：JSON 会转义 C0 控制字符，但不转义 DEL 和 C1 字节（例如 CSI 引导符 U+009B），这些字节随后显示为 `�`，引用的文本在 200 个码点处截断。Session id 和事件类型只认字符串：Session 没有字符串 id 时，该行判失败并写出实际返回的值；事件类型不是字符串时不代表任何结果，turn 行判失败。页面的 data 不是列表或缺失时，对应的行同样判失败；Session id 无法作为路由中的单独一段时（空串、`.` 或 `..`），或根本无法放进路由时（含孤立代理项，没有可做百分号编码的 UTF-8），也是如此。只有标记为 `terminal: true` 的事件才会结束 turn；事件序号只有是整数或整数的数字串时才推进读取位置，而且只向前推进。`verify` 的 session 和 turn 行中来自 API 的文本同样如此，失败行中写出的请求也不例外；而且无论端点的应答多长，截断都不会复制一份全文。`start` 的探测被截止时间截短时（最后一次只剩 1 毫秒），无论是在连接时还是在读取响应体时，都可能在端点来得及应答之前超时，因此不会覆盖之前的应答。在截止时间之前就用满自身 5 秒上限而超时的探测会覆盖，因为这说明端点已不再应答；其他失败（例如连接被拒）也会覆盖。`--server-url` 仍可指定控制面的地址，例如位于代理之后，此时健康端点为 `<url>/actuator/health`；`verify` 不访问 Harness，这时只为 `--tenant` 解析配置。无法解析配置时（即上文的两种情况），两个阶段与以前一样使用 `server.env` 中给出的 URL，并打印一行说明用了哪些：猜错的代价是等满一次 `--timeout`，而拒绝执行会挡住猜对时本可以完成的升级。
 
 ### 备份是否仍然有效
 
@@ -154,12 +165,12 @@ Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directo
   - check 的每一行；
   - 每个阶段的拒绝条件与执行步骤。
 - **环境文件。** 通过 systemd 257 的 `systemd-run` 读回 1579 个随机文件，与命令的读取结果没有任何差异。
-- **变异测试。** 脚本中的判断 87 个变异，预检改动 5 个变异，`ResolvedConfiguration` 及其读取的认证模式 8 个变异。
+- **变异测试。** 脚本中的判断 87 个变异，预检改动 5 个变异，`ResolvedConfiguration` 及其读取的认证模式 8 个变异；后续改动又为自身增加了 33 个，为其评审增加了 17 个，其中一个是等价变异：重启间隔长于一次轮询，先查健康还是先查退出结论相同。
 - **预检单元测试：**
   - Flyway 顺序；
   - 校验钩子；
   - `databaseCheck` 实际执行的校验，在 Flyway 迁移出的 H2 数据库上运行。
-- **`ResolvedConfiguration` 单元测试**，走 Spring 自己的环境准备：launcher 配置文件中的 import、带同级键的 flow mapping、merge key、目录位置旁的 profile 文件、`SPRING_CONFIG_NAME` 选中的 properties 文件、各种环境变量写法、`SPRING_APPLICATION_JSON`、相对路径的目录、认证模式与 actor 请求头、缺失的 import，以及打印的那一行。
+- **`ResolvedConfiguration` 单元测试**，走 Spring 自己的环境准备：launcher 配置文件中的 import、带同级键的 flow mapping、merge key、目录位置旁的 profile 文件、`SPRING_CONFIG_NAME` 选中的 properties 文件、各种环境变量写法、`SPRING_APPLICATION_JSON`、相对路径的目录、认证模式与 actor 请求头、上述每种端口、地址、TLS 和 management 设置下的监听 URL、缺失的 import，以及打印的那一行。
 - **真实主机端到端**（systemd 257、MySQL 8.4，真实 Hosted Harness 配合伪造模型）。旧版本按 `systemd/README.md` 的方式安装，并在服务端 cgroup 中留一个替身 worker。
   - **兼容的升级：** 跑完所有阶段，并验证：
     - 在服务运行时或阶段顺序不对时的拒绝；
@@ -173,6 +184,10 @@ Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directo
     - `verify` 期间用 `ps` 采样，确认 `Environment=` 不出现在 `systemd-run` 的命令行上；
     - unit 停止后显示为 `failed` 时 `stop` 打印的说明，以及第二次 `install`。
   - **基线被原地重写：** `check` 报 FAIL，`stop` 拒绝执行。
+  - **首次 install 中断：** 从复制到最后一次 `rename`，在十个文件系统步骤处分别 `SIGKILL`。之后再运行 `install`（`check` 给出 `mv -T` 时先执行它），留下的目录布局都与未中断的安装相同，控制面随后能启动并通过 `verify`。
+  - **信号：** 导出期间向命令发送 `SIGTERM`、向其进程组发送 `SIGINT`，以及复制期间发送 `SIGTERM`，都不会留下选项文件、备份目录或部分副本。`backup --skip-database` 等待 `systemd-run` 解析配置期间，向命令及其进程组发送 `SIGTERM`、向进程组发送 `SIGINT`、向命令发送 `SIGHUP`，都不会留下 `unit.env` 或 jar；`SIGTERM` 之后 0.2 秒再发 `SIGKILL` 则两者都会留下，见上文各阶段的说明。
+  - **选项文件：** root 的 `~/.my.cnf` 指定另一个账号时，`--defaults-extra-file` 会以该账号连接并被拒绝；`--defaults-file` 以服务账号连接。
+  - **启动后被杀掉的控制面：** 之前的模块会等满 `--timeout`，在 systemd 反复重启 unit 期间报告启动较慢；本模块在几秒内停止它。下一次 `start` 会重启前一次留下的 Harness。
   - **同一主机状态下的预检 A/B：**
     - 本改动之前的版本放过服务端会拒绝的数据库；
     - 本版本让该数据库报 FAIL。

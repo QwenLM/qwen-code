@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -443,6 +443,30 @@ export class TestRig {
       join(qwenDir, 'settings.json'),
       JSON.stringify(settings, null, 2),
     );
+
+    // Hooks declared in this project settings file now require explicit
+    // folder trust. Grant the rig directory in an isolated trust store so
+    // hook fixtures keep executing; tests about untrusted behavior override
+    // QWEN_CODE_TRUSTED_FOLDERS_PATH themselves.
+    const qwenHome = join(this.testDir, '.qwen-home');
+    mkdirSync(qwenHome, { recursive: true });
+    const userSettingsPath = join(qwenHome, 'settings.json');
+    if (!fs.existsSync(userSettingsPath)) {
+      writeFileSync(
+        userSettingsPath,
+        JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      );
+    }
+    const trustStorePath = join(qwenHome, 'trustedFolders.json');
+    if (!fs.existsSync(trustStorePath)) {
+      writeFileSync(
+        trustStorePath,
+        JSON.stringify({ [realpathSync(this.testDir)]: 'TRUST_FOLDER' }),
+      );
+    }
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
+    vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', trustStorePath);
   }
 
   createFile(fileName: string, content: string) {

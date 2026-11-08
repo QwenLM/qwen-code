@@ -13,9 +13,15 @@ export function prepareBundledGeneratedUi(
   value: unknown,
   supported: boolean,
 ): BundledGeneratedUiConfig {
-  if (value !== true) return { enabled: false };
+  // On by default; only an explicit `false` (or an invalid value) turns it off.
+  if (value !== undefined && value !== true) return { enabled: false };
+  const requested = value === true ? { explicit: true } : {};
   if (!supported) {
-    return { enabled: true, unavailableReason: 'unsupported-runtime' };
+    return {
+      enabled: true,
+      unavailableReason: 'unsupported-runtime',
+      ...requested,
+    };
   }
   let directory = resolveBundleDir(import.meta.url);
   let assetsDir = join(directory, 'generated-ui');
@@ -55,10 +61,11 @@ export function prepareBundledGeneratedUi(
       }
     })
   ) {
-    return { enabled: true, unavailableReason: 'assets-missing' };
+    return { enabled: true, unavailableReason: 'assets-missing', ...requested };
   }
   return {
     enabled: true,
+    ...requested,
     skillsDir: join(assetsDir, 'skills'),
     server: {
       command: process.execPath,
@@ -68,6 +75,13 @@ export function prepareBundledGeneratedUi(
       // Declared up front: the model should see the view as an option when it
       // decides how to answer, not only after searching for deferred tools.
       alwaysLoadTools: true,
+      // When the CLI itself is the Electron binary launched by an IDE
+      // companion, the ACP launch scrubs ELECTRON_RUN_AS_NODE from the
+      // inherited environment (#16063): without it this child starts the
+      // VS Code GUI, which opens the entry file in an editor.
+      ...(process.versions['electron']
+        ? { env: { ELECTRON_RUN_AS_NODE: '1' } }
+        : {}),
     },
   };
 }

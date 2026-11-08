@@ -239,32 +239,50 @@ describe('runAgentLoop', () => {
     expect(raw.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {});
   });
 
-  it('drops the calls of an attempt that a retry replaced', async () => {
-    const stale = toolRequest('stale');
-    const fresh = toolRequest('fresh');
-    const { client } = fakeClient([
-      [requestEvent(stale), { type: LlmEventType.Retry }, requestEvent(fresh)],
-      [content],
-    ]);
-    const { executor, batches } = fakeExecutor();
-    const discarded: Array<readonly ToolCallRequestInfo[]> = [];
-
-    await runAgentLoop({
-      client,
-      config: fakeConfig().config,
-      signal: new AbortController().signal,
-      first: first(),
-      executor,
-      host: {
-        onModelEvent: (event, calls) => {
-          if (event.type === LlmEventType.Retry) discarded.push(calls);
-        },
+  it.each([
+    ['a retry', { type: LlmEventType.Retry }],
+    [
+      'a model fallback',
+      {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
       },
-    });
+    ],
+  ] as const)(
+    'drops the calls of an attempt that %s replaced',
+    async (_, replaced) => {
+      const stale = toolRequest('stale');
+      const fresh = toolRequest('fresh');
+      const { client } = fakeClient([
+        [
+          requestEvent(stale),
+          replaced as unknown as ServerLlmStreamEvent,
+          requestEvent(fresh),
+        ],
+        [content],
+      ]);
+      const { executor, batches } = fakeExecutor();
+      const discarded: Array<readonly ToolCallRequestInfo[]> = [];
 
-    expect(discarded).toEqual([[stale]]);
-    expect(batches).toEqual([[fresh]]);
-  });
+      await runAgentLoop({
+        client,
+        config: fakeConfig().config,
+        signal: new AbortController().signal,
+        first: first(),
+        executor,
+        host: {
+          onModelEvent: (event, calls) => {
+            if (event.type === replaced.type) discarded.push(calls);
+          },
+        },
+      });
+
+      expect(discarded).toEqual([[stale]]);
+      expect(batches).toEqual([[fresh]]);
+    },
+  );
 
   it.each([
     [LlmEventType.LoopDetected, 'loop_detected'],
@@ -600,6 +618,38 @@ describe('runAgentLoop', () => {
     ]);
   });
 
+  it('does not record a call the executor already recorded', async () => {
+    const counted = toolRequest('counted');
+    const plain = toolRequest('plain');
+    const { client, raw } = fakeClient([
+      [requestEvent(counted), requestEvent(plain)],
+      [content],
+    ]);
+    const executor: AgentLoopToolExecutor = {
+      async run(requests, _signal, hooks) {
+        return requests
+          .filter((request) => hooks.beforeLaunch(request, []))
+          .map((request) => ({
+            status: 'success' as const,
+            request,
+            response: okResponse(request),
+            recorded: request.callId === 'counted',
+          }));
+      },
+    };
+
+    await runAgentLoop({
+      client,
+      config: fakeConfig().config,
+      signal: new AbortController().signal,
+      first: first(),
+      executor,
+    });
+
+    expect(raw.recordCompletedToolCall).toHaveBeenCalledOnce();
+    expect(raw.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {});
+  });
+
   it('stops on terminateTurn unless the surface keeps going', async () => {
     const respond = (r: ToolCallRequestInfo) =>
       okResponse(r, { terminateTurn: true });
@@ -809,6 +859,55 @@ describe('runToolBatch', () => {
     expect(result.stop).toBeUndefined();
     expect(batches).toHaveLength(1);
     expect(ids(result.parts)).toEqual(['c1', 'c2']);
+  });
+
+  it('returns the parts by call too, replays included, in request order', async () => {
+    const { client } = fakeClient([]);
+    const { config } = fakeConfig();
+    const state = duplicates();
+    state.handled.set(
+      'c1',
+      getCachedToolCallFingerprint(toolRequest('c1'), 'read_file', {}),
+    );
+
+    const result = await runToolBatch([toolRequest('c1'), toolRequest('c2')], {
+      config,
+      client,
+      signal: new AbortController().signal,
+      duplicates: state,
+      executor: fakeExecutor().executor,
+    });
+
+    expect(result.responses?.map(({ callId }) => callId)).toEqual(['c1', 'c2']);
+    expect(result.responses?.flatMap(({ parts }) => parts)).toEqual(
+      result.parts,
+    );
+    expect(result.responses?.every(({ record }) => !record)).toBe(true);
+  });
+
+  it('leaves recording to the surface when it defers it', async () => {
+    const { client } = fakeClient([]);
+    const { config, recordToolResult } = fakeConfig();
+
+    const result = await runToolBatch([toolRequest('c1'), toolRequest('c2')], {
+      config,
+      client,
+      signal: new AbortController().signal,
+      duplicates: duplicates(),
+      executor: fakeExecutor().executor,
+      deferRecording: true,
+    });
+
+    expect(recordToolResult).not.toHaveBeenCalled();
+    result.responses?.[1]?.record?.();
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+    expect(recordToolResult.mock.calls[0]?.[0]).toEqual(
+      result.responses?.[1]?.parts,
+    );
+    expect(recordToolResult.mock.calls[0]?.[1]).toMatchObject({
+      callId: 'c2',
+      status: 'success',
+    });
   });
 });
 
