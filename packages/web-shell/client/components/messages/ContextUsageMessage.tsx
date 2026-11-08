@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react';
 import type {
   DaemonContextMemoryDetail,
   DaemonContextSkillDetail,
@@ -13,6 +14,12 @@ import styles from './ContextUsageMessage.module.css';
 
 const SENTINEL = 'web-shell:context-usage:v1:';
 
+export function createContextUsageMessageData(
+  status: DaemonSessionContextUsageStatus,
+) {
+  return { type: SENTINEL, status };
+}
+
 export function serializeContextUsageMessage(
   status: DaemonSessionContextUsageStatus,
 ): string {
@@ -21,7 +28,17 @@ export function serializeContextUsageMessage(
 
 export function parseContextUsageMessage(
   content: string,
+  data?: unknown,
 ): DaemonSessionContextUsageStatus | null {
+  const structured = data as
+    | ReturnType<typeof createContextUsageMessageData>
+    | undefined;
+  if (
+    structured?.type === SENTINEL &&
+    typeof structured.status?.usage?.totalTokens === 'number'
+  ) {
+    return structured.status;
+  }
   if (!content.startsWith(SENTINEL)) return null;
   try {
     const parsed = JSON.parse(content.slice(SENTINEL.length));
@@ -162,17 +179,30 @@ function DetailRow({
   name,
   tokens,
   tokenLabel,
+  onOpen,
 }: {
   name: string;
   tokens: number;
   tokenLabel: string;
+  onOpen?: () => void;
 }) {
   return (
     <div className={styles.detailRow}>
       <span className={styles.secondary}>{'\u2514'} </span>
-      <span className={styles.detailName} title={name}>
-        {name}
-      </span>
+      {onOpen ? (
+        <button
+          type="button"
+          className={styles.detailNameButton}
+          title={name}
+          onClick={onOpen}
+        >
+          {name}
+        </button>
+      ) : (
+        <span className={styles.detailName} title={name}>
+          {name}
+        </span>
+      )}
       <span className={styles.value}>
         {formatTokens(tokens)} {tokenLabel}
       </span>
@@ -184,25 +214,36 @@ function DetailSection({
   items,
   getName,
   tokenLabel,
+  onOpen,
 }: {
   items: readonly (DaemonContextToolDetail | DaemonContextMemoryDetail)[];
   getName: (
     item: DaemonContextToolDetail | DaemonContextMemoryDetail,
   ) => string;
   tokenLabel: string;
+  onOpen?: (item: DaemonContextMemoryDetail) => void;
 }) {
   const sorted = sortByTokens(items);
   if (sorted.length === 0) return null;
   return (
     <>
-      {sorted.map((item) => (
-        <DetailRow
-          key={getName(item)}
-          name={getName(item)}
-          tokens={item.tokens}
-          tokenLabel={tokenLabel}
-        />
-      ))}
+      {sorted.map((item) => {
+        // Only real files (those carrying an absolute path) are openable;
+        // synthetic aggregates such as the auto-memory prompt are not.
+        const handleOpen =
+          onOpen && 'absolutePath' in item && item.absolutePath
+            ? () => onOpen(item)
+            : undefined;
+        return (
+          <DetailRow
+            key={getName(item)}
+            name={getName(item)}
+            tokens={item.tokens}
+            tokenLabel={tokenLabel}
+            onOpen={handleOpen}
+          />
+        );
+      })}
     </>
   );
 }
@@ -213,13 +254,12 @@ function SkillsSection({
 }: {
   skills: readonly DaemonContextSkillDetail[];
   labels: {
-    active: string;
     bodyLoaded: string;
     tokens: string;
   };
 }) {
   const sorted = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
   });
   if (sorted.length === 0) return null;
@@ -232,9 +272,6 @@ function SkillsSection({
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
               {skill.name}
-              {skill.loaded && (
-                <span className={styles.success}> {labels.active}</span>
-              )}
             </span>
             <span className={styles.value}>
               {formatTokens(skill.tokens)} {labels.tokens}
@@ -259,13 +296,17 @@ export function ContextUsageMessage({
   status,
   onShowDetail,
   compact = false,
+  onOpenMemoryFile,
 }: {
   status: DaemonSessionContextUsageStatus;
   /** Run /context detail, exactly like typing it. */
   onShowDetail?: () => void;
   compact?: boolean;
+  /** Open a memory file row in a read-only preview. */
+  onOpenMemoryFile?: (file: DaemonContextMemoryDetail) => void;
 }) {
   const { t } = useI18n();
+  const [collapsed, setCollapsed] = useState(false);
   const { usage } = status;
   const { breakdown, contextWindowSize } = usage;
   const hasTokenCount = usage.totalTokens > 0;
@@ -289,11 +330,26 @@ export function ContextUsageMessage({
       className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}
       role={compact ? undefined : 'group'}
       aria-label={compact ? undefined : t('contextUsage.title')}
+      data-collapsed={!compact && collapsed}
     >
       {!compact && (
         <div className={styles.header}>
           <div className={styles.title}>{t('contextUsage.title')}</div>
           <span className={styles.secondary}>{t('contextUsage.snapshot')}</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={collapsed ? t('common.expand') : t('common.collapse')}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            {collapsed ? (
+              <ChevronDownIcon aria-hidden="true" />
+            ) : (
+              <ChevronUpIcon aria-hidden="true" />
+            )}
+          </Button>
         </div>
       )}
       <div className={styles.metaLine}>
@@ -303,11 +359,17 @@ export function ContextUsageMessage({
       </div>
       {!hasTokenCount ? (
         <>
+          {/* After /model, /restore or a resume the estimate includes the
+              conversation, so the base-overhead captions would be false. */}
           <div className={styles.estimateHint}>
-            {t('contextUsage.usageUnavailable')}
+            {breakdown.messages > 0
+              ? t('contextUsage.usageEstimatedWithConversation')
+              : t('contextUsage.usageUnavailable')}
           </div>
           <div className={styles.sectionTitle}>
-            {t('contextUsage.estimatedOverhead')}
+            {breakdown.messages > 0
+              ? t('contextUsage.estimatedUsage')
+              : t('contextUsage.estimatedOverhead')}
           </div>
           <div className={styles.metaLine}>
             {t('contextUsage.contextWindow')}: {formatTokens(contextWindowSize)}{' '}
@@ -358,6 +420,15 @@ export function ContextUsageMessage({
             symbolClassName={isOverLimit ? styles.error : styles.accent}
             isOverLimit={isOverLimit}
           />
+          {/* Annotation, not a category: the cached prefix spans several categories. */}
+          {(breakdown.cachedTokens ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.cachedPrefix')}
+              tokens={breakdown.cachedTokens!}
+              symbolClassName={styles.secondary}
+            />
+          )}
           <CategoryRow
             {...categoryProps}
             label={t('contextUsage.free')}
@@ -410,9 +481,29 @@ export function ContextUsageMessage({
               ) : undefined}
             </CategoryRow>
           )}
+          {breakdown.instructionFiles !== undefined && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.instructionFiles')}
+              tokens={breakdown.instructionFiles}
+            >
+              {hasDetails && (usage.instructionFiles?.length ?? 0) > 0 ? (
+                <DetailSection
+                  items={usage.instructionFiles!}
+                  getName={(item) => ('path' in item ? item.path : item.name)}
+                  tokenLabel={t('contextUsage.tokens')}
+                  onOpen={onOpenMemoryFile}
+                />
+              ) : undefined}
+            </CategoryRow>
+          )}
           <CategoryRow
             {...categoryProps}
-            label={t('contextUsage.memoryFiles')}
+            label={t(
+              breakdown.instructionFiles === undefined
+                ? 'contextUsage.memoryFiles'
+                : 'contextUsage.autoMemory',
+            )}
             tokens={breakdown.memoryFiles}
           >
             {hasDetails && usage.memoryFiles.length > 0 ? (
@@ -420,6 +511,7 @@ export function ContextUsageMessage({
                 items={usage.memoryFiles}
                 getName={(item) => ('path' in item ? item.path : item.name)}
                 tokenLabel={t('contextUsage.tokens')}
+                onOpen={onOpenMemoryFile}
               />
             ) : undefined}
           </CategoryRow>
@@ -432,14 +524,20 @@ export function ContextUsageMessage({
               <SkillsSection
                 skills={usage.skills}
                 labels={{
-                  active: t('contextUsage.active'),
                   bodyLoaded: t('contextUsage.bodyLoaded'),
                   tokens: t('contextUsage.tokens'),
                 }}
               />
             ) : undefined}
           </CategoryRow>
-          {hasTokenCount && (
+          {(breakdown.startupContext ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.startupContext')}
+              tokens={breakdown.startupContext!}
+            />
+          )}
+          {(hasTokenCount || breakdown.messages > 0) && (
             <CategoryRow
               {...categoryProps}
               label={t('contextUsage.messages')}

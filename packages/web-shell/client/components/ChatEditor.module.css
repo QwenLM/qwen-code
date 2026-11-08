@@ -60,10 +60,160 @@
   padding: 10px;
 }
 
+.inputRow {
+  display: contents;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .container {
+  border-radius: 28px;
+  --chat-editor-min-height: 54px;
+  --chat-editor-input-min-height: 28px;
+  --chat-editor-input-max-height: 200px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .content {
+  padding: 4px 8px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 44px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: end;
+  column-gap: 6px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button {
+  grid-column: 1;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .editorArea {
+  grid-column: 2;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  padding: 9px 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .editorArea
+  > :last-child {
+  min-height: 0;
+  max-height: min(100%, var(--chat-editor-input-max-height, 300px));
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  :global(.cm-placeholder) {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .mobileTextarea::placeholder {
+  white-space: nowrap;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbar {
+  display: contents;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight {
+  grid-column: 3;
+  flex: 0 0 auto;
+  gap: 4px;
+  margin: 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button,
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight > button,
+.editorShell[data-web-shell-composer-variant='simple']
+  [data-web-shell-simple-voice]
+  button:has(> svg) {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button svg {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--foreground) 50%, var(--background));
+}
+
+.editorShell [data-web-shell-simple-voice]:not([hidden]) {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+.editorShell
+  [data-web-shell-simple-idle]:has([data-web-shell-simple-voice] button)
+  [data-web-shell-composer-submit] {
+  display: none;
+}
+
+.editorShell[data-web-shell-simple-voice-active] .inputRow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.editorShell[data-web-shell-simple-voice-active] .editorArea,
+.editorShell[data-web-shell-simple-voice-active] .inputRow > button,
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-composer-submit],
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-composer-stop] {
+  display: none;
+}
+
+.editorShell[data-web-shell-simple-voice-active] .toolbarRight {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+.editorShell[data-web-shell-simple-voice-active] [data-web-shell-simple-voice],
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span,
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span
+  > :first-child {
+  width: 100%;
+  min-width: 0;
+}
+
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span
+  > :first-child {
+  height: 44px;
+  border-radius: 22px;
+  justify-content: center;
+}
+
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-voice-waveform] {
+  flex: 1;
+  justify-content: center;
+}
+
 .container:focus-within .content,
-.container:has([aria-expanded='true']) .content,
 .container[data-at-panel-open] .content {
   border-color: var(--chat-editor-accent-color);
+}
+
+@supports (selector(:has(*))) {
+  .container:has([aria-expanded='true']) .content {
+    border-color: var(--chat-editor-accent-color);
+  }
 }
 
 .container[data-image-drag-active] .content {
@@ -251,8 +401,13 @@
 }
 
 :global([data-web-shell-toolbar-popover]) {
-  width: min(max-content, var(--radix-popover-content-available-width));
+  width: max-content;
+  max-width: min(
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
   max-height: var(--radix-popover-content-available-height);
+  box-sizing: border-box;
   overflow: hidden;
 }
 
@@ -446,7 +601,7 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .slashDetailText {
@@ -894,6 +1049,15 @@
   white-space: normal;
 }
 
+@supports (height: 100dvh) {
+  .tagTooltip {
+    max-height: min(
+      calc(100dvh - 16px),
+      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
+    );
+  }
+}
+
 .tagLabel,
 .tagValue {
   color: var(--chat-editor-text-primary);
@@ -932,6 +1096,13 @@
   padding: 3px 0 3px 0.5ch;
   color: var(--foreground, #e4e4e4);
   opacity: 1;
+}
+
+/* The label and value carry no right padding of their own; the remove button
+   supplies that edge when it is present. A chip without one ends on the
+   content box, so it needs the inset itself. */
+.tagContent:last-child {
+  padding-right: 7px;
 }
 
 .tagRemove {
@@ -1064,6 +1235,43 @@
 
 .editorShell[data-web-shell-compact-composer] .toolbar {
   gap: 4px;
+}
+
+/* The workspace and git chips, moved out of the toolbar into their own row
+   under the composer box so the composer stays about the prompt itself. The
+   4px inset plus the workspace chip's 8px padding lines their content up with the
+   editor's text. */
+.contextRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin-top: -12px;
+  padding: 18px 4px 6px;
+  border-radius: 0 0 12px 12px;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.contextRow button[data-web-shell-git-branch] {
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.contextRow button[data-web-shell-git-branch]:hover,
+.contextRow button[data-web-shell-git-branch]:focus-visible {
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+
+.contextRow button[data-web-shell-git-branch] > svg {
+  display: none;
 }
 
 .toolbarLeading,
@@ -1336,6 +1544,58 @@
   height: 16px;
 }
 
+.editorShell .toolbarRight [data-web-shell-simple-voice] button > svg {
+  width: 28px;
+  height: 28px;
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  ) {
+  justify-content: center;
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  )
+  > svg {
+  width: 14px;
+  height: 14px;
+  color: color-mix(in srgb, var(--muted-foreground) 85%, var(--background));
+  transform: translateX(4px);
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  ):not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--muted) 99%, transparent)
+    calc(50% + 4px) center / 24px 24px no-repeat;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .inputRow
+  > button:not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--muted) 99%, transparent)
+    center / 32px 32px no-repeat;
+}
+
+.editorShell
+  .toolbarRight
+  [data-web-shell-simple-voice]
+  button:has(> svg):not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--secondary) 99%, transparent)
+    center / 32px 32px no-repeat;
+}
+
 .toolbarRightCustom {
   display: inline-flex;
   min-width: 0;
@@ -1360,6 +1620,23 @@
 .dropdownWrapperCompact {
   width: 28px;
   flex: 0 0 28px;
+}
+
+.dropdownSearch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dropdownSearchRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dropdownSearchRow > :first-child {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .dropdownList {
@@ -1417,8 +1694,26 @@
   padding: 6px 9px;
 }
 
+.dropdownItem[data-disabled] {
+  color: var(--muted-foreground);
+  cursor: default;
+  opacity: 0.5;
+}
+
+.dropdownItem[data-disabled] .dropdownItemLabel,
+.dropdownItem[data-disabled] .dropdownItemCheck {
+  color: var(--muted-foreground);
+}
+
 .dropdownItem:hover {
   background: var(--accent);
+}
+
+.dropdownItem[data-disabled]:hover,
+.dropdownItem[data-disabled]:focus-visible,
+.dropdownItem[data-disabled][aria-expanded='true'] {
+  background: var(--accent);
+  opacity: 0.7;
 }
 
 .dropdownItemActive {
@@ -1583,6 +1878,116 @@
 
 .planControl[data-disabled] {
   cursor: default;
+}
+
+/* Shown only while Plan is on: the state has to stay visible even though the
+   entry itself is tucked into the add menu. */
+.planChip {
+  flex: 0 0 auto;
+  background: var(--subtle-bg-strong);
+  color: var(--chat-editor-text-primary);
+}
+
+/* Not the shorter `.toolBtn.planChip:hover`: this ties the generic toolbar
+   hover above on specificity and wins by coming later, which the shorter
+   selector would not. The chip is never natively disabled, so the tint does
+   not drop under the pointer during the request the click itself starts. */
+.toolBtn.planChip:not(:disabled):hover {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-text-primary) 12%,
+    transparent
+  );
+  color: var(--chat-editor-text-primary);
+}
+
+.planChip .toolBtnText {
+  color: inherit;
+}
+
+/* Workflow mode saved on but not currently able to take effect. */
+.workflowChip[data-unavailable] {
+  color: var(--warning-color);
+}
+
+/* No dimming: like every other .toolBtn, including the permission button
+   beside it, the chip keeps its appearance while mode controls are busy. That
+   state is brief, and dimming one control of the pair would flicker. */
+.planChip[aria-disabled='true'] {
+  cursor: default;
+}
+
+/* At rest the chip shows the Plan icon and no close mark. The mark shares the
+   icon slot and takes it over on hover or keyboard focus, so revealing it
+   never changes how wide the chip is. */
+.planChipIcon {
+  position: relative;
+}
+
+.planChipIcon > .planChipClose {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+}
+
+.planChipIcon > .planChipClose svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* None of the reveals is limited to an enabled chip: it is inert for the
+   length of the request its own click starts, and swapping back under the
+   pointer would read as the click having been refused. */
+.planChip:focus-visible .planChipIcon > :not(.planChipClose) {
+  opacity: 0;
+}
+
+.planChip:focus-visible .planChipClose {
+  opacity: 1;
+}
+
+/* Only where the pointer really hovers. A touch browser keeps :hover on the
+   last thing tapped, which would leave the mark stuck on a chip whose tap did
+   nothing. */
+@media (hover: hover) {
+  .planChip:hover .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip:hover .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Without hover only keyboard focus would ever reveal the mark, so it stays
+   shown — but only beside the label. A chip too narrow for its label keeps the Plan icon
+   instead: a bare × would name nothing, and a pressed button that a tap
+   releases needs no mark to work. Keyed on the primary pointer, so a
+   touchscreen laptop driven by a mouse still gets the quiet chip. */
+@media (hover: none) {
+  .planChip[data-labelled] .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip[data-labelled] .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Forced colours repaint a masked background away, which would leave a chip
+   without its label blank at rest. Painting the mask with a system colour
+   keeps the icon. Every mode icon has the same gap; this covers only the one
+   this chip depends on. */
+@media (forced-colors: active) {
+  .planChipIcon > span:not(.planChipClose) {
+    forced-color-adjust: none;
+    background: ButtonText;
+  }
 }
 
 .workspaceSelectTrigger {
@@ -1798,9 +2203,11 @@
   border-top: 1px solid var(--border);
 }
 
-@container (min-width: 521px) {
-  .contextUsagePercentage {
-    display: inline;
+@supports (container-type: inline-size) {
+  @container (min-width: 521px) {
+    .contextUsagePercentage {
+      display: inline;
+    }
   }
 }
 
@@ -1828,15 +2235,6 @@
 }
 
 .widthModeBtn .toolBtnIcon svg {
-  width: 18px;
-  height: 18px;
-}
-
-.quickActionsBtn {
-  display: inline-flex;
-}
-
-.quickActionsBtn .toolBtnIcon svg {
   width: 18px;
   height: 18px;
 }
@@ -1886,121 +2284,6 @@
   display: block;
   width: 16px;
   height: 16px;
-}
-
-.quickActionsPanel {
-  display: block;
-  position: relative;
-  z-index: 2;
-  margin-top: 8px;
-  padding: 8px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 12px;
-  background: var(--background);
-  box-shadow: 0 8px 24px color-mix(in srgb, #000 12%, transparent);
-  cursor: default;
-}
-
-.quickActionsHeader {
-  padding: 6px 2px;
-  color: var(--chat-editor-text-dimmed);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.quickActionsLayout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(104px, 0.7fr);
-  gap: 7px;
-  align-items: stretch;
-}
-
-.quickActionsGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-rows: minmax(22px, auto);
-  gap: 3px;
-  padding-right: 6px;
-  border-right: 1px solid var(--chat-editor-border-color);
-}
-
-.quickAction {
-  display: flex;
-  min-width: 0;
-  min-height: 22px;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 5px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--chat-editor-text-primary);
-  font-family: var(--font-sans, system-ui, sans-serif);
-  text-align: center;
-  cursor: pointer;
-}
-
-.quickAction:hover,
-.quickAction:focus-visible {
-  background: var(--chat-editor-bg-tertiary);
-  outline: none;
-}
-
-.quickActionLabel {
-  display: -webkit-box;
-  overflow: hidden;
-  max-width: 100%;
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 10px;
-  line-height: 1.15;
-  text-overflow: ellipsis;
-  white-space: normal;
-  word-break: keep-all;
-  overflow-wrap: anywhere;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.quickKeysGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-  align-self: stretch;
-  gap: 4px;
-  height: 100%;
-  min-height: 100%;
-}
-
-.quickKey {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 4px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--chat-editor-text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1;
-  text-align: center;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.quickKeyLabel {
-  overflow: hidden;
-  max-width: 100%;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quickKey:hover,
-.quickKey:focus-visible {
-  background: var(--chat-editor-bg-tertiary);
-  outline: none;
 }
 
 .sendBtn {
@@ -2258,6 +2541,111 @@
   flex-wrap: wrap;
 }
 
+/* Two classes so this wins over `.fileChip`'s fixed width, which is declared
+   later in this file: a text card sizes to its own content. */
+.fileChip.fileChipText {
+  width: auto;
+  min-width: min(264px, 100%);
+  max-width: min(100%, 360px);
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fileChipIcon {
+  display: flex;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fileChipBody {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+}
+
+.fileChipTitle {
+  overflow: hidden;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipTitle:disabled {
+  cursor: default;
+}
+
+.fileChipTitle:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+.fileChipTitle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  /* The row is nowrap, so at the narrowest panes let the size drop to its own
+     line rather than escaping the card. */
+  flex-wrap: wrap;
+}
+
+.fileChipExpand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fileChipExpand:not(:disabled):hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
+.fileChipExpand:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipExpand:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .fileChip {
   position: relative;
   display: inline-flex;
@@ -2314,10 +2702,10 @@
   flex-direction: column;
   position: absolute;
   right: 0;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + 8px - var(--chat-editor-search-shift, 0px));
   left: 0;
   z-index: 20;
-  max-height: min(320px, 50vh);
+  max-height: min(320px, 50vh, var(--chat-editor-search-room, 320px));
   padding: 8px;
   border: 1px solid var(--chat-editor-border-color);
   border-radius: 12px;
@@ -2583,4 +2971,145 @@
   flex: 0 0 auto;
   margin-left: 8px;
   color: var(--muted-foreground);
+}
+
+.editorShell[data-web-shell-mobile-composer] .container {
+  --chat-editor-composer-cap: min(480px, 60dvh);
+  --chat-editor-max-height: var(--chat-editor-composer-cap);
+}
+
+/* The workspace/Git row lives inside the capped box; without its height added
+   back, a soft keyboard leaves the attachments strip almost no room. The
+   height is measured because the row wraps on narrow viewports, and the 8px
+   is the pull-up the editing row gives up below it. */
+.editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
+  --chat-editor-max-height: calc(
+    var(--chat-editor-composer-cap) +
+      var(--chat-editor-context-row-height, 44px) + 8px
+  );
+}
+
+.editorShell[data-web-shell-mobile-composer] .uploadRowAction,
+.editorShell[data-web-shell-mobile-composer] .toolBtn,
+.editorShell[data-web-shell-mobile-composer] .sendBtn,
+.editorShell[data-web-shell-mobile-composer] .toolbarRight button,
+.editorShell[data-web-shell-mobile-composer] .mobileContextRow button,
+.editorShell[data-web-shell-mobile-composer] .dropdownWrapperCompact {
+  min-width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbar,
+.editorShell[data-web-shell-mobile-composer] .toolbarLeft {
+  flex-wrap: wrap;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarLeading {
+  max-width: 100%;
+  margin-left: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarRight {
+  gap: 0;
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarLeft {
+  gap: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolBtn {
+  justify-content: center;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextUsageBtn {
+  padding: 0;
+}
+
+.mobileEditingActions,
+.mobileContextRow,
+.mobileExpandedHeader {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mobileContextRow {
+  min-width: 44px;
+  min-height: 44px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.mobileContextRow > *,
+.mobileContextRow [data-web-shell-git-branch] {
+  max-width: 100%;
+}
+
+.editorShell[data-web-shell-mobile-composer] .mobileContextRow button {
+  max-width: 100%;
+  flex-shrink: 1;
+}
+
+.mobileEditingActions {
+  flex-wrap: wrap;
+  margin-top: -8px;
+}
+
+.mobileEditingActions:has(.mobileContextRow) {
+  align-items: flex-start;
+  margin-top: 0;
+}
+
+.mobileEditingActions > button > svg {
+  width: 18px;
+  height: 18px;
+}
+
+.mobileEditingSpacer {
+  flex: 1;
+}
+
+.mobileExpandedEditor {
+  display: flex;
+  width: calc(100% - 16px);
+  max-width: 720px;
+  height: 85dvh;
+  max-height: 100%;
+  flex-direction: column;
+  padding: 12px;
+  gap: 8px;
+}
+
+.mobileExpandedHeader h2 {
+  flex: 1;
+}
+
+.mobileExpandedTextarea {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.editorShell[data-web-shell-mobile-composer] .uploadRowPreview {
+  min-height: 44px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .searchInput {
+  min-height: 44px;
+  font-size: 16px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .searchResult {
+  min-height: 44px;
 }

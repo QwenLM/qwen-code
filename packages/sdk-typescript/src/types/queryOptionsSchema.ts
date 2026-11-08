@@ -109,6 +109,8 @@ export const CLIMcpServerConfigSchema = z.object({
   // Common
   timeout: z.number().optional(),
   versionNegotiation: z.enum(['auto', 'legacy']).optional(),
+  appResourceMaxBytes: z.number().optional(),
+  appResourceTimeoutMs: z.number().optional(),
   trust: z.boolean().optional(),
   // Metadata
   description: z.string().optional(),
@@ -227,6 +229,7 @@ export const QueryOptionsSchema = z
         'openai-responses',
         'anthropic',
         'qwen-oauth',
+        'qwen-subscription',
         'gemini',
         'vertex-ai',
       ])
@@ -250,6 +253,7 @@ export const QueryOptionsSchema = z
       )
       .optional(),
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    workflowMode: z.boolean().optional(),
     includePartialMessages: z.boolean().optional(),
     continue: z.boolean().optional(),
     resume: z.string().optional(),

@@ -54,7 +54,7 @@ qwen extensions install <marketplace-name>:<plugin-name>
 qwen extensions install <marketplace-github-url>:<plugin-name>
 ```
 
-For example, to install the `prompts.chat` plugin from the [f/awesome-chatgpt-prompts](https://claudemarketplaces.com/plugins/f-awesome-chatgpt-prompts) marketplace:
+For example, to install the `prompts.chat` plugin from the [f/awesome-chatgpt-prompts](https://claudemarketplaces.com/plugins/f-prompts.chat) marketplace:
 
 ```bash
 qwen extensions install f/awesome-chatgpt-prompts:prompts.chat
@@ -101,7 +101,7 @@ Gemini extensions are automatically converted to Qwen Code format during install
 
 #### From Qoder Plugins
 
-Qwen Code supports [Qoder plugins](https://docs.qoder.com/en/cli/sdk/plugins) that contain a `.qoder-plugin/plugin.json` manifest. Install a local directory, archive, Git repository, archive URL, or scoped npm package with the existing `qwen extensions install` command:
+Qwen Code supports [Qoder plugins](https://docs.qoder.com/en/cli/sdk/plugins) that contain a `.qoder-plugin/plugin.json` manifest. Install a local directory, archive, Git repository, archive URL, or npm package with the existing `qwen extensions install` command:
 
 ```bash
 qwen extensions install ./sample-qoder-plugin
@@ -127,25 +127,28 @@ The portable runtime supports Agent Skills plus stdio and Streamable HTTP MCP se
 
 #### From npm Registry
 
-Qwen Code supports installing extensions from npm registries using scoped package names. This is ideal for teams with private registries that already have auth, versioning, and publishing infrastructure in place.
+Qwen Code supports installing extensions from npm registries using scoped or unscoped package names. This is ideal for teams with private registries that already have auth, versioning, and publishing infrastructure in place.
 
 ```bash
 # Install the latest version
 qwen extensions install @scope/my-extension
 
+# Install an unscoped package
+qwen extensions install my-extension
+
 # Install a specific version
-qwen extensions install @scope/my-extension@1.2.0
+qwen extensions install my-extension@1.2.0
 
 # Install from a custom registry
 qwen extensions install @scope/my-extension --registry https://your-registry.com
 ```
 
-Only scoped packages (`@scope/package-name`) are supported to avoid ambiguity with the `owner/repo` GitHub shorthand format.
+Both `package-name` and `@scope/package-name` are supported, with optional `@version` or `@tag` suffixes. Existing local files and directories take precedence; use an explicit path such as `./my-extension` when a local source is intended. The `owner/repo` form remains a GitHub shorthand.
 
 **Registry resolution** follows this priority:
 
 1. `--registry` CLI flag (explicit override)
-2. Scoped registry from `.npmrc` (e.g. `@scope:registry=https://...`)
+2. Scoped registry from `.npmrc` (scoped packages only, e.g. `@scope:registry=https://...`)
 3. Default registry from `.npmrc`
 4. Fallback: `https://registry.npmjs.org/`
 
@@ -430,6 +433,8 @@ export const meta = {
 Only a workflow that declares `whenToUse` is listed for the model, together with its description, so the model can start it when a request matches; each run still goes through the workflow approval. Without it, the model does not see the workflow, which then runs when you invoke it, ask for it by name, or another workflow calls it. `whenToUse` is shortened past 500 characters, like `description`, and since it lives in the script, changing it makes the next update ask for consent again.
 
 In the interactive UI, `/gcp:deep-research` starts the workflow directly. In headless mode and over ACP, the same command asks the model to run it by name, and the approval follows.
+
+To let the model start your extension's workflows without letting it write and run scripts of its own, deploy with [`tools.workflowNameOnly`](../configuration/settings.md) (or `QWEN_CODE_WORKFLOW_NAME_ONLY=1`) and allow the workflows by name, for example `Workflow(name:gcp:deep-research)`. The lock makes every run the model starts addressable by such a rule; it does not approve anything by itself, so keep asking for names you have not allowed.
 
 Discovery is deliberately narrow:
 

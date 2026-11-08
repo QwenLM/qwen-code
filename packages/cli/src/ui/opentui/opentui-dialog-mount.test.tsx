@@ -15,6 +15,9 @@
  *  - the callbacks the mount hands a dialog do the real thing — persist through
  *    the data helpers, reach the composer owner, or report a seam this shell
  *    does not wire rather than closing over a no-op;
+ *  - a dialog outcome ink writes to the transcript reaches both the transcript
+ *    and the chat recording, while one ink keeps transient stays on the shell's
+ *    notice slot;
  *  - the help request routes to HelpOverlay and drives tab/scroll keys through
  *    the mount's own useKeyboard handler;
  *  - an unknown dialog kind hits the never-default and throws.
@@ -26,9 +29,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
+import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { AppEvent } from '../../utils/events.js';
 import {
   addWorkspaceDirectory,
+  applyExtensionUpdate,
+  applyExtensionUpdateCheck,
   applyModelSelection,
+  applyMcpServerAction,
+  applyThemeSelection,
   removeWorkspaceDirectory,
 } from './dialog-data.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
@@ -42,8 +51,6 @@ const mocks = vi.hoisted(() => {
     dialogProps: {} as Record<string, Record<string, unknown>>,
     /** Line count the stubbed help-content builders report, to pin the scroll bound. */
     helpLineCount: 0,
-    /** Terminal height the mocked renderer reports, to pin the help body budget. */
-    terminalHeight: 40,
   };
   // Renders the dialog-name marker but keeps the props the mount passed, so
   // wiring (callbacks, data builders) stays observable from these tests.
@@ -87,10 +94,7 @@ vi.mock('@opentui/react', () => ({
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.keyboardHandlers.push(handler);
   },
-  useTerminalDimensions: () => ({
-    width: 120,
-    height: mocks.state.terminalHeight,
-  }),
+  useTerminalDimensions: () => ({ width: 120, height: 40 }),
   useRenderer: () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
@@ -142,7 +146,7 @@ vi.mock('./dialog-data.js', () => ({
   removeWorkspaceDirectory: vi.fn(),
   buildMcpServers: () => [],
   enrichMcpOAuthState: async () => [],
-  applyMcpServerAction: async () => ({ message: null, changed: false }),
+  applyMcpServerAction: vi.fn(async () => ({ message: null, changed: false })),
   getMcpServerTools: () => [],
   getMcpServerResources: () => [],
   buildExtensionRows: () => [],
@@ -150,12 +154,12 @@ vi.mock('./dialog-data.js', () => ({
   applyExtensionFavorite: () => {},
   applyExtensionUninstall: async () => {},
   applyExtensionScopeChange: async () => {},
-  applyExtensionUpdate: async () => {},
-  applyExtensionUpdateCheck: async () => null,
+  applyExtensionUpdate: vi.fn(async () => {}),
+  applyExtensionUpdateCheck: vi.fn(async () => null),
   buildModelEntries: () => [],
   computeModelDialogInitialKey: () => undefined,
   applyModelSelection: vi.fn(async () => ({ ok: true as const })),
-  applyThemeSelection: () => ({ applied: undefined, error: undefined }),
+  applyThemeSelection: vi.fn(() => ({ applied: undefined, error: undefined })),
 }));
 
 vi.mock('./help-overlay.js', () => ({ HelpOverlay: mocks.stub('help') }));
@@ -183,6 +187,8 @@ vi.mock('./dialogs-arena.js', () => ({
 }));
 vi.mock('./dialogs-memory-status.js', () => ({
   OpenTuiMemoryDialog: mocks.stub('memory'),
+}));
+vi.mock('./dialogs-statusline.js', () => ({
   OpenTuiStatusLineDialog: mocks.stub('statusline'),
 }));
 vi.mock('./dialogs-modes.js', () => ({
@@ -197,18 +203,30 @@ vi.mock('./dialogs-stats-skills.js', () => ({
 vi.mock('./dialogs-hooks.js', () => ({
   OpenTuiHooksDialog: mocks.stub('hooks'),
 }));
+vi.mock('./session-rewind.js', () => ({
+  OpentuiRewindSelector: mocks.stub('rewind'),
+}));
 vi.mock('./dialogs-misc.js', () => ({
   OpenTuiDeleteDialog: mocks.stub('delete'),
   OpenTuiDiffDialog: mocks.stub('diff'),
   OpenTuiEditorDialog: mocks.stub('editor'),
   OpenTuiResumeDialog: mocks.stub('resume'),
-  OpenTuiRewindDialog: mocks.stub('rewind'),
   OpenTuiSubagentCreateDialog: mocks.stub('subagent_create'),
   OpenTuiSubagentListDialog: mocks.stub('subagent_list'),
   OpenTuiTrustDialog: mocks.stub('trust'),
 }));
 
-const CONFIG = { getModel: () => 'fake-model' } as unknown as Config;
+const mockGetHookSystem = vi.fn<Config['getHookSystem']>();
+const recordSlashCommand = vi.fn();
+const CONFIG = {
+  getTargetDir: () => '/owned/workspace',
+  getSessionId: () => 'owned-session',
+  getExtensionManager: () => undefined,
+  getModel: () => 'fake-model',
+  getFileCheckpointingEnabled: () => true,
+  getHookSystem: mockGetHookSystem,
+  getChatRecordingService: () => ({ recordSlashCommand }),
+} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const addItem = vi.fn();
 const HOST = {
@@ -223,6 +241,8 @@ function mount(
     onClose?: () => void;
     fillInput?: (text: string) => void;
     onSelectSetting?: (name: string, scope: unknown) => void;
+    onRestartRequest?: () => void;
+    availableTerminalHeight?: number;
   } = {},
 ) {
   return render(
@@ -236,6 +256,8 @@ function mount(
       notify={overrides.notify ?? (() => {})}
       fillInput={overrides.fillInput}
       onSelectSetting={overrides.onSelectSetting}
+      onRestartRequest={overrides.onRestartRequest}
+      availableTerminalHeight={overrides.availableTerminalHeight ?? 35}
     />,
   );
 }
@@ -293,13 +315,85 @@ const REQUESTS: Array<[string, OpenTuiDialogRequest]> = [
 ];
 
 describe('OpenTuiDialogMount routing', () => {
+  it('preserves subscription success metadata in history', () => {
+    const ui = mount({ dialog: 'auth' });
+    dialogProp('auth', 'notify')('new member login', 'subscription-success');
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'new member login',
+        presentation: 'subscription-success',
+      }),
+      expect.any(Number),
+    );
+    ui.unmount();
+  });
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.dialogProps = {};
     mocks.state.helpLineCount = 0;
-    mocks.state.terminalHeight = 40;
     vi.clearAllMocks();
+    mockGetHookSystem.mockReset();
   });
+
+  it.each([
+    'update-available',
+    'up-to-date',
+    'not-updatable',
+    'error',
+  ] as const)('returns the extension update check state: %s', async (state) => {
+    const message = `Update check result: ${state}`;
+    vi.mocked(applyExtensionUpdateCheck).mockResolvedValueOnce({
+      message,
+      state,
+    });
+    mount({ dialog: 'extensions_manage' });
+    let result: unknown;
+    await act(async () => {
+      result = await dialogProp('extensions_manage', 'onDetailAction')(
+        { key: 'owned-extension' },
+        'mark-update',
+      );
+    });
+    expect(applyExtensionUpdateCheck).toHaveBeenCalledWith(
+      CONFIG,
+      'owned-extension',
+    );
+    expect(result).toBe(state);
+    expect(mocks.state.dialogProps['extensions_manage']['status']).toEqual({
+      type: state === 'error' ? 'error' : 'info',
+      text: message,
+    });
+    expect(mocks.state.dialogProps['extensions_manage']['busy']).toBe(false);
+  });
+
+  it.each([true, false])(
+    'settles an extension update with changed=%s',
+    async (changed) => {
+      vi.mocked(applyExtensionUpdate).mockResolvedValueOnce({
+        message: 'Update result',
+        changed,
+        level: changed ? 'success' : 'error',
+      });
+      mount({ dialog: 'extensions_manage' });
+      let state: unknown;
+      await act(async () => {
+        state = await dialogProp('extensions_manage', 'onDetailAction')(
+          { key: 'owned-extension' },
+          'update',
+        );
+      });
+      expect(applyExtensionUpdate).toHaveBeenCalledWith(
+        CONFIG,
+        'owned-extension',
+      );
+      expect(state).toBe(changed ? 'up-to-date' : undefined);
+      expect(mocks.state.dialogProps['extensions_manage']['busy']).toBe(false);
+      expect(mocks.state.dialogProps['extensions_manage']['status']).toEqual({
+        type: changed ? 'success' : 'error',
+        text: 'Update result',
+      });
+    },
+  );
 
   it('routes every dialog request to its own component', () => {
     expect(REQUESTS).toHaveLength(25);
@@ -309,6 +403,75 @@ describe('OpenTuiDialogMount routing', () => {
       unmount();
     }
   });
+
+  it('hands the region height to the approval-mode dialog, as it does for theme/settings/model', () => {
+    // The approval-mode dialog windows its list from this budget; without the
+    // forwarding its five rows never window and overflow the region.
+    mount(
+      { dialog: 'approval-mode' },
+      { notify: () => {}, availableTerminalHeight: 20 },
+    );
+    expect(
+      mocks.state.dialogProps['approval-mode']?.['availableTerminalHeight'],
+    ).toBe(20);
+  });
+
+  it('hands the region height to the settings dialog, which windows its list from it', () => {
+    // The settings list windows to the region it is handed; without the
+    // forwarding it silently reverts to the flat eight-row window and
+    // overpaints the frame on a short terminal.
+    mount({ dialog: 'settings' }, { availableTerminalHeight: 20 });
+    expect(
+      mocks.state.dialogProps['settings']?.['availableTerminalHeight'],
+    ).toBe(20);
+  });
+
+  it('forwards settings restart requests to the shell owner', () => {
+    const onRestartRequest = vi.fn();
+    mount({ dialog: 'settings' }, { onRestartRequest });
+
+    dialogProp('settings', 'onRestartRequest')();
+
+    expect(onRestartRequest).toHaveBeenCalledOnce();
+  });
+
+  it('hands the region height to every region-mounted dialog leg', () => {
+    // The budget is a property of the region, not of the legs that window:
+    // the legs that window a list size themselves from it (the permission
+    // rule and directory lists, the delete/resume session picker, the diff
+    // and subagents scrollboxes, the hooks and extension lists, the MCP tool
+    // and resource lists, the arena pickers, the theme/effort/output-style
+    // lists) and the rest ignore it. A leg left unforwarded renders
+    // content-height inside the fixed, clipped region, where the clip takes
+    // rows the keys still commit.
+    for (const [dialog, request] of REQUESTS) {
+      // The help overlay's budget arrives as its derived bodyRows.
+      if (dialog === 'help') continue;
+      const { unmount } = mount(request, { availableTerminalHeight: 23 });
+      expect(
+        mocks.state.dialogProps[dialog]?.['availableTerminalHeight'],
+        `mount did not forward the region budget to ${dialog}`,
+      ).toBe(23);
+      unmount();
+    }
+  });
+
+  it.each([true, false])(
+    'gates the hooks reload notice on hook system availability: %s',
+    (available) => {
+      mockGetHookSystem.mockReturnValue(
+        available ? ({} as ReturnType<Config['getHookSystem']>) : undefined,
+      );
+
+      mount({ dialog: 'hooks' });
+
+      expect(mocks.state.dialogProps['hooks']?.['notice']).toBe(
+        available
+          ? 'Reopen this menu to reload hook definitions.\nHook controls and HTTP security settings require a restart.'
+          : undefined,
+      );
+    },
+  );
 
   it('persists working-directory changes made in the permissions dialog', () => {
     mount({ dialog: 'permissions' });
@@ -371,7 +534,7 @@ describe('OpenTuiDialogMount routing', () => {
   it('drives help tab cycling and scrolling through its own keyboard handler', () => {
     // 23 lines over the 18-row window leave five offsets that actually move it.
     mocks.state.helpLineCount = 23;
-    mount({ dialog: 'help' });
+    mount({ dialog: 'help' }, { availableTerminalHeight: 31 });
     expect(mocks.state.keyboardHandlers.length).toBeGreaterThan(0);
     const send = (name: string, shift = false) => {
       act(() => {
@@ -384,7 +547,7 @@ describe('OpenTuiDialogMount routing', () => {
     // The overlay gets the popup area, not the raw terminal: the 120 columns
     // this renderer reports cap at 100, the width ink hands its Help dialog.
     expect(overlay().width).toBe(100);
-    expect(overlay().bodyRows).toBe(34);
+    expect(overlay().bodyRows).toBe(25);
     expect(overlay().tab).toBe('general');
     // The general tab has no scrollable window, so the arrow keys are inert.
     send('down');
@@ -409,12 +572,11 @@ describe('OpenTuiDialogMount routing', () => {
   });
 
   it('pages the help command list by the window a short terminal leaves', () => {
-    // The same 23 lines, but a 24-row terminal budgets 18 body rows and the tab
+    // The same 23 lines, but a 24-row region budgets 18 body rows and the tab
     // chrome claims four of them: the window narrows to 14, so a page covers 14
     // lines and stops at nine rather than the five offsets a roomy terminal has.
     mocks.state.helpLineCount = 23;
-    mocks.state.terminalHeight = 24;
-    mount({ dialog: 'help' });
+    mount({ dialog: 'help' }, { availableTerminalHeight: 24 });
     const send = (name: string) => {
       act(() => {
         for (const handler of mocks.state.keyboardHandlers)
@@ -431,6 +593,17 @@ describe('OpenTuiDialogMount routing', () => {
     expect(helpOverlay().scroll).toBe(0);
   });
 
+  it('budgets the help overlay from the region, not the raw terminal height', () => {
+    // The overlay renders inside the popup region, whose budget already accounts
+    // for the banner, the status bar and the composer — none of them occupied
+    // while it is open. Deriving the body from the raw terminal height instead
+    // leaves those rows unused inside the region and windows the command list
+    // short of ink's fixed 18.
+    mocks.state.helpLineCount = 23;
+    mount({ dialog: 'help' }, { availableTerminalHeight: 19 });
+    expect(helpOverlay().bodyRows).toBe(13);
+  });
+
   it('closes the help overlay on escape', () => {
     const onClose = vi.fn();
     render(
@@ -442,6 +615,7 @@ describe('OpenTuiDialogMount routing', () => {
         commands={[]}
         onClose={onClose}
         notify={() => {}}
+        availableTerminalHeight={19}
       />,
     );
     act(() => {
@@ -461,6 +635,15 @@ describe('OpenTuiDialogMount routing', () => {
     expect(addItem.mock.calls[0]![0]).toMatchObject({
       text: expect.stringContaining('Kept model as'),
     });
+    // ink ModelDialog records the row it adds, so a resumed session replays it.
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'info', text: expect.stringContaining('Kept model as') },
+      ],
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -477,11 +660,17 @@ describe('OpenTuiDialogMount routing', () => {
     dialogProp('model', 'onSelect')('fake-model');
     dialogProp('model', 'onClose')();
     expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     await act(async () => {
       settle({ ok: true, message: 'Model set to fake-model' });
     });
     expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [{ type: 'info', text: 'Model set to fake-model' }],
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -508,11 +697,328 @@ describe('OpenTuiDialogMount routing', () => {
     select('fake-model');
     expect(applyModelSelection).toHaveBeenCalledTimes(1);
     expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('records nothing for a pick that fails to apply', async () => {
+    vi.mocked(applyModelSelection).mockImplementationOnce(async () => ({
+      ok: false,
+      error: 'Selected model is unavailable.',
+    }));
+    const onClose = vi.fn();
+    mount({ dialog: 'model', mode: 'primary' }, { onClose });
+    dialogProp('model', 'onSelect')('fake-model');
+    await act(async () => {});
+    // ink keeps the dialog open with the error: a row here would let a resume
+    // replay a switch that never landed.
+    expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // ink's split, ported: the outcomes it writes to the transcript must survive
+  // the dialog closing, and the commands it records must replay on resume.
+  const persistedOutcomes: Array<{
+    request: OpenTuiDialogRequest;
+    args: string[];
+    rawCommand: string | null;
+    type: string;
+  }> = [
+    {
+      request: { dialog: 'editor' },
+      args: ['Editor set to vim.'],
+      rawCommand: '/editor',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'effort' },
+      args: ['Reasoning effort: high (requested; clamped per model).'],
+      rawCommand: '/effort',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'output-style' },
+      args: ['Failed to set "general.outputStyle": disk full', 'error'],
+      rawCommand: '/output-style',
+      type: 'error',
+    },
+    {
+      // /delete is in SLASH_COMMANDS_SKIP_RECORDING: added, not recorded.
+      request: { dialog: 'delete' },
+      args: ['Failed to delete session.', 'error'],
+      rawCommand: null,
+      type: 'error',
+    },
+    {
+      request: { dialog: 'auth', openedViaCommand: true },
+      args: ['Authenticated with Qwen OAuth.'],
+      rawCommand: '/auth',
+      type: 'info',
+    },
+    {
+      // The boot auth-error open is not a command, so ink records nothing.
+      request: { dialog: 'auth', initialError: 'Token expired.' },
+      args: ['Authenticated with Qwen OAuth.'],
+      rawCommand: null,
+      type: 'info',
+    },
+    {
+      request: { dialog: 'arena', mode: 'select' },
+      args: ['Arena session started.'],
+      rawCommand: '/arena select',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'arena', mode: 'stop' },
+      args: ['No arena session is running.', 'error'],
+      rawCommand: '/arena stop',
+      type: 'error',
+    },
+  ];
+
+  it.each(persistedOutcomes)(
+    '%# writes the outcome ink persists for $request.dialog',
+    ({ request, args, rawCommand, type }) => {
+      mount(request);
+      dialogProp(request.dialog, 'notify')(...args);
+
+      const text = args[0]!;
+      expect(addItem).toHaveBeenCalledTimes(1);
+      expect(addItem.mock.calls[0]![0]).toEqual({ type, text });
+      if (rawCommand) {
+        expect(recordSlashCommand).toHaveBeenCalledWith({
+          phase: 'result',
+          rawCommand,
+          outputHistoryItems: [{ type, text }],
+        });
+      } else {
+        expect(recordSlashCommand).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('keeps the theme, mcp and arena-start outcomes off the transcript', async () => {
+    const notices: string[] = [];
+    const notify = (text: string) => notices.push(text);
+
+    // ink reports these inside the dialog or through addItem-free paths, so a
+    // transcript row here would outlive state the user can still change.
+    vi.mocked(applyThemeSelection).mockReturnValueOnce({
+      applied: 'Ayu',
+      error: undefined,
+    });
+    const theme = mount({ dialog: 'theme' }, { notify });
+    dialogProp('theme', 'onSelect')('Ayu', 'user');
+    theme.unmount();
+
+    vi.mocked(applyMcpServerAction).mockResolvedValueOnce({
+      message: 'Auth started.',
+      changed: false,
+    });
+    const mcp = mount({ dialog: 'mcp' }, { notify });
+    await act(async () => {
+      dialogProp('mcp', 'onServerAction')({ name: 'srv' }, 'auth');
+    });
+    mcp.unmount();
+
+    const arena = mount({ dialog: 'arena', mode: 'start' }, { notify });
+    dialogProp('arena', 'notify')('The arena session is already running.');
+    arena.unmount();
+
+    expect(notices).toEqual([
+      'Theme set to Ayu.',
+      'Auth started.',
+      'The arena session is already running.',
+    ]);
+    expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([true, undefined])(
+    'passes the auth command origin %s to the dialog',
+    (openedViaCommand) => {
+      mount({ dialog: 'auth', openedViaCommand });
+      expect(mocks.state.dialogProps['auth']?.['openedViaCommand']).toBe(
+        openedViaCommand,
+      );
+    },
+  );
 
   it('throws for an unhandled dialog kind', () => {
     const bad = { dialog: 'nope' } as unknown as OpenTuiDialogRequest;
     expect(() => mount(bad)).toThrow(/Unhandled OpenTUI dialog request/);
   });
+});
+
+describe('extension catalog shared refresh lifecycle', () => {
+  function heldRefresh() {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function refreshOwnerHarness() {
+    const state = new ExtensionRefreshState();
+    const needed = vi.fn();
+    const content = vi.fn();
+    state.on(AppEvent.ExtensionRefreshNeeded, needed);
+    state.on(AppEvent.ExtensionContentChanged, content);
+    let cwd = '/owned/refresh-a';
+    const refreshCache = vi.fn<() => Promise<void>>();
+    const refreshTools = vi.fn(async () => {});
+    const manager = { refreshCache, refreshTools };
+    const config = {
+      ...CONFIG,
+      getTargetDir: () => cwd,
+      getExtensionManager: () => manager,
+      isSafeMode: () => false,
+      getActiveExtensions: () => [],
+    } as unknown as Config;
+    const reloadCommands = vi.fn(async () => {});
+    const host = { ...HOST, reloadCommands } as unknown as OpenTuiAppHost;
+    const request: OpenTuiDialogRequest = { dialog: 'extensions_manage' };
+    const element = () => (
+      <OpenTuiDialogMount
+        request={request}
+        host={host}
+        config={config}
+        settings={SETTINGS}
+        commands={[]}
+        extensionRefreshState={state}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={35}
+      />
+    );
+    const view = render(element());
+    const reload = () => {
+      const catalog = mocks.state.dialogProps['extensions_manage'][
+        'catalog'
+      ] as {
+        reload: () => Promise<void>;
+        isCurrent: () => boolean;
+      };
+      expect(catalog.isCurrent()).toBe(true);
+      return catalog.reload;
+    };
+    const replace = (kind: 'unmount' | 'cwd') => {
+      if (kind === 'unmount') {
+        view.unmount();
+        return render(element());
+      }
+      cwd = '/owned/refresh-b';
+      view.rerender(element());
+      return view;
+    };
+    return {
+      state,
+      needed,
+      content,
+      refreshCache,
+      refreshTools,
+      reloadCommands,
+      view,
+      reload,
+      replace,
+      invalidate: (kind: 'unmount' | 'cwd') => {
+        if (kind === 'unmount') view.unmount();
+        else {
+          cwd = '/owned/refresh-b';
+          view.rerender(element());
+        }
+      },
+    };
+  }
+
+  it.each(['unmount', 'cwd'] as const)(
+    'settles shared refresh after the only reload owner is invalidated by %s',
+    async (kind) => {
+      const h = refreshOwnerHarness();
+      const gate = heldRefresh();
+      h.refreshCache.mockImplementationOnce(() => gate.promise);
+      let settled!: Promise<unknown>;
+      act(() => {
+        settled = h
+          .reload()()
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+      });
+      expect(h.refreshCache).toHaveBeenCalledTimes(1);
+      expect(h.state.isReloadInProgress()).toBe(true);
+      act(() => h.invalidate(kind));
+      await act(async () => {
+        gate.resolve();
+        await settled;
+      });
+      expect(await settled).toBeInstanceOf(Error);
+      expect(h.reloadCommands).not.toHaveBeenCalled();
+      expect(h.state.isReloadInProgress()).toBe(false);
+      expect(h.state.needsExtensionRefresh()).toBe(true);
+      expect(h.needed).toHaveBeenCalled();
+      h.state.clearExtensionsChanged();
+      expect(h.state.markExtensionContentChanged('later actual content')).toBe(
+        true,
+      );
+      expect(h.content).toHaveBeenCalledWith('later actual content');
+    },
+  );
+
+  it.each(['unmount', 'cwd'] as const)(
+    'does not let old owner late failure settle the successor reload after %s',
+    async (kind) => {
+      const h = refreshOwnerHarness();
+      const a = heldRefresh();
+      const b = heldRefresh();
+      h.refreshCache
+        .mockImplementationOnce(() => a.promise)
+        .mockImplementationOnce(() => b.promise);
+      let old!: Promise<unknown>;
+      act(() => {
+        old = h
+          .reload()()
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+      });
+      expect(h.state.isReloadInProgress()).toBe(true);
+      let successor!: ReturnType<typeof render>;
+      act(() => {
+        successor = h.replace(kind);
+      });
+      let next!: Promise<void>;
+      act(() => {
+        next = h.reload()();
+      });
+      expect(h.refreshCache).toHaveBeenCalledTimes(2);
+      expect(h.state.isReloadInProgress()).toBe(true);
+      const neededBeforeOldFailure = h.needed.mock.calls.length;
+      await act(async () => {
+        a.reject(new Error('old refresh failure'));
+        await old;
+      });
+      expect(await old).toBeInstanceOf(Error);
+      expect(h.state.isReloadInProgress()).toBe(true);
+      expect(h.needed).toHaveBeenCalledTimes(neededBeforeOldFailure);
+      expect(h.reloadCommands).not.toHaveBeenCalled();
+      await act(async () => {
+        b.resolve();
+        await next;
+      });
+      expect(h.state.isReloadInProgress()).toBe(false);
+      expect(h.reloadCommands).toHaveBeenCalledTimes(1);
+      expect(h.state.needsExtensionRefresh()).toBe(false);
+      expect(h.state.markExtensionsChanged('new owner change')).toBe(true);
+      expect(h.needed).toHaveBeenCalledTimes(neededBeforeOldFailure + 1);
+      expect(h.needed).toHaveBeenLastCalledWith('new owner change');
+      successor.unmount();
+    },
+  );
 });

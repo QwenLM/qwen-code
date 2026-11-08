@@ -95,7 +95,30 @@ describe('ITermBackend', () => {
     }
   });
 
-  // ─── Initialization ─────────────────────────────────────────
+  /** init(), then spawn each agent; `[id, sessionId]` queues split's result. */
+  async function start(...agents: Array<string | [string, string]>) {
+    await backend.init();
+    for (const agent of agents) {
+      const [id, sessionId] = typeof agent === 'string' ? [agent] : agent;
+      if (sessionId) hoistedItermSplitPane.mockResolvedValueOnce(sessionId);
+      await backend.spawnAgent(makeConfig(id));
+    }
+  }
+  function onExit() {
+    const exitCallback = vi.fn();
+    backend.setOnAgentExit(exitCallback);
+    return exitCallback;
+  }
+  const runCommandArg = () =>
+    hoistedItermRunCommand.mock.calls[0]![1] as string;
+  /** Spawns 'a', then makes its exit marker read `marker` and polls once. */
+  async function exitWithMarker(marker: string) {
+    await start('a');
+    const exitCallback = onExit();
+    hoistedFsReadFile.mockResolvedValue(marker);
+    await vi.advanceTimersByTimeAsync(600);
+    return exitCallback;
+  }
 
   it('throws if spawnAgent is called before init', async () => {
     await expect(backend.spawnAgent(makeConfig('a1'))).rejects.toThrow(
@@ -122,14 +145,10 @@ describe('ITermBackend', () => {
     expect(hoistedVerifyITerm).toHaveBeenCalledTimes(1);
   });
 
-  // ─── Spawning ─────────────────────────────────────────────
-
   it('spawns first agent using ITERM_SESSION_ID when set', async () => {
     process.env['ITERM_SESSION_ID'] = 'leader-sess';
     backend = new ITermBackend();
-    await backend.init();
-
-    await backend.spawnAgent(makeConfig('agent-1'));
+    await start('agent-1');
 
     expect(hoistedItermSplitPane).toHaveBeenCalledWith('leader-sess');
     expect(hoistedItermRunCommand).toHaveBeenCalledWith(
@@ -140,29 +159,21 @@ describe('ITermBackend', () => {
   });
 
   it('spawns first agent without ITERM_SESSION_ID', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('agent-1'));
+    await start('agent-1');
 
     expect(hoistedItermSplitPane).toHaveBeenCalledWith(undefined);
     expect(backend.getActiveAgentId()).toBe('agent-1');
   });
 
   it('spawns subsequent agent from last session', async () => {
-    await backend.init();
-
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('agent-1'));
-
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-2');
-    await backend.spawnAgent(makeConfig('agent-2'));
+    await start(['agent-1', 'sess-1'], ['agent-2', 'sess-2']);
 
     // Second split should use the first agent's session as source
     expect(hoistedItermSplitPane).toHaveBeenLastCalledWith('sess-1');
   });
 
   it('rejects duplicate agent IDs', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('dup'));
+    await start('dup');
 
     await expect(backend.spawnAgent(makeConfig('dup'))).rejects.toThrow(
       'already exists',
@@ -172,9 +183,7 @@ describe('ITermBackend', () => {
   it('registers failed agent and fires exit callback on spawn error', async () => {
     await backend.init();
     hoistedItermSplitPane.mockRejectedValueOnce(new Error('split failed'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
+    const exitCallback = onExit();
 
     await backend.spawnAgent(makeConfig('fail'));
 
@@ -183,19 +192,14 @@ describe('ITermBackend', () => {
 
   // ─── buildShellCommand (env key validation) ────────────────
 
-  it('rejects invalid environment variable names', async () => {
+  it.each([
+    ['rejects invalid environment variable names', 'FOO BAR'],
+    ['rejects env key starting with a digit', '1VAR'],
+  ])('%s', async (_title, key) => {
     await backend.init();
 
     await expect(
-      backend.spawnAgent(makeConfig('bad-env', { env: { 'FOO BAR': 'baz' } })),
-    ).rejects.toThrow('Invalid environment variable name');
-  });
-
-  it('rejects env key starting with a digit', async () => {
-    await backend.init();
-
-    await expect(
-      backend.spawnAgent(makeConfig('bad-env', { env: { '1VAR': 'baz' } })),
+      backend.spawnAgent(makeConfig('bad-env', { env: { [key]: 'baz' } })),
     ).rejects.toThrow('Invalid environment variable name');
   });
 
@@ -214,19 +218,16 @@ describe('ITermBackend', () => {
   // ─── buildShellCommand (atomic marker write) ──────────────
 
   it('builds command with atomic exit marker write', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
+    await start('a');
 
-    const cmdArg = hoistedItermRunCommand.mock.calls[0]![1] as string;
     // Should contain write-then-rename pattern
-    expect(cmdArg).toMatch(/echo \$\? > .+\.tmp.+ && mv .+\.tmp/);
+    expect(runCommandArg()).toMatch(/echo \$\? > .+\.tmp.+ && mv .+\.tmp/);
   });
 
   it('builds command with cd and quoted args', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
+    await start('a');
 
-    const cmdArg = hoistedItermRunCommand.mock.calls[0]![1] as string;
+    const cmdArg = runCommandArg();
     expect(cmdArg).toContain("cd '/tmp/test'");
     expect(cmdArg).toContain("'/usr/bin/node'");
     expect(cmdArg).toContain("'agent.js'");
@@ -236,20 +237,13 @@ describe('ITermBackend', () => {
     await backend.init();
     await backend.spawnAgent(makeConfig('a', { env: { NODE_ENV: 'test' } }));
 
-    const cmdArg = hoistedItermRunCommand.mock.calls[0]![1] as string;
+    const cmdArg = runCommandArg();
     expect(cmdArg).toContain("NODE_ENV='test'");
     expect(cmdArg).toContain('env ');
   });
 
-  // ─── Navigation ───────────────────────────────────────────
-
   it('switchTo changes active agent and focuses session', async () => {
-    await backend.init();
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
-
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-2');
-    await backend.spawnAgent(makeConfig('b'));
+    await start(['a', 'sess-1'], ['b', 'sess-2']);
 
     backend.switchTo('b');
     expect(backend.getActiveAgentId()).toBe('b');
@@ -262,13 +256,7 @@ describe('ITermBackend', () => {
   });
 
   it('switchToNext and switchToPrevious cycle correctly', async () => {
-    await backend.init();
-
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
-
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-2');
-    await backend.spawnAgent(makeConfig('b'));
+    await start(['a', 'sess-1'], ['b', 'sess-2']);
 
     expect(backend.getActiveAgentId()).toBe('a');
     backend.switchToNext();
@@ -280,28 +268,20 @@ describe('ITermBackend', () => {
   });
 
   it('switchToNext does nothing with a single agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('solo'));
+    await start('solo');
     backend.switchToNext();
     expect(backend.getActiveAgentId()).toBe('solo');
   });
 
   it('switchToPrevious does nothing with a single agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('solo'));
+    await start('solo');
     backend.switchToPrevious();
     expect(backend.getActiveAgentId()).toBe('solo');
   });
 
-  // ─── Stop & Cleanup ──────────────────────────────────────
-
   it('stopAgent closes session and fires exit callback', async () => {
-    await backend.init();
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
+    await start(['a', 'sess-1']);
+    const exitCallback = onExit();
 
     backend.stopAgent('a');
 
@@ -310,8 +290,7 @@ describe('ITermBackend', () => {
   });
 
   it('stopAgent is a no-op for already-stopped agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
+    await start('a');
     backend.stopAgent('a');
     hoistedItermCloseSession.mockClear();
 
@@ -326,15 +305,8 @@ describe('ITermBackend', () => {
   });
 
   it('stopAll closes all sessions and resets activeAgentId', async () => {
-    await backend.init();
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
-
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-2');
-    await backend.spawnAgent(makeConfig('b'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
+    await start(['a', 'sess-1'], ['b', 'sess-2']);
+    const exitCallback = onExit();
 
     backend.stopAll();
 
@@ -344,9 +316,7 @@ describe('ITermBackend', () => {
   });
 
   it('cleanup closes sessions and removes exit marker directory', async () => {
-    await backend.init();
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
+    await start(['a', 'sess-1']);
 
     await backend.cleanup();
 
@@ -359,13 +329,9 @@ describe('ITermBackend', () => {
   });
 
   it('cleanup tolerates session close errors', async () => {
-    await backend.init();
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
-
+    await start(['a', 'sess-1']);
     hoistedItermCloseSession.mockRejectedValueOnce(new Error('session gone'));
 
-    // Should not throw
     await expect(backend.cleanup()).resolves.toBeUndefined();
   });
 
@@ -373,128 +339,65 @@ describe('ITermBackend', () => {
     await backend.init();
     hoistedFsRm.mockRejectedValueOnce(new Error('ENOENT'));
 
-    // Should not throw
     await expect(backend.cleanup()).resolves.toBeUndefined();
   });
 
-  // ─── Exit Detection ─────────────────────────────────────────
-
-  it('marks agent as exited when marker file appears', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
-
-    // Simulate marker file appearing with exit code 0
-    hoistedFsReadFile.mockResolvedValue('0\n');
-
-    await vi.advanceTimersByTimeAsync(600);
-
-    expect(exitCallback).toHaveBeenCalledWith('a', 0, null);
-  });
-
-  it('preserves non-zero exit codes from marker', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
-
-    hoistedFsReadFile.mockResolvedValue('42\n');
-
-    await vi.advanceTimersByTimeAsync(600);
-
-    expect(exitCallback).toHaveBeenCalledWith('a', 42, null);
-  });
-
-  it('defaults to exit code 1 when marker contains NaN', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
-
-    hoistedFsReadFile.mockResolvedValue('garbage\n');
-
-    await vi.advanceTimersByTimeAsync(600);
-
-    expect(exitCallback).toHaveBeenCalledWith('a', 1, null);
+  it.each([
+    ['marks agent as exited when marker file appears', '0\n', 0],
+    ['preserves non-zero exit codes from marker', '42\n', 42],
+    ['defaults to exit code 1 when marker contains NaN', 'garbage\n', 1],
+  ])('%s', async (_title, marker, code) => {
+    const exitCallback = await exitWithMarker(marker);
+    expect(exitCallback).toHaveBeenCalledWith('a', code, null);
   });
 
   it('does not fire callback twice for the same agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
-
-    hoistedFsReadFile.mockResolvedValue('0\n');
-
-    await vi.advanceTimersByTimeAsync(600);
+    const exitCallback = await exitWithMarker('0\n');
     await vi.advanceTimersByTimeAsync(600);
 
     expect(exitCallback).toHaveBeenCalledTimes(1);
   });
 
   it('stops polling once all agents have exited', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-
+    await start('a');
     hoistedFsReadFile.mockResolvedValue('0\n');
-
     await vi.advanceTimersByTimeAsync(600);
 
-    // Reset to track future reads
+    // Reset to track future reads; advancing further should not poll anymore
     hoistedFsReadFile.mockClear();
-
-    // Advance more — should not poll anymore
     await vi.advanceTimersByTimeAsync(2000);
     expect(hoistedFsReadFile).not.toHaveBeenCalled();
   });
 
-  // ─── waitForAll ─────────────────────────────────────────────
-
   it('waitForAll resolves immediately when no agents exist', async () => {
     await backend.init();
-    const result = await backend.waitForAll();
-    expect(result).toBe(true);
+    expect(await backend.waitForAll()).toBe(true);
   });
 
   it('waitForAll resolves when all agents exit', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-
+    await start('a');
     hoistedFsReadFile.mockResolvedValue('0\n');
 
     const waitPromise = backend.waitForAll();
     await vi.advanceTimersByTimeAsync(600);
 
-    const result = await waitPromise;
-    expect(result).toBe(true);
+    expect(await waitPromise).toBe(true);
   });
 
   it('waitForAll returns false on timeout', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
+    await start('a');
 
     // Marker never appears (readFile keeps throwing)
     const waitPromise = backend.waitForAll(1000);
     await vi.advanceTimersByTimeAsync(1100);
 
-    const result = await waitPromise;
-    expect(result).toBe(false);
+    expect(await waitPromise).toBe(false);
   });
 
-  // ─── Input ─────────────────────────────────────────────────
-
   it('writeToAgent sends text via itermSendText', async () => {
-    await backend.init();
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
+    await start(['a', 'sess-1']);
 
-    const result = backend.writeToAgent('a', 'hello');
-    expect(result).toBe(true);
+    expect(backend.writeToAgent('a', 'hello')).toBe(true);
     expect(hoistedItermSendText).toHaveBeenCalledWith('sess-1', 'hello');
   });
 
@@ -504,20 +407,16 @@ describe('ITermBackend', () => {
   });
 
   it('writeToAgent returns false for stopped agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
+    await start('a');
     backend.stopAgent('a');
 
     expect(backend.writeToAgent('a', 'hello')).toBe(false);
   });
 
   it('forwardInput delegates to active agent', async () => {
-    await backend.init();
-    hoistedItermSplitPane.mockResolvedValueOnce('sess-1');
-    await backend.spawnAgent(makeConfig('a'));
+    await start(['a', 'sess-1']);
 
-    const result = backend.forwardInput('hello');
-    expect(result).toBe(true);
+    expect(backend.forwardInput('hello')).toBe(true);
     expect(hoistedItermSendText).toHaveBeenCalledWith('sess-1', 'hello');
   });
 
@@ -526,42 +425,33 @@ describe('ITermBackend', () => {
     expect(backend.forwardInput('hello')).toBe(false);
   });
 
-  // ─── Snapshots ──────────────────────────────────────────────
-
-  it('getActiveSnapshot returns null', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-    expect(backend.getActiveSnapshot()).toBeNull();
+  it.each([
+    ['getActiveSnapshot returns null', () => backend.getActiveSnapshot(), null],
+    [
+      'getAgentSnapshot returns null',
+      () => backend.getAgentSnapshot('a'),
+      null,
+    ],
+    [
+      'getAgentScrollbackLength returns 0',
+      () => backend.getAgentScrollbackLength('a'),
+      0,
+    ],
+  ])('%s', async (_title, read, expected) => {
+    await start('a');
+    expect(read()).toBe(expected);
   });
-
-  it('getAgentSnapshot returns null', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-    expect(backend.getAgentSnapshot('a')).toBeNull();
-  });
-
-  it('getAgentScrollbackLength returns 0', async () => {
-    await backend.init();
-    await backend.spawnAgent(makeConfig('a'));
-    expect(backend.getAgentScrollbackLength('a')).toBe(0);
-  });
-
-  // ─── getAttachHint ──────────────────────────────────────────
 
   it('getAttachHint returns null', async () => {
     await backend.init();
     expect(backend.getAttachHint()).toBeNull();
   });
 
-  // ─── resizeAll ──────────────────────────────────────────────
-
   it('resizeAll is a no-op', async () => {
     await backend.init();
     // Should not throw
     backend.resizeAll(80, 24);
   });
-
-  // ─── type ───────────────────────────────────────────────────
 
   it('has type "iterm2"', () => {
     expect(backend.type).toBe('iterm2');

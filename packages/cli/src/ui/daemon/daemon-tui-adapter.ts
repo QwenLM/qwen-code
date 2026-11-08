@@ -17,6 +17,7 @@ import {
   FINDING_SOURCES,
   REPORT_FINDINGS_LEVELS,
 } from '@qwen-code/qwen-code-core/tools/report-findings.js';
+import { isAdvisorDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ToolCallStatus,
@@ -330,6 +331,11 @@ function formatToolResultDisplay(
       value,
     ) as IndividualToolCallDisplay['resultDisplay'];
   }
+  if (isAdvisorDisplay(value)) {
+    return sanitizeDaemonValue(
+      value,
+    ) as IndividualToolCallDisplay['resultDisplay'];
+  }
   if (
     isRecord(value) &&
     value['type'] === 'mcp_app' &&
@@ -339,7 +345,8 @@ function formatToolResultDisplay(
   }
   if (
     isRecord(value) &&
-    value['type'] === 'ask_user_question_answers' &&
+    (value['type'] === 'ask_user_question_answers' ||
+      value['type'] === 'shell_result') &&
     typeof value['text'] === 'string'
   ) {
     return sanitizeDisplayText(value['text']);
@@ -421,6 +428,13 @@ function toolUpdateToHistoryItem(
   update: Record<string, unknown>,
   state?: DaemonTuiReducerState,
 ): HistoryItemToolGroup | undefined {
+  const lifecycleMeta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  if (
+    lifecycleMeta?.['toolLifecycle'] !== undefined &&
+    update['status'] === undefined &&
+    update['content'] === undefined
+  )
+    return undefined;
   const toolCallId = getString(update['toolCallId']);
   if (!toolCallId) {
     return undefined;
@@ -563,6 +577,15 @@ function shouldReportUnsupportedProtocolVersion(version: unknown): boolean {
   return true;
 }
 
+// Wire close-reason tokens are internal identifiers; only the stop path has
+// copy of its own. Everything else renders the same generic line rather than
+// leaking tokens like `client_close` into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
+
 export function reduceDaemonEventToTuiUpdates(
   event: DaemonTuiEvent,
   state?: DaemonTuiReducerState,
@@ -692,6 +715,18 @@ export function reduceDaemonEventToTuiUpdates(
           daemonEventId: event.id,
         },
       ];
+    }
+
+    case 'session_closed': {
+      const data = isRecord(event.data) ? event.data : {};
+      const reason =
+        data['persistenceUnconfirmed'] === true
+          ? 'Workspace runtime stopped; session persistence is unconfirmed'
+          : data['cause'] === 'workspace_runtime_stop'
+            ? 'Workspace runtime stopped.'
+            : (SESSION_CLOSED_REASON_COPY[getString(data['reason']) ?? ''] ??
+              'Session closed');
+      return terminalUpdates(event, reason);
     }
 
     case 'session_died': {

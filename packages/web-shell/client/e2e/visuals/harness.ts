@@ -21,6 +21,7 @@ import {
   type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
 import { FIXED_CAPTURE_TIME, VISUAL_VIEWPORT } from './constants';
+import type { WebShellModelManagementOptions } from '../../modelManagement';
 
 export type VisualTheme = 'dark' | 'light';
 
@@ -91,8 +92,8 @@ async function primeTheme(page: Page, theme: VisualTheme): Promise<void> {
  *   surface as a bare expect timeout. Such a scenario must seed already-expired
  *   timestamps or drive `page.clock.fastForward` / `runFor` itself.
  *
- * `visual-capture-contracts.test.ts` pins that both navigation helpers still
- * call this before `page.goto`; nothing in the visuals suite reads the clock,
+ * `visual-capture-contracts.test.ts` pins that every navigation helper still
+ * calls this before `page.goto`; nothing in the visuals suite reads the clock,
  * so a dropped call would otherwise stay green.
  */
 export async function freezeWallClock(page: Page): Promise<void> {
@@ -169,6 +170,49 @@ export async function gotoNewSession(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
+}
+
+/**
+ * Navigate to the settings harness page, which maps query parameters onto
+ * the shell's settings exclusions and model management host props. These
+ * options are not exposed by the standalone entry. Freezes the
+ * clock before navigating like every other helper; the theme assertion keys
+ * on the shell's own surface because the harness paints the `<html>` theme
+ * class from the same `?theme=` param, where it cannot mislabel.
+ */
+export async function gotoSettingsHarness(
+  page: Page,
+  scenario: WebShellDaemonScenario,
+  daemon: MockDaemonController,
+  theme: VisualTheme,
+  exclude: readonly string[] = [],
+  modelManagement: WebShellModelManagementOptions = {},
+): Promise<void> {
+  await freezeWallClock(page);
+  const params = new URLSearchParams({ theme, sessionId: scenario.sessionId });
+  if (exclude.length > 0) params.set('exclude', exclude.join(','));
+  for (const [key, value] of Object.entries(modelManagement)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  await page.goto(`/e2e/settings-harness.html?${params.toString()}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  // The shell's own theme must agree with the filename: the app root carries
+  // a plain `dark` literal only in the dark theme. The last bare root is the
+  // app; the session provider's loading placeholder is also a bare
+  // [data-web-shell-root].
+  const rootClass = await page
+    .locator('[data-web-shell-root]:not([data-web-shell-gate])')
+    .last()
+    .getAttribute('class');
+  expect(rootClass?.split(/\s+/).includes('dark')).toBe(theme === 'dark');
+  await completeReplay(
+    page,
+    daemon,
+    scenario.sessionId,
+    scenario.events.length,
+  );
 }
 
 export async function completeReplay(

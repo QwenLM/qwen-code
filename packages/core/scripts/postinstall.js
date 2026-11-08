@@ -17,6 +17,7 @@ const __dirname = path.dirname(__filename);
 // Get the package root directory
 const packageRoot = path.join(__dirname, '..');
 const vendorDir = path.join(packageRoot, 'vendor', 'ripgrep');
+const landlockVendorDir = path.join(packageRoot, 'vendor', 'landlock-run');
 
 /**
  * Remove quarantine attribute and set executable permissions on macOS/Linux
@@ -90,9 +91,29 @@ function setupRipgrepBinaries() {
   }
 }
 
+function setupLandlockBinary() {
+  if (process.platform !== 'linux') return;
+  if (process.arch !== 'x64' && process.arch !== 'arm64') return;
+  const binary = path.join(
+    landlockVendorDir,
+    `${process.arch}-linux`,
+    'qwen-landlock-run',
+  );
+  if (!fs.existsSync(binary)) return;
+  try {
+    fs.chmodSync(binary, 0o755);
+    console.log(`✓ Set executable permissions on ${binary}`);
+  } catch (error) {
+    console.log(
+      `⚠ Could not set Landlock helper permissions: ${error.message || 'Unknown error'}`,
+    );
+  }
+}
+
 // Wrap the entire execution to ensure no errors escape to npm
 try {
   setupRipgrepBinaries();
+  setupLandlockBinary();
 } catch {
   // Last resort catch - never let errors block npm
   console.log('⚠ Postinstall script encountered an unexpected error');

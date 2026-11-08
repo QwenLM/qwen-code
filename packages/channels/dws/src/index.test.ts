@@ -16,9 +16,10 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'profile',
       'groupPolicy',
-      'dmPolicy',
-      'senderPolicy',
+      'privatePolicy',
       'allowedUsers',
+      'quotePrivateReply',
+      'quoteGroupReply',
       'watchTodos',
       'startReaction',
       'endReaction',
@@ -29,15 +30,36 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
   });
 
-  it('exposes independent direct-message access with the existing open default', () => {
+  it.each(['quotePrivateReply', 'quoteGroupReply'])(
+    'exposes and validates the %s switch',
+    (field) => {
+      expect(
+        plugin.management?.fields.find((entry) => entry.key === field),
+      ).toMatchObject({ kind: 'boolean' });
+      for (const value of [undefined, false, true]) {
+        expect(
+          plugin.management?.validateConfig?.({ [field]: value }),
+        ).toBeUndefined();
+      }
+      for (const value of ['false', 0, null]) {
+        expect(
+          plugin.management?.validateConfig?.({ [field]: value }),
+        ).toContain(`${field} must be a boolean`);
+      }
+    },
+  );
+
+  it('exposes all four private policies with pairing as the new default', () => {
     expect(
-      plugin.management?.fields.find((field) => field.key === 'dmPolicy'),
+      plugin.management?.fields.find((field) => field.key === 'privatePolicy'),
     ).toMatchObject({
       kind: 'enum',
-      default: 'open',
+      default: 'pairing',
       options: [
-        { value: 'open', label: 'Open' },
         { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
       ],
     });
   });
@@ -54,7 +76,7 @@ describe('DWS channel plugin', () => {
       'disabled',
     ]);
     expect(
-      plugin.management?.fields.find((field) => field.key === 'senderPolicy')
+      plugin.management?.fields.find((field) => field.key === 'privatePolicy')
         ?.default,
     ).toBe('pairing');
     expect(

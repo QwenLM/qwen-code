@@ -66,6 +66,7 @@ export enum HookEventName {
   TodoCompleted = 'TodoCompleted',
   // InstructionsLoaded - When an instruction or context file is loaded
   InstructionsLoaded = 'InstructionsLoaded',
+  FileChanged = 'FileChanged',
 }
 
 /**
@@ -292,6 +293,13 @@ export interface InstructionsLoadedInput extends HookInput {
   parent_file_path?: string;
 }
 
+export type FileChangeEvent = 'add' | 'change' | 'unlink';
+
+export interface FileChangedInput extends HookInput {
+  file_path: string;
+  event: FileChangeEvent;
+}
+
 /**
  * Base hook output - common fields for all events
  */
@@ -389,6 +397,27 @@ export function createHookOutput(
     default:
       return new DefaultHookOutput(data);
   }
+}
+
+/**
+ * Whether a hook's output is a blocking decision on this event: for PreToolUse
+ * the permission decision wins over the generic `decision` field. The HTTP
+ * runner and the progress reporting both use this one test, so they report
+ * such a decision the same way.
+ *
+ * It covers decisions only. Output that stops the turn with `continue: false`,
+ * or a PreToolUse `ask`, also keeps a tool call from proceeding but is not a
+ * blocking decision here, and the function runner applies its own test that
+ * counts `continue: false`. Reporting a stop is left to the progress display.
+ */
+export function isBlockingHookOutput(
+  eventName: string,
+  data: Partial<HookOutput>,
+): boolean {
+  const output = createHookOutput(eventName, data);
+  return output instanceof PreToolUseHookOutput
+    ? output.isDenied()
+    : output.isBlockingDecision();
 }
 
 /**
@@ -554,6 +583,37 @@ export class PreToolUseHookOutput extends DefaultHookOutput {
    */
   isAllowed(): boolean {
     return this.getPermissionDecision() === 'allow';
+  }
+
+  /**
+   * The canonical `updatedInput` as a detached copy that replaces the whole
+   * tool input: `undefined` when absent, `null` when present but not a plain
+   * object of transferable values.
+   */
+  getUpdatedInput(): Record<string, unknown> | null | undefined {
+    return toUpdatedToolInput(this.hookSpecificOutput?.['updatedInput']);
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/**
+ * A hook's replacement tool input as a detached copy: `undefined` when
+ * absent, `null` when present but not a plain object of transferable values.
+ */
+export function toUpdatedToolInput(
+  value: unknown,
+): Record<string, unknown> | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) return null;
+  try {
+    return structuredClone(value);
+  } catch {
+    return null;
   }
 }
 
@@ -738,11 +798,11 @@ export class PermissionRequestHookOutput extends DefaultHookOutput {
   }
 
   /**
-   * Get updated tool input if permission was allowed with modifications
+   * Get updated tool input if permission was allowed with modifications;
+   * `null` when it is present but not a plain object.
    */
-  getUpdatedToolInput(): Record<string, unknown> | undefined {
-    const decision = this.getPermissionDecision();
-    return decision?.updatedInput;
+  getUpdatedToolInput(): Record<string, unknown> | null | undefined {
+    return toUpdatedToolInput(this.getPermissionDecision()?.updatedInput);
   }
 
   /**
@@ -773,6 +833,8 @@ export interface PreToolUseOutput extends HookOutput {
     hookEventName: 'PreToolUse';
     permissionDecision: 'allow' | 'deny' | 'ask';
     permissionDecisionReason: string;
+    /** Replaces the whole tool input; it is not merged with the original. */
+    updatedInput?: Record<string, unknown>;
   };
 }
 
@@ -1053,6 +1115,7 @@ export interface SessionStartOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'SessionStart';
     additionalContext?: string;
+    watchPaths?: string[];
   };
 }
 
@@ -1341,6 +1404,14 @@ export function detectTodoChanges(
  * Hook execution result
  */
 export interface HookExecutionResult {
+  processReceipt?: {
+    readonly ownerId: string;
+    readonly scope: 'process_tree' | 'process_group';
+    readonly state: 'stopped' | 'outcome_unknown';
+  };
+  /** True only if a managed command never starts or its owned cgroup is empty. */
+  processTreeDrained?: boolean;
+  httpRequestState?: 'not_started' | 'response_received' | 'outcome_unknown';
   hookConfig: HookConfig;
   eventName: HookEventName;
   success: boolean;

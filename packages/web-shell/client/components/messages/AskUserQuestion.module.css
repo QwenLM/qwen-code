@@ -347,6 +347,7 @@
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
@@ -410,7 +411,8 @@
   height: 14px;
 }
 
-.ignoreButton {
+.ignoreButton,
+.detailsButton {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -426,17 +428,21 @@
   line-height: 22px;
 }
 
-.ignoreButton:hover {
+.ignoreButton:hover,
+.detailsButton:hover {
   color: var(--foreground);
 }
 
-.ignoreButton:disabled {
+.ignoreButton:disabled,
+.detailsButton:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
 
-@container (max-width: 420px) {
-  .actions > [data-shortcut]::after {
-    display: none;
+@supports (container-type: inline-size) {
+  @container (max-width: 420px) {
+    .actions > [data-shortcut]::after {
+      display: none;
+    }
   }
 }

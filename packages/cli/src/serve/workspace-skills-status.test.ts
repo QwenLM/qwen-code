@@ -25,6 +25,7 @@ import {
   getUserSettingsPath,
 } from '../config/settings.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
   let qwenHome: string;
@@ -37,6 +38,81 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     await fsp.rm(qwenHome, { recursive: true, force: true });
     vi.restoreAllMocks();
     mockWriteStderrLine.mockClear();
+  });
+
+  it('exports only enabled instructions with invocation policy and fresh configuration', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-export-'),
+    );
+    try {
+      for (const [name, flags] of [
+        ['enabled', 'disable-model-invocation: true'],
+        ['disabled', ''],
+        ['hidden', 'user-invocable: false'],
+      ]) {
+        const directory = path.join(workspace, '.qwen', 'skills', name!);
+        await fsp.mkdir(directory, { recursive: true });
+        await fsp.writeFile(
+          path.join(directory, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: Test ${name}\n${flags}\n---\nBODY_${name}`,
+        );
+      }
+      const settings = path.join(workspace, '.qwen', 'settings.json');
+      await fsp.writeFile(
+        settings,
+        JSON.stringify({
+          skills: {
+            disabledLevels: ['user', 'bundled'],
+            disabled: ['disabled'],
+          },
+        }),
+      );
+      const provider = createWorkspaceSkillsStatusProvider();
+      const snapshot = await provider.snapshot(workspace);
+      expect(snapshot).toEqual({
+        workspaceCwd: workspace,
+        skills: [
+          {
+            name: 'enabled',
+            description: 'Test enabled',
+            body: 'BODY_enabled',
+            model_invocable: false,
+          },
+          {
+            name: 'hidden',
+            description: 'Test hidden',
+            body: 'BODY_hidden',
+            user_invocable: false,
+          },
+        ],
+      });
+      expect(JSON.stringify(await provider(workspace))).not.toContain('BODY_');
+      await fsp.writeFile(
+        settings,
+        JSON.stringify({
+          skills: {
+            disabledLevels: ['user', 'bundled'],
+            disabled: ['enabled'],
+          },
+        }),
+      );
+      expect(
+        (await provider.snapshot(workspace)).skills.map((skill) => skill.name),
+      ).toEqual(['disabled', 'hidden']);
+      vi.spyOn(SkillManager.prototype, 'hasDiscoveryErrors').mockReturnValue(
+        true,
+      );
+      await expect(provider.snapshot(workspace)).rejects.toThrow(
+        'completely discovered',
+      );
+      await expect(
+        createWorkspaceSkillsStatusProvider({
+          workspaceTrusted: false,
+        }).snapshot(workspace),
+      ).rejects.toThrow('trusted');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
   });
 
   it('enumerates bundled skills (including /review) without an ACP child', async () => {
@@ -382,6 +458,41 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     }
   });
 
+  // The bundled `auto-memory` reference is listed only where the child session
+  // runs managed auto-memory. SkillManager asks the shim about it, so a shim
+  // without `isSkillEnabled` would fail the whole catalog.
+  it.each([
+    [{}, true],
+    [{ memory: { enableManagedAutoMemory: false } }, false],
+  ])(
+    'lists the bundled auto-memory skill only with managed auto-memory (settings %j)',
+    async (settings, listed) => {
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-skills-auto-memory-'),
+      );
+      await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(workspace, '.qwen', 'settings.json'),
+        JSON.stringify(settings),
+      );
+      try {
+        const provider = createWorkspaceSkillsStatusProvider();
+
+        const status = await provider(workspace);
+
+        expect(status.initialized).toBe(true);
+        expect(status.skills.find((s) => s.name === 'review')).toBeDefined();
+        expect(
+          status.skills.some(
+            (s) => s.name === 'auto-memory' && s.level === 'bundled',
+          ),
+        ).toBe(listed);
+      } finally {
+        await fsp.rm(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('ignores disabledLevels in safe mode (matches CLI child session)', async () => {
     const workspace = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-skills-safe-levels-'),
@@ -441,7 +552,12 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       }),
     );
     for (const skill of skillNames) {
-      const skillDir = path.join(directory, 'skills', skill);
+      // The author-visible name comes from the SKILL.md frontmatter
+      // (`parseSkillContent`, skill-load.ts) — the directory name is not part
+      // of it. Windows forbids ':' in a path segment, so an authored name like
+      // `audit:detail` (the naming-rule cases below) lives in a colon-free
+      // directory there while the manifest keeps the real name.
+      const skillDir = path.join(directory, 'skills', skill.replace(/:/g, '-'));
       await fsp.mkdir(skillDir, { recursive: true });
       await fsp.writeFile(
         path.join(skillDir, 'SKILL.md'),
@@ -916,7 +1032,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'fails closed for a searchable but unlistable extensions root',
     async () => {
       const extensionsRoot = path.join(qwenHome, 'extensions');
@@ -1035,5 +1151,106 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       },
       { name: 'second:second-skill', status: 'ok' },
     ]);
+  });
+
+  it('shares one enumeration between concurrent reads', async () => {
+    const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
+    const provider = createWorkspaceSkillsStatusProvider();
+
+    await Promise.all([provider('/ws'), provider('/ws')]);
+
+    expect(listSpy).toHaveBeenCalledOnce();
+  });
+
+  it('rebuilds after an invalidation that lands during an in-flight enumeration', async () => {
+    const workspace = path.join(qwenHome, 'workspace');
+    const skillDir = path.join(workspace, '.qwen', 'skills', 'alpha');
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Alpha\n---\nInstructions',
+    );
+    await fsp.mkdir(path.join(qwenHome, 'extensions'), { recursive: true });
+
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = ExtensionManager.prototype.refreshCacheWithSnapshot;
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    ).mockImplementation(async function (this: ExtensionManager, options) {
+      enter();
+      await gate;
+      return original.call(this, options);
+    });
+
+    const provider = createWorkspaceSkillsStatusProvider();
+    const first = provider(workspace);
+    await entered;
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['project'] } }),
+    );
+    provider.invalidate?.(workspace);
+    release();
+    await first;
+
+    const status = await provider(workspace);
+    expect(status.skills.some((skill) => skill.name === 'alpha')).toBe(false);
+  });
+
+  it('starts a post-invalidation read instead of joining the pre-invalidation enumeration', async () => {
+    const workspace = path.join(qwenHome, 'workspace');
+    const alphaDir = path.join(workspace, '.qwen', 'skills', 'alpha');
+    await fsp.mkdir(alphaDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(alphaDir, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Alpha\n---\nInstructions',
+    );
+
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = SkillManager.prototype.listSkills;
+    const listSpy = vi
+      .spyOn(SkillManager.prototype, 'listSkills')
+      .mockImplementation(async function (this: SkillManager) {
+        const skills = await original.call(this);
+        if (listSpy.mock.calls.length === 1) {
+          enter();
+          await gate;
+        }
+        return skills;
+      });
+
+    const provider = createWorkspaceSkillsStatusProvider();
+    const first = provider(workspace);
+    await entered;
+    const betaDir = path.join(workspace, '.qwen', 'skills', 'beta');
+    await fsp.mkdir(betaDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(betaDir, 'SKILL.md'),
+      '---\nname: beta\ndescription: Beta\n---\nInstructions',
+    );
+    provider.invalidate?.(workspace);
+    const second = provider(workspace);
+    expect(second).not.toBe(first);
+    release();
+
+    const [firstStatus, secondStatus] = await Promise.all([first, second]);
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(secondStatus.skills.map((skill) => skill.name)).toContain('beta');
+    expect(firstStatus.skills.map((skill) => skill.name)).not.toContain('beta');
   });
 });

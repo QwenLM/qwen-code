@@ -15,13 +15,49 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
 import {
+  WebShellNavigationBoundary,
+  useWebShellNavigation,
+  type WebShellUrlNavigationOptions,
+} from '../navigation';
+import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
-import { getTranslator, normalizeLanguage } from '../i18n';
+import {
+  getTranslator,
+  normalizeLanguage,
+  type WebShellLanguage,
+} from '../i18n';
+import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+
+function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
+  return theme ?? WebShellThemeId.Dark;
+}
+
+function surfaceLanguage(
+  language: WebShellProps['language'],
+): WebShellLanguage {
+  return normalizeLanguage(language);
+}
+
+function withChrome(
+  props: WebShellProps,
+  theme: WebShellTheme | undefined,
+  language: WebShellLanguage | undefined,
+): WebShellProps {
+  return {
+    ...props,
+    theme: props.theme ?? theme,
+    language: props.language ?? language,
+  };
+}
+
 interface WorkspaceSessionProviderProps {
+  viewHidden?: boolean;
+  urlNavigation?: WebShellUrlNavigationOptions;
   sessionId?: string;
   workspaceId?: string;
   workspaceCwd?: string;
@@ -30,19 +66,54 @@ interface WorkspaceSessionProviderProps {
   clientId?: string;
   restartSseOnPrompt?: boolean;
   historyPageSize?: number;
+  chromeTheme?: WebShellTheme;
+  chromeLanguage?: WebShellLanguage;
   webShellProps: WebShellProps;
 }
 
 export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
+  if (!props.urlNavigation)
+    return <ResolvedWorkspaceSessionProvider {...props} />;
+  return (
+    <WebShellNavigationBoundary
+      options={props.urlNavigation}
+      externalTarget={{
+        sessionId: props.sessionId,
+        workspaceId: props.workspaceId,
+        workspaceCwd: props.workspaceCwd,
+        sessionContext: props.sessionContext,
+      }}
+      onSessionIdChange={props.webShellProps.onSessionIdChange}
+    >
+      {(target, onSessionIdChange) => (
+        <ResolvedWorkspaceSessionProvider
+          {...props}
+          sessionId={target.sessionId}
+          workspaceId={target.workspaceId}
+          workspaceCwd={target.workspaceCwd}
+          sessionContext={target.sessionContext}
+          webShellProps={{ ...props.webShellProps, onSessionIdChange }}
+        />
+      )}
+    </WebShellNavigationBoundary>
+  );
+}
+
+function ResolvedWorkspaceSessionProvider(
+  props: WorkspaceSessionProviderProps,
+) {
   const {
     sessionId,
     workspaceId,
     workspaceCwd,
     sessionContext,
     lockWorkspaceCwd,
-    webShellProps,
+    chromeTheme,
+    chromeLanguage,
+    webShellProps: appProps,
   } = props;
-  const onSessionIdChange = webShellProps.onSessionIdChange;
+  const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
+  const onSessionIdChange = appProps.onSessionIdChange;
   const attachedStandaloneSessionIdRef = useRef<string | undefined>(undefined);
   // Keep an initially-needed standalone gate mounted so later context switches
   // preserve the provider and App subtree it resolved.
@@ -79,7 +150,7 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
   ) {
     standaloneGateActiveRef.current = true;
   }
-  const t = getTranslator(normalizeLanguage(webShellProps.language));
+  const t = getTranslator(surfaceLanguage(webShellProps.language));
   const contextConflictsWithWorkspace =
     sessionContext?.kind !== undefined &&
     sessionContext.kind !== 'workspace' &&
@@ -90,7 +161,7 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
       <WorkspaceUnavailableState
         title={t('session.loadFailed')}
         description={t('session.contextConflict')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
       />
     );
@@ -99,7 +170,7 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
   const routedProps = {
     ...props,
     webShellProps: {
-      ...webShellProps,
+      ...appProps,
       onSessionIdChange: onSessionIdChange ? handleSessionIdChange : undefined,
     },
   };
@@ -117,6 +188,7 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
 }
 
 function WorkspaceSessionProviderWorkspace({
+  viewHidden,
   sessionId,
   workspaceId,
   workspaceCwd,
@@ -125,9 +197,14 @@ function WorkspaceSessionProviderWorkspace({
   clientId,
   restartSseOnPrompt,
   historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
-  webShellProps,
+  chromeTheme,
+  chromeLanguage,
+  webShellProps: appProps,
 }: WorkspaceSessionProviderProps) {
+  const navigation = useWebShellNavigation();
+  const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const workspaceActions = useWorkspaceActions();
   const [usePrimaryNewSession, setUsePrimaryNewSession] = useState(false);
   const [registeredWorkspace, setRegisteredWorkspace] = useState<{
@@ -185,7 +262,7 @@ function WorkspaceSessionProviderWorkspace({
         (entry) => entry.id === effectiveWorkspaceId,
       );
   const t = useMemo(
-    () => getTranslator(normalizeLanguage(webShellProps.language)),
+    () => getTranslator(surfaceLanguage(webShellProps.language)),
     [webShellProps.language],
   );
 
@@ -258,10 +335,14 @@ function WorkspaceSessionProviderWorkspace({
             : t('workspace.loadFailedDescription')
         }
         actionLabel={t('common.retry')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
@@ -274,7 +355,7 @@ function WorkspaceSessionProviderWorkspace({
       <div
         data-web-shell-root
         data-web-shell-shadcn
-        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${webShellProps.theme === 'dark' ? 'dark' : ''}`}
+        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
       >
@@ -289,7 +370,7 @@ function WorkspaceSessionProviderWorkspace({
         title={t('workspace.loadFailed')}
         description={t('workspace.loadFailedDescription')}
         actionLabel={t('common.retry')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
           registrationRef.current = undefined;
@@ -303,7 +384,7 @@ function WorkspaceSessionProviderWorkspace({
       <div
         data-web-shell-root
         data-web-shell-shadcn
-        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${webShellProps.theme === 'dark' ? 'dark' : ''}`}
+        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
       >
@@ -318,8 +399,9 @@ function WorkspaceSessionProviderWorkspace({
         title={t('workspace.notFound')}
         description={t('workspace.notFoundDescription')}
         actionLabel={t('session.new')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         onAction={() => {
+          navigation?.beginSessionNavigation();
           setUsePrimaryNewSession(true);
           webShellProps.onSessionIdChange?.(undefined, undefined);
         }}
@@ -354,18 +436,24 @@ function WorkspaceSessionProviderWorkspace({
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
     >
-      <App
-        {...webShellProps}
-        historyPageSize={historyPageSize}
-        restartSseOnPrompt={restartSseOnPrompt}
-        initialSelectedWorkspaceCwd={
-          !lockWorkspaceCwd && targetWorkspace ? targetWorkspace.cwd : undefined
-        }
-        lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
-        lockedWorkspaceCapability={
-          lockWorkspaceCwd ? targetWorkspace : undefined
-        }
-      />
+      {!viewHidden && (
+        <App
+          {...appProps}
+          historyPageSize={historyPageSize}
+          restartSseOnPrompt={restartSseOnPrompt}
+          initialSelectedWorkspaceCwd={
+            !lockWorkspaceCwd && targetWorkspace
+              ? targetWorkspace.cwd
+              : undefined
+          }
+          lockedWorkspaceCwd={
+            lockWorkspaceCwd ? targetWorkspace?.cwd : undefined
+          }
+          lockedWorkspaceCapability={
+            lockWorkspaceCwd ? targetWorkspace : undefined
+          }
+        />
+      )}
     </DaemonSessionProvider>
   );
 }
@@ -384,12 +472,17 @@ function StandaloneSessionGate({
   sessionId,
   sessionContext,
   attachedSessionId,
-  webShellProps,
+  chromeTheme,
+  chromeLanguage,
+  webShellProps: appProps,
   ...workspaceProviderProps
 }: WorkspaceSessionProviderProps & {
   attachedSessionId?: string;
 }) {
+  const navigation = useWebShellNavigation();
+  const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const [attempt, setAttempt] = useState(0);
   const [resolution, setResolution] = useState<StandaloneResolution>(() =>
     sessionId ? { status: 'loading' } : { status: 'ready' },
@@ -397,7 +490,7 @@ function StandaloneSessionGate({
   const [resolutionSessionId, setResolutionSessionId] = useState(sessionId);
   const resolutionGenerationRef = useRef(0);
   const t = useMemo(
-    () => getTranslator(normalizeLanguage(webShellProps.language)),
+    () => getTranslator(surfaceLanguage(webShellProps.language)),
     [webShellProps.language],
   );
 
@@ -484,7 +577,9 @@ function StandaloneSessionGate({
     ...workspaceProviderProps,
     sessionId,
     sessionContext,
-    webShellProps,
+    chromeTheme,
+    chromeLanguage,
+    webShellProps: appProps,
   };
   if (sessionContext?.kind !== 'standalone') {
     return <WorkspaceSessionProviderWorkspace {...routedProps} />;
@@ -497,10 +592,14 @@ function StandaloneSessionGate({
         title={t('session.loadFailed')}
         description={t('session.capabilitiesFailed')}
         actionLabel={t('common.retry')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
@@ -510,7 +609,7 @@ function StandaloneSessionGate({
       <div
         data-web-shell-root
         data-web-shell-shadcn
-        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${webShellProps.theme === 'dark' ? 'dark' : ''}`}
+        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
       >
@@ -524,7 +623,7 @@ function StandaloneSessionGate({
       <WorkspaceUnavailableState
         title={t('session.standaloneUnavailable')}
         description={t('session.standaloneUpgradeRequired')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
       />
     );
@@ -537,7 +636,7 @@ function StandaloneSessionGate({
       <div
         data-web-shell-root
         data-web-shell-shadcn
-        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${webShellProps.theme === 'dark' ? 'dark' : ''}`}
+        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
       >
@@ -554,11 +653,12 @@ function StandaloneSessionGate({
         actionLabel={
           webShellProps.onSessionIdChange ? t('session.new') : undefined
         }
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={
           webShellProps.onSessionIdChange
             ? () => {
+                navigation?.beginSessionNavigation();
                 webShellProps.onSessionIdChange?.(
                   undefined,
                   undefined,
@@ -581,7 +681,7 @@ function StandaloneSessionGate({
             : resolution.error.message
         }
         actionLabel={t('common.retry')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => setAttempt((current) => current + 1)}
       />
@@ -593,7 +693,7 @@ function StandaloneSessionGate({
         title={t('session.archived')}
         description={t('session.archivedDescription')}
         actionLabel={t('session.unarchive')}
-        theme={webShellProps.theme}
+        theme={surfaceTheme(webShellProps.theme)}
         onAction={() => {
           const requestedSessionId = sessionId!;
           const normalizedSessionId = requestedSessionId.toLowerCase();

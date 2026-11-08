@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   canOpenWorkspaceArtifact,
+  getArtifactExternalUrl,
   getArtifactPreviewContent,
   getFileChangePreviewContent,
   getWorkspaceArtifactOpenBlockReason,
@@ -186,5 +187,50 @@ describe('TurnOutputs helpers', () => {
     expect(getWorkspaceArtifactOpenBlockReason(missing, t)).toBe(
       'File not found in the workspace',
     );
+  });
+
+  it.each([
+    [
+      'external_url',
+      'https://platform.example.com/detail?id=7',
+      'https://platform.example.com/detail?id=7',
+    ],
+    [
+      'external_url',
+      '  https://example.com/detail  ',
+      'https://example.com/detail',
+    ],
+    ['external_url', 'mailto:owner@example.com', 'mailto:owner@example.com'],
+    ['published', 'https://example.com/detail', undefined],
+    ['external_url', 'javascript:alert(1)', undefined],
+    ['external_url', 'w/agent/report.html', undefined],
+    ['external_url', undefined, undefined],
+  ])(
+    'opens a %s link artifact with %s in a new page',
+    (storage, url, expected) => {
+      expect(
+        getArtifactExternalUrl({
+          id: 'link-1',
+          kind: 'link',
+          storage,
+          status: 'available',
+          title: 'Detail page',
+          ...(url === undefined ? {} : { url }),
+        } as DaemonSessionArtifact),
+      ).toBe(expected);
+    },
+  );
+
+  it('keeps non-link artifacts on the panel path', () => {
+    expect(
+      getArtifactExternalUrl({
+        id: 'page-1',
+        kind: 'html',
+        storage: 'external_url',
+        status: 'available',
+        title: 'Published page',
+        url: 'https://example.com/page',
+      } as DaemonSessionArtifact),
+    ).toBeUndefined();
   });
 });

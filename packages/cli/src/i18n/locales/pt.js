@@ -7,6 +7,10 @@
 // Portuguese translations for Qwen Code CLI (pt-BR)
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Ativa o Generated UI integrado em sessões locais compatíveis. Reinicie a sessão correspondente para aplicar as alterações.',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -186,6 +190,8 @@ export default {
     'O retrocesso não afeta arquivos editados manualmente ou por meio de comandos shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Não é possível retroceder para um turno que foi compactado. Tente um turno mais recente.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Não é possível retroceder a conversa para este turno: ele não corresponde mais ao histórico do modelo (por exemplo, após uma nova tentativa). Tente um turno mais recente.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'A restauração de arquivos não está disponível para este turno (sem alterações capturadas, ou o turno é anterior à sessão atual).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -734,6 +740,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurados',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Este menu é somente leitura. Para adicionar ou modificar hooks, edite settings.json diretamente ou pergunte ao Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Reabra este menu para recarregar as definições dos hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Os controles dos hooks e as configurações de segurança HTTP exigem uma reinicialização.',
+  'Failed to reload hook definitions: {{error}}':
+    'Falha ao recarregar as definições dos hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Enter para selecionar · Esc para cancelar',
   // Hooks - Detail Step
@@ -1134,6 +1146,14 @@ export default {
   'Clear Authentication': 'Limpar autenticação',
   disabled: 'desativado',
   enabled: 'ativado',
+  'disabled (bare mode)': 'desativado (modo mínimo)',
+  'disabled (safe mode)': 'desativado (modo seguro)',
+  'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
+  'disabled (not approved)': 'desativado (não aprovado)',
+  'disabled (rejected)': 'desativado (rejeitado)',
+  'disabled (folder not trusted)': 'desativado (pasta não confiável)',
+  'disabled (turned off for this session)':
+    'desativado (desligado nesta sessão)',
   'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',
@@ -1839,19 +1859,28 @@ export default {
     'Contexto excede o limite! Use /compress ou /clear para reduzir.',
   'No API response yet. Send a message to see actual usage.':
     'Ainda não há resposta da API. Envie uma mensagem para ver o uso real.',
+  'Estimated usage, including the conversation':
+    'Uso estimado, incluindo a conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Ainda não há uso do provedor. Estas são estimativas locais, incluindo a conversa.',
   'Estimated pre-conversation overhead': 'Sobrecarga estimada pré-conversa',
   'Context window': 'Janela de Contexto',
   tokens: 'tokens',
   Used: 'Usado',
   Free: 'Livre',
-  'Autocompact buffer': 'Buffer de autocompactação',
+  'Autocompact buffer': 'Buffer de compactação',
   'Usage by category': 'Uso por categoria',
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Arquivos de instruções',
+  'Auto memory': 'Memória automática',
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
+  'Startup context': 'Contexto inicial',
+  Unattributed: 'Não atribuído',
+  'Cached prefix': 'Prefixo em cache',
   'Run /context detail for per-item breakdown.':
     'Execute /context detail para detalhamento por item.',
   active: 'ativo',
@@ -2103,6 +2132,10 @@ export default {
   'to retry last request': 'para repetir a última solicitação',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key inválida. As API Keys do Coding Plan começam com "sk-sp-". Verifique.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key inválida. As chaves pay-as-you-go começam com "sk-" ou "sk-ws-". As chaves Token Plan ("sk-sp-") precisam da entrada Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key inválida. As Token Plan API Keys começam com "sk-sp-". Gere uma no console Token Plan ou use a entrada Standard API Key para uma chave pay-as-you-go.',
   'Lock release warning': 'Aviso de liberação de bloqueio',
   'Metadata write warning': 'Aviso de gravação de metadados',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -2175,6 +2208,8 @@ export default {
   out: 'saída',
   'In/Out': 'Ent/Saída',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Atualizações para uma versão específica exigem uma instalação independente. Instale a versão {{version}} manualmente usando seu método de instalação.',
   'Check for Qwen Code updates and install if available':
     'Verificar atualizações do Qwen Code e instalar se disponível',
   'Qwen Code update available! {{current}} → {{latest}}':

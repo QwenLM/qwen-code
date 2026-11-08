@@ -1,4 +1,5 @@
 import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { memo, useCallback } from 'react';
 import {
@@ -16,11 +17,17 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
+import {
+  formatCompressionTokens,
+  parseContextCompressionMeta,
+} from '../../utils/contextCompression';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
+import { formatTurnDuration } from '../../utils/turnDuration';
 import {
   ContextUsageMessage,
   parseContextUsageMessage,
 } from './ContextUsageMessage';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { StatsMessage, parseStatsMessage } from './StatsMessage';
 import { StatusMessage, parseStatusMessage } from './StatusMessage';
 import { McpStatusMessage, parseMcpStatusMessage } from './McpStatusMessage';
@@ -47,6 +54,11 @@ interface SystemMessageProps {
   }>;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -105,6 +117,46 @@ function formatVisionBridgeNotice(
   });
 }
 
+/**
+ * Localized replacement for the `/compress` sentences: the daemon formats its
+ * own English lines (kept for text-only ACP hosts), so every row of the
+ * compression flow is rendered here in this UI's language, with grouping that
+ * follows the UI language rather than the browser locale.
+ *
+ * The warning is the one exception — it is server-authored prose, so it is
+ * shown verbatim, on its own line (two trailing spaces = Markdown hard break,
+ * matching how the daemon itself joins it).
+ */
+function formatContextCompression(
+  data: unknown,
+  t: ReturnType<typeof useI18n>['t'],
+  language: string,
+): string | undefined {
+  const meta = parseContextCompressionMeta(data);
+  if (!meta) return undefined;
+  if (meta.phase === 'notice') {
+    return t('contextCompression.instructionsTruncated', {
+      max: formatCompressionTokens(meta.instructionsLimit, false, language),
+    });
+  }
+  if (meta.phase === 'progress') return t('contextUsage.compressing');
+  if (meta.phase === 'noop') return t('contextCompression.noop');
+  const { result } = meta;
+  const line = t('contextCompression.result', {
+    from: formatCompressionTokens(
+      result.originalTokenCount,
+      result.originalTokenCountIsEstimated,
+      language,
+    ),
+    to: formatCompressionTokens(
+      result.newTokenCount,
+      result.newTokenCountIsEstimated,
+      language,
+    ),
+  });
+  return result.warning ? `${line}  \n${result.warning}` : line;
+}
+
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
@@ -113,13 +165,29 @@ export const SystemMessage = memo(function SystemMessage({
   images,
   files,
   onShowContextDetail,
+  onOpenMemoryFile,
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
+  if (
+    variant === 'error' &&
+    data &&
+    typeof data === 'object' &&
+    'subscriptionQuota' in data
+  ) {
+    content =
+      formatSubscriptionQuotaDisplay(data.subscriptionQuota, t) ?? content;
+  }
+  if (
+    content ===
+    'Your login credentials are no longer valid. Run /auth to sign in again.'
+  ) {
+    content = t('subscription.loginRequired');
+  }
   const backgroundDetails = useSubagentDetails()?.onOpenBackground;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
@@ -172,7 +240,13 @@ export const SystemMessage = memo(function SystemMessage({
           <MarkerIcon aria-hidden="true" />
         </span>
         <span className="shrink-0 text-muted-foreground">
-          {t(turn?.kind === 'agent' ? 'background.agent' : 'background.task')}
+          {t(
+            turn?.kind === 'agent'
+              ? 'background.agent'
+              : turn?.kind === 'peer'
+                ? 'background.peer'
+                : 'background.task',
+          )}
         </span>
         <span aria-hidden="true" className="text-muted-foreground">
           ·
@@ -196,7 +270,8 @@ export const SystemMessage = memo(function SystemMessage({
               {t('background.source')}
             </Button>
           )}
-          {backgroundDetails && turn && (
+          {/* A peer turn has no task behind it to show the details of. */}
+          {backgroundDetails && turn && turn.kind !== 'peer' && (
             <Button
               type="button"
               variant="ghost"
@@ -236,26 +311,38 @@ export const SystemMessage = memo(function SystemMessage({
           {typeof elapsedMs === 'number' &&
           Number.isFinite(elapsedMs) &&
           elapsedMs >= 0
-            ? t('turn.stoppedAfter', { seconds: Math.ceil(elapsedMs / 1000) })
+            ? t('turn.stoppedAfter', {
+                duration: formatTurnDuration(elapsedMs),
+              })
             : t('turn.stopped')}
         </span>
       </div>
     );
   }
   const contextUsage =
-    variant === 'info' ? parseContextUsageMessage(content) : null;
+    variant === 'info' ? parseContextUsageMessage(content, data) : null;
   if (contextUsage) {
     return (
       <div className={styles.flushMessage}>
         <ContextUsageMessage
           status={contextUsage}
           onShowDetail={onShowContextDetail}
+          onOpenMemoryFile={
+            onOpenMemoryFile
+              ? (file) =>
+                  onOpenMemoryFile(
+                    file,
+                    contextUsage.workspaceRoot ?? contextUsage.workspaceCwd,
+                  )
+              : undefined
+          }
         />
       </div>
     );
   }
 
-  const statsData = variant === 'info' ? parseStatsMessage(content) : null;
+  const statsData =
+    variant === 'info' ? parseStatsMessage(content, data) : null;
   if (statsData) {
     return (
       <div className={styles.flushMessage}>
@@ -353,7 +440,12 @@ export const SystemMessage = memo(function SystemMessage({
     source === 'vision_bridge_notice'
       ? formatVisionBridgeNotice(data, t)
       : undefined;
-  const displayContent = visionBridgeContent ?? content;
+  const contextCompressionContent =
+    source === 'context_compression'
+      ? formatContextCompression(data, t, language)
+      : undefined;
+  const displayContent =
+    contextCompressionContent ?? visionBridgeContent ?? content;
 
   const taskKind = stringField('kind');
   const taskCommandLabel = stringField('commandLabel');

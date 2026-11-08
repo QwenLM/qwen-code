@@ -33,6 +33,7 @@ These commands help you save, restore, and summarize work progress.
 | `/rewind`        | Rewind conversation to a previous turn                                   | `/rewind` or `/rollback`                                      |
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
+| `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
 
 > [!note]
 >
@@ -139,7 +140,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the user/system-scoped `tools.lspEnabled` setting, its `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` env pair, or the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` and `tools.lspEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 > [!note]
 >
@@ -149,16 +150,17 @@ Commands for managing AI tools and models.
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command       | Description                                                   | Usage Examples                                                            |
-| ------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `/review`     | Multi-agent code review (12 parallel agents at high effort)   | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
-| `/coordinate` | Coordinate read-only workers and one optional worktree writer | `/coordinate investigate and fix the authentication regression`           |
-| `/loop`       | Run a prompt on a recurring schedule                          | `/loop 5m check the build`                                                |
-| `/goal-draft` | Turn a fuzzy intention into a verifiable `/goal` objective    | `/goal-draft make the auth tests pass`                                    |
-| `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                             |
-| `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                      |
+| Command       | Description                                                   | Usage Examples                                                                            |
+| ------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `/review`     | Multi-agent code review (12 parallel agents at high effort)   | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low`                 |
+| `/coordinate` | Coordinate read-only workers and one optional worktree writer | `/coordinate investigate and fix the authentication regression`                           |
+| `/loop`       | Run a prompt on a recurring schedule                          | `/loop 5m check the build`                                                                |
+| `/goal-draft` | Turn a fuzzy intention into a verifiable `/goal` objective    | `/goal-draft make the auth tests pass`                                                    |
+| `/autofix-pr` | Watch a PR and fix its CI, review feedback and conflicts      | `/autofix-pr 123`, `/autofix-pr 123 --once`, `/autofix-pr resume`, `/autofix-pr stop 123` |
+| `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                                             |
+| `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                                      |
 
-See [Code Review](./code-review.md) for full `/review` documentation.
+See [Code Review](./code-review.md) for full `/review` documentation, and [Autofix a Pull Request](./autofix-pr.md) for `/autofix-pr`.
 
 ### 1.6 Side Question (`/btw`)
 
@@ -466,6 +468,8 @@ Commands for obtaining information and performing system settings.
 | `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
 | `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                               | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
 | `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
+| `/logout`        | Sign out of the active Qwen Subscription account (available with Qwen Subscription login)                                      | `/logout`                                                                           |
+| `/upgrade`       | Open Qwen subscription plans (available with Qwen Subscription login)                                                          | `/upgrade`                                                                          |
 | `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
 | → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
 | → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                              | `/doctor cpu-profile [--duration <seconds>]`                                        |
@@ -520,6 +524,8 @@ Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor
 | Standalone `@`      | Used when discussing `@` symbol itself       | `@ What is this symbol used for in programming?` |
 
 Note: Spaces in paths need to be escaped with backslash (e.g., `@My\ Documents/file.txt`)
+
+In the interactive prompt, `@` completion supports Unicode filenames, including emoji. Emoji elsewhere in the prompt do not change the file path used for completion.
 
 ## 3. Exclamation Commands (`!`) - Shell Command Execution
 
@@ -761,11 +767,13 @@ qwen sessions list --json | jq .
 
 #### `qwen sessions ps`
 
-Lists the Qwen Code sessions registered on this machine right now.
-`sessions list` walks saved transcripts ("what have I worked on"); this
-walks the live-process registry ("what is running at this moment").
-Records left behind by a killed session are swept as they are found. A
-one-shot `qwen -p` run never registers, so it is never shown.
+Lists the Qwen Code session records visible on this machine.
+`sessions list` walks saved transcripts ("what have I worked on"). This
+command shows both the live-process registry and Agent View records marked
+`managed`. Records left behind by a killed session are swept from the registry
+as they are found. A managed record is persistent bookkeeping, not evidence
+that its worker is still alive. A one-shot `qwen -p` run never registers and
+is not shown.
 
 **Flags:**
 
@@ -783,24 +791,39 @@ front-end, a relay), and `headless` or `serve` for a session another
 program drives. Several `serve` or `headless` rows can share one PID: a
 `qwen --acp` child hosts all its sessions in one process — `serve` when
 the daemon spawned it, `headless` when a client is driving it directly —
-and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
+and each of them registers separately when peer messaging is active. A hosted
+session does not register here when its own environment puts it in bare or
+safe mode. A daemon's `--bare` does not reach the sessions it hosts
+(`QWEN_CODE_SIMPLE` is scrubbed from the child environment); an inherited
+`QWEN_CODE_SAFE_MODE` does, keeping those hosted sessions out of this listing. It is a
+self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
-session is allowed to do depends on it. See
+session is allowed to do depends on it. An Agent View record marked
+`managed` uses `managed` for KIND and `-` for PID and AGE. It remains a
+separate row when the same session also has a live registry record. See
 [Cross-Session Protocol](./cross-session-protocol.md) for the record
 format and for how to register a program of your own.
 
 **JSON output (`--json`):**
 
-Outputs JSON Lines on stdout, newest session first. Each line is a JSON
-object with fields:
+Outputs JSON Lines on stdout with managed records first. Registry records
+keep their existing shape:
 
 ```
 schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
 qwenVersion, kind, ipcPath (when peer messaging is available)
 ```
 
+A managed record contains only source-backed data:
+
+```
+sessionId, cwd, managed: true
+```
+
 Nothing else is written to stdout — an empty listing prints nothing at
-all — so `qwen sessions ps --json | jq .` is safe to script against.
+all — so `qwen sessions ps --json | jq .` is safe to script against. If
+the supervisor store cannot be read, registry records still print and the
+reason is written to stderr.
 
 JSON output is raw data: field values are emitted exactly as recorded,
 with no terminal sanitization. Treat them as data, and sanitize before
@@ -812,7 +835,7 @@ rendering them in a terminal.
 # Show the other live sessions
 qwen sessions ps
 
-# Which directories are busy right now?
+# Which directories have a visible session record?
 # Note: `jq -r` renders the raw recorded value in your terminal (see the
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
@@ -821,17 +844,23 @@ qwen sessions ps --json | jq -r .cwd
 ## 6. Messaging Another Running Session
 
 Two interactive sessions on the same machine can send each other
-messages. The feature is **on by default**: a session is discoverable by
-the other sessions of the same user on the machine, and what they send
+messages. The feature is **on by default**, but `--bare` and `--safe-mode`
+disable it regardless of the setting. With a listening inbox, a session is
+discoverable by the other sessions of the same user on the machine, and what they send
 it goes through the review rules below before its model sees any of it.
-To keep a session invisible and unreachable, turn it off in
+To disable peer discovery and messaging, turn it off in
 `settings.json` and restart:
 
 ```json
 { "agents": { "crossSessionMessaging": false } }
 ```
 
-With it on, the model in one session can discover the others with
+An interactive session with peer messaging disabled can still appear in
+`qwen sessions ps`, but has no `ipcPath` and is not a reachable peer in
+`list_agents`. The OpenTUI interface does not bind a peer inbox either;
+enabling the setting alone does not make it messageable.
+
+With messaging active, the model in one session can discover the others with
 `list_agents` — each appears under `sessions` with the `name` that
 `qwen sessions ps --json` records (the table view may truncate long
 names) — and address one with `send_message` using
@@ -1057,9 +1086,10 @@ waiting out an expiry. Where a held message should surface for those
 sessions is not settled yet.
 
 A session registers unless its own settings turn
-`agents.crossSessionMessaging` off. Turned off, it stays invisible,
-because the only reason to list a session nobody can message would be to
-advertise an address that never answers.
+`agents.crossSessionMessaging` off, or it was started with `--bare` or
+`--safe-mode` — those turn messaging off whatever the setting says. Turned
+off, it stays invisible, because the only reason to list a session nobody
+can message would be to advertise an address that never answers.
 
 ### Programs that are not Qwen Code sessions
 

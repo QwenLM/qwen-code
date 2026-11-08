@@ -6,7 +6,7 @@
 
 /**
  * U-33: user-invoked shell execution for the OpenTUI `!` shell mode. Runs
- * the command directly through core's ShellExecutionService — no model turn
+ * the command through core's runtime shell executor — no model turn
  * and no approval dialog (ink shellCommandProcessor parity: typing the
  * command IS the consent) — and reports through the stream events the
  * transcript already folds: a `user-shell` command row plus a synthetic
@@ -15,14 +15,15 @@
  * ink's processor, which owns that copy).
  */
 
+import { executeRuntimeShell } from '@qwen-code/qwen-code-core/sandbox/runtime-shell.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  compactToolResultDisplayForHistory,
   isBinary,
   isSignalTermination,
-  ShellExecutionService,
   type Config,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
@@ -52,7 +53,7 @@ export async function executeUserShell(
   let commandToExecute = rawQuery;
   let pwdFilePath: string | undefined;
 
-  if (os.platform() !== 'win32') {
+  if (os.platform() !== 'win32' && !config.getShellExecutionSandbox?.()) {
     // Capture the child's final working directory so a `cd` can be warned
     // about (shell mode is stateless) — lifted from ink's processor.
     let command = rawQuery.trim();
@@ -117,7 +118,11 @@ export async function executeUserShell(
       cumulative.length > emittedLength
     ) {
       emittedLength = cumulative.length;
-      emit({ type: 'tool-output', id: callId, output: cumulative });
+      emit({
+        type: 'tool-output',
+        id: callId,
+        output: compactToolResultDisplayForHistory(cumulative),
+      });
       lastUpdate = Date.now();
     }
   };
@@ -128,7 +133,8 @@ export async function executeUserShell(
     }
   };
 
-  return ShellExecutionService.execute(
+  return executeRuntimeShell(
+    config,
     commandToExecute,
     targetDir,
     onOutputEvent,
@@ -178,11 +184,16 @@ export async function executeUserShell(
           : res.output.trim() || '(Command produced no output)';
 
         // The result event replaces whatever streamed onto the card, so it
-        // carries the whole display — the same string the LLM history write
-        // below uses.
+        // carries the whole display. Ink splits the same string two ways here —
+        // compacted for the UI row, verbatim for the LLM history below — and
+        // this mirrors it: the card is a display, the model gets the output.
         const finalOutput = `${prefixText}${mainContent}`;
 
-        emit({ type: 'tool-result', id: callId, display: finalOutput });
+        emit({
+          type: 'tool-result',
+          id: callId,
+          display: compactToolResultDisplayForHistory(finalOutput),
+        });
         emit({
           type: 'tool-end',
           id: callId,

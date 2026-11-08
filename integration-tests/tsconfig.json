@@ -18,7 +18,6 @@
     // `terminal-capture/` and pulls SDK sources that reference `WebSocket` /
     // `HeadersInit`, none of which exist in the root's ES2023-only lib.
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
-    "baseUrl": ".",
     // Resolve workspace packages from source so `tsc -p` here does not depend
     // on whether someone had built them recently — a missing dist used to fail
     // resolution outright and a stale one silently typechecked against old
@@ -45,11 +44,21 @@
       // (`../../packages/cli/src/...`), so those files get checked here too
       // and must resolve their own imports.
       "@qwen-code/qwen-code-core": ["../packages/core/src/index.ts"],
+      "@qwen-code/qwen-code-core/omni": ["../packages/core/src/omni/index.ts"],
+      "@qwen-code/qwen-code-core/omniPolicyCollection": [
+        "../packages/core/src/omni/policy/model-call-collection.ts"
+      ],
       "@qwen-code/qwen-code-core/subSessionConstants": [
         "../packages/core/src/tools/sub-session-constants.ts"
       ],
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../packages/core/src/utils/transcript-records.ts"
+      ],
+      "@qwen-code/qwen-code-core/shellResult": [
+        "../packages/core/src/utils/shell-result.ts"
+      ],
+      "@qwen-code/qwen-code-core/telemetryConstants": [
+        "../packages/core/src/telemetry/constants.ts"
       ],
       "@qwen-code/qwen-code-core/noFollowOpen": [
         "../packages/core/src/utils/no-follow-open.ts"
@@ -169,7 +178,10 @@
       // sites share one declaration — mixing src and dist declarations
       // produces duplicate-private-class errors.
       "@qwen-code/channel-base": ["../packages/channels/base/src/index.ts"],
-      // cli's channel-registry.ts imports the nine builtin channel
+      "@qwen-code/channel-base/markdown-chunks": [
+        "../packages/channels/base/src/markdown-chunks.ts"
+      ],
+      // cli's channel-registry.ts imports the builtin channel
       // adapters and html.ts imports web-templates; without entries they
       // resolve through their exports maps to dist, leaving the typecheck
       // dependent on those packages being built.
@@ -181,6 +193,7 @@
         "../packages/channels/dingtalk/src/index.ts"
       ],
       "@qwen-code/channel-dws": ["../packages/channels/dws/src/index.ts"],
+      "@qwen-code/channel-email": ["../packages/channels/email/src/index.ts"],
       "@qwen-code/channel-wecom": ["../packages/channels/wecom/src/index.ts"],
       "@qwen-code/channel-feishu": ["../packages/channels/feishu/src/index.ts"],
       "@qwen-code/channel-qqbot": ["../packages/channels/qqbot/src/index.ts"],

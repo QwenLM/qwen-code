@@ -12,14 +12,26 @@ import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
   logLoopDetected,
   logLoopDetectionDisabled,
+  logLoopProtection,
 } from '../telemetry/loggers.js';
 import {
   LoopDetectedEvent,
   LoopDetectionDisabledEvent,
+  LoopProtectionEvent,
+  LoopReason,
   LoopType,
 } from '../telemetry/types.js';
+import type { LoopStopDetail } from '../telemetry/types.js';
+import {
+  buildLoopReminder,
+  CAP_REPEAT_REMINDER_AT,
+  IDENTICAL_CALL_REMINDER_AT,
+  SHELL_INSPECTION_REMINDER_AT,
+} from './loop-protection.js';
+import type { LoopReminderInput } from './loop-protection.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   PREVIEW_SIZE_CHARS,
@@ -32,12 +44,41 @@ import {
 // service's turn.js dependency.
 export { getToolCallRepeatKey };
 
+function getLoopDetectionToolCall<T extends { name: string; args: object }>(
+  toolCall: T,
+): T {
+  if (toolCall.name !== ToolNames.TOOL_CALL) return toolCall;
+
+  const envelopeArgs = toolCall.args as Record<string, unknown>;
+  const targetName = envelopeArgs['name'];
+  if (typeof targetName !== 'string') return toolCall;
+
+  const targetArgs = envelopeArgs['arguments'];
+  return {
+    ...toolCall,
+    // The bridge resolves target names case-insensitively, so loop identity
+    // and read-tool classification must use the same canonical casing.
+    name: canonicalToolName(targetName).toLowerCase(),
+    // A non-object payload (e.g. a JSON-string `arguments` a later repair
+    // pass would normalize) cannot be unwrapped, but dropping it would
+    // collapse every bridged call to the target onto one repeat key; keep
+    // the envelope itself as the key material so distinct payloads stay
+    // distinct.
+    args:
+      typeof targetArgs === 'object' &&
+      targetArgs !== null &&
+      !Array.isArray(targetArgs)
+        ? (targetArgs as Record<string, unknown>)
+        : toolCall.args,
+  } as T;
+}
+
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
-// yields an identical result, so this is never a productive pattern. Kept
-// below the DashScope server-side "Repetitive tool calls detected" threshold
-// so the client breaks the loop before the server rejects the whole
-// conversation with a 400 (issue #5019).
+// yields an identical result, so this is never a productive pattern. It was
+// first kept below a DashScope server-side "Repetitive tool calls detected"
+// 400 (issue #5019), which no longer reproduces (#14828); under `stop` it
+// halts here, under `warn` it only reminds.
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
@@ -169,26 +210,101 @@ export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
 
 /**
- * Halt predicate of the per-turn tool-call cap, shared with the daemon's
+ * Whether a stream event restarts the current attempt from scratch (the
+ * failed attempt's partial output is discarded and re-streamed), so any
+ * attempt-scoped observations recorded after the last committed round-trip
+ * must be rolled back. The client's stream loop consumes it for both of its
+ * attempt-scoped states — the exploration budget's phase and the loop-guard
+ * feed set (`modelRequestAccepted`/`hasToolCalls`/`loopGuardFedCallIds`) — so
+ * a new restart-style event lands in both of them or in neither.
+ *
+ * It is deliberately not consumed by the loop detector, which has no call
+ * site here: that module's own per-turn cap rollback stays `Retry`-only, and
+ * `checkAlwaysOnSafeties` already treats a fallback as a no-op through its
+ * non-`ToolCallRequest` early return (a fallback cannot have streamed calls,
+ * and clearing the detector's streak evidence per round-trip would silence
+ * the consecutive-identical and stagnation guards). A restart-style event
+ * added here does NOT propagate to the detector; add it there separately and
+ * justify it.
+ */
+export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
+  return (
+    event.type === LlmEventType.Retry ||
+    event.type === LlmEventType.ModelFallback
+  );
+}
+
+export interface TurnToolCallCapHalt {
+  reason: LoopReason;
+  /** The explicit cap, the hard backstop, or the soft cap for a stuck halt. */
+  limit: number;
+}
+
+/** One queued loop-protection warning, keyed by its pattern. */
+export interface LoopReminderEntry {
+  text: string;
+  loopType: LoopType;
+  detail: LoopStopDetail;
+  /** The prompt id that queued it, since a side query's reset moves promptId. */
+  promptId: string;
+}
+
+/**
+ * Halt classifier of the per-turn tool-call cap, shared with the daemon's
  * turn-loop guard (ACP Session's recordDaemonToolCalls) so both runtimes
  * decide identically and cannot drift. `cap` is the resolved effective cap
  * from getMaxToolCallsPerTurn (Infinity when disabled); `maxKeyRepeat` is
  * the turn's running max count of any single (tool, args) repeat key.
- * Returns true when a turn that has emitted `totalCalls` calls must halt:
- * always past an explicit cap (the released hard-cap contract), and past
- * the adaptive default cap only on a stuck-repetition signal or at the
- * hard backstop (see checkTurnToolCallCap).
+ * Returns null while a turn that has emitted `totalCalls` calls may
+ * continue, and otherwise why it must halt: always past an explicit cap (the
+ * released hard-cap contract), and past the adaptive default cap only on a
+ * stuck-repetition signal or at the hard backstop (see checkTurnToolCallCap).
+ * Past the backstop the reason is BACKSTOP even when a call also repeated,
+ * since the budget is what the user can change.
  */
-export function shouldHaltOnTurnToolCallCap(
+export function getTurnToolCallCapHalt(
+  totalCalls: number,
+  maxKeyRepeat: number,
+  cap: number,
+  isExplicitCap: boolean,
+): TurnToolCallCapHalt | null {
+  if (totalCalls <= cap) return null;
+  if (isExplicitCap) return { reason: LoopReason.EXPLICIT_CAP, limit: cap };
+  const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
+  if (totalCalls > hardCap) {
+    return { reason: LoopReason.BACKSTOP, limit: hardCap };
+  }
+  if (maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD) {
+    return { reason: LoopReason.STUCK_REPETITION, limit: cap };
+  }
+  return null;
+}
+
+/**
+ * Whether an adaptive cap should remind before its stuck-repetition stop:
+ * past the soft cap, with one (tool, args) pair repeated
+ * CAP_REPEAT_REMINDER_AT times (#14828).
+ */
+export function shouldRemindTurnToolCallCap(
   totalCalls: number,
   maxKeyRepeat: number,
   cap: number,
   isExplicitCap: boolean,
 ): boolean {
-  if (totalCalls <= cap) return false;
-  const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
-  const stuck = maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
-  return isExplicitCap || totalCalls > hardCap || stuck;
+  return (
+    !isExplicitCap && totalCalls > cap && maxKeyRepeat >= CAP_REPEAT_REMINDER_AT
+  );
+}
+
+/** Options for one loop check. */
+export interface LoopCheckOptions {
+  /** False to keep the check from queueing reminders. Defaults to true. */
+  queueReminders?: boolean;
+  /**
+   * False to leave tool-call patterns to a host that checks its own; a tool
+   * call still ends the content and thought streams. Defaults to true.
+   */
+  toolCallPatterns?: boolean;
 }
 
 // Producer shapes of the oversized-result stubs (see tools/truncation.ts).
@@ -387,12 +503,50 @@ export class LoopDetectionService {
   // the user which detector actually fired.
   private lastLoopType: LoopType | null = null;
 
+  // Reason and tool-call numbers of the most recent firing, for the loop
+  // types that cover several causes. Tagged with its loop type because one
+  // heuristic pass can fire several detectors and the last one sets
+  // lastLoopType; the detail only applies while that type still matches.
+  private lastLoopDetail: {
+    loopType: LoopType;
+    detail: LoopStopDetail;
+  } | null = null;
+
+  // Loop-protection decisions already made, keyed by pattern: 'identical'
+  // and 'shell' for the current streak, 'cap' and heuristic loop types for
+  // the turn. Each pattern is reminded or observed once (#14828).
+  private loopProtectionHandled = new Set<string>();
+
+  // Reminders waiting for the next request that carries tool results, keyed
+  // by the pattern that queued them so a retry can undo them. Each keeps the
+  // prompt id that queued it, since a side query's reset moves promptId.
+  private pendingReminders = new Map<string, LoopReminderEntry>();
+
+  // A delivery takeLoopReminder() handed to the client for the request it is
+  // assembling. It waits here — not yet credited, not re-queued — until the
+  // client commits it at the model-acceptance boundary or abandons it, so
+  // neither the handled decisions nor the `reminded` telemetry settle from a
+  // draft request array that may never reach the model.
+  private preparedReminderDelivery: Array<[string, LoopReminderEntry]> | null =
+    null;
+
+  // False while a concurrent side query feeds the detectors: its calls and
+  // retries must not queue, drop or observe the running turn's decisions.
+  private queueingReminders = true;
+
+  // A stop is logged as one `stopped` decision even when several detectors
+  // fire on the same event.
+  private loopProtectionStopLogged = false;
+
+  // Tool of the (tool, args) key behind capMaxKeyRepeat, for the reminder.
+  private capMaxKeyToolName = '';
+
   // Short excerpt of the repeated region captured when the chanting
   // detector fires, for debug logging only. Deliberately NOT part of the
-  // LoopDetected event payload: the event contract stays loop_type-only and
-  // the excerpt rides the debug log instead, so a headless reasoning-channel
-  // halt (empty stdout, label-only stderr) leaves an artifact that tells a
-  // true repetition from a misfire.
+  // LoopDetected event payload: the event contract stays the loop type and
+  // its stop detail, and the excerpt rides the debug log instead, so a
+  // headless reasoning-channel halt (empty stdout, label-only stderr) leaves
+  // an artifact that tells a true repetition from a misfire.
   private lastChantExcerpt = '';
 
   constructor(config: Config) {
@@ -405,6 +559,204 @@ export class LoopDetectionService {
    */
   getLastLoopType(): LoopType | null {
     return this.lastLoopType;
+  }
+
+  /**
+   * Returns the reason and tool-call numbers of the most recent detection,
+   * or an empty object when its loop type carries none.
+   */
+  getLastLoopDetail(): LoopStopDetail {
+    return this.lastLoopDetail &&
+      this.lastLoopDetail.loopType === this.lastLoopType
+      ? this.lastLoopDetail.detail
+      : {};
+  }
+
+  private recordLoopDetail(loopType: LoopType, detail: LoopStopDetail): void {
+    this.lastLoopType = loopType;
+    this.lastLoopDetail = { loopType, detail };
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(loopType, this.promptId, detail),
+    );
+  }
+
+  /**
+   * Returns the loop-protection reminder queued since the last call, for the
+   * next request that carries tool results. The delivery is only prepared
+   * here: the caller credits it with commitLoopReminderDelivery() once the
+   * model accepts the request, or returns it with abandonLoopReminderDelivery()
+   * when the request never reaches the model.
+   */
+  takeLoopReminder(): string | undefined {
+    if (this.pendingReminders.size === 0) return undefined;
+    const pending = [...this.pendingReminders.entries()];
+    this.pendingReminders.clear();
+    this.preparedReminderDelivery = pending;
+    return pending.map(([, { text }]) => text).join('\n\n');
+  }
+
+  /**
+   * Credits the `reminded` decision for the delivery takeLoopReminder()
+   * prepared. The client calls this at the model-acceptance boundary — the
+   * first event of the request that carries the reminder — so a send that is
+   * abandoned or fails before acceptance stays un-credited.
+   */
+  commitLoopReminderDelivery(): void {
+    const prepared = this.preparedReminderDelivery;
+    if (!prepared) return;
+    this.preparedReminderDelivery = null;
+    // Logged on delivery, so a reminder dropped by a retry or never sent
+    // before a stop is not counted.
+    for (const [, { loopType, detail, promptId }] of prepared) {
+      this.logLoopProtectionDecision(loopType, 'reminded', detail, promptId);
+    }
+  }
+
+  /**
+   * Puts the delivery takeLoopReminder() prepared back into the pending map
+   * after the request carrying it exited without model acceptance, so the
+   * same streak's warning stays eligible for the next send.
+   *
+   * The keys stay marked handled here: the remind decision stood, and
+   * unmarking would let a refire queue a duplicate beside the restored entry.
+   * They do not survive everything — a Retry drops the consecutive streak
+   * through resetToolCallCount(), which deletes `identical`,
+   * `identical-unverified` and `shell` from loopProtectionHandled. The
+   * retry's dropPendingReminders() cannot do that on this path, because the
+   * taken entries are no longer in pendingReminders when it runs. A reset
+   * clears this prepared delivery instead, so an abandoned send cannot leak
+   * a stale warning into a new prompt.
+   */
+  abandonLoopReminderDelivery(): void {
+    const prepared = this.preparedReminderDelivery;
+    if (!prepared) return;
+    this.preparedReminderDelivery = null;
+    for (const [key, reminder] of prepared) {
+      this.pendingReminders.set(key, reminder);
+    }
+  }
+
+  // A retry replays the attempt's calls, which queue the reminders again. A
+  // side query's retry replays none of them, so it keeps them.
+  private dropPendingReminders(): void {
+    if (!this.queueingReminders) return;
+    for (const key of this.pendingReminders.keys()) {
+      this.loopProtectionHandled.delete(key);
+    }
+    this.pendingReminders.clear();
+  }
+
+  private withReminderQueueing<T>(queue: boolean, run: () => T): T {
+    const previous = this.queueingReminders;
+    this.queueingReminders = queue;
+    try {
+      return run();
+    } finally {
+      this.queueingReminders = previous;
+    }
+  }
+
+  private logLoopProtectionDecision(
+    loopType: LoopType,
+    decision: 'reminded' | 'stopped' | 'observed',
+    detail: LoopStopDetail,
+    promptId = this.promptId,
+  ): void {
+    logLoopProtection(
+      this.config,
+      new LoopProtectionEvent({
+        prompt_id: promptId,
+        loop_type: loopType,
+        decision,
+        mode: this.config.getLoopProtection(),
+        loop_reason: detail.loopReason,
+      }),
+    );
+  }
+
+  // One reminder per pattern.
+  private remind(
+    key: string,
+    input: LoopReminderInput,
+    detail: LoopStopDetail,
+  ): void {
+    if (!this.queueingReminders || this.loopProtectionHandled.has(key)) return;
+    this.loopProtectionHandled.add(key);
+    this.pendingReminders.set(key, {
+      text: buildLoopReminder(input),
+      loopType: input.loopType,
+      detail,
+      promptId: this.promptId,
+    });
+  }
+
+  private observe(
+    key: string,
+    loopType: LoopType,
+    detail: LoopStopDetail,
+  ): void {
+    if (!this.queueingReminders || this.loopProtectionHandled.has(key)) return;
+    this.loopProtectionHandled.add(key);
+    this.logLoopProtectionDecision(loopType, 'observed', detail);
+  }
+
+  private stopTurn(loopType: LoopType, detail: LoopStopDetail = {}): true {
+    this.recordLoopDetail(loopType, detail);
+    if (!this.loopProtectionStopLogged) {
+      this.loopProtectionStopLogged = true;
+      this.logLoopProtectionDecision(loopType, 'stopped', detail);
+    }
+    return true;
+  }
+
+  // An always-on detector reached its reminder point.
+  private remindBeforeStop(
+    key: string,
+    input: Omit<LoopReminderInput, 'stops'>,
+    detail: LoopStopDetail = {},
+  ): void {
+    const mode = this.config.getLoopProtection();
+    if (mode === 'off') return;
+    this.remind(key, { ...input, stops: mode === 'stop' }, detail);
+  }
+
+  // An always-on detector reached its stop point. Returns whether to halt.
+  private onAlwaysOnStopPoint(
+    key: string,
+    input: Omit<LoopReminderInput, 'stops'>,
+    detail: LoopStopDetail = {},
+  ): boolean {
+    switch (this.config.getLoopProtection()) {
+      case 'stop':
+        return this.stopTurn(input.loopType, detail);
+      case 'warn':
+        this.remind(key, { ...input, stops: false }, detail);
+        return false;
+      default:
+        this.observe(key, input.loopType, detail);
+        return false;
+    }
+  }
+
+  // A heuristic detector fired. Content and thought repetition happen
+  // mid-stream, where no tool result can carry a reminder, so they still stop
+  // under `warn`. Returns whether to halt.
+  private onHeuristicFired(
+    loopType: LoopType,
+    detail: LoopStopDetail = {},
+    midStream = false,
+  ): boolean {
+    const mode = this.config.getLoopProtection();
+    if (mode === 'stop' || (mode === 'warn' && midStream)) {
+      return this.stopTurn(loopType, detail);
+    }
+    if (mode === 'warn') {
+      this.remind(loopType, { loopType, stops: false }, detail);
+    } else {
+      this.observe(loopType, loopType, detail);
+    }
+    return false;
   }
 
   getConsecutiveToolCallCount(): number {
@@ -422,6 +774,10 @@ export class LoopDetectionService {
     );
   }
 
+  isDisabledForSession(): boolean {
+    return this.disabledForSession;
+  }
+
   /**
    * Records the executed result of a tool call so the guards can treat
    * stateful read tools (see STATEFUL_READ_TOOLS) result-aware: identical
@@ -432,20 +788,32 @@ export class LoopDetectionService {
    *
    * Returns true when the recorded result itself trips a detector (the
    * result-aware global-duplicate count); callers must then halt the turn
-   * the same way they do for an event-detected loop.
+   * the same way they do for an event-detected loop. `queueReminders` is as
+   * in addAndCheckHeuristicLoops.
    */
   recordToolResult(
+    toolCall: { name: string; args: object },
+    responseParts: readonly Part[],
+    { queueReminders = true }: LoopCheckOptions = {},
+  ): boolean {
+    return this.withReminderQueueing(queueReminders, () =>
+      this.runRecordToolResult(toolCall, responseParts),
+    );
+  }
+
+  private runRecordToolResult(
     toolCall: { name: string; args: object },
     responseParts: readonly Part[],
   ): boolean {
     if (this.loopDetected) return true;
     if (this.disabledForSession) return false;
-    if (!this.isStatefulReadTool(toolCall.name)) return false;
+    const resolvedToolCall = getLoopDetectionToolCall(toolCall);
+    if (!this.isStatefulReadTool(resolvedToolCall.name)) return false;
 
     const resultText = LoopDetectionService.extractResultText(responseParts);
     if (resultText === null) return false;
     const fingerprint = createHash('sha256').update(resultText).digest('hex');
-    const key = this.getToolCallKey(toolCall);
+    const key = this.getToolCallKey(resolvedToolCall);
 
     // Consecutive-streak evidence for the always-on guard. The state entry
     // can predate the streak (lastFingerprint survives streak breaks), so
@@ -478,7 +846,7 @@ export class LoopDetectionService {
 
     // A changed result is observable progress: restart the same-name streak
     // so ACTION_STAGNATION does not fire on productive polling.
-    if (fingerprintChanged && this.lastSeenToolName === toolCall.name) {
+    if (fingerprintChanged && this.lastSeenToolName === resolvedToolCall.name) {
       this.sameNameStreak = 1;
     }
 
@@ -497,22 +865,18 @@ export class LoopDetectionService {
     });
     if (consecutiveCount > this.capMaxKeyRepeat) {
       this.capMaxKeyRepeat = consecutiveCount;
+      this.capMaxKeyToolName = resolvedToolCall.name;
     }
 
     // The global-duplicate detector is gated (skipLoopDetection) exactly as
     // its request-time counterpart in addAndCheckHeuristicLoops.
     if (
       !this.config.getSkipLoopDetection() &&
-      consecutiveCount >= GLOBAL_DUPLICATE_THRESHOLD
+      consecutiveCount >= GLOBAL_DUPLICATE_THRESHOLD &&
+      this.onHeuristicFired(LoopType.GLOBAL_TOOL_CALL_DUPLICATE, {
+        loopReason: LoopReason.REPEATED_CALL,
+      })
     ) {
-      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(
-          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          this.promptId,
-        ),
-      );
       this.loopDetected = true;
       return true;
     }
@@ -528,6 +892,7 @@ export class LoopDetectionService {
   recordToolResultByCallId(
     callId: string,
     responseParts: readonly Part[],
+    options: LoopCheckOptions = {},
   ): boolean {
     const request = this.requestByCallId.get(callId);
     if (!request) return false;
@@ -535,6 +900,7 @@ export class LoopDetectionService {
     return this.recordToolResult(
       { name: request.name, args: request.args },
       responseParts,
+      options,
     );
   }
 
@@ -591,7 +957,23 @@ export class LoopDetectionService {
     return this.addAndCheckHeuristicLoops(event);
   }
 
-  addAndCheckHeuristicLoops(event: ServerLlmStreamEvent): boolean {
+  /**
+   * Opt-in heuristic checks. `queueReminders: false` keeps a concurrent side
+   * query from queueing loop-protection reminders into the running turn.
+   */
+  addAndCheckHeuristicLoops(
+    event: ServerLlmStreamEvent,
+    { queueReminders = true, toolCallPatterns = true }: LoopCheckOptions = {},
+  ): boolean {
+    return this.withReminderQueueing(queueReminders, () =>
+      this.runHeuristicLoops(event, toolCallPatterns),
+    );
+  }
+
+  private runHeuristicLoops(
+    event: ServerLlmStreamEvent,
+    toolCallPatterns: boolean,
+  ): boolean {
     if (this.loopDetected || this.disabledForSession) {
       return this.loopDetected;
     }
@@ -605,13 +987,15 @@ export class LoopDetectionService {
         // reasoning stream. Once a tool call lands, the model has made
         // observable progress — any prior thoughts should not carry over.
         this.thoughtHistory = [];
+        if (!toolCallPatterns) break;
 
-        this.trackToolCall(event.value);
-        const toolCallKey = this.getToolCallKey(event.value);
+        const toolCall = getLoopDetectionToolCall(event.value);
+        this.trackToolCall(toolCall);
+        const toolCallKey = this.getToolCallKey(toolCall);
         // Stateful read tools are counted post-execution in
         // recordToolResult, on consecutive identical results instead of
         // args alone (issue #9450).
-        const globalDup = this.isStatefulReadTool(event.value.name)
+        const globalDup = this.isStatefulReadTool(toolCall.name)
           ? false
           : this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
@@ -701,9 +1085,19 @@ export class LoopDetectionService {
    * tool-call cap. Call this before the gated heuristic checks so none of the
    * guards can be bypassed by `skipLoopDetection`. All three honor an
    * explicit in-session disable; the cap is additionally tunable via the
-   * `model.maxToolCallsPerTurn` setting.
+   * `model.maxToolCallsPerTurn` setting. `queueReminders` is as in
+   * addAndCheckHeuristicLoops.
    */
-  checkAlwaysOnSafeties(event: ServerLlmStreamEvent): boolean {
+  checkAlwaysOnSafeties(
+    event: ServerLlmStreamEvent,
+    { queueReminders = true }: LoopCheckOptions = {},
+  ): boolean {
+    return this.withReminderQueueing(queueReminders, () =>
+      this.runAlwaysOnSafeties(event),
+    );
+  }
+
+  private runAlwaysOnSafeties(event: ServerLlmStreamEvent): boolean {
     if (this.loopDetected) {
       return true;
     }
@@ -726,6 +1120,7 @@ export class LoopDetectionService {
     // globalToolCallCounts on retry): the replayed calls re-populate it, and a
     // stuck pattern simply re-accumulates toward the threshold.
     if (event.type === LlmEventType.Retry) {
+      this.dropPendingReminders();
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       this.capKeyCounts.clear();
@@ -756,17 +1151,18 @@ export class LoopDetectionService {
     // Hash the (tool,args) key once and share it across the guards that need
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
-    const key = this.getToolCallKey(event.value);
-    const stateful = this.isStatefulReadTool(event.value.name);
+    const toolCall = getLoopDetectionToolCall(event.value);
+    const key = this.getToolCallKey(toolCall);
+    const stateful = this.isStatefulReadTool(toolCall.name);
 
     // Pair requests with their later results (recordToolResultByCallId).
     // Only stateful read tools participate: recordToolResult rejects every
     // other tool, so tracking them would just accumulate full args objects
     // (write_file args can carry whole file contents) until eviction.
-    if (event.value.callId && stateful) {
-      this.requestByCallId.set(event.value.callId, {
-        name: event.value.name,
-        args: event.value.args,
+    if (toolCall.callId && stateful) {
+      this.requestByCallId.set(toolCall.callId, {
+        name: toolCall.name,
+        args: toolCall.args,
       });
       if (this.requestByCallId.size > MAX_TRACKED_TOOL_REQUESTS) {
         const oldest = this.requestByCallId.keys().next().value;
@@ -780,24 +1176,23 @@ export class LoopDetectionService {
     // post-execution instead (recordToolResult): the same call returning
     // changed state is productive and must not build the stuck signal.
     if (!stateful) {
-      this.trackCapKeyRepeat(key);
+      this.trackCapKeyRepeat(key, toolCall.name);
     }
 
     // Consecutive identical tool calls (same name AND identical args) are the
-    // one repetition signal precise enough to halt unconditionally — for
-    // deterministic tools an identical call returns an identical result, so
-    // it is never productive. Promoted here from the opt-in tier so it
-    // protects every user regardless of the `skipLoopDetection` config
-    // default: the DashScope server rejects this pattern with a 400 (issue
-    // #5019) far below the per-turn cap, so the gated default left users
-    // unprotected. For stateful read tools the guard additionally requires
-    // the observed results to be unchanged (issue #9450).
-    if (this.checkToolCallLoop(event.value, key)) {
+    // most precise repetition signal — for deterministic tools an identical
+    // call returns an identical result, so it is never productive. It runs
+    // here, outside the opt-in tier, so it protects every user regardless of
+    // the `skipLoopDetection` config default; model.loopProtection decides
+    // whether it reminds or stops (#14828). For stateful read tools the guard
+    // additionally requires the observed results to be unchanged (issue
+    // #9450).
+    if (this.checkToolCallLoop(toolCall, key)) {
       this.loopDetected = true;
       return true;
     }
 
-    if (this.checkShellCommandStagnation(event.value)) {
+    if (this.checkShellCommandStagnation(toolCall)) {
       this.loopDetected = true;
       return true;
     }
@@ -829,6 +1224,23 @@ export class LoopDetectionService {
       }
       this.lastToolCallKey = key;
       this.toolCallRepetitionCount = 1;
+      this.loopProtectionHandled.delete('identical');
+      this.loopProtectionHandled.delete('identical-unverified');
+    }
+    const repeated = {
+      loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      toolName: toolCall.name,
+      count: this.toolCallRepetitionCount,
+    };
+    // The reminder window ends at the stop point, so a reminder that waited
+    // behind another pending one still comes before the stop.
+    if (
+      this.toolCallRepetitionCount >= IDENTICAL_CALL_REMINDER_AT &&
+      this.toolCallRepetitionCount < TOOL_CALL_LOOP_THRESHOLD &&
+      (!this.isStatefulReadTool(toolCall.name) ||
+        this.statefulResultsUnchanged(key))
+    ) {
+      this.remindBeforeStop('identical', repeated);
     }
     if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
       if (this.isStatefulReadTool(toolCall.name)) {
@@ -840,8 +1252,7 @@ export class LoopDetectionService {
         // result changed, the model's re-poll was productive — restart the
         // streak instead of halting. Missing result evidence (results never
         // recorded for this streak) fails safe and keeps the pre-#9450
-        // behavior, so the DashScope protection (#5019) is never loosened by
-        // a wiring gap.
+        // stop, so a wiring gap never loosens the guard under `stop`.
         const state = this.statefulRepeatState.get(key);
         const expectedResults = this.toolCallRepetitionCount - 1;
         if (state && state.resultsObserved >= expectedResults) {
@@ -849,21 +1260,39 @@ export class LoopDetectionService {
             this.toolCallRepetitionCount = 1;
             state.resultsObserved = 0;
             state.unchangedStreak = 0;
+            this.loopProtectionHandled.delete('identical');
+            this.loopProtectionHandled.delete('identical-unverified');
             return false;
           }
         }
+        // Without that evidence the stop still fails safe, but a `warn`
+        // reminder would tell the model a result that may be changing will
+        // not change, so it is only recorded. It is recorded under its own
+        // key: results that arrive later can still earn the reminder.
+        if (
+          this.config.getLoopProtection() === 'warn' &&
+          !this.statefulResultsUnchanged(key)
+        ) {
+          this.observe('identical-unverified', repeated.loopType, {});
+          return false;
+        }
       }
-      this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(
-          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
-          this.promptId,
-        ),
-      );
-      return true;
+      return this.onAlwaysOnStopPoint('identical', repeated);
     }
     return false;
+  }
+
+  // Whether the results recorded for the current streak of a stateful read
+  // tool are all observed and unchanged. A reminder needs this evidence:
+  // unlike the stop, it does not fail safe on missing results.
+  private statefulResultsUnchanged(key: string): boolean {
+    const state = this.statefulRepeatState.get(key);
+    const expectedResults = this.toolCallRepetitionCount - 1;
+    return (
+      state !== undefined &&
+      state.resultsObserved >= expectedResults &&
+      state.unchangedStreak >= expectedResults - 1
+    );
   }
 
   private checkShellCommandStagnation(toolCall: {
@@ -874,6 +1303,7 @@ export class LoopDetectionService {
     if (!key) {
       this.lastShellInspectionKey = null;
       this.shellInspectionStreak = 0;
+      this.loopProtectionHandled.delete('shell');
       return false;
     }
 
@@ -882,15 +1312,21 @@ export class LoopDetectionService {
     } else {
       this.lastShellInspectionKey = key;
       this.shellInspectionStreak = 1;
+      this.loopProtectionHandled.delete('shell');
     }
 
+    const inspection = {
+      loopType: LoopType.SHELL_COMMAND_STAGNATION,
+      count: this.shellInspectionStreak,
+    };
+    if (
+      this.shellInspectionStreak >= SHELL_INSPECTION_REMINDER_AT &&
+      this.shellInspectionStreak < SHELL_COMMAND_STAGNATION_THRESHOLD
+    ) {
+      this.remindBeforeStop('shell', inspection);
+    }
     if (this.shellInspectionStreak >= SHELL_COMMAND_STAGNATION_THRESHOLD) {
-      this.lastLoopType = LoopType.SHELL_COMMAND_STAGNATION;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(LoopType.SHELL_COMMAND_STAGNATION, this.promptId),
-      );
-      return true;
+      return this.onAlwaysOnStopPoint('shell', inspection);
     }
 
     return false;
@@ -1134,15 +1570,10 @@ export class LoopDetectionService {
       );
       const chunkHash = createHash('sha256').update(currentChunk).digest('hex');
 
-      if (this.isLoopDetectedForChunk(currentChunk, chunkHash)) {
-        this.lastLoopType = LoopType.CHANTING_IDENTICAL_SENTENCES;
-        logLoopDetected(
-          this.config,
-          new LoopDetectedEvent(
-            LoopType.CHANTING_IDENTICAL_SENTENCES,
-            this.promptId,
-          ),
-        );
+      if (
+        this.isLoopDetectedForChunk(currentChunk, chunkHash) &&
+        this.onHeuristicFired(LoopType.CHANTING_IDENTICAL_SENTENCES, {}, true)
+      ) {
         // The LoopDetected event carries only loop_type + prompt_id, and a
         // reasoning-channel halt prints nothing to stdout — without an
         // artifact there is no way to tell a true repetition from a
@@ -1423,15 +1854,10 @@ export class LoopDetectionService {
 
     const recentThoughts = this.thoughtHistory.slice(-THOUGHT_REPEAT_THRESHOLD);
     const firstThought = recentThoughts[0];
-    if (recentThoughts.every((thought) => thought === firstThought)) {
-      this.lastLoopType = LoopType.REPETITIVE_THOUGHTS;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(LoopType.REPETITIVE_THOUGHTS, this.promptId),
-      );
-      return true;
-    }
-    return false;
+    return (
+      recentThoughts.every((thought) => thought === firstThought) &&
+      this.onHeuristicFired(LoopType.REPETITIVE_THOUGHTS, {}, true)
+    );
   }
 
   // Exact tool names that read content from the filesystem. A plain substring
@@ -1514,32 +1940,20 @@ export class LoopDetectionService {
       this.isReadLikeTool(call.name),
     ).length;
 
-    if (fileReadCount >= FILE_READ_THRESHOLD) {
-      this.lastLoopType = LoopType.READ_FILE_LOOP;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(LoopType.READ_FILE_LOOP, this.promptId),
-      );
-      return true;
-    }
-
-    return false;
+    return (
+      fileReadCount >= FILE_READ_THRESHOLD &&
+      this.onHeuristicFired(LoopType.READ_FILE_LOOP)
+    );
   }
 
   /**
    * Checks for action stagnation where the model performs different but equally unproductive actions.
    */
   private checkActionStagnation(): boolean {
-    if (this.sameNameStreak >= STAGNATION_THRESHOLD) {
-      this.lastLoopType = LoopType.ACTION_STAGNATION;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(LoopType.ACTION_STAGNATION, this.promptId),
-      );
-      return true;
-    }
-
-    return false;
+    return (
+      this.sameNameStreak >= STAGNATION_THRESHOLD &&
+      this.onHeuristicFired(LoopType.ACTION_STAGNATION)
+    );
   }
 
   /**
@@ -1547,11 +1961,12 @@ export class LoopDetectionService {
    * running max repeat count. Always-on (called from checkAlwaysOnSafeties
    * with the already-hashed key).
    */
-  private trackCapKeyRepeat(key: string): void {
+  private trackCapKeyRepeat(key: string, toolName: string): void {
     const count = (this.capKeyCounts.get(key) ?? 0) + 1;
     this.capKeyCounts.set(key, count);
     if (count > this.capMaxKeyRepeat) {
       this.capMaxKeyRepeat = count;
+      this.capMaxKeyToolName = toolName;
     }
   }
 
@@ -1570,22 +1985,48 @@ export class LoopDetectionService {
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
+    const cap = this.config.getMaxToolCallsPerTurn();
+    const isExplicitCap = this.config.isMaxToolCallsPerTurnExplicit();
+    const halt = getTurnToolCallCapHalt(
+      this.turnToolCallTotal,
+      this.capMaxKeyRepeat,
+      cap,
+      isExplicitCap,
+    );
+    const stuck = {
+      loopType: LoopType.TURN_TOOL_CALL_CAP,
+      toolName: this.capMaxKeyToolName,
+      count: this.capMaxKeyRepeat,
+      softCap: cap,
+    };
+    if (halt) {
+      const detail = {
+        loopReason: halt.reason,
+        toolCallCount: this.turnToolCallTotal,
+        toolCallLimit: halt.limit,
+      };
+      // Budgets (an explicit cap, the backstop) stop in every mode.
+      if (halt.reason !== LoopReason.STUCK_REPETITION) {
+        this.recordLoopDetail(LoopType.TURN_TOOL_CALL_CAP, detail);
+        return true;
+      }
+      return this.onAlwaysOnStopPoint('cap', stuck, detail);
+    }
     if (
-      !shouldHaltOnTurnToolCallCap(
+      shouldRemindTurnToolCallCap(
         this.turnToolCallTotal,
         this.capMaxKeyRepeat,
-        this.config.getMaxToolCallsPerTurn(),
-        this.config.isMaxToolCallsPerTurnExplicit(),
+        cap,
+        isExplicitCap,
       )
     ) {
-      return false;
+      this.remindBeforeStop('cap', stuck, {
+        loopReason: LoopReason.STUCK_REPETITION,
+        toolCallCount: this.turnToolCallTotal,
+        toolCallLimit: cap,
+      });
     }
-    this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
-    logLoopDetected(
-      this.config,
-      new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
-    );
-    return true;
+    return false;
   }
 
   /**
@@ -1598,18 +2039,12 @@ export class LoopDetectionService {
     const count = (this.globalToolCallCounts.get(toolCallKey) ?? 0) + 1;
     this.globalToolCallCounts.set(toolCallKey, count);
 
-    if (count >= GLOBAL_DUPLICATE_THRESHOLD) {
-      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(
-          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          this.promptId,
-        ),
-      );
-      return true;
-    }
-    return false;
+    return (
+      count >= GLOBAL_DUPLICATE_THRESHOLD &&
+      this.onHeuristicFired(LoopType.GLOBAL_TOOL_CALL_DUPLICATE, {
+        loopReason: LoopReason.REPEATED_CALL,
+      })
+    );
   }
 
   /**
@@ -1641,21 +2076,15 @@ export class LoopDetectionService {
       }
     }
 
-    this.lastLoopType = LoopType.ALTERNATING_TOOL_CALL_PATTERN;
-    logLoopDetected(
-      this.config,
-      new LoopDetectedEvent(
-        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
-        this.promptId,
-      ),
-    );
-    return true;
+    return this.onHeuristicFired(LoopType.ALTERNATING_TOOL_CALL_PATTERN);
   }
 
   /**
-   * Resets all loop detection state.
+   * Resets all loop detection state. A concurrent side query passes
+   * `keepReminders` so the running turn keeps its queued reminders and its
+   * reminded/observed/stopped decisions.
    */
-  reset(promptId: string): void {
+  reset(promptId: string, { keepReminders = false } = {}): void {
     this.promptId = promptId;
     this.resetToolCallCount();
     this.resetContentTracking();
@@ -1669,15 +2098,24 @@ export class LoopDetectionService {
     this.lastSeenToolName = null;
     this.hasSeenNonReadTool = false;
     this.lastLoopType = null;
+    this.lastLoopDetail = null;
     this.globalToolCallCounts.clear();
     this.recentToolCallKeys = [];
     this.turnToolCallTotal = 0;
     this.turnToolCallTotalCommitted = 0;
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
+    this.capMaxKeyToolName = '';
     this.statefulRepeatState.clear();
     this.statefulConsecutiveResults.clear();
     this.requestByCallId.clear();
+    if (keepReminders) return;
+    this.loopProtectionHandled.clear();
+    this.pendingReminders.clear();
+    // A prepared delivery belongs to a send of the old prompt: dropping it
+    // keeps a late abandon from resurrecting the stale warning here.
+    this.preparedReminderDelivery = null;
+    this.loopProtectionStopLogged = false;
   }
 
   private resetToolCallCount(): void {
@@ -1685,6 +2123,9 @@ export class LoopDetectionService {
     this.toolCallRepetitionCount = 0;
     this.lastShellInspectionKey = null;
     this.shellInspectionStreak = 0;
+    this.loopProtectionHandled.delete('identical');
+    this.loopProtectionHandled.delete('identical-unverified');
+    this.loopProtectionHandled.delete('shell');
   }
 
   private resetContentTracking(resetHistory = true): void {

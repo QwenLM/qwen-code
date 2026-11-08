@@ -11,7 +11,14 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  UiTelemetryService,
+  EVENT_API_RESPONSE,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
   CompressionStatus,
+  ToolDisplayNames,
   type Config,
   type SessionMetrics,
 } from '@qwen-code/qwen-code-core';
@@ -23,6 +30,7 @@ import {
   projectDoctor,
   projectExtensionsList,
   projectItemToStreamEvent,
+  projectHistoryToStreamEvents,
   projectMcpStatus,
   projectModelStats,
   projectQuit,
@@ -34,9 +42,23 @@ import {
   projectToolsList,
   type ItemProjectionContext,
 } from './item-projection.js';
+import { ToolCallStatus, isHistoryItemVisibleAfterRestore } from '../types.js';
+import {
+  foldLiveEvent,
+  rewindBoundaryHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
+import {
+  applyCollapsePolicyAndSummary,
+  expandCollapsedHistory,
+} from '../utils/resumeHistoryUtils.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { HistoryItemWithoutId } from '../types.js';
+import type {
+  ContextCategoryBreakdown,
+  HistoryItemWithoutId,
+  HistoryItem,
+} from '../types.js';
 
 // R1-93 tests the cached-items upgrade from the DISCONNECTED base state;
 // the real registry reports unknown servers as disconnected anyway, but the
@@ -171,9 +193,69 @@ describe('projectSummary', () => {
   });
 });
 
+/**
+ * Capacity uses the reported total when available and local category estimates
+ * otherwise. Legacy residuals and cached-prefix annotations are not categories.
+ */
+function expectCoherentBreakdown(item: {
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: Partial<ContextCategoryBreakdown>;
+}): void {
+  const { breakdown } = item;
+  const rows =
+    (breakdown.systemPrompt ?? 0) +
+    (breakdown.builtinTools ?? 0) +
+    (breakdown.mcpTools ?? 0) +
+    (breakdown.instructionFiles ?? 0) +
+    (breakdown.memoryFiles ?? 0) +
+    (breakdown.skills ?? 0) +
+    (breakdown.startupContext ?? 0) +
+    (breakdown.messages ?? 0);
+  const hasProviderTotal = item.totalTokens > 0;
+  // The producer clamps at 0, so an over-full window reports no free space.
+  expect(breakdown.freeSpace).toBe(
+    Math.max(
+      0,
+      item.contextWindowSize -
+        (hasProviderTotal ? item.totalTokens : rows) -
+        (breakdown.autocompactBuffer ?? 0),
+    ),
+  );
+}
+
 describe('projectContextUsage', () => {
+  it('shows a million-token context window in millions', () => {
+    const withWindow = (contextWindowSize: number) => {
+      const item = {
+        modelName: 'coder-model',
+        totalTokens: 5000,
+        contextWindowSize,
+        breakdown: {
+          systemPrompt: 1000,
+          builtinTools: 800,
+          mcpTools: 0,
+          memoryFiles: 200,
+          skills: 0,
+          messages: 3000,
+          freeSpace: contextWindowSize - 5000 - 1000,
+          autocompactBuffer: 1000,
+        },
+        isEstimated: false,
+        showDetails: false,
+      };
+      expectCoherentBreakdown(item);
+      return projectContextUsage(item);
+    };
+
+    expect(withWindow(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(withWindow(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_950)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_949)).toContain('Context window: 999.9k tokens');
+  });
+
   it('prints the usage table with categories', () => {
-    const text = projectContextUsage({
+    const item = {
       modelName: 'qwen3-max',
       totalTokens: 5000,
       contextWindowSize: 100000,
@@ -189,7 +271,9 @@ describe('projectContextUsage', () => {
       },
       isEstimated: false,
       showDetails: false,
-    });
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
     expect(text).toContain('Context Usage');
     expect(text).toContain('Model: qwen3-max Context window: 100.0k tokens');
     expect(text).toContain('█ Used 5.0k tokens (5.0%)');
@@ -197,6 +281,123 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Run /context detail for per-item breakdown.');
     // MCP tools row is skipped at zero.
     expect(text).not.toContain('MCP tools');
+    // Optional startup and cached-prefix rows remain absent in legacy payloads.
+    expect(text).not.toContain('Cached prefix');
+    expect(text).not.toContain('Startup context');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('prints cached prefix and startup context while ignoring legacy residuals', () => {
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        // Category estimates do not need to add up to totalTokens.
+        messages: 900,
+        freeSpace: 94000,
+        autocompactBuffer: 1000,
+        startupContext: 1200,
+        unattributed: 900,
+        cachedTokens: 3000,
+      },
+      isEstimated: false,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Cached prefix 3.0k tokens (3.0%)');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('renders the pre-first-turn estimate: startup context shown, no messages yet (#12235)', () => {
+    // The producer's shape before any request: no provider total, a nonzero
+    // startup prelude, and no conversation. `Startup context` is the one
+    // optional row that is not total-gated.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 300,
+        startupContext: 1200,
+        messages: 0,
+        freeSpace: 95500,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('No API response yet.');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).not.toContain('Messages');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    // After `/model`, `/restore` or a resume the provider total is 0 while the
+    // history is intact; that estimate drives the tier, so it must be visible.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 40000,
+        freeSpace: 57000,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Messages 40.0k tokens (40.0%)');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('No API response yet.');
+    expect(text).not.toContain('pre-conversation');
+  });
+
+  it('heads the categories with "Usage by category" only when a provider total exists (#12606)', () => {
+    // Parity of views/ContextUsage and the text panel: without a provider
+    // total the estimate caption heads the rows, with or without a history.
+    const breakdown = {
+      systemPrompt: 1000,
+      builtinTools: 800,
+      mcpTools: 0,
+      memoryFiles: 200,
+      skills: 0,
+      freeSpace: 57000,
+      autocompactBuffer: 1000,
+    };
+    const project = (totalTokens: number, messages: number) =>
+      projectContextUsage({
+        modelName: 'qwen3-max',
+        totalTokens,
+        contextWindowSize: 100000,
+        breakdown: { ...breakdown, messages },
+        isEstimated: totalTokens <= 0,
+        showDetails: false,
+      });
+
+    expect(project(0, 0)).not.toContain('Usage by category');
+    expect(project(0, 40000)).not.toContain('Usage by category');
+    expect(project(42000, 40000)).toContain('Usage by category');
   });
 
   it('shows the no-API-response notice before the first turn', () => {
@@ -233,7 +434,54 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Current tier warn');
   });
 
+  it.each([false, true])(
+    'preserves the combined memory category in legacy OpenTUI snapshots (details: %s)',
+    (showDetails) => {
+      const item = {
+        modelName: 'legacy-model',
+        totalTokens: 200,
+        contextWindowSize: 1000,
+        breakdown: {
+          memoryFiles: 200,
+          freeSpace: 800,
+          autocompactBuffer: 0,
+        },
+        memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+        showDetails,
+      };
+      expectCoherentBreakdown(item);
+      const text = projectContextUsage(item);
+      expect(text).toContain('█ Memory files 200 tokens (20.0%)');
+      expect(text).not.toContain('Instruction files');
+      expect(text).not.toContain('Auto memory');
+      expect(text.includes('QWEN.md')).toBe(showDetails);
+    },
+  );
+
   it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
+    const item = {
+      modelName: 'm',
+      totalTokens: 30,
+      contextWindowSize: 100,
+      breakdown: {
+        instructionFiles: 20,
+        memoryFiles: 10,
+        freeSpace: 70,
+        autocompactBuffer: 0,
+      },
+      showDetails: true,
+      instructionFiles: [{ path: 'QWEN.md', tokens: 20 }],
+      memoryFiles: [{ path: 'auto memory', tokens: 10 }],
+    };
+    expectCoherentBreakdown(item);
+    const split = projectContextUsage(item);
+    expect(split).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(split).toContain('█ Auto memory 10 tokens (10.0%)');
+    const summary = projectContextUsage({ ...item, showDetails: false });
+    expect(summary).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(summary).toContain('█ Auto memory 10 tokens (10.0%)');
+    expect(split).toContain('QWEN.md');
+    expect(split).not.toContain('Memory files');
     const text = projectContextUsage({
       modelName: 'm',
       totalTokens: 5000,
@@ -280,6 +528,32 @@ describe('projectContextUsage', () => {
     expect(unloadedIdx).toBeGreaterThan(loadedIdx);
     expect(text).toContain('+400 body');
     expect(text).not.toContain('Run /context detail');
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the wire type, so a payload from an
+    // older daemon omits it. Absent and `false` are the same state — not
+    // loaded — so the pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const text = projectContextUsage({
+        modelName: 'm',
+        totalTokens: 5000,
+        contextWindowSize: 100000,
+        breakdown: {},
+        isEstimated: false,
+        showDetails: true,
+        skills,
+      });
+      expect(text).toContain('big-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
   });
 });
 
@@ -543,6 +817,17 @@ describe('projectMcpStatus line spellings (R1-86)', () => {
   it('prints the disconnected line exactly like ink — no dots after the name', () => {
     const text = projectMcpStatus({ servers: { off: {} } });
     expect(text).toContain('● off - Disconnected');
+  });
+});
+
+describe('projectAbout authentication', () => {
+  it.each([
+    ['qwen-subscription', 'Qwen Subscription'],
+    ['qwen-oauth', 'Qwen OAuth'],
+    ['openai', 'API Key - openai'],
+  ])('displays %s as %s', (selectedAuthType, label) => {
+    const text = projectAbout({ selectedAuthType });
+    expect(text.split('\n')).toContain(`Auth: ${label}`);
   });
 });
 
@@ -817,7 +1102,11 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
   it('routes the special kinds through projectSpecialItemText as info rows', () => {
     expect(
       projectItemToStreamEvent({ type: 'about', systemInfo: {} as never }, ctx),
-    ).toEqual({ type: 'info', text: expect.stringContaining('Status') });
+    ).toEqual({
+      type: 'info',
+      text: expect.stringContaining('Status'),
+      historyIsSynthetic: false,
+    });
     expect(
       projectItemToStreamEvent(
         {
@@ -831,7 +1120,11 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
         },
         ctx,
       ),
-    ).toEqual({ type: 'info', text: 'Compressing chat history' });
+    ).toEqual({
+      type: 'info',
+      text: 'Compressing chat history',
+      historyIsSynthetic: false,
+    });
     expect(
       projectItemToStreamEvent({ type: 'stats', duration: '9m' }, ctx)?.type,
     ).toBe('info');
@@ -911,5 +1204,372 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       totalDurationMs: 2000,
       agents: [agent],
     });
+  });
+});
+
+describe('canonical resumed tool projection', () => {
+  it('preserves meaningful classification through replay and folding', () => {
+    const canonical: HistoryItem[] = [
+      { id: 7, type: 'about', systemInfo: {} as never },
+      {
+        id: 8,
+        type: 'info',
+        text: 'Preparing',
+        display: { suppressOnRestore: true },
+      },
+    ];
+    const events = projectHistoryToStreamEvents(canonical, {});
+    expect(events).toEqual([
+      {
+        type: 'info',
+        text: 'Status\nProxy: no proxy',
+        historyIsSynthetic: false,
+        historyId: 7,
+        canonicalHistoryItem: canonical[0],
+      },
+      {
+        type: 'info',
+        text: 'Preparing',
+        historyId: 8,
+        historyDisplay: { suppressOnRestore: true },
+        canonicalHistoryItem: canonical[1],
+      },
+      { type: 'done' },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items).toEqual([
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Status\nProxy: no proxy',
+        historyIsSynthetic: false,
+        historyId: 7,
+        canonicalHistoryItem: canonical[0],
+      },
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Preparing',
+        historyId: 8,
+        display: { suppressOnRestore: true },
+        canonicalHistoryItem: canonical[1],
+      },
+    ]);
+  });
+
+  it('replays one structured compression row without changing live notice projection', () => {
+    const compression = {
+      isPending: false,
+      originalTokenCount: 100,
+      newTokenCount: 40,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      compressionKind: 'summarize' as const,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: false,
+    };
+    const item: HistoryItem = {
+      id: 73,
+      type: 'compression',
+      compression,
+      display: { suppressOnRestore: true },
+    };
+    const events = projectHistoryToStreamEvents([item], {});
+    expect(events).toEqual([
+      {
+        type: 'compaction',
+        compression,
+        historyId: 73,
+        historyDisplay: { suppressOnRestore: true },
+        canonicalHistoryItem: item,
+      },
+      { type: 'done' },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'compaction',
+      compression,
+      historyId: 73,
+      display: { suppressOnRestore: true },
+    });
+    expect(isHistoryItemVisibleAfterRestore(items[0])).toBe(false);
+    expect(rewindBoundaryHistory(items)).toEqual([{ ...item, id: 0 }]);
+    expect(projectItemToStreamEvent(item, {})).toMatchObject({
+      type: 'info',
+      text: projectCompression(compression),
+      historyIsSynthetic: false,
+    });
+  });
+
+  it.each(['fast', 'summarize'] as const)(
+    'keeps collapsed %s boundaries and full-array turn identities available for rewind',
+    (compressionKind) => {
+      const compression = {
+        isPending: false,
+        originalTokenCount: 10,
+        newTokenCount: 5,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        compressionKind,
+        originalTokenCountIsEstimated: true,
+      };
+      const canonical: HistoryItem[] = [
+        {
+          id: 90,
+          type: 'user',
+          text: 'first',
+          promptId: 'p1',
+          sentToModel: true,
+        },
+        { id: 91, type: 'info', text: 'retained command output' },
+        { id: 92, type: 'compression', compression },
+        {
+          id: 93,
+          type: 'user',
+          text: 'second',
+          promptId: 'p2',
+          sentToModel: true,
+        },
+      ];
+      const collapsed = applyCollapsePolicyAndSummary(canonical, true);
+      const items = projectHistoryToStreamEvents(collapsed, {}).reduce<
+        readonly LiveHistoryItem[]
+      >(foldLiveEvent, []);
+      expect(items).toHaveLength(5);
+      expect(items.filter(isHistoryItemVisibleAfterRestore)).toEqual([
+        expect.objectContaining({ display: { kind: 'collapse-summary' } }),
+      ]);
+      expect(rewindBoundaryHistory(items)).toEqual([
+        { ...collapsed[0], id: 0 },
+        { ...collapsed[2], id: 2 },
+        { ...collapsed[3], id: 3 },
+      ]);
+      const expanded = projectHistoryToStreamEvents(
+        expandCollapsedHistory(collapsed),
+        {},
+      ).reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+      expect(expanded).toHaveLength(4);
+      expect(expanded.every(isHistoryItemVisibleAfterRestore)).toBe(true);
+      expect(expanded.find((item) => item.kind === 'compaction')).toMatchObject(
+        { compression },
+      );
+    },
+  );
+
+  it('keeps exact image bytes and detailed read text through projection and folding', () => {
+    const history: HistoryItem[] = [
+      {
+        id: 41,
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'read-1',
+            name: ToolDisplayNames.READ_FILE,
+            description: 'owned.txt',
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+            resultDisplay: 'Read 2 lines',
+            detailedDisplay: 'line one\nline two',
+            args: { absolute_path: '/owned.txt' },
+            images: [{ mimeType: 'image/png', data: 'exact-base64' }],
+            omittedImageCount: 2,
+          },
+        ],
+      },
+    ];
+    const events = projectHistoryToStreamEvents(history, {});
+    expect(events.filter((event) => event.type === 'image')).toEqual([
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        data: 'exact-base64',
+        historyId: 41,
+        canonicalHistoryItem: history[0],
+      },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items.find((item) => item.kind === 'tool')).toMatchObject({
+      id: 'read-1',
+      output: 'Read 2 lines',
+      detailedDisplay: 'line one\nline two',
+      historyId: 41,
+      done: true,
+    });
+    expect(items.find((item) => item.kind === 'image')).toMatchObject({
+      data: 'exact-base64',
+      mimeType: 'image/png',
+      historyId: 41,
+    });
+    expect(items.find((item) => item.kind === 'info')?.historyId).toBe(41);
+  });
+});
+
+describe('cost does not double-count included reasoning tokens (#15444)', () => {
+  // Priced so the rendered dollar figure isolates the OUTPUT term: input at
+  // $0/M and output at $1/M makes `$X` exactly outputTokens / 1_000_000.
+  const PRICING = {
+    'qwen3-max-001': { inputPerMillionTokens: 0, outputPerMillionTokens: 1 },
+  };
+
+  const metricsWith = (tokens: {
+    prompt: number;
+    candidates: number;
+    thoughts: number;
+    total: number;
+  }): SessionMetrics =>
+    ({
+      models: {
+        'qwen3-max-001': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: { ...tokens, cached: 0 },
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('renders accumulated event costs for mixed completeness and missing OpenAI totals', () => {
+    const telemetry = new UiTelemetryService();
+    const add = (
+      auth: string,
+      usage: ConstructorParameters<typeof ApiResponseEvent>[5],
+    ) =>
+      telemetry.addEvent({
+        ...new ApiResponseEvent('r', 'qwen3-max-001', 1, 'p', auth, usage),
+        'event.name': EVENT_API_RESPONSE,
+      } as UiEvent);
+    add('gemini', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 50_000,
+      thoughtsTokenCount: 120_000,
+      totalTokenCount: 270_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1700',
+    );
+    add('gemini', { promptTokenCount: 20_000, candidatesTokenCount: 10_000 });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1800',
+    );
+    // Legacy history cannot recover the missing total; its estimate stays unchanged.
+    const legacy = structuredClone(telemetry.getMetrics());
+    delete legacy.billableOutputTokens;
+    expect(projectModelStats(legacy, PRICING)).toContain('Estimated $0.1500');
+    telemetry.reset();
+    add('openai', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 150_000,
+      thoughtsTokenCount: 120_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1500',
+    );
+  });
+
+  it('honors an authoritative zero instead of falling back to raw thoughts', () => {
+    const metrics = metricsWith({
+      prompt: 100,
+      candidates: 0,
+      thoughts: 1000,
+      total: 0,
+    });
+    metrics.billableOutputTokens = {
+      'qwen3-max-001': { total: 0, bySource: {} },
+    };
+    expect(projectModelStats(metrics, PRICING)).toContain('Estimated $0.0000');
+  });
+
+  it('bills total − prompt when reasoning is already inside candidates', () => {
+    // OpenAI-style usage: the provider's `total` already counts the reasoning
+    // tokens that sit inside `candidates`, so `candidates + thoughts` bills
+    // the reasoning twice — 150000 + 120000 = 270000 ($0.2700) instead of the
+    // 150000 output the provider actually reported ($0.1500).
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 150_000,
+        thoughts: 120_000,
+        total: 250_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1500');
+    expect(text).not.toContain('$0.2700');
+  });
+
+  it('is unchanged when thoughts are disjoint from candidates', () => {
+    // Gemini-style usage: total = prompt + candidates + thoughts, so
+    // total − prompt (170000) already equals candidates + thoughts (170000).
+    // The fix must be a no-op here — without this leg an implementation that
+    // drops thinking entirely would still pass the OpenAI assertion above.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 270_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('falls back to candidates + thoughts when no usable total is reported', () => {
+    // Mirrors the cost-ledger guard: derive only when the subtraction is
+    // meaningful, so an absent total keeps today's behaviour instead of
+    // billing a negative output.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 0,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('does not bill a total-only record as output', () => {
+    // A provider that reports only `total_tokens` leaves prompt and candidates
+    // at 0. Deriving anyway would bill the entire total -- almost all input --
+    // at the output rate, where the old sum reported no cost at all.
+    const text = projectModelStats(
+      metricsWith({ prompt: 0, candidates: 0, thoughts: 0, total: 250_000 }),
+      PRICING,
+    );
+    expect(text).not.toContain('$0.2500');
+    expect(text).not.toContain('Estimated');
+  });
+
+  it('does not bill a cached-only prompt as output', () => {
+    // Cached input coerces prompt to 0 while total keeps the cache, so
+    // derived 52_000 sits far above the band [10_000, 12_000]; the over-bill
+    // would be exactly the cached count, i.e. input tokens at the output rate.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 0,
+        candidates: 10_000,
+        thoughts: 2_000,
+        total: 52_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.0120');
+    expect(text).not.toContain('$0.0520');
+  });
+
+  it('does not under-bill when a short total lands below candidates', () => {
+    // One total-less event among complete ones subtracts an unreported prompt
+    // from the other events' output: derived 180_000 < candidates 190_000.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 110_000,
+        candidates: 190_000,
+        thoughts: 0,
+        total: 290_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1900');
+    expect(text).not.toContain('$0.1800');
   });
 });

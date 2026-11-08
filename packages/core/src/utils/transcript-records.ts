@@ -109,8 +109,21 @@ const ARTIFACT_RECORD_SUBTYPES = new Set([
   'session_artifact_snapshot',
 ]);
 
+const MANAGED_SESSION_RECORD_SUBTYPES = new Set([
+  'managed_session_header_v1',
+  'managed_session_event_v1',
+  'managed_session_commit_v1',
+  'managed_session_snapshot_base_v1',
+]);
+
+const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
+  'session_sources_snapshot',
+  ...MANAGED_SESSION_RECORD_SUBTYPES,
+]);
+
 const KNOWN_RECORD_SUBTYPES = new Set([
   'chat_compression',
+  'memory_catalog_snapshot',
   'slash_command',
   'ui_telemetry',
   'at_command',
@@ -130,12 +143,23 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'file_history_snapshot',
   'session_source',
   'session_model',
+  'omni_recall',
+  'session_execution_engine',
   'session_sources_snapshot',
+  'session_approval_mode',
+  'session_workflow_mode',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
+  'goal_turn_end',
+  'code_mode_tool_result',
   'turn_result',
+  'turn_attempt',
+  'user_text_elements',
+  'agent_mention',
+  'agent_message',
   ...ARTIFACT_RECORD_SUBTYPES,
+  ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -261,7 +285,11 @@ export function isTranscriptConversationRecord(
 ): boolean {
   return (
     !isTranscriptArtifactRecord(record) &&
-    !(record.type === 'system' && record.subtype === 'session_sources_snapshot')
+    !(
+      record.type === 'system' &&
+      typeof record.subtype === 'string' &&
+      NON_CONVERSATION_RECORD_SUBTYPES.has(record.subtype)
+    )
   );
 }
 
@@ -273,6 +301,15 @@ export function isTranscriptArtifactRecord(record: {
     record.type === 'system' &&
     typeof record.subtype === 'string' &&
     ARTIFACT_RECORD_SUBTYPES.has(record.subtype)
+  );
+}
+
+export function isInternalCodeModeToolResult(record: {
+  readonly type?: unknown;
+  readonly subtype?: unknown;
+}): boolean {
+  return (
+    record.type === 'tool_result' && record.subtype === 'code_mode_tool_result'
   );
 }
 

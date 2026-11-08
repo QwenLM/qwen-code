@@ -24,6 +24,7 @@ export {
 } from './config/models.js';
 export {
   type AvailableModel,
+  type ModelWireApi,
   type ModelCapabilities,
   type ModelConfig as ProviderModelConfig,
   type ModelConfigCliInput,
@@ -35,6 +36,10 @@ export {
   isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  validateModelProvidersConfig,
+  resolveModelSelectionAuthType,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
@@ -95,6 +100,7 @@ export * from './core/prompts.js';
 export * from './core/output-styles.js';
 export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
+export { buildSessionHistoryFromConversation } from './services/session-api-history.js';
 export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
@@ -144,6 +150,16 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
+export type {
+  ManagedToolExecutionResult,
+  ManagedToolInvocationStatus,
+  ManagedToolV2Client,
+} from './tools/managed-tool-runtime.js';
+export {
+  managedToolDigest,
+  type ManagedToolInvocationReference,
+} from './tools/managed-tool-protocol.js';
+export * from './managed-runtime/managed-session-records.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {
@@ -230,7 +246,7 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './tools/write-file.js';
+} from './tools/artifact/workspace-auto-record.js';
 export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
@@ -287,6 +303,7 @@ export type {
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
+export type { AutofixPrTool, AutofixPrParams } from './tools/autofix-pr.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type {
   CurrentSessionScheduledTaskCreateRequest,
@@ -295,6 +312,17 @@ export type {
 } from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+export {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  describeBridgedArgumentError,
+  resolveDeferredToolCall,
+} from './tools/tool-call.js';
+export type {
+  DeferredToolCallResolution,
+  ToolCallTool,
+  ToolCallParams,
+} from './tools/tool-call.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export type {
   TeamPlanApprovalTool,
@@ -313,6 +341,7 @@ export * from './providers/index.js';
 
 export {
   computeThresholds,
+  isBelowCompactionWarn,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
 export { estimateContextTextTokens } from './services/tokenEstimation.js';
@@ -323,7 +352,6 @@ export {
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
 export {
   isApiUserPrompt,
-  findApiRewindCutPoint,
   countApiUserPrompts,
   type ApiUserPromptOptions,
 } from './services/api-user-prompt.js';
@@ -335,9 +363,13 @@ export type {
   DurableCronTask,
   CronTaskRun,
   CronRunSessionOutcome,
+  CronGateStatus,
+  CronGateOutcome,
+  CronGateRunOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  withTaskGate,
   cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
@@ -352,6 +384,7 @@ export {
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
+export { MAX_CRON_GATE_CHARS, gateCommandError } from './services/cron-gate.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
@@ -373,8 +406,9 @@ export {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   GLOBAL_DUPLICATE_THRESHOLD,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
+  getTurnToolCallCapHalt,
 } from './services/loopDetectionService.js';
+export type { TurnToolCallCapHalt } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
@@ -388,6 +422,8 @@ export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
 export * from './ipc/peer-drop-reports.js';
 export * from './ipc/peer-envelope.js';
+export * from './agents/session-agents/contract.js';
+export * from './agents/session-agents/envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/peer-routing.js';
 export * from './ipc/peer-send.js';
@@ -485,6 +521,11 @@ export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
+export * from './agents/workflow-checkpoint.js';
+export {
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
+} from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -495,6 +536,7 @@ export {
   EXTENSION_WORKFLOW_NAME_PATTERN,
   qualifyExtensionWorkflowName,
   parseExtensionWorkflowName,
+  isWorkflowRunId,
   type SavedWorkflowEntry,
   type SavedWorkflowScope,
   type SavedWorkflowSource,
@@ -529,6 +571,7 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Production code: config.getMemoryManager().method(...)
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
+export { getExtractNoopSkipTurns } from './memory/extract-cadence.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)
@@ -632,6 +675,7 @@ export {
   IdeConnectionEvent,
   IdeConnectionType,
   LoopDetectedEvent,
+  LoopReason,
   LoopType,
   RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
@@ -641,6 +685,7 @@ export {
   WorkflowRunEvent,
   WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
+export type { LoopStopDetail } from './telemetry/types.js';
 
 // ============================================================================
 // Extensions, Skills, Subagents & Agents
@@ -687,6 +732,7 @@ export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/git-branches.js';
+export * from './utils/git-worktrees.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/git-ignore.js';
@@ -756,7 +802,7 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './tools/tool-utils.js';
 export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
-export * from './utils/yaml-parser.js';
+export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
@@ -815,6 +861,7 @@ export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export { buildHooksListing } from './hooks/hooks-listing.js';
 export type {
   HooksListing,
+  HooksListingDisabledReason,
   HooksListingOrigin,
   HooksListingRow,
 } from './hooks/hooks-listing.js';
@@ -826,6 +873,24 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export type { StopFailureErrorType } from './hooks/types.js';
+export {
+  HOOK_EVENT_DISPLAY,
+  hookEventDisplay,
+} from './hooks/hook-event-display.js';
+export type { HookEventDisplayMeta } from './hooks/hook-event-display.js';
+export {
+  DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_FUNCTION_HOOK_TIMEOUT_MS,
+  describeHookTimeout,
+  isLegacyMillisecondHookTimeout,
+  resolveCommandHookTimeoutMs,
+} from './hooks/hook-timeout.js';
+export type {
+  HookTimeoutDescription,
+  HookTimeoutSource,
+} from './hooks/hook-timeout.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
@@ -857,6 +922,10 @@ export {
   type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+export {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './core/tool-hook-context.js';
 
 // ============================================================================
 // Startup profiler — cross-package event sink (first-screen perf observability)
@@ -869,6 +938,66 @@ export {
   type StartupEventAttrs,
 } from './utils/startupEventSink.js';
 
+// ============================================================================
+// Omni multimodal experiment — upload-based media delivery
+// ============================================================================
+
+export {
+  isOmniDeliveryActive,
+  processMediaForOmniDelivery,
+  readMediaViaOmniDelivery,
+  parseHttpUrlRef,
+  downloadMediaUrl,
+  effectiveMaxDownloadFileBytes,
+  recognizeMediaFile,
+  formatDisclosureText,
+  formatOmissionText,
+  buildAdditionalMediaParts,
+  buildTranscriptParts,
+  OmniObjectStore,
+  OmniDeliveryError,
+  OmniDownloadError,
+  OmniTransportGuardError,
+  type OmniModality,
+  type OmniMediaDelivery,
+  type OmniAdditionalMediaDelivery,
+  type OmniAdditionalMediaPart,
+  type OmniTokenEstimate,
+  type DownloadedMedia,
+} from './omni/index.js';
+export { processToolResultOmniMedia } from './omni/tool-result-media.js';
+export {
+  resolveMediaPolicyModelAccess,
+  isMediaPolicyToolHiddenFromModel,
+  evaluateMediaPolicyToolCall,
+  type MediaPolicyConfigView,
+  type MediaPolicyCallGateResult,
+  type ResolvedMediaPolicyModelAccess,
+} from './omni/policy/model-access.js';
+export type {
+  OmniPolicyToolSettings,
+  OmniPolicyToolModelAccessSettings,
+  OmniPolicyToolsSettings,
+} from './omni/policy/types.js';
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
 export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
+
+export {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from './hooks/hook-execution-context.js';
+export type { HookExecutionOwner } from './hooks/hook-execution-context.js';
+
+export type { RequestLifecycleEvent } from './telemetry/request-lifecycle.js';
+
+export {
+  createToolLifecycle,
+  TOOL_LIFECYCLE_DRAIN_MS,
+} from './telemetry/tool-lifecycle.js';
+export type {
+  ToolLifecycleEvent,
+  ToolLifecycleRecord,
+  ToolLifecycleOutcome,
+} from './telemetry/tool-lifecycle.js';

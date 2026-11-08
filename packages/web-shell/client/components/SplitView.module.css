@@ -110,6 +110,12 @@
   cursor: pointer;
 }
 
+.pickerEmpty {
+  padding: 7px 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
 .pickerItemLabel {
   flex: 1 1 auto;
   min-width: 0;

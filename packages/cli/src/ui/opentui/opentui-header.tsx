@@ -11,8 +11,8 @@
  * (ASCII logo + info panel), ported back from the pre-batch
  * `feat/opentui-migrate` implementation that the batched merge dropped.
  *
- * Stable by construction: depends only on config/settings/width, so it does not
- * re-render on streaming; resize re-renders without flicker via the erase-free
+ * Memoized on visible account, model and theme values, so streaming does not
+ * rebuild the banner; resize re-renders without flicker via the erase-free
  * painter. Honours the same custom-banner resolution as ink (hideBanner /
  * customAsciiArt / customBannerTitle / customBannerSubtitle) and suppresses in
  * screen-reader mode.
@@ -21,15 +21,15 @@
 import { useMemo } from 'react';
 import { useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { findProviderByCredentials } from '@qwen-code/qwen-code-core/providers/all-providers.js';
+import { resolveMetadataKey } from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import {
-  findProviderByCredentials,
-  resolveMetadataKey,
   shortenPath,
   tildeifyPath,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/paths.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { formatVersionLabel } from '../../utils/version.js';
-import { C } from './theme.js';
+import { C, GRADIENT, THEME_REVISION } from './theme.js';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import {
@@ -37,58 +37,93 @@ import {
   resolveCustomBanner,
 } from '../utils/customBanner.js';
 
-const LOGO_GRADIENT = ['#4796E4', '#847ACE', '#C3677F'];
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
 
-function lerpHex(a: string, b: string, t: number): string {
-  const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
-  const pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+function rgbToHex(rgb: readonly number[]): string {
   return (
-    '#' +
-    pa
-      .map((v, i) =>
-        Math.round(v + (pb[i] - v) * t)
-          .toString(16)
-          .padStart(2, '0'),
-      )
-      .join('')
+    '#' + rgb.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')
   );
 }
 
-function gradientAt(stops: string[], t: number): string {
-  if (stops.length === 0) return C.accent;
-  if (stops.length === 1) return stops[0];
-  const seg = Math.min(stops.length - 1, Math.floor(t * (stops.length - 1)));
-  const lt = t * (stops.length - 1) - seg;
-  return lerpHex(stops[seg], stops[seg + 1], lt);
+/**
+ * One line of the wordmark, sampled the way ink samples it. `ink-gradient`
+ * wraps ink's `Transform`, which runs `gradient.multiline()` per laid-out
+ * line, so each line builds its own `tinygradient.rgb(steps)`: the segments
+ * between stops get `round((steps - 1) / segments)` substeps, rebalanced
+ * until they sum to `steps - 1`, and each segment then steps from its own
+ * start. Sharing one ramp across lines, or lerping on a plain
+ * `t = i / (len - 1)`, drifts a unit or two per channel and leaves a shorter
+ * line one step short of the last stop.
+ */
+function lineRamp(stops: string[], steps: number): string[] {
+  const rgb = stops.map(hexToRgb);
+  const segments = rgb.length - 1;
+  const substeps = Array.from({ length: segments }, () =>
+    Math.max(1, Math.round((steps - 1) / segments)),
+  );
+  let total = substeps.reduce((sum, n) => sum + n, 1);
+  while (total !== steps) {
+    const grow = total < steps;
+    const target = grow ? Math.min(...substeps) : Math.max(...substeps);
+    substeps[substeps.indexOf(target)] += grow ? 1 : -1;
+    total += grow ? 1 : -1;
+  }
+  const ramp: string[] = [];
+  for (let s = 0; s < segments; s++) {
+    const from = rgb[s];
+    const to = rgb[s + 1];
+    const n = substeps[s];
+    ramp.push(rgbToHex(from));
+    for (let i = 1; i < n; i++) {
+      ramp.push(rgbToHex(from.map((v, k) => ((to[k] - v) / n) * i + v)));
+    }
+  }
+  ramp.push(rgbToHex(rgb[segments]));
+  return ramp;
 }
 
-/** ASCII logo with the original horizontal gradient (themes GradientColors). */
+/** ASCII logo with the active theme's horizontal gradient (ink `ui.gradient`). */
 function GradientLogo({ logo }: { logo: string }) {
+  const stops = GRADIENT;
   const lines = logo.replace(/^\n/, '').split('\n');
-  const w = Math.max(...lines.map((l) => [...l].length), 1);
   return (
     <box flexDirection="column" flexShrink={0}>
-      {lines.map((line, li) => (
-        <box key={li} flexDirection="row">
-          {[...line].map((ch, ci) => (
-            <text key={ci} fg={gradientAt(LOGO_GRADIENT, ci / w)}>
-              {ch}
-            </text>
-          ))}
-        </box>
-      ))}
+      {lines.map((line, li) => {
+        const chars = [...line];
+        const ramp =
+          stops.length >= 2
+            ? lineRamp(stops, Math.max(chars.length, stops.length))
+            : [];
+        return (
+          <box key={li} flexDirection="row">
+            {chars.map((ch, ci) => (
+              <text key={ci} fg={ramp[ci]}>
+                {ch}
+              </text>
+            ))}
+          </box>
+        );
+      })}
     </box>
   );
 }
 
 /**
- * Faithful port of the ink `Header`: a single-border info panel with 4 lines —
- * title(+version), blank spacer (or subtitle), auth|model(+hint), directory —
+ * Faithful port of the ink `Header`: a single-border info panel with title,
+ * optional subtitle/spacer, auth|model(+hint), and directory —
  * laid out two-column (gradient logo + panel) when wide, panel-only when
  * narrow. Same data sources as the original, including the AppHeader
  * custom-banner resolution.
  */
-function buildBanner(config: Config, settings: LoadedSettings, width: number) {
+function buildBanner(
+  config: Config,
+  settings: LoadedSettings,
+  width: number,
+  subscriptionPlan?: 'plus' | 'pro',
+) {
   const versionLabel = formatVersionLabel(config.getCliVersion() ?? 'unknown');
   const cg = config.getContentGeneratorConfig();
   const model = config.getModelDisplayName();
@@ -96,7 +131,7 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
   // auth label (mirrors AppHeader.getAuthDisplayType)
   let authLabel = '';
   try {
-    if (cg?.authType) {
+    if (cg?.authType && cg.authType !== 'qwen-subscription') {
       const matched = findProviderByCredentials(cg.baseUrl, cg.apiKeyEnvKey);
       authLabel =
         (matched && resolveMetadataKey(matched) && matched.label) ||
@@ -105,7 +140,12 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
   } catch {
     authLabel = '';
   }
-  const authModelText = authLabel ? `${authLabel} | ${model}` : model;
+  const authModelText =
+    cg?.authType === 'qwen-subscription'
+      ? `${subscriptionPlan ? `Qwen ${subscriptionPlan.charAt(0).toUpperCase() + subscriptionPlan.slice(1)} | ` : ''}[Qwen Subscription] ${model}`
+      : authLabel
+        ? `${authLabel} | ${model}`
+        : model;
   const hint = ' (/model to change)';
 
   const custom = resolveCustomBanner(settings);
@@ -158,6 +198,7 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
     <box
       flexDirection="column"
       borderStyle="single"
+      borderColor={C.borderDefault}
       paddingX={1}
       width={infoPanelWidth}
       flexGrow={showLogo ? 0 : 1}
@@ -168,11 +209,10 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
         </text>
         <text fg={C.dim}>{` (${versionLabel})`}</text>
       </box>
-      {/* Subtitle (when set) replaces the blank spacer row so the auth line
-       * keeps its vertical position (ink Header parity). */}
+      {/* Subscription headers omit the default spacer, while custom subtitles remain. */}
       {custom.subtitle ? (
         <text fg={C.dim}>{custom.subtitle}</text>
-      ) : (
+      ) : cg?.authType === 'qwen-subscription' ? null : (
         <text> </text>
       )}
       <box flexDirection="row">
@@ -215,16 +255,39 @@ export interface OpenTuiBannerProps {
 }
 
 /**
- * Renders the header banner, or nothing when suppressed (screen-reader mode or
- * `ui.hideBanner`). Memoized on its inputs so streaming does not re-render it.
+ * Renders the banner and subscription usage tip with their visibility settings.
+ * Memoized on its inputs so streaming does not rebuild the banner.
  */
 export function OpenTuiBanner({ config, settings }: OpenTuiBannerProps) {
   const { width } = useTerminalDimensions();
   const showBanner =
     !config.getScreenReader() && !settings.merged.ui?.hideBanner;
+  const generatorConfig = config.getContentGeneratorConfig();
+  const model = config.getModelDisplayName();
+  const subscriptionPlan =
+    generatorConfig?.authType === 'qwen-subscription'
+      ? config.getSubscriptionPlan()
+      : undefined;
   const banner = useMemo(
-    () => (showBanner ? buildBanner(config, settings, width) : null),
-    [showBanner, config, settings, width],
+    () =>
+      showBanner
+        ? buildBanner(config, settings, width, subscriptionPlan)
+        : null,
+    // The palette is mutated in place and `settings` keeps its identity when
+    // `/theme` writes it, so the revision is the only dep that sees a repaint.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      showBanner,
+      config,
+      settings,
+      width,
+      THEME_REVISION,
+      generatorConfig?.authType,
+      generatorConfig?.baseUrl,
+      generatorConfig?.apiKeyEnvKey,
+      model,
+      subscriptionPlan,
+    ],
   );
   return banner;
 }

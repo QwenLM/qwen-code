@@ -40,7 +40,7 @@ export type OpenTuiDialogRequest =
   | { dialog: 'settings' }
   | { dialog: 'statusline' }
   | { dialog: 'memory' }
-  | { dialog: 'auth'; initialError?: string }
+  | { dialog: 'auth'; initialError?: string; openedViaCommand?: boolean }
   | { dialog: 'trust' }
   | { dialog: 'permissions' }
   | { dialog: 'approval-mode' }
@@ -88,7 +88,9 @@ export function routeDialogToOpenTui(
     case 'memory':
       return { dialog: 'memory' };
     case 'auth':
-      return { dialog: 'auth' };
+      // ink records the /auth result only when the command opened the dialog
+      // (useAuth's openedViaCommandRef), never for the boot auth-error open.
+      return { dialog: 'auth', openedViaCommand: true };
     case 'trust':
       return { dialog: 'trust' };
     case 'permissions':
@@ -146,6 +148,8 @@ export function routeDialogToOpenTui(
         mode: 'primary',
         ...(result.persistScope ? { persistScope: result.persistScope } : {}),
       };
+    case 'advisor-model':
+      return { dialog: 'model', mode: 'advisor' };
     case 'fast-model':
       return {
         dialog: 'model',
@@ -199,7 +203,7 @@ export type SlashResultKind =
 
 /** Config-based gates mirrored from services/BuiltinCommandLoader.ts. */
 export type CommandGate =
-  | 'workflows'
+  | 'workflows-or-mode'
   | 'managed-memory'
   | 'folder-trust'
   | 'lsp';
@@ -222,6 +226,12 @@ export interface CommandRouteSpec {
  * command tree.
  */
 export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
+  { name: 'upgrade', results: ['message'] },
+  {
+    name: 'logout',
+    results: ['message', 'dialog'],
+    dialogs: ['auth'],
+  },
   { name: 'status', altNames: ['about'], results: ['none', 'message'] },
   {
     name: 'agents',
@@ -229,7 +239,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     dialogs: ['subagent_create', 'subagent_list'],
   },
   { name: 'tasks', results: ['message'] },
-  { name: 'workflows', results: ['message'], gatedBy: 'workflows' },
+  { name: 'workflows', results: ['message'], gatedBy: 'workflows-or-mode' },
   {
     name: 'arena',
     results: ['dialog', 'message', 'confirm_action'],
@@ -240,7 +250,11 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     results: ['dialog', 'message'],
     dialogs: ['approval-mode'],
   },
-  { name: 'advisor', results: ['message'] },
+  {
+    name: 'advisor',
+    results: ['dialog', 'message'],
+    dialogs: ['advisor-model'],
+  },
   {
     name: 'auth',
     altNames: ['connect', 'login'],
@@ -255,6 +269,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
   { name: 'bug', results: ['none'] },
   { name: 'cd', results: ['confirm_action', 'message'] },
   { name: 'clear', altNames: ['reset', 'new'], results: ['message'] },
+  { name: 'commit', results: ['submit_prompt'] },
   {
     name: 'compress',
     altNames: ['summarize'],

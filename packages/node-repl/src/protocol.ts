@@ -22,6 +22,7 @@ export interface NodeReplModuleRoot {
 
 export interface InitMessage {
   type: 'init';
+  preloadCua?: boolean;
   generation: number;
   cwd: string;
   homeDir: string;
@@ -85,6 +86,7 @@ export interface ImageMessage {
   execId: string | null;
   data: string;
   mimeType: string;
+  metadata?: string;
 }
 
 export interface ExecResultMessage {

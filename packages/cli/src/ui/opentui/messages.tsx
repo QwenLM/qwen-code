@@ -222,26 +222,27 @@ export function tailWindowPhysical(
 export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 
 /**
- * Rows reserved below a pending tool card so the confirmation dialog's
- * COLLAPSED body (frame + title/question + 20-row body + outcome list +
- * footer ≈ 36 rows) still ends inside the viewport. Excludes any payload
- * the dialog only reveals on ctrl-s expansion — that bound lives in
- * pendingCardMaxRows.
+ * Rows reserved below a pending tool card so the inline confirmation's
+ * COLLAPSED body (padding + body margins + question + 20-row body +
+ * hidden-tail and ctrl-s labels + outcome list + waiting row ≈ 33 rows)
+ * still ends inside the viewport. Excludes any payload the confirmation only
+ * reveals on ctrl-s expansion — that bound lives in pendingCardMaxRows.
  */
-export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
+export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 43;
 
 /**
- * Rows a pending card's expanded confirmation dialog does not own. Above the
- * card's description rows: the banner (6), the startup notices a fresh
- * session shows (≈ 3), the prompt echo with its turn margin (2), and the
- * card's own hidden-tail and awaiting rows (2). In the dialog itself, around
- * the body: the frame's border and padding (4), title (1), body margins (2),
- * question row (1), outcome list (2), footer hint (1) ≈ 11. The sum (≈ 24,
- * padded to 26 against notice timing) is what an 80-row viewport measured:
- * at 14 the expanded tail and the outcome list ran off the bottom of the
- * screen (mem0 e2e regression).
+ * Rows a pending card's expanded confirmation does not own. Above the card's
+ * description rows: the banner (6), the startup notices a fresh session shows
+ * (≈ 3), the prompt echo with its turn margin (2), and the card's own
+ * hidden-tail row (1) — the awaiting marker is inline on the card row. In the
+ * confirmation itself, around the body: the question row (1), the outcome list
+ * (2), and the waiting row the loading indicator takes (1). The sum (≈ 16) is
+ * padded to 18 against notice timing; the frame border, title and footer hint
+ * an earlier revision reserved are gone with the bordered dialog. 80 rows is
+ * the viewport that bounds this: the expanded tail plus the outcome list must
+ * end above the bottom edge (mem0 e2e regression).
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
+export const DIALOG_EXPANDED_RESERVE_ROWS = 18;
 
 /**
  * Measured at a 110-column terminal the card's flex row gives the
@@ -396,13 +397,13 @@ export function toolCardDescription(rawName: string, args?: string): string {
 }
 
 export function userMessageMeta(): { glyph: string; color: string } {
-  // UserMessage → PrefixedTextMessage with theme.text.accent (purple).
-  return { glyph: '>', color: C.purple };
+  // UserMessage → PrefixedTextMessage with theme.text.accent.
+  return { glyph: '>', color: C.accent };
 }
 
 export function assistantMessageMeta(): { glyph: string; color: string } {
   // AssistantMessage → ICON.DIAMOND prefix, theme.text.accent.
-  return { glyph: ICON.DIAMOND, color: C.purple };
+  return { glyph: ICON.DIAMOND, color: C.accent };
 }
 
 /** ink ConversationMessages: under this a committed thought reads "briefly". */
@@ -420,17 +421,15 @@ export interface ThinkingMeta {
 /**
  * ThinkMessage semantics: a live thought shows `∵ Thinking…`, a committed
  * thought collapses to `∴ Thought for … (… to expand)` unless expanded. The
- * click hint mirrors the VP-mode "click or ctrl+o" affordance.
+ * collapsed hint follows ink's `clickable` branch — `ui.mouseTracking` off
+ * hands the pointer back to the terminal, so only the key hint is offered.
  */
 export function thinkingMeta(
   done: boolean,
   expanded: boolean,
-  clickable: boolean,
   durationMs?: number,
+  clickable = true,
 ): ThinkingMeta {
-  const expandHint = clickable
-    ? '(click or ctrl+o to expand)'
-    : '(ctrl+o to expand)';
   const completedLabel =
     durationMs === undefined
       ? null
@@ -438,9 +437,14 @@ export function thinkingMeta(
         ? 'Thought briefly'
         : `Thought for ${formatDuration(durationMs)}`;
   if (!done) {
+    // ink appends the live elapsed time to the pending label.
+    const pendingLabel =
+      durationMs === undefined
+        ? 'Thinking…'
+        : `Thinking… ${formatDuration(durationMs)}`;
     return {
       icon: ICON.BECAUSE,
-      label: 'Thinking…',
+      label: pendingLabel,
       hint: '',
       color: C.dim,
       collapsed: false,
@@ -450,7 +454,7 @@ export function thinkingMeta(
     return {
       icon: ICON.THEREFORE,
       label: completedLabel ?? 'Thinking',
-      hint: expandHint,
+      hint: clickable ? '(click or ctrl+o to expand)' : '(ctrl+o to expand)',
       color: C.dim,
       collapsed: true,
     };
@@ -485,6 +489,13 @@ export function toolStatusMeta(item: LiveToolItem): ToolStatusMeta {
     };
   }
   if (!item.done) {
+    if (item.queued) {
+      return {
+        glyph: TOOL_STATUS.PENDING,
+        color: C.green,
+        strikethrough: false,
+      };
+    }
     return {
       glyph: TOOL_STATUS.EXECUTING,
       color: C.text,

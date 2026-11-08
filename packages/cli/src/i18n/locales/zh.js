@@ -7,6 +7,28 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    '周额度已用完{{reset}}。您可以等待额度恢复，或运行 /upgrade 升级套餐以获取更多额度。',
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    '周额度已用完{{reset}}，请在额度恢复后重试。',
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    '额度已用完{{reset}}，请在额度恢复后重试。',
+  ' Your credits are expected to reset in {{time}}.':
+    '，预计将于{{time}}后恢复',
+  '{{days}} and {{hours}}': '{{days}} {{hours}}',
+  '1 day': '1天',
+  '{{count}} days': '{{count}}天',
+  '1 hour': '1小时',
+  '{{count}} hours': '{{count}}小时',
+  Retry: '重试',
+  'Connecting…': '正在连接…',
+  'Loading models from provider…': '正在加载服务商模型…',
+  'Recommended models · provider list unavailable, showing built-ins':
+    '推荐模型 · 无法获取服务商列表，显示内置模型',
+  'Generated UI': 'Generated UI 生成式界面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',
@@ -21,6 +43,8 @@ export default {
   'Project level': '项目级',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪贴板图片粘贴不可用：未找到受支持的剪贴板工具。Linux 下请安装 `wl-clipboard`（Wayland）或 `xclip`（X11），无显示器环境下请设置 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -184,7 +208,10 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目标',
   'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
+  'toolDisplayName.ManageMemory': '管理记忆',
+  'toolDisplayName.SearchMemory': '搜索记忆',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '审查模型',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
   'toolDisplayName.RecordSource': '记录来源',
@@ -201,6 +228,7 @@ export default {
   'toolDisplayName.CronCreate': '创建定时任务',
   'toolDisplayName.CronList': '定时任务列表',
   'toolDisplayName.CronDelete': '删除定时任务',
+  'toolDisplayName.AutofixPr': 'PR 自动修复',
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
   'toolDisplayName.ListAgents': '列出 Agent',
@@ -217,11 +245,29 @@ export default {
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
   'toolDisplayName.ToolSearch': '工具搜索',
+  'toolDisplayName.ToolCall': '工具调用',
   'toolDisplayName.EnterWorktree': '进入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.DownsampleImage': '降采样图像',
+  'toolDisplayName.DownscaleVideo': '降采样视频',
+  'toolDisplayName.DownsampleAudio': '降采样音频',
+  'toolDisplayName.ExtractKeyframes': '提取关键帧',
+  'toolDisplayName.ExtractAudio': '提取音轨',
+  'toolDisplayName.ClipVideo': '剪辑视频',
+  'toolDisplayName.ClipImage': '裁剪图像',
+  'toolDisplayName.ClipAudio': '剪辑音频',
+  'toolDisplayName.CaptionImage': '描述图像',
+  'toolDisplayName.CaptionAudio': '描述音频',
+  'toolDisplayName.OcrImage': '识别图像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解视频',
+  'toolDisplayName.ConvertImage': '转换图像',
+  'toolDisplayName.TranscribeAudio': '转写音频',
+  'toolDisplayName.RecallMediaMemory': '召回媒体记忆',
+  '[fixed-only: runs via media policies, not the model]':
+    '［仅固定策略：由媒体策略调用，不开放给模型］',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -404,6 +450,8 @@ export default {
     '回退不会影响手工编辑或通过 shell 命令修改的文件。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '无法回退到已被压缩的轮次，请尝试更近一些的轮次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '无法将对话回退到该轮次：它已无法与模型历史对应（例如经过重试）。请尝试更近一些的轮次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '该轮次无法恢复文件（没有捕获到文件变更，或该轮次属于本次会话之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -726,6 +774,9 @@ export default {
   // Settings Labels
   // ============================================================================
   'Code Mode Only (Experimental)': '仅代码模式（实验性）',
+  'Mods (Experimental)': 'Mods（实验性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本地交互终端和无界面会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',
@@ -1066,6 +1117,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新打开此菜单可重新加载 Hook 定义。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制项和 HTTP 安全设置需要重启后生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新加载 Hook 定义失败：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
   // Hooks - Detail Step
   'Exit codes:': '退出码：',
@@ -1350,6 +1407,13 @@ export default {
   'Clear Authentication': '清空认证',
   disabled: '已禁用',
   enabled: '已启用',
+  'disabled (bare mode)': '已禁用（精简模式）',
+  'disabled (safe mode)': '已禁用（安全模式）',
+  'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (not approved)': '已禁用（未批准）',
+  'disabled (rejected)': '已禁用（已拒绝）',
+  'disabled (folder not trusted)': '已禁用（文件夹未受信任）',
+  'disabled (turned off for this session)': '已禁用（本会话中已关闭）',
   'Server:': '服务器：',
   'Error:': '错误：',
   tool: '工具',
@@ -1687,6 +1751,50 @@ export default {
     '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     '认证方式被强制设置为 {{enforcedType}}，但您当前使用的是 {{currentType}}',
+  'Qwen Subscription': 'Qwen Subscription',
+  'Qwen Account with Subscription': 'Qwen 会员账号',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和 Agent 能力',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    '登录凭证已失效，请运行 /auth 重新登录。',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    '正在浏览器中打开 chat.qwen.ai… 请在那里登录以连接 Qwen Code。',
+  "If the browser didn't open, visit:": '如果浏览器未打开，请访问：',
+  'Waiting for sign-in…': '正在等待登录…',
+  'c to copy link · Esc to cancel': '按 c 复制链接 · 按 Esc 取消',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    '身份验证超时。请重试或选择其他身份验证方式。',
+  'Signed in as {{email}}': '已登录为 {{email}}',
+  'Signed in successfully · {{email}}': '登录成功 · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    '当前套餐：Qwen {{plan}}，已可使用 Qwen Code',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
+    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。',
+  'Common commands: /usage   /upgrade   /model   /status   /logout':
+    '常用命令：/usage   /upgrade   /model   /status   /logout',
+  'Signed in as {{email}} (Qwen {{plan}})':
+    '已登录为 {{email}}（Qwen {{plan}}）',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} 已生效 · 用量包含在你的套餐中',
+  'Model: {{model}}': '模型：{{model}}',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Plus 和 Pro 包含 Qwen Code',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    '你已使用 {{plan}} 账号登录，该账号不包含 Qwen Code。请在浏览器中选择 Plus 或 Pro；订阅后此终端将自动继续。',
+  'Waiting for your subscription to become active…': '正在等待你的订阅生效…',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    '你的 Qwen 登录已过期，请运行 /auth 重新登录。',
+  'Checking your subscription…': '正在检查你的订阅…',
+  'Retry Connection': '重试',
+  'View Plans': '查看套餐',
+  'Opens the Qwen Code plans page in your browser':
+    '在浏览器中打开 Qwen Code 套餐页',
+  'Switch Provider': '切换供应商',
+  'Use another account': '使用其他账号',
+  'Choose another model provider': '选择其他模型供应商',
+  'Sign out': '退出登录',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    '按 Enter 选择，↑↓ 切换 · 按 Esc 关闭',
   'Qwen OAuth Authentication': 'Qwen OAuth 认证',
   'Please visit this URL to authorize:': '请访问此 URL 进行授权：',
   'Waiting for authorization': '等待授权中',
@@ -2111,6 +2219,10 @@ export default {
   'API key cannot be empty.': 'API Key 不能为空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '无效的 API Key。Coding Plan API Key 以 "sk-sp-" 开头，请检查。',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '无效的 API Key。按量付费 Key 以 "sk-" 或 "sk-ws-" 开头。Token Plan Key（"sk-sp-"）请使用 Token Plan 入口。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '无效的 API Key。Token Plan API Key 以 "sk-sp-" 开头。请从 Token Plan 控制台生成，或使用 Standard API Key 入口绑定按量付费 Key。',
   'You can get your Coding Plan API key here':
     '您可以在这里获取 Coding Plan API Key',
   'You can get your Token Plan API key here':
@@ -2137,6 +2249,17 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  QwenCloud: '千问AI平台',
+  'QwenCloud · Access Method': '千问AI平台 · 接入方式',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推荐配置：Token Plan 或 Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    '按量付费 · 使用已有的平台 API Key 连接',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    '按月 Credit 额度订阅 · 专用 endpoint（个人版与团队版）',
+  'China — 千问AI平台': '中国 — 千问AI平台',
+  'International — QwenCloud': '国际 — QwenCloud',
+  Platform: '平台',
   Custom: '自定义',
   'Select Region for Coding Plan': '选择 Coding Plan 区域',
   'Choose based on where your account is registered':
@@ -2167,10 +2290,18 @@ export default {
   'System prompt': '系统提示',
   'Built-in tools': '内置工具',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指令文件',
+  'Auto memory': '自动记忆',
   'Memory files': '记忆文件',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '启动上下文',
+  Unattributed: '未归因',
+  'Cached prefix': '缓存前缀',
   tokens: 'tokens',
+  'Estimated usage, including the conversation': '估算用量（含对话）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下为本地估算，包含对话。',
   'Estimated pre-conversation overhead': '预估对话前开销',
   'No API response yet. Send a message to see actual usage.':
     '暂无 API 响应。发送消息以查看实际使用情况。',
@@ -2276,6 +2407,13 @@ export default {
     '在不影响主对话的情况下快速问一个旁支问题',
   'Get a second opinion on the current conversation from a reviewer model':
     '让审查模型对当前对话给出第二意见',
+  'Configure the Advisor model': '配置 Advisor 模型',
+  'Disable Advisor': '禁用 Advisor',
+  'Select Advisor Model': '选择 Advisor 模型',
+  'Advisor disabled': 'Advisor 已禁用',
+  'Advisor set to {{model}}': 'Advisor 已设置为 {{model}}',
+  'Selected Advisor model is unavailable.': '所选 Advisor 模型不可用。',
+  'Advisor configuration is unavailable.': 'Advisor 配置不可用。',
   'Consulting advisor...': '正在咨询审查模型...',
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
@@ -2502,6 +2640,8 @@ export default {
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定版本升级需要独立安装。请使用当前安装方式手动安装 {{version}} 版本。',
   'Check for Qwen Code updates and install if available':
     '检查 Qwen Code 更新并安装（如果可用）',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2665,4 +2805,42 @@ export default {
   'Kept model as {{model}}': '模型保持为 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交信息创建 git 提交',
+  'Could not request an authorization link. Please try signing in again.':
+    '无法申请授权链接，请重新登录。',
+  'Could not complete authorization. Please try signing in again.':
+    '无法完成授权，请重新登录。',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    '无法读取或保存 Qwen 凭证，请检查本地文件权限和磁盘空间。',
+  'Could not refresh your Qwen session. Please try again.':
+    '无法刷新 Qwen 登录凭证，请重试。',
+  'You are signed out locally, but the remote session could not be revoked.':
+    '本地已退出登录，但未能撤销远端会话。',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    '无法清除本地 Qwen 凭证，请检查本地文件权限。',
+  'Authorization or access was denied.': '授权或访问被拒绝。',
+  'Too many requests. Please try again later.': '请求过多，请稍后重试。',
+  'The network request failed or timed out.': '网络请求失败或超时。',
+  'The service returned an invalid response.': '服务返回的数据格式无效。',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    '模型：{{model}} · 运行 /usage 查看套餐用量',
+  'Type your request, or /usage': '输入你的请求，或 /usage',
+  'Try:': '试试：',
+  'Open Qwen subscription plans': '打开 Qwen 订阅套餐页',
+  'Could not open your browser. Visit {{url}}':
+    '无法打开浏览器，请访问 {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen 订阅套餐：{{url}}',
+  'Sign out of your Qwen account': '退出 Qwen 账号',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    '当前连接无需通过 /logout 退出。如需切换模型服务，请使用 /auth。',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    '此命令仅适用于 Qwen 订阅登录。如需使用 Qwen 订阅，请通过 /auth 登录。',
+  'Wait for the current response to finish before signing out.':
+    '请等待当前回复结束后再退出登录。',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    '已退出登录，但未能清除保存的认证方式。',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    '已退出 Qwen，请使用 /auth 登录其他账号。',
+  'Tip: Run /usage to see your plan usage.': '提示：运行 /usage 查看套餐用量。',
 };

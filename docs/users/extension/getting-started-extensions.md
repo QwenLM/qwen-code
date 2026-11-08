@@ -250,9 +250,27 @@ After restarting Qwen Code, your custom skills will be available via `/skills` a
 
 An extension skill is registered under its owner's name: the skill above becomes `my-first-extension:code-analyzer`, so you run it as `/my-first-extension:code-analyzer`. `skills.disabled` can block it under either that name or the plain `code-analyzer` you authored; `skills.enabled` opts it back in under the prefixed name only. See [Extension Skills](../features/skills.md#extension-skills).
 
+### Adding Conditional Rules
+
+An extension can also ship a `rules/` directory. A rule is a Markdown file whose `paths:` frontmatter says which files it applies to, and it enters the prompt only when a tool call touches a matching file:
+
+```markdown
+---
+description: How this project charts data
+paths:
+  - 'src/**/*.chart.ts'
+---
+
+Use the palette from `theme/charts.ts`. Never hard-code a hex value.
+```
+
+**An extension's rules must be conditional** — a rule with no `paths:` is skipped and named in a startup warning. A baseline rule would be part of every request, which is exactly what the `QWEN.md` note in the next step asks you to avoid. Rules appear in the prompt labelled by owner, as `my-first-extension:rules/charting.md`. See [Rules](../features/rules.md).
+
 ## Step 6: Add a Custom `QWEN.md`
 
 You can provide persistent context to the model by adding a `QWEN.md` file to your extension. This is useful for giving the model instructions on how to behave or information about your extension's tools. Note that you may not always need this for extensions built to expose commands and prompts.
+
+> **This is the most expensive place to put instructions.** An extension's context file is concatenated into the system prompt of **every request of every session the extension is active in**, whether or not the work at hand has anything to do with your extension — there is no relevance gating and no size limit. In one measured session, nine extensions' context files accounted for 9,989 tokens, 21% of everything the request carried before the conversation itself. Keep the context file to the few facts that are always true — the extension's identity, its vocabulary, a hard constraint — and put scenario guidance in a [skill](../features/skills.md) instead. A skill is listed by its name and description only — in the same measured session, 84 skills averaged about 55 tokens each — and loads its body when invoked, and a skill [gated on `paths:`](../features/skills.md#optional-gate-a-skill-on-file-paths-paths) is not even listed until a matching file is touched. `/context detail` names each extension's context file so you can see what yours costs.
 
 1.  Create a file named `QWEN.md` in the root of your extension directory:
 
@@ -279,7 +297,7 @@ You can provide persistent context to the model by adding a `QWEN.md` file to yo
     }
     ```
 
-Restart the CLI again. The model will now have the context from your `QWEN.md` file in every session where the extension is active.
+Restart the CLI again. The model will now have the context from your `QWEN.md` file in every session where the extension is active — and in every request of those sessions, which is why the note above asks you to keep it short and to reach for a skill for anything scenario-specific.
 
 ## Step 7: Releasing Your Extension
 
