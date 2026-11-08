@@ -480,6 +480,19 @@ export function TextSelectionController(
     }
   }, [props.isActive, clearSelection]);
 
+  // The painted range lives on the per-stdout frame controller, outside React,
+  // so it outlives this controller: ink re-reads it on every serialization pass
+  // and stamps the highlight onto whatever cells now occupy those coordinates.
+  // A view that unmounts with a selection on screen (switching away from a
+  // teammate tab, or between teammates) would therefore leave a highlight band
+  // over content the user never selected there. `clearSelection()` cannot do
+  // this teardown: it early-returns while its own selection is empty, and a
+  // successor controller always starts empty, so nothing downstream repairs it
+  // either. Unmount only — never `eventsPaused`, which must keep the selection
+  // the open context menu's "Copy Selection" offers. `getBuffer` is a
+  // `useCallback` keyed on `[stdout]`, so this cleanup runs once, on unmount.
+  useEffect(() => () => getBuffer()?.setSelection(null), [getBuffer]);
+
   // Expose the live selection to an external query ref (context menu "Copy
   // Selection"). A collapsed char-mode selection is a bare click (cleared on
   // release anyway) and carries no text; a collapsed word/line span still

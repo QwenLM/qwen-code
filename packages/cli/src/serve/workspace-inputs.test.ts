@@ -13,9 +13,15 @@ import {
   MissingWorkspaceInputError,
   MultipleWorkspaceInputError,
   NestedWorkspaceInputError,
+  MAX_REGISTERED_WORKSPACES,
+  resolveMaxRegisteredWorkspaces,
   resolveSingleWorkspaceInput,
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
+
+vi.mock('@qwen-code/acp-bridge/channelControlTimeouts', () => ({
+  MAX_DAEMON_WORKSPACES: 7,
+}));
 
 let scratch: string | undefined;
 
@@ -118,6 +124,10 @@ describe('resolveSingleWorkspaceInput', () => {
 });
 
 describe('resolveWorkspaceInputs', () => {
+  it('keeps registration independent of the legacy channel-control capacity', () => {
+    expect(MAX_REGISTERED_WORKSPACES).toBe(256);
+  });
+
   it('keeps distinct non-nested explicit workspaces in input order', () => {
     const root = makeScratch();
     const primary = path.join(root, 'primary');
@@ -142,6 +152,67 @@ describe('resolveWorkspaceInputs', () => {
     );
     expect(() => resolveWorkspaceInputs([parent, child])).toThrow(
       NestedWorkspaceInputError,
+    );
+  });
+});
+
+describe('resolveMaxRegisteredWorkspaces', () => {
+  it('defaults to 256 and lets an explicit option override even invalid environment', () => {
+    expect(resolveMaxRegisteredWorkspaces(undefined, {})).toBe(256);
+    expect(
+      resolveMaxRegisteredWorkspaces(2, {
+        QWEN_SERVE_MAX_WORKSPACES: 'invalid',
+      }),
+    ).toBe(2);
+  });
+  it.each(['1', '25', '26', '256', ' 00256 '])(
+    'accepts decimal capacity %s',
+    (raw) => {
+      expect(
+        resolveMaxRegisteredWorkspaces(undefined, {
+          QWEN_SERVE_MAX_WORKSPACES: raw,
+        }),
+      ).toBe(Number(raw));
+    },
+  );
+  it.each([
+    '',
+    ' ',
+    '0',
+    '-1',
+    '1.5',
+    '1e2',
+    '0x10',
+    'NaN',
+    'Infinity',
+    '257',
+    '+2',
+  ])('rejects invalid environment %j', (raw) => {
+    expect(() =>
+      resolveMaxRegisteredWorkspaces(undefined, {
+        QWEN_SERVE_MAX_WORKSPACES: raw,
+      }),
+    ).toThrow(/QWEN_SERVE_MAX_WORKSPACES/);
+  });
+  it.each([0, -1, 1.5, NaN, Infinity, 257])(
+    'rejects invalid option %s',
+    (value) => {
+      expect(() => resolveMaxRegisteredWorkspaces(value, {})).toThrow(
+        /integer from 1 to 256/,
+      );
+    },
+  );
+  it('names the configuration source that supplied the invalid value', () => {
+    expect(() =>
+      resolveMaxRegisteredWorkspaces(undefined, {
+        QWEN_SERVE_MAX_WORKSPACES: ' abc ',
+      }),
+    ).toThrow('Invalid QWEN_SERVE_MAX_WORKSPACES=" abc "');
+    expect(() => resolveMaxRegisteredWorkspaces(300, {})).toThrow(
+      'Invalid maxRegisteredWorkspaces option 300',
+    );
+    expect(() => resolveMaxRegisteredWorkspaces(300, {})).not.toThrow(
+      /QWEN_SERVE_MAX_WORKSPACES/,
     );
   });
 });

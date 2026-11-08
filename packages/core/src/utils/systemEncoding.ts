@@ -12,6 +12,21 @@ import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('ENCODING');
 
+/**
+ * Returns the encoding label unchanged when `new TextDecoder(label)`
+ * accepts it, otherwise null. Guards against handing undecodable labels
+ * (e.g. the Unix locale "C", or code pages without a WHATWG equivalent
+ * like cp437) to consumers that call `new TextDecoder(...)` unguarded.
+ */
+function toDecodableLabel(label: string): string | null {
+  try {
+    new TextDecoder(label);
+    return label;
+  } catch {
+    return null;
+  }
+}
+
 // Cache for system encoding to avoid repeated detection
 // Use undefined to indicate "not yet checked" vs null meaning "checked but failed"
 let cachedSystemEncoding: string | null | undefined = undefined;
@@ -26,10 +41,16 @@ export function resetEncodingCache(): void {
 /**
  * Detects the encoding of a buffer.
  *
- * Strategy: try UTF-8 first, then chardet, then system encoding.
+ * Strategy: try UTF-8 first, then a non-UTF-8 system encoding, then chardet.
  * UTF-8 is tried first because modern developer tools, PowerShell Core,
  * git, node, and most CLI tools output UTF-8. Legacy codepage bytes
  * (0x80-0xFF) rarely form valid multi-byte UTF-8 sequences by accident.
+ *
+ * For bytes that are not valid UTF-8, a non-UTF-8 system code page is
+ * authoritative for console output and is consulted before chardet:
+ * chardet misclassifies legacy code pages (e.g. CP-866 Cyrillic is
+ * detected as windows-1252 or KOI8-R). When the system encoding is UTF-8
+ * or unknown, chardet statistical detection remains the fallback.
  *
  * This function should be called on the **complete** output buffer
  * (after the command finishes), not on individual streaming chunks,
@@ -42,15 +63,21 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
     return 'utf-8';
   }
 
-  // Buffer is not valid UTF-8 — try chardet, then system encoding
+  // Buffer is not valid UTF-8 — a non-UTF-8 system code page is
+  // authoritative for console output; consult it before chardet.
+  if (cachedSystemEncoding === undefined) {
+    cachedSystemEncoding = getSystemEncoding();
+  }
+  if (cachedSystemEncoding && cachedSystemEncoding !== 'utf-8') {
+    return cachedSystemEncoding;
+  }
+
+  // UTF-8 locale or unknown system encoding — try chardet
   const detected = detectEncodingFromBuffer(buffer);
   if (detected) {
     return detected;
   }
 
-  if (cachedSystemEncoding === undefined) {
-    cachedSystemEncoding = getSystemEncoding();
-  }
   if (cachedSystemEncoding) {
     return cachedSystemEncoding;
   }
@@ -113,12 +140,12 @@ export function getSystemEncoding(): string | null {
 
   const match = locale.match(/\.(.+)/); // e.g., "en_US.UTF-8"
   if (match && match[1]) {
-    return match[1].toLowerCase();
+    return toDecodableLabel(match[1].toLowerCase());
   }
 
   // Handle cases where locale charmap returns just the encoding name (e.g., "UTF-8")
   if (locale && !locale.includes('.')) {
-    return locale.toLowerCase();
+    return toDecodableLabel(locale.toLowerCase());
   }
 
   return null;
@@ -136,7 +163,7 @@ export function windowsCodePageToEncoding(cp: number): string | null {
     437: 'cp437',
     850: 'cp850',
     852: 'cp852',
-    866: 'cp866',
+    866: 'ibm866',
     874: 'windows-874',
     932: 'shift_jis',
     936: 'gbk',
@@ -157,7 +184,17 @@ export function windowsCodePageToEncoding(cp: number): string | null {
   };
 
   if (map[cp]) {
-    return map[cp];
+    const label = toDecodableLabel(map[cp]);
+    if (!label) {
+      // e.g. DOS code pages 437/850/852 have no WHATWG equivalent, so
+      // `new TextDecoder('cp437')` etc. throw RangeError. Return null:
+      // callers then fall back to chardet/UTF-8. Proper support would
+      // require iconv-lite — tracked separately.
+      debugLogger.warn(
+        `Windows code page ${cp} maps to "${map[cp]}", which is not supported by TextDecoder; falling back to content detection.`,
+      );
+    }
+    return label;
   }
 
   debugLogger.warn(`Unable to determine encoding for windows code page ${cp}.`);

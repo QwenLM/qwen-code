@@ -11,6 +11,7 @@ import { theme } from '../semantic-colors.js';
 import { useStreamingContext } from '../contexts/StreamingContext.js';
 import { StreamingState } from '../types.js';
 import { RespondingSpinner } from './RespondingSpinner.js';
+import { WAITING_SPINNER_FRAME } from '../constants.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
@@ -129,7 +130,7 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
             <RespondingSpinner
               nonRespondingDisplay={
                 streamingState === StreamingState.WaitingForConfirmation
-                  ? '⠏'
+                  ? WAITING_SPINNER_FRAME
                   : ''
               }
             />

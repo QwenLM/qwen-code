@@ -6,16 +6,22 @@
 
 /**
  * App-level URL detection behind OpenTUI click-to-open (audit gap #54,
- * option 1). The framework renders markdown links as `label (url)` plain
- * text and does not emit OSC 8 in any @opentui 0.5.x release, while
- * `useMouse: true` makes the terminal hand pointer events to the app —
- * terminal-native cmd+click link handling included. Clicks that land on a
- * URL cell are therefore opened here. Terminal-side OSC 8 remains a
- * follow-up pending framework support (it already ships `detectLinks` +
- * `caps.hyperlinks` groundwork).
+ * option 1). Measured through a pty probe rather than read off the JS layer,
+ * which does not carry this code: at @opentui 0.5.8 through 0.5.10 a markdown
+ * link prints as `label (url)` *and* the `url` cells carry an OSC 8 hyperlink
+ * whose target is that same text. The envelope comes from the native library,
+ * so its absence from `index.node.js` proves nothing either way.
  *
- * Security reuses the ink OSC 8 constraints (scheme allowlist, trailing
- * punctuation trimming) from `../utils/osc8.js`.
+ * This path stays load-bearing for two reasons. `useMouse: true` makes the
+ * terminal hand pointer events to the app, terminal-native cmd+click on those
+ * envelopes included, so a click only opens a URL if we open it. And upstream
+ * applies no scheme allowlist — it emits a target for `javascript:alert(1)`
+ * too — so the `isSafeOscScheme` filter below, reused from ink's OSC 8
+ * constraints in `../utils/osc8.js`, is what keeps a click from reaching a
+ * non-safe scheme.
+ *
+ * 0.5.11 stops printing the target text, which leaves nothing here to match;
+ * that regression is why `packages/cli` pins 0.5.10.
  *
  * Known boundary: URLs wrapped across buffer rows are not stitched back
  * together — the same class of limitation terminal auto-detection has.

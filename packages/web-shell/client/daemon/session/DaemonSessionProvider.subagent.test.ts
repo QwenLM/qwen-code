@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonUiEvent } from '@qwen-code/sdk/daemon';
+import {
+  createDaemonTranscriptState,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
+  type DaemonUiEvent,
+} from '@qwen-code/sdk/daemon';
 import { projectMainTranscriptEventsForTesting } from './DaemonSessionProvider.js';
 
 describe('on-demand subagent transcript projection', () => {
@@ -23,6 +28,7 @@ describe('on-demand subagent transcript projection', () => {
           terminateReason: 'max_turns',
           skills: ['repo-ops'],
           result: 'large result',
+          tokenCount: 120,
           toolCalls: [{ callId: 'read-1' }],
           executionSummary: {
             totalToolCalls: 1,
@@ -50,6 +56,10 @@ describe('on-demand subagent transcript projection', () => {
         usage: { inputTokens: 10, outputTokens: 2, cachedTokens: 8 },
         parentToolCallId: 'agent-1',
       },
+      {
+        type: 'assistant.usage',
+        usage: { inputTokens: 200, outputTokens: 30 },
+      },
     ];
 
     const result = projectMainTranscriptEventsForTesting(events);
@@ -67,17 +77,20 @@ describe('on-demand subagent transcript projection', () => {
         skills: ['repo-ops'],
         executionSummary: {
           totalToolCalls: 1,
-          inputTokens: 100,
-          outputTokens: 20,
-          cachedTokens: 40,
-          totalTokens: 120,
         },
       },
     });
     expect(result[1]).toMatchObject({
       type: 'assistant.usage',
-      usage: { inputTokens: 10, outputTokens: 2, cachedTokens: 8 },
-      parentToolCallId: 'agent-1',
+      usage: { inputTokens: 200, outputTokens: 30 },
+    });
+    expect(result[0]).toHaveProperty('rawOutput.tokenCount', 120);
+    expect(result[0]).toHaveProperty('rawOutput.executionSummary', {
+      totalToolCalls: 1,
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedTokens: 40,
+      totalTokens: 120,
     });
     expect(result[0]).not.toHaveProperty('rawOutput.result');
     expect(result[0]).not.toHaveProperty('rawOutput.toolCalls');
@@ -85,6 +98,59 @@ describe('on-demand subagent transcript projection', () => {
       (result[0] as Extract<DaemonUiEvent, { type: 'tool.update' }>).rawInput,
     ).toMatchObject({ prompt: `${'p'.repeat(240)}…` });
   });
+
+  it.each(['running', 'completed', 'failed', 'cancelled'] as const)(
+    'preserves settled usage through projection and repeated replay: %s',
+    (status) => {
+      const events = projectMainTranscriptEventsForTesting([
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-usage',
+          toolName: 'agent',
+          status: 'completed',
+          rawOutput: {
+            type: 'task_execution',
+            status,
+            tokenCount: 20,
+            executionSummary: {
+              inputTokens: 100,
+              outputTokens: 20,
+              cachedTokens: 40,
+            },
+          },
+        },
+        {
+          type: 'assistant.usage',
+          parentToolCallId: 'agent-usage',
+          usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 40 },
+        },
+      ]);
+      expect(events).toHaveLength(1);
+      let state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ retainSubagentBlocks: false }),
+        events,
+      );
+      state = reduceDaemonTranscriptEvents(state, events);
+      expect(state.blocks).toHaveLength(1);
+      if (status === 'running') {
+        expect(state.blocks[0]).not.toHaveProperty('rawOutput.tokenCount');
+        expect(state.blocks[0]).toHaveProperty('rawOutput.executionSummary', {
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedTokens: 0,
+          totalTokens: 0,
+        });
+      } else {
+        expect(state.blocks[0]).toHaveProperty('rawOutput.tokenCount', 20);
+        expect(state.blocks[0]).toHaveProperty('rawOutput.executionSummary', {
+          inputTokens: 100,
+          outputTokens: 20,
+          cachedTokens: 40,
+          totalTokens: 120,
+        });
+      }
+    },
+  );
 
   it('omits root output when none of its fields are projected', () => {
     const [result] = projectMainTranscriptEventsForTesting([
@@ -214,3 +280,71 @@ describe('on-demand subagent transcript projection', () => {
     expect(result).not.toHaveProperty('rawOutput.executionMode');
   });
 });
+
+it.each([false, true])(
+  'retains subagent readiness=%s in compact live updates',
+  (subagentSessionReady) => {
+    const [event] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        subagentSessionReady,
+        rawOutput: { type: 'task_execution', subagentSessionReady },
+      },
+    ]);
+    expect(event).toMatchObject({
+      subagentSessionReady,
+      rawOutput: { subagentSessionReady },
+    });
+  },
+);
+
+it.each([false, true])(
+  'preserves meta-only readiness=%s without replacing existing output',
+  (subagentSessionReady) => {
+    const rawOutput = {
+      type: 'task_execution',
+      executionSummary: { totalToolCalls: 2 },
+    };
+    const initial = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-1',
+          toolName: 'agent',
+          status: 'in_progress',
+          rawOutput,
+        },
+      ],
+    );
+    const events = projectMainTranscriptEventsForTesting(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'agent-1',
+            _meta: { toolName: 'agent', subagentSessionReady },
+          },
+        },
+      }),
+    );
+    expect(events).toMatchObject([{ subagentSessionReady }]);
+    expect(events[0]).not.toHaveProperty('rawOutput', expect.anything());
+    const state = reduceDaemonTranscriptEvents(initial, events);
+    expect(state.blocks).toMatchObject([
+      {
+        id: initial.blocks[0].id,
+        toolCallId: 'agent-1',
+        status: 'in_progress',
+        subagentSessionReady,
+        rawOutput,
+      },
+    ]);
+    expect(state.blocks).toHaveLength(1);
+  },
+);

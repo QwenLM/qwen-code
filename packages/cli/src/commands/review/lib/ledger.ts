@@ -21,6 +21,8 @@
 // wrong verdict. Parsing is correspondingly fail-quiet: a body whose marker is
 // malformed simply contributes no ledger.
 
+import { readClaimHead } from './inline-counts.js';
+
 /** One finding the review stands behind, carried to the next round. */
 export interface LedgerFinding {
   /**
@@ -406,9 +408,15 @@ export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
  * (#9212 review). The earlier `\b`-bounded whole-body scan also matched
  * cross-references ("see R3-2 for context") and ids embedded in longer
  * hyphen runs, exempting a re-post under an unrelated thread.
+ *
+ * The full-width colon `：` rides the marker-separator grammar
+ * (`MARKER_SEPARATOR_RE` admits `[:：]`), so a carry written with it must
+ * read back — it terminates on its own: CJK usage puts no space after it,
+ * so the `(?=\s|$)` lookahead that bounds the ASCII set cannot (#9940
+ * review).
  */
 export const LEDGER_ID_READBACK = new RegExp(
-  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+  `^(${LEDGER_ID_TOKEN})(?:[:.)\\]]?(?=\\s|$)|：)\\s*`,
 );
 
 /**
@@ -423,6 +431,63 @@ export const LEDGER_ID_READBACK = new RegExp(
  * and citing a round no account ever ran.
  */
 export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
+
+/**
+ * The CANONICAL spelling of a ledger id: leading zeros dropped from both
+ * numbers (`R02-03` → `R2-3`). Every join downstream — the contradiction
+ * gate's fixed set, the thread matcher's map, the ledger builder's carry
+ * test, presubmit's wanted ids — is raw-string equality, so a variant the
+ * shape tolerates but no entry ever carries must collapse to the one
+ * spelling at the ONE head-slot read (`readClaimHead`) and at the marker
+ * read (`normalizeLedgerFinding`), or a re-post written `R02-3:` slips past
+ * a `fixed` ruling on `R2-3` while the body re-voices the claim (#9940
+ * review, audit). `R0-1` stays `R0-1` — the round bound refuses it.
+ */
+export function canonicalLedgerId(id: string): string {
+  return id.replace(/^R0*(\d+)-0*(\d+)$/, 'R$1-$2');
+}
+
+/**
+ * The id a claim line carries, whether that id fronts a NEW defect, and the
+ * claim itself with both stripped.
+ *
+ * `fixInduced` is the answer to a question the id alone cannot settle. Step 6
+ * re-reports two different things under a previous entry's id: a finding that
+ * STILL STANDS — the same claim, re-asserted — and a fix-induced defect, which
+ * is new work wearing the id of the entry whose fix produced it. The volume
+ * trend counts comments posted for the first time, and reading the id alone
+ * called both of them re-posts, so the trend's baseline fell on exactly the
+ * churning pull requests where new work was not falling at all. The thread
+ * lifecycle reads the same pair to keep that new defect on its OWN thread:
+ * only a still-standing re-assertion belongs in the original one.
+ *
+ * Shared by every consumer of a carried id — compose-review's ledger builder,
+ * the convergence diagnosis, and submit's thread lifecycle — so one end can
+ * never call a comment carried while another calls it new.
+ */
+export function readClaim(rest: string): {
+  id?: string;
+  fixInduced: boolean;
+  title: string;
+} {
+  // ONE reader for the claim's head slot (#10291): the id, the
+  // `(fix-induced)` marking, the axis tags and the source tag are
+  // tokenised wherever the model placed them in the slot — a source tag
+  // between the id and the marking included — and the title is what is
+  // left past the slot, the source tag kept as the finding's own text.
+  // An anchored readback restated here once disagreed with the
+  // tokeniser on exactly that placement.
+  // A bare `\r` is a line break to the line model and to the bare readback
+  // leg; splitting on `\n` alone let the id grammar's trailing `\s*` cross
+  // it and read a second-line token into the head slot (#9940 review,
+  // audit).
+  const head = readClaimHead(rest.split(/\r\n?|\n/)[0]!.trim());
+  return {
+    ...(head.id === undefined ? {} : { id: head.id }),
+    fixInduced: head.fixInduced,
+    title: head.claim,
+  };
+}
 
 /**
  * The claim LOCATOR of a work-list entry or a built finding's title: the
@@ -614,7 +679,7 @@ export function serializeLedger(ledger: Ledger): string {
       ...f,
       // Length-safe by construction now: the admission test bounds the id,
       // so this slice can only be a no-op on it.
-      id: f.id.slice(0, LEDGER_MAX_ID),
+      id: canonicalLedgerId(f.id).slice(0, LEDGER_MAX_ID),
       title: f.title.slice(0, LEDGER_MAX_TITLE),
       file: f.file.slice(0, LEDGER_MAX_FILE),
     }));
@@ -905,7 +970,7 @@ export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
   const { k: _k, d: _d, b: _b, ...rest } = f;
   return {
     ...rest,
-    id: f.id.slice(0, LEDGER_MAX_ID),
+    id: canonicalLedgerId(f.id).slice(0, LEDGER_MAX_ID),
     title: f.title.slice(0, LEDGER_MAX_TITLE),
     file: f.file.slice(0, LEDGER_MAX_FILE),
     // Normalised to absent, never used to REJECT the entry. `k` is a

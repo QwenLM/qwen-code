@@ -1,6 +1,6 @@
 # Administrator-configured Mem0 External Context Extension
 
-**Status:** PR2 implementation
+**Status:** Implemented base integration; optional Auto Recall follow-up implemented
 
 **Date:** 2026-08-28
 
@@ -23,11 +23,19 @@ absolute dialect path. The dialect file describes request and response
 differences within the existing closed `DialectV1` grammar. Its `id` is an
 administrator-managed audit label and has no registry or file-name semantics.
 
-External Context MCP Profile v1 remains the only public Qwen interoperability
-boundary. Qwen Core does not gain a provider registry, public provider SDK,
+External Context MCP Profile v1 remains the on-demand interoperability
+boundary. The optional automatic mode uses Qwen's existing
+`UserPromptSubmit` Hook contract; it does not add a provider-specific Qwen
+interface. Qwen Core does not gain a provider registry, public provider SDK,
 dynamic module loading, or new third-party cases in its private
 `ProviderConfig` union. The existing direct integration remains available for
 compatibility and is not modified by this design.
+
+The default Extension manifest remains MCP-only. Administrators may separately
+install the package's opt-in `UserPromptSubmit` command Hook to retrieve context
+before a prompt. That deployment mode is specified in
+[Opt-in Auto Recall for Administrator-configured Mem0](./external-context-mem0-auto-recall.md)
+and is intentionally not enabled by installing the Extension.
 
 ## Goals
 
@@ -37,6 +45,8 @@ compatibility and is not modified by this design.
   endpoint, credential, scope, timeout, and dialect remain administrator-owned.
 - Preserve the bounded request engine, response normalization, and failure
   behavior already implemented by the Extension.
+- Preserve zero automatic retrieval for the default Extension installation
+  while allowing an administrator-owned Hook profile to opt in explicitly.
 - Give protocols outside the closed grammar a clear path to a separate local
   or remote MCP Extension.
 
@@ -45,10 +55,11 @@ compatibility and is not modified by this design.
 - Publish provider presets, provider-specific contract fixtures, or live
   service credentials.
 - Add ordinary Qwen settings or Extension settings for the configuration path.
-- Define arbitrary request templates, JSONPath, scripting, custom headers, or
-  executable hooks.
+- Define arbitrary request templates, JSONPath, scripting, or custom headers.
 - Probe or fall back between upstream protocol versions.
-- Add memory creation, update, deletion, Auto Recall, redirects, or retries.
+- Enable Auto Recall by default or combine the on-demand MCP and automatic Hook
+  surfaces in one installation profile.
+- Add memory creation, update, deletion, redirects, or retries.
 - Migrate or remove the existing direct External Context integration.
 
 ## Architecture
@@ -61,12 +72,15 @@ flowchart LR
     D["Administrator-owned DialectV1"] --> E
     E --> R["Bounded request engine"]
     R --> S["Compatible HTTP service"]
+    H["Optional administrator-owned UserPromptSubmit Hook"] --> R
+    A["Administrator-owned InstanceConfigV3"] --> H
 ```
 
-The local Extension owns configuration loading and HTTP translation. Qwen sees
-only the MCP profile. A service that cannot fit the bounded dialect grammar
-owns a separate MCP implementation instead of expanding the grammar or Qwen
-Core.
+The local package owns configuration loading and HTTP translation. On-demand
+retrieval reaches it through the MCP profile; the optional automatic mode
+reaches it through the existing command-Hook contract. A service that cannot
+fit the bounded dialect grammar owns a separate MCP implementation instead of
+expanding the grammar or Qwen Core.
 
 ## Version model
 
@@ -74,8 +88,9 @@ Four independent version axes remain explicit:
 
 1. **MCP Profile version** defines the Qwen-to-Extension tool contract. This
    Extension implements External Context MCP Profile v1.
-2. **Instance schema version** defines administrator binding. This design uses
-   `schemaVersion: 2`.
+2. **Instance schema version** defines administrator binding. The MCP runtime
+   uses `schemaVersion: 2`; the separate Auto Recall Hook profile uses
+   `schemaVersion: 3` so each entry point rejects the other's configuration.
 3. **Dialect version** defines interpretation of the closed request and
    response grammar. This design keeps `dialectVersion: 1` unchanged.
 4. **Upstream API version** belongs to the service and appears only in the
@@ -175,9 +190,9 @@ The grammar stays deliberately closed:
 - `threshold` and `rerank` are typed fields, not request fragments.
 
 The dialect cannot define arbitrary headers, body interpolation, JSONPath,
-code, environment-variable expansion, redirects, or response transformations.
-Its `id` does not have to match its file name or any value in the instance
-file. Administrators own its naming and versioning policy.
+code, environment-variable expansion, redirects, response transformations, or
+trigger behavior. Its `id` does not have to match its file name or any value in
+the instance file. Administrators own its naming and versioning policy.
 
 ## Startup and failure behavior
 
@@ -217,16 +232,20 @@ query, credential, or upstream response.
 
 ## Retrieval-only boundary
 
-The manifest exposes exactly `context_search`. A dialect cannot enable memory
-creation, update, deletion, or Auto Recall. Write protocols require a separate
-future profile or Extension because their idempotency, duplication, timeout,
-and authorization semantics do not fit the retrieval grammar.
+The default manifest exposes exactly `context_search` and contains no Hooks. A
+dialect cannot enable memory creation, update, deletion, or Auto Recall. The
+optional administrator-installed Hook changes only when the same bounded
+retrieval runs; it does not add write operations or expand the dialect grammar.
+Write protocols require a separate future profile or Extension because their
+idempotency, duplication, timeout, and authorization semantics do not fit the
+retrieval grammar.
 
 ## Packaging and service ownership
 
-The npm package publishes only the bundled runtime, canonical schemas,
-Extension manifest, and README. It contains no administrator dialect, provider
-preset, provider identifier, or provider-specific contract fixture.
+The npm package publishes only the bundled MCP and Auto Recall entry points,
+canonical schemas, Extension manifest, unbranded Hook configuration examples,
+and README. It contains no administrator dialect, provider preset, provider
+identifier, or provider-specific contract fixture.
 
 The public package name is `@qwen-code/external-context-mem0`. Its package and
 Extension manifest versions follow the Qwen Code release version and are
@@ -265,16 +284,20 @@ built-in provider rollout for either case.
    and profile boundary.
 4. **Distribution follow-up:** Publish the self-contained Extension through the
    normal Qwen Code npm release without adding provider data or Core wiring.
-5. Design any portable write capability separately.
+5. **Auto Recall follow-up:** Add a separately installed, administrator-owned
+   Hook profile while leaving the default manifest MCP-only.
+6. Design any portable write capability separately.
 
 There is no Qwen-maintained provider-preset PR3. Administrators own compatible
 dialect data; incompatible protocols use their own MCP Extension.
 
 ## Verification
 
-Verification covers both canonical schemas; 64 KiB file limits; unavailable,
+Verification covers all canonical schemas; 64 KiB file limits; unavailable,
 malformed, unsupported, relative, and semantically invalid configurations;
 credential ordering; synthetic GET and POST request contracts; response
-normalization; the MCP tool surface; real stdio MCP startup against a local
-synthetic HTTP service; restart-only reload behavior; package contents; build,
-typecheck, lint, and tests. No verification contacts a live provider service.
+normalization; the MCP tool surface; Hook provenance, repository containment,
+sanitization, fail-open behavior, and wall-clock bounds; real stdio MCP and Hook
+startup against local synthetic HTTP services; reload behavior; package
+contents; build, typecheck, lint, and tests. No verification contacts a live
+provider service.

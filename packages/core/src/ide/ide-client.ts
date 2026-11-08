@@ -121,10 +121,14 @@ export class IdeClient {
     if (!IdeClient.instancePromise) {
       IdeClient.instancePromise = (async () => {
         const client = new IdeClient();
-        client.ideProcessInfo = await getIdeProcessInfo();
+        // The process walk spawns `ps` per ancestor. Only VS Code terminals
+        // need it (detectIde and legacy pid-file discovery), so skip it elsewhere.
+        if (process.env['TERM_PROGRAM'] === 'vscode') {
+          client.ideProcessInfo = await getIdeProcessInfo();
+        }
         client.connectionConfig = await client.getConnectionConfigFromFile();
         client.currentIde = detectIde(
-          client.ideProcessInfo,
+          client.ideProcessInfo ?? { pid: 0, command: '' },
           client.connectionConfig?.ideInfo,
         );
         return client;

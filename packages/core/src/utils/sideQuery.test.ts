@@ -272,9 +272,10 @@ describe('runSideQuery', () => {
       await runSideQuery<{ ok: boolean }>(mockConfig, {
         ...baseOptions,
         maxAttempts: 1,
+        boundedRetries: true,
       });
       expect(mockBaseLlmClient.generateJson).toHaveBeenLastCalledWith(
-        expect.objectContaining({ maxAttempts: 1 }),
+        expect.objectContaining({ maxAttempts: 1, boundedRetries: true }),
       );
 
       await runSideQuery<{ ok: boolean }>(mockConfig, baseOptions);
@@ -283,6 +284,7 @@ describe('runSideQuery', () => {
         .mock.calls.at(-1)?.[0];
       expect(lastCall).toBeDefined();
       expect(lastCall as object).not.toHaveProperty('maxAttempts');
+      expect(lastCall as object).not.toHaveProperty('boundedRetries');
     });
 
     it('propagates rejections from generateJson', async () => {

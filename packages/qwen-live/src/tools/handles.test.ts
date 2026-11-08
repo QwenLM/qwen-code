@@ -52,6 +52,81 @@ describe('HandleRegistry sessions', () => {
 });
 
 describe('HandleRegistry jobs', () => {
+  it.each(['accepted', 'interrupted'] as const)(
+    'binds exact joined refs and retains promised aliases from %s without minting another job',
+    (state) => {
+      const registry = new HandleRegistry();
+      const original = registry.createJob({
+        sessionHandle: 'session_1',
+        backend: backend('abc'),
+        jobRef: 'active',
+        task: 'Original',
+      });
+      const placeholder = registry.createJob({
+        sessionHandle: 'session_1',
+        backend: backend('abc'),
+        task: 'Joined instruction',
+      });
+      placeholder.state = state;
+      expect(
+        registry.bindJoinedJob(placeholder.jobHandle, backend('abc'), 'active'),
+      ).toBe(original);
+      expect(registry.resolveJob(placeholder.jobHandle)).toBe(original);
+      expect(
+        registry.bindJoinedJob(placeholder.jobHandle, backend('abc'), 'active'),
+      ).toBe(original);
+      expect(
+        registry.bindJoinedJob(
+          placeholder.jobHandle,
+          backend('abc'),
+          'different',
+        ),
+      ).toBeUndefined();
+      expect(registry.jobByRef(backend('abc'), 'different')).toBeUndefined();
+      const independent = registry.createJob({
+        sessionHandle: 'session_1',
+        backend: backend('abc'),
+        task: 'External join',
+      });
+      expect(
+        registry.bindJoinedJob(
+          independent.jobHandle,
+          backend('abc'),
+          'external',
+        ),
+      ).toBe(independent);
+      expect(registry.jobByRef(backend('abc'), 'external')).toBe(independent);
+    },
+  );
+
+  it('does not steal a joined ref owned by another session or backend', () => {
+    const registry = new HandleRegistry();
+    const foreign = registry.createJob({
+      sessionHandle: 'session_2',
+      backend: backend('foreign'),
+      jobRef: 'owned',
+      task: 'Foreign',
+    });
+    const pending = registry.createJob({
+      sessionHandle: 'session_1',
+      backend: backend('abc'),
+      task: 'Waiting',
+    });
+    expect(
+      registry.bindJoinedJob(pending.jobHandle, backend('abc'), 'owned'),
+    ).toBeUndefined();
+    expect(
+      registry.bindJoinedJob(
+        pending.jobHandle,
+        backend('abc', 'other'),
+        'free',
+      ),
+    ).toBeUndefined();
+    expect(registry.resolveJob(pending.jobHandle)).toBe(pending);
+    expect(pending.jobRef).toBeUndefined();
+    expect(registry.jobByRef(backend('foreign'), 'owned')).toBe(foreign);
+  });
+
   it('creates jobs with incrementing handles and accepted state', () => {
     const registry = new HandleRegistry();
     const sessionHandle = registry.session(backend('abc'));
@@ -201,6 +276,20 @@ describe('HandleRegistry jobs', () => {
     });
 
     expect(registry.activeJobForSession('session_2')).toBeUndefined();
+  });
+
+  it('retires unknown idle outcomes as interrupted instead of successful', () => {
+    const registry = new HandleRegistry();
+    const job = registry.createJob({
+      sessionHandle: 'session_1',
+      backend: backend('abc'),
+      task: 'Task',
+    });
+    job.state = 'running';
+    expect(registry.reconcileIdleSession('session_1')).toEqual([job]);
+    expect(job.state).toBe('interrupted');
+    expect(registry.activeJobForSession('session_1')).toBeUndefined();
+    expect(registry.reconcileIdleSession('session_1')).toEqual([]);
   });
 });
 

@@ -7,18 +7,20 @@
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
 import type { ApiUserPromptOptions } from '@qwen-code/qwen-code-core';
-import {
-  CompressionStatus,
-  getStartupContextLength,
-  isApiUserPrompt,
-} from '@qwen-code/qwen-code-core';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
+import { findApiHistoryPromptIndex } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import { isApiUserPrompt } from '@qwen-code/qwen-code-core/services/api-user-prompt.js';
 import { isSlashCommand } from './commandUtils.js';
 
 /**
- * TUI rewind's binding of the shared user-prompt classifier. Exported so the
- * OpenTUI parity path counts prompts under the exact same rule.
+ * The dormant OpenTUI mapper's binding of the user-prompt classifier. Deliberately
+ * module-private: `isUserTextContent` below is the only door to this rule, and
+ * the OpenTUI parity path reaches it by importing that function. Exporting the
+ * options would let a caller compose `isApiUserPrompt(x, …)` directly and
+ * re-create the per-surface twin this consolidation removes.
  */
-export const TUI_API_USER_PROMPT_OPTIONS: ApiUserPromptOptions = {
+const TUI_API_USER_PROMPT_OPTIONS: ApiUserPromptOptions = {
   excludeClearedMediaPlaceholders: true,
 };
 
@@ -45,17 +47,23 @@ export function isRealUserTurn(
 }
 
 /**
+ * Whether the turn carries the identity a conversation rewind resolves to.
+ * A real user row without one (a turn injected by accepted speculation, a
+ * persisted custom slash invocation) can never be associated with model or
+ * recorded history, so the selector must not offer it — every pick would fail
+ * closed.
+ */
+export function isRewindableUserTurn(item: HistoryItem): boolean {
+  if (!isRealUserTurn(item)) return false;
+  return Boolean(item.promptId ?? item.rewindId);
+}
+
+/**
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
  *
- * Thin binding of the shared classifier: TUI rewind excludes microcompaction
- * media-clear placeholders because a cleared media-only entry never produced
- * a visible user turn, so counting it would desynchronize the API prompt
- * count from the UI turn count and truncate one turn early. See
- * `ApiUserPromptOptions` in core for why that exclusion is an option rather
- * than part of the shared rule (ACP must keep those entries counted), and for
- * the exact-match collision this leaves behind — which is what prompt
- * identity resolves.
+ * Kept for the dormant OpenTUI positional mapper. Live Ink rewind resolves
+ * identities instead; content shape is not a turn identity.
  */
 export function isUserTextContent(content: Content): boolean {
   return isApiUserPrompt(content, TUI_API_USER_PROMPT_OPTIONS);
@@ -81,15 +89,9 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * Computes the number of API Content[] entries to keep when rewinding
  * to a specific user turn in the UI history.
  *
- * The API history may include:
- * - A startup context entry at the beginning
- * - User text prompts (corresponding to UI user turns)
- * - Model responses (with optional functionCall parts)
- * - Tool result entries: user(functionResponse) + model(response)
- *
- * This function counts user text Content entries (skipping tool results
- * and the startup context entry) to find the API boundary corresponding
- * to the target UI user turn.
+ * Identified turns require exactly one matching entry in the retained region
+ * of each history; a missing or ambiguous identity returns -1. Legacy turns
+ * require a shared source-record link rather than positional mapping.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
  * IDE context. This function does not account for those and will produce
@@ -100,7 +102,7 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * @param targetUserItemId The ID of the user HistoryItem to rewind to
  * @param apiHistory The current API Content[] array
  * @returns The number of Content entries to keep, or -1 if the target turn
- *   could not be located (e.g., it was absorbed by chat compression).
+ *   could not be located, or its identity is missing or ambiguous.
  */
 export function computeApiTruncationIndex(
   uiHistory: HistoryItem[],
@@ -115,55 +117,48 @@ export function computeApiTruncationIndex(
   const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
-  // Count how many UI user turns exist before the target
-  let uiUserTurnCount = 0;
-  for (
-    let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
-    i < targetIndex;
-    i++
-  ) {
-    const item = uiHistory[i]!;
-    if (isRealUserTurn(item)) {
-      uiUserTurnCount++;
-    }
-  }
+  const retainedStart = compressionIndex === -1 ? 0 : compressionIndex + 1;
 
-  // Determine the starting index in the API history (skip startup context)
   const startIndex = getStartupContextLength(apiHistory, {
     includeCompressed: true,
   });
 
-  if (uiUserTurnCount === 0) {
-    // Marker-less auto-compaction (entrance 3): the API history carries a
-    // compressed prefix but the UI has no summarizing compression boundary.
-    // Rewinding to the first turn would silently truncate to
-    // [prelude, summary, ack] and drop every real turn — fail loud instead.
+  const target = uiHistory[targetIndex]!;
+  if (isRealUserTurn(target)) {
+    const rewindId = target.promptId ?? target.rewindId;
+    if (!rewindId) return -1;
+    // Only the retained region is resolvable: a twin above the compression
+    // boundary is already unmappable, and refusing the turn that *can* be
+    // resolved uniquely would widen the refusal past the ambiguous pair.
     if (
-      compressionIndex === -1 &&
-      startIndex > getStartupContextLength(apiHistory)
+      uiHistory.some(
+        (item, index) =>
+          index !== targetIndex &&
+          index >= retainedStart &&
+          isRealUserTurn(item) &&
+          (item.promptId ?? item.rewindId) === rewindId,
+      )
     ) {
       return -1;
     }
-    // Rewinding to the first user turn: keep only startup context (if any)
-    return startIndex;
+    return findApiHistoryPromptIndex(apiHistory, rewindId, startIndex);
   }
-
-  // Walk the API history from after the startup context, counting
-  // user text prompts to find the one corresponding to the target turn.
-  let realUserPromptCount = 0;
-
-  for (let i = startIndex; i < apiHistory.length; i++) {
-    if (isUserTextContent(apiHistory[i]!)) {
-      realUserPromptCount++;
-      // The target turn is the (uiUserTurnCount + 1)th real user prompt.
-      // We want to truncate right before it.
-      if (realUserPromptCount > uiUserTurnCount) {
-        return i;
-      }
-    }
-  }
-
-  // If we didn't find enough user prompts (e.g., after compression),
-  // signal that the target turn is unreachable.
   return -1;
+}
+
+/**
+ * Whether the target is retained, so a refusal means its model association
+ * could not be resolved rather than that compression absorbed it.
+ */
+export function isRetainedUserTurn(
+  uiHistory: HistoryItem[],
+  targetUserItemId: number,
+): boolean {
+  const targetIndex = uiHistory.findIndex(
+    (item) => item.id === targetUserItemId,
+  );
+  if (targetIndex === -1) return false;
+  const target = uiHistory[targetIndex]!;
+  if (!isRealUserTurn(target)) return false;
+  return targetIndex > findLastSuccessfulCompressionIndex(uiHistory);
 }

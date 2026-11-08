@@ -7,6 +7,11 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
+  ChannelPromptCancelledError,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type BridgeSessionInfo,
@@ -15,12 +20,15 @@ import {
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
+  type ChannelToolDefinition,
   type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
 import { sanitizeLogText } from './sanitize.js';
 import {
+  CHANNEL_LOOP_MCP_TOOLS,
   ChannelLoopMcpServer,
+  selectChannelToolsForSession,
   type JsonRpcMessage,
 } from './ChannelLoopTools.js';
 import type { SessionScope } from './types.js';
@@ -66,6 +74,7 @@ export interface DaemonChannelSessionClient {
   }): AsyncGenerator<DaemonChannelEvent>;
   detach?(): Promise<void>;
   cancel(): Promise<void>;
+  interrupt?(): Promise<void>;
   setModel(modelId: string): Promise<Record<string, unknown>>;
   respondToPermission(
     requestId: string,
@@ -90,6 +99,11 @@ export interface DaemonChannelSessionFactoryRequest {
   /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
   worktree?: Record<string, never>;
+  /**
+   * Worktree ownership transfer: replace this session with a fresh session
+   * that takes over its worktree (daemon `session_worktree_reset_v1`).
+   */
+  worktreeReset?: { sessionId: string };
 }
 
 export type DaemonChannelSessionFactory = (
@@ -129,6 +143,8 @@ export interface DaemonChannelBridgeOptions {
   sessionPermissionVote?: boolean;
   /** Daemon guarantees durable worktree create/restore attestation. */
   sessionWorktreePersistence?: boolean;
+  /** Daemon supports worktree ownership transfer (`session_worktree_reset_v1`). */
+  sessionWorktreeReset?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -194,7 +210,7 @@ function channelImageName(mimeType: string, index = 0): string | undefined {
 function decodeChannelImage(
   data: string,
   oversizedReason: string,
-): { bytes: Buffer } | { skip: string } {
+): { bytes: Buffer<ArrayBuffer> } | { skip: string } {
   // Valid base64 decodes to at most this many bytes, so an oversized image
   // is rejected on length alone instead of allocating a buffer the size
   // check would discard. Padding is subtracted only when the input length
@@ -330,6 +346,10 @@ export class DaemonChannelBridge
   private readonly requestToSession = new Map<string, string>();
   private readonly respondedRequestToSession = new Map<string, string>();
   private readonly activePrompts = new Set<string>();
+  private readonly taskOutputs = new Map<
+    string,
+    { text?: string; turnId?: string; partial?: boolean }
+  >();
   private readonly activePromptControllers = new Map<
     string,
     Set<AbortController>
@@ -338,8 +358,15 @@ export class DaemonChannelBridge
     string,
     AvailableCommand[]
   >();
+  private readonly toolCallKindsBySession = new Map<
+    string,
+    Map<string, string>
+  >();
   private readonly turnBarriers = new Map<string, () => void>();
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private readonly channelTools: ChannelToolDefinition[] = [];
+  /** Channel instance that owns each session, for adapter-tool scoping. */
+  private readonly sessionOwners = new Map<string, string>();
   private readonly channelLoopDisabledSessions = new Set<string>();
   private readonly registeredChannelLoopMcpSessions = new Set<string>();
   private readonly channelLoopMcpOperations = new Map<string, Promise<void>>();
@@ -427,6 +454,9 @@ export class DaemonChannelBridge
       await this.rejectStaleSession(session);
     }
     this.attachSession(session, bindingToken);
+    if (options?.sourceId) {
+      this.sessionOwners.set(session.sessionId, options.sourceId);
+    }
     if (options?.enableChannelLoops === false) {
       this.channelLoopDisabledSessions.add(session.sessionId);
       void this.reconcileChannelLoopMcpForSession(session.sessionId);
@@ -463,6 +493,52 @@ export class DaemonChannelBridge
       );
     }
     this.attachSession(session, bindingToken);
+    if (options?.sourceId) {
+      this.sessionOwners.set(session.sessionId, options.sourceId);
+    }
+    if (options?.enableChannelLoops === false) {
+      this.channelLoopDisabledSessions.add(session.sessionId);
+      void this.reconcileChannelLoopMcpForSession(session.sessionId);
+    } else {
+      await this.reconcileChannelLoopMcpForSession(session.sessionId);
+    }
+    return session.sessionId;
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session (daemon `session_worktree_reset_v1`). The returned id is the
+   * replacement's; the superseded session's clients stay bound to it (and
+   * are forgotten by the caller). Gated on the capability flag so a daemon
+   * without reset support fails before any session is created.
+   */
+  async resetWorktreeSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
+    if (!this.options.sessionWorktreeReset) {
+      throw new Error(
+        'The daemon does not support worktree reset for Channel tasks.',
+      );
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const session = await this.options.sessionFactory({
+      workspaceCwd: cwd || this.options.cwd,
+      modelServiceId: this.options.modelServiceId,
+      sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
+      worktreeReset: { sessionId },
+    });
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
+    }
+    this.attachSession(session, bindingToken);
+    if (options?.sourceId) {
+      this.sessionOwners.set(session.sessionId, options.sourceId);
+    }
     if (options?.enableChannelLoops === false) {
       this.channelLoopDisabledSessions.add(session.sessionId);
       void this.reconcileChannelLoopMcpForSession(session.sessionId);
@@ -476,19 +552,92 @@ export class DaemonChannelBridge
     if (!this.channelLoopToolHandlers.includes(handler)) {
       this.channelLoopToolHandlers.push(handler);
     }
-    this.channelLoopMcpServer ??= new ChannelLoopMcpServer({
-      create: (sessionId, input) =>
-        this.resolveChannelLoopToolHandler(sessionId).create(sessionId, input),
-      list: (sessionId) =>
-        this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
-      cancel: (sessionId, id) =>
-        this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
-    });
+    this.ensureChannelToolServer();
     for (const sessionId of this.sessions.keys()) {
-      if (!this.channelLoopDisabledSessions.has(sessionId)) {
+      if (this.needsChannelToolServer(sessionId)) {
         void this.reconcileChannelLoopMcpForSession(sessionId);
       }
     }
+  }
+
+  registerChannelTool(tool: ChannelToolDefinition): void {
+    if (!this.addChannelTool(tool)) return;
+    this.ensureChannelToolServer();
+    for (const sessionId of this.sessions.keys()) {
+      void this.reconcileChannelLoopMcpForSession(sessionId);
+    }
+  }
+
+  /**
+   * A session needs the client MCP server while it still exists and either
+   * wants loops or has adapter tools to serve it (owned by its channel, or
+   * ownerless). Another channel's owned tools are not this session's tools.
+   */
+  private needsChannelToolServer(sessionId: string): boolean {
+    return (
+      this.sessions.has(sessionId) &&
+      (!this.channelLoopDisabledSessions.has(sessionId) ||
+        this.channelToolsForSession(sessionId).length > 0)
+    );
+  }
+
+  /**
+   * Shared registration guard: one tool per name per owning channel, and never
+   * a name the built-in channel_loop_* tools already own. Two instances of the
+   * same channel type register the same names, so the owner scopes the entry
+   * instead of the second registration being dropped.
+   */
+  private addChannelTool(tool: ChannelToolDefinition): boolean {
+    if (
+      CHANNEL_LOOP_MCP_TOOLS.some((loopTool) => loopTool.name === tool.name)
+    ) {
+      process.stderr.write(
+        `[DaemonChannelBridge] Channel tool "${sanitizeLogText(tool.name, 64)}" ignored: name is reserved for the built-in channel loop tools\n`,
+      );
+      return false;
+    }
+    if (
+      this.channelTools.some(
+        (existing) =>
+          existing.name === tool.name && existing.owner === tool.owner,
+      )
+    ) {
+      process.stderr.write(
+        `[DaemonChannelBridge] Channel tool "${sanitizeLogText(tool.name, 64)}" ignored: already registered for owner "${sanitizeLogText(tool.owner ?? '', 64)}"\n`,
+      );
+      return false;
+    }
+    this.channelTools.push(tool);
+    return true;
+  }
+
+  private channelToolsForSession(sessionId: string): ChannelToolDefinition[] {
+    return selectChannelToolsForSession(
+      this.channelTools,
+      this.sessionOwners.get(sessionId),
+    );
+  }
+
+  private ensureChannelToolServer(): ChannelLoopMcpServer {
+    return (this.channelLoopMcpServer ??= new ChannelLoopMcpServer(
+      {
+        create: (sessionId, input) =>
+          this.resolveChannelLoopToolHandler(sessionId).create(
+            sessionId,
+            input,
+          ),
+        list: (sessionId) =>
+          this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
+        cancel: (sessionId, id) =>
+          this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
+      },
+      {
+        extraTools: (sessionId) => this.channelToolsForSession(sessionId),
+        loopToolsEnabled: (sessionId) =>
+          this.channelLoopToolHandlers.length > 0 &&
+          !this.channelLoopDisabledSessions.has(sessionId),
+      },
+    ));
   }
 
   async prompt(
@@ -503,6 +652,10 @@ export class DaemonChannelBridge
       );
     }
     this.activePrompts.add(sessionId);
+    const taskOutput:
+      | { text?: string; turnId?: string; partial?: boolean }
+      | undefined = options?.outputMode === 'per_task' ? {} : undefined;
+    if (taskOutput) this.taskOutputs.set(sessionId, taskOutput);
 
     const controller = new AbortController();
     let controllers = this.activePromptControllers.get(sessionId);
@@ -514,6 +667,9 @@ export class DaemonChannelBridge
 
     const chunks: string[] = [];
     let slashCommandOutput = '';
+    // A turn notice rides the reply, so it keeps its own buffer that response
+    // boundaries never clear.
+    let turnNotice = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         chunks.push(chunk);
@@ -522,6 +678,11 @@ export class DaemonChannelBridge
     const onSlashCommandOutput = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         slashCommandOutput = chunk;
+      }
+    };
+    const onTurnNotice = (sid: string, notice: string) => {
+      if (sid === sessionId) {
+        turnNotice = notice;
       }
     };
     const clearChunks = (sid: string) => {
@@ -537,6 +698,7 @@ export class DaemonChannelBridge
     };
     this.on('textChunk', onChunk);
     this.on('slashCommandOutput', onSlashCommandOutput);
+    this.on('turnNotice', onTurnNotice);
     this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
@@ -664,6 +826,9 @@ export class DaemonChannelBridge
             prompt,
             _meta: {
               [CHANNEL_PROMPT_META_KEY]: true,
+              ...(options?.outputMode === 'per_task'
+                ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
+                : {}),
               ...(promptAuthorization
                 ? {
                     [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]:
@@ -694,7 +859,18 @@ export class DaemonChannelBridge
         turnBarrier,
         new Promise<void>((resolve) => setTimeout(resolve, 0)),
       ]);
-      const textResult = chunks.join('') || slashCommandOutput;
+      if (
+        options?.outputMode === 'per_task' &&
+        result.stopReason === 'cancelled'
+      ) {
+        throw new ChannelPromptCancelledError();
+      }
+      if (taskOutput) {
+        options?.onTaskResult?.({ partial: taskOutput.partial === true });
+      }
+      const body = taskOutput?.text || chunks.join('') || slashCommandOutput;
+      const textResult =
+        turnNotice && body ? `${turnNotice}\n\n${body}` : turnNotice || body;
       this.emit('promptComplete', {
         sessionId,
         text: textResult,
@@ -705,9 +881,13 @@ export class DaemonChannelBridge
       this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
+      this.off('turnNotice', onTurnNotice);
       this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
+      if (this.taskOutputs.get(sessionId) === taskOutput) {
+        this.taskOutputs.delete(sessionId);
+      }
       controllers.delete(controller);
       if (
         controllers.size === 0 &&
@@ -794,7 +974,7 @@ export class DaemonChannelBridge
         // Fall back to cancellation for clients that cannot detach cleanly.
       }
     }
-    await session.cancel();
+    await (session.interrupt ? session.interrupt() : session.cancel());
   }
 
   async setSessionModel(
@@ -843,9 +1023,11 @@ export class DaemonChannelBridge
     for (const sessionId of Array.from(this.sessions.keys())) {
       const session = this.sessions.get(sessionId);
       if (session) {
-        void session.cancel().catch((error: unknown) => {
-          this.lastError = error;
-        });
+        void (session.interrupt ? session.interrupt() : session.cancel()).catch(
+          (error: unknown) => {
+            this.lastError = error;
+          },
+        );
       }
       this.dropSession(sessionId, 'bridge_stopped', false);
     }
@@ -980,6 +1162,7 @@ export class DaemonChannelBridge
         );
         break;
       case 'turn_complete':
+        if (isRecord(event.data) && event.data['backgroundTurn']) break;
         this.resolveTurnBarrier(session.sessionId);
         break;
       case 'turn_error':
@@ -1013,15 +1196,49 @@ export class DaemonChannelBridge
           if (
             meta['source'] === 'background_notification_response' &&
             meta['rewritten'] !== true &&
-            text
+            meta[CHANNEL_TASK_OUTPUT_META_KEY] === true
           ) {
-            this.emit('backgroundResponse', sessionId, text);
+            const taskOutput = this.taskOutputs.get(sessionId);
+            if (taskOutput) {
+              const context = parseBackgroundResponseContext(
+                meta['backgroundTask'],
+              );
+              if (text?.trim()) {
+                taskOutput.text = text;
+                taskOutput.turnId = context?.turnId;
+                taskOutput.partial = context?.partial === true;
+              } else if (
+                context?.turnComplete &&
+                context.turnId !== undefined &&
+                context.turnId === taskOutput.turnId
+              ) {
+                taskOutput.partial = context.partial === true;
+              }
+            }
+            break;
+          }
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            meta[CHANNEL_TASK_OUTPUT_META_KEY] !== true
+          ) {
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (text || context?.turnComplete) {
+              this.emit('backgroundResponse', sessionId, text ?? '', context);
+            }
           } else if (meta['source'] === 'vision_bridge_notice' && text) {
             this.emit('textChunk', sessionId, text);
           }
           break;
         }
         if (text) {
+          if (meta?.[CHANNEL_TURN_NOTICE_META_KEY] === true) {
+            // Keep notices outside the text buffer cleared by tool boundaries.
+            this.emit('turnNotice', sessionId, text);
+            break;
+          }
           this.emit(
             meta?.['source'] === 'slash_command'
               ? 'slashCommandOutput'
@@ -1041,11 +1258,20 @@ export class DaemonChannelBridge
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const lifecycleMeta = isRecord(update['_meta'])
+          ? update['_meta']
+          : undefined;
+        if (
+          lifecycleMeta?.['toolLifecycle'] !== undefined &&
+          update['status'] === undefined &&
+          update['content'] === undefined
+        )
+          break;
         const toolCallId = getString(update['toolCallId']);
-        const kind = getString(update['kind']);
+        const explicitKind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
         if (
-          !kind &&
+          !explicitKind &&
           toolCallId &&
           getString(update['status']) === 'in_progress' &&
           (meta?.['shellProgress'] !== undefined ||
@@ -1061,9 +1287,20 @@ export class DaemonChannelBridge
           // reaches the normal flow below instead of being silently swallowed.
           break;
         }
+        // Terminal frames from the daemon's transcript replay carry no kind by
+        // construction; restore the kind remembered from the initial frame
+        // (same contract as AcpBridge) before judging the frame malformed.
+        let sessionKinds = this.toolCallKindsBySession.get(sessionId);
+        const kind = explicitKind || sessionKinds?.get(toolCallId ?? '');
         if (!toolCallId || !kind) {
           this.emitProtocolError(`Malformed daemon ${type} event`, update);
           break;
+        }
+        if (type === 'tool_call' || explicitKind) {
+          const kinds = sessionKinds ?? new Map<string, string>();
+          kinds.set(toolCallId, kind);
+          this.toolCallKindsBySession.set(sessionId, kinds);
+          sessionKinds = kinds;
         }
         const event: ToolCallEvent = {
           sessionId,
@@ -1079,6 +1316,12 @@ export class DaemonChannelBridge
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);
+        if (event.status === 'completed' || event.status === 'failed') {
+          sessionKinds?.delete(toolCallId);
+          if (sessionKinds?.size === 0) {
+            this.toolCallKindsBySession.delete(sessionId);
+          }
+        }
         break;
       }
       case 'plan': {
@@ -1248,10 +1491,12 @@ export class DaemonChannelBridge
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
     this.sessionBindingTokens.delete(sessionId);
+    this.sessionOwners.delete(sessionId);
     this.channelLoopDisabledSessions.delete(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
     this.availableCommandsBySession.delete(sessionId);
+    this.toolCallKindsBySession.delete(sessionId);
     if (this.latestAvailableCommandsSessionId === sessionId) {
       this.latestAvailableCommandsSessionId = Array.from(
         this.availableCommandsBySession.keys(),
@@ -1284,8 +1529,7 @@ export class DaemonChannelBridge
         const shouldRegister =
           host !== undefined &&
           server !== undefined &&
-          this.sessions.has(sessionId) &&
-          !this.channelLoopDisabledSessions.has(sessionId);
+          this.needsChannelToolServer(sessionId);
         if (!shouldRegister) {
           if (host && this.registeredChannelLoopMcpSessions.has(sessionId)) {
             await host.unregister(sessionId);
@@ -1298,10 +1542,7 @@ export class DaemonChannelBridge
           server.handleMessage(message, { sessionId }),
         );
         this.registeredChannelLoopMcpSessions.add(sessionId);
-        if (
-          !this.sessions.has(sessionId) ||
-          this.channelLoopDisabledSessions.has(sessionId)
-        ) {
+        if (!this.needsChannelToolServer(sessionId)) {
           await host.unregister(sessionId);
           this.registeredChannelLoopMcpSessions.delete(sessionId);
         }

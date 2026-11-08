@@ -23,6 +23,7 @@ vi.mock('@opentui/core', () => ({
 import {
   buildModelSelectionKey,
   computeModelDialogMaxItems,
+  encodeVisionModelSelector,
   formatContextWindow,
   formatModalities,
   formatModelOptionLabel,
@@ -92,6 +93,29 @@ describe('model selection keys', () => {
       authType: '',
       modelId: 'plain-id',
     });
+  });
+});
+
+describe('encodeVisionModelSelector', () => {
+  it('keeps a clean baseUrl suffix byte-identical', () => {
+    expect(
+      encodeVisionModelSelector(
+        buildModelSelectionKey('use-openai', 'gpt-x', 'https://a.example/v1'),
+      ),
+    ).toBe('use-openai:gpt-x\0https://a.example/v1');
+  });
+
+  it('persists a credential-bearing suffix registry-exact so the pin resolves', () => {
+    // The suffix is the routing key: `modelRegistry` copies the configured
+    // baseUrl verbatim and the vision, image and advisor consumers compare it
+    // with `===`. Scrubbing it on write makes the pin resolve to nothing for
+    // exactly the credential-bearing endpoints, so re-adding a write-path
+    // strip must red this row. Egress surfaces scrub on the way out instead.
+    expect(
+      encodeVisionModelSelector(
+        'use-openai::gpt-x\0https://user:sk-secret@a.example/v1',
+      ),
+    ).toBe('use-openai:gpt-x\0https://user:sk-secret@a.example/v1');
   });
 });
 

@@ -137,6 +137,39 @@ describe('statusLinePresets', () => {
     ]);
   });
 
+  it.each([
+    ['LF', '\n', ' '],
+    ['CR', '\r', ' '],
+    ['VT', '\v', ' '],
+    ['FF', '\f', ' '],
+    ['NEL', '\u0085', ' '],
+    ['LS', '\u2028', ' '],
+    ['PS', '\u2029', ' '],
+    ['horizontal whitespace', '  \t', '  \t'],
+  ])('normalizes only line breaks: %s', (_name, input, expected) => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      currentDir: `/repo/pro${input}ject`,
+      branch: undefined,
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 1200,
+      totalOutputTokens: 340,
+      totalLinesAdded: 12,
+      totalLinesRemoved: 3,
+      streamingState: StreamingState.Idle,
+    });
+
+    expect(
+      buildStatusLinePresetLines(
+        { type: 'preset', items: ['current-dir'] },
+        data,
+      ),
+    ).toEqual([`/repo/pro${expected}ject`]);
+  });
+
   it('renders every preset item with representative data', () => {
     const data = buildStatusLinePresetData({
       sessionId: 'session-123',

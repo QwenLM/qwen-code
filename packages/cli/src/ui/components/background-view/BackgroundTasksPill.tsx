@@ -15,6 +15,7 @@ import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 import { t } from '../../../i18n/index.js';
+import { isActiveWorkflowStatus } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
@@ -34,6 +35,20 @@ export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
     (e) =>
       (e.kind === 'agent' || e.kind === 'workflow') &&
       (e.pendingApprovals?.length ?? 0) > 0,
+  );
+}
+
+/**
+ * True if a workflow that is still active has been flagged as large. Settled
+ * runs are left out: the marker is a nudge to stop something, and they have
+ * stopped.
+ */
+export function hasLargeWorkflow(entries: readonly DialogEntry[]): boolean {
+  return entries.some(
+    (e) =>
+      e.kind === 'workflow' &&
+      isActiveWorkflowStatus(e.status) &&
+      e.sizeWarning !== undefined,
   );
 }
 
@@ -136,6 +151,7 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const label = getPillLabel(entries);
   const needsApproval = hasPendingApproval(entries);
+  const largeWorkflow = hasLargeWorkflow(entries);
 
   return (
     <>
@@ -151,6 +167,11 @@ export const BackgroundTasksPill: React.FC = () => {
       {needsApproval && (
         <Text color={theme.status.warning} wrap="truncate">
           {` ⚠ ${t('needs approval')}`}
+        </Text>
+      )}
+      {largeWorkflow && (
+        <Text color={theme.status.warning} wrap="truncate">
+          {` ⚠ ${t('Large workflow')}`}
         </Text>
       )}
     </>

@@ -1,20 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_SESSION_ACTION_ITEMS } from './WebShellSidebar';
 import type {
   WebShellSidebarSessionActionItem,
   WebShellSidebarSessionInlineActionItem,
 } from './WebShellSidebar';
 
-const ALL_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
-  'details',
-  'rename',
-  'group',
-  'export',
-  'delete',
-  'pin',
-  'archive',
-];
-
-const DEFAULT_ITEMS: readonly WebShellSidebarSessionActionItem[] = ALL_ITEMS;
+const ALL_ITEMS = DEFAULT_SESSION_ACTION_ITEMS;
 
 const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin'];
@@ -23,6 +14,7 @@ const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
 const DROPDOWN_ONLY_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
   'archive',
   'group',
+  'split',
 ];
 
 interface VisibilityResult {
@@ -74,7 +66,7 @@ describe('session action visibility matrix', () => {
   describe('defaults (no consumer config)', () => {
     it('shows details on hover, pin inline, and archive plus mutations in the dropdown', () => {
       const { inline, dropdown, hover, showDropdownTrigger } =
-        computeVisibility(DEFAULT_ITEMS, DEFAULT_INLINE_ITEMS);
+        computeVisibility(ALL_ITEMS, DEFAULT_INLINE_ITEMS);
 
       expect([...inline].sort()).toEqual(['pin']);
       expect([...dropdown].sort()).toEqual([
@@ -83,6 +75,7 @@ describe('session action visibility matrix', () => {
         'export',
         'group',
         'rename',
+        'split',
       ]);
       expect([...hover]).toEqual(['details']);
       expect(showDropdownTrigger).toBe(true);
@@ -92,7 +85,7 @@ describe('session action visibility matrix', () => {
   describe('items × inlineItems interaction', () => {
     it('inlineItems: [] — all items fall to dropdown', () => {
       const { inline, dropdown, showDropdownTrigger } = computeVisibility(
-        DEFAULT_ITEMS,
+        ALL_ITEMS,
         [],
       );
 
@@ -115,7 +108,7 @@ describe('session action visibility matrix', () => {
     });
 
     it('inlineItems: ["delete"] — delete inline only, not in dropdown', () => {
-      const { inline, dropdown } = computeVisibility(DEFAULT_ITEMS, ['delete']);
+      const { inline, dropdown } = computeVisibility(ALL_ITEMS, ['delete']);
 
       expect(inline.has('delete')).toBe(true);
       expect(dropdown.has('delete')).toBe(false);
@@ -126,6 +119,7 @@ describe('session action visibility matrix', () => {
         'group',
         'pin',
         'rename',
+        'split',
       ]);
     });
 
@@ -154,10 +148,10 @@ describe('session action visibility matrix', () => {
         items: readonly WebShellSidebarSessionActionItem[];
         inlineItems: readonly WebShellSidebarSessionInlineActionItem[];
       }> = [
-        { items: DEFAULT_ITEMS, inlineItems: DEFAULT_INLINE_ITEMS },
-        { items: DEFAULT_ITEMS, inlineItems: [] },
-        { items: DEFAULT_ITEMS, inlineItems: ['pin', 'delete'] },
-        { items: DEFAULT_ITEMS, inlineItems: ['rename', 'export', 'delete'] },
+        { items: ALL_ITEMS, inlineItems: DEFAULT_INLINE_ITEMS },
+        { items: ALL_ITEMS, inlineItems: [] },
+        { items: ALL_ITEMS, inlineItems: ['pin', 'delete'] },
+        { items: ALL_ITEMS, inlineItems: ['rename', 'export', 'delete'] },
         { items: ['delete', 'rename'], inlineItems: ['delete', 'rename'] },
         { items: ['pin', 'archive'], inlineItems: [] },
         { items: [], inlineItems: DEFAULT_INLINE_ITEMS },

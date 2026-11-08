@@ -110,7 +110,9 @@ function renderDelta(current, baseline) {
     const b = baseline.counts[p.name];
     const d = c - b;
     const arrow = d < 0 ? '↓' : d > 0 ? '↑' : '·';
-    stdout.write(`    ${p.name.padEnd(18)} ${d > 0 ? '+' : ''}${d}  ${arrow}\n`);
+    stdout.write(
+      `    ${p.name.padEnd(18)} ${d > 0 ? '+' : ''}${d}  ${arrow}\n`,
+    );
   }
   stdout.write(
     '\ntip: lower clearTerminalPair (and lower clearScreen) on "current" wins.\n',

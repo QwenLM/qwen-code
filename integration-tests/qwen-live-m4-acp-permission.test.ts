@@ -23,6 +23,7 @@ import {
 import {
   bootAcpLiveStack,
   startLiveCall,
+  waitForLiveResponseAfter,
   type AcpLiveStack,
 } from './qwen-live-harness.js';
 
@@ -78,11 +79,12 @@ describeE2E('qwen-live M4 — ACP permission relay', () => {
 
   it('relays the ask to voice and the allow vote resolves the RPC', async () => {
     const inboxIndex = stack.fakeDash.inbox.length;
-    conn.functionCall({
+    conn.queueFunctionCall({
       name: 'handoff',
       argumentsJson: JSON.stringify({ task: 'perm-acp-task' }),
       callId: 'call-p',
     });
+    conn.speakTranscript('Run perm-acp-task.');
     const receiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-p',
       {
@@ -109,7 +111,7 @@ describeE2E('qwen-live M4 — ACP permission relay', () => {
     );
     expect(contextTextOf(permissionMessage)).toContain('respond_permission');
     // …plus the spoken ask.
-    await stack.fakeDash.waitForMessage(
+    const spokenAsk = await stack.fakeDash.waitForMessage(
       (message) => {
         const text = contextTextOf(message);
         return (
@@ -124,13 +126,15 @@ describeE2E('qwen-live M4 — ACP permission relay', () => {
         description: 'the spoken permission ask',
       },
     );
+    await waitForLiveResponseAfter(stack, spokenAsk, 'backend_speech');
 
     // The user says yes: the vote must resolve the parked RPC.
-    conn.functionCall({
+    conn.queueFunctionCall({
       name: 'respond_permission',
       argumentsJson: '{"request_id":"req_1","decision":"allow"}',
       callId: 'call-v',
     });
+    conn.speakTranscript('Yes, allow it.');
     const voteReceiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-v',
       {
@@ -143,6 +147,11 @@ describeE2E('qwen-live M4 — ACP permission relay', () => {
       functionCallOutputOf(voteReceiptMessage)!.output,
     ) as Record<string, unknown>;
     expect(voteReceipt['status']).toBe('delivered');
+    await waitForLiveResponseAfter(
+      stack,
+      voteReceiptMessage,
+      'tool_continuation',
+    );
 
     // The turn completes and the file landed.
     const complete = await stack.fakeDash.waitForMessage(

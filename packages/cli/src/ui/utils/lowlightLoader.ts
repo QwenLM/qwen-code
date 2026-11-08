@@ -82,7 +82,7 @@ export function loadLowlight(): Promise<Lowlight> {
     );
   }
   if (lowlightLoad) return lowlightLoad;
-  lowlightLoad = import('lowlight')
+  lowlightLoad = import('./lowlight-common.js')
     .then((mod) => {
       const instance = mod.createLowlight(mod.common) as Partial<Lowlight>;
       // Validate the runtime shape before casting. Without this, an upstream

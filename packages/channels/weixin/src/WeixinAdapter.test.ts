@@ -156,26 +156,26 @@ describe('WeixinChannel', () => {
       msg: { text: '/review inspect this' },
       synthetic: undefined,
     },
-  ])('marks $label for the message-prefix gate', async ({ msg, synthetic }) => {
-    // The placeholder is the adapter's own text: no user action can put
-    // the configured prefix on it, so gating it would drop every WeChat
-    // media message.
-    const channel = createChannel({ messagePrefix: '/review' });
-    await channel.connect();
-    const onMessage = monitorMocks.startPollLoop.mock.calls[0]?.[0]
-      ?.onMessage as (parsed: ParsedMessage) => Promise<void>;
+  ])(
+    'preserves the synthetic marker for $label',
+    async ({ msg, synthetic }) => {
+      const channel = createChannel();
+      await channel.connect();
+      const onMessage = monitorMocks.startPollLoop.mock.calls[0]?.[0]
+        ?.onMessage as (parsed: ParsedMessage) => Promise<void>;
 
-    await onMessage({ fromUserId: 'user-1', messageId: 'm-1', ...msg });
+      await onMessage({ fromUserId: 'user-1', messageId: 'm-1', ...msg });
 
-    expect(channel.inboundEnvelopes[0]?.syntheticText).toBe(synthetic);
-  });
+      expect(channel.inboundEnvelopes[0]?.syntheticText).toBe(synthetic);
+    },
+  );
 
   it('replaces a captionless image placeholder when the download fails', async () => {
     mediaMocks.downloadAndDecrypt.mockRejectedValue(
       new Error('download unavailable'),
     );
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const channel = createChannel({ messagePrefix: '/review' });
+    const channel = createChannel();
     await channel.connect();
     const onMessage = monitorMocks.startPollLoop.mock.calls[0]?.[0]
       ?.onMessage as (parsed: ParsedMessage) => Promise<void>;

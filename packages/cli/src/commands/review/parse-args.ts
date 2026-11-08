@@ -28,7 +28,11 @@ import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import { isAoneCanonicalHost } from './lib/remote-match.js';
-import { lastReviewEffortPath } from './lib/paths.js';
+import {
+  ensureReviewTmpDir,
+  lastReviewEffortPath,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -159,6 +163,14 @@ export interface ParsedReviewArgs {
     /** `--resume` applies (the target is a PR). */
     effective: boolean;
   };
+  /**
+   * The PR target is a bare number the PR-shape preference PROMOTED over
+   * preceding prose — a positional guess, not a target the user typed
+   * first. Such a target never carries posting authority (`comment.effective`
+   * stays false), and the routing clause treats it as confirm-before-running.
+   * False for an explicitly typed number, a PR URL, and every non-PR target.
+   */
+  promotedNumberTarget: boolean;
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -190,6 +202,41 @@ export const EFFORT_OPTION = {
     'so check-coverage, agent-prompt --roster and compose-review all ' +
     'read one value. Omit for the full (high) roster.',
 } as const;
+
+/**
+ * `--deadline`, shared by the three capture commands so the wall is one
+ * option with one grammar everywhere: a whole number of minutes, or `none`.
+ * Omitted, the capture records the tier's default wall (lib/deadline.ts).
+ * Only `fetch-pr` has a `--resume`, so only its help speaks of one: the
+ * other two commands' `--help` must not describe a flag they do not take.
+ */
+export const deadlineOption = (command: {
+  resumes: boolean;
+}): { type: 'string'; describe: string } => ({
+  type: 'string',
+  describe:
+    "The review's wall, in minutes, recorded in the plan as a duration from " +
+    "the attempt's start — the round builder refuses a reverse-audit round " +
+    'that no longer fits inside it plus the tail reserve' +
+    (command.resumes ? ', and a `--resume` from a new session renews it' : '') +
+    ". Omit for the topology's default (8h on a 3A diff, 12h on a " +
+    '3B one, 16h when huge), which bounds a run that has stopped converging ' +
+    'without touching a healthy one; `none` records no wall; a wall that ' +
+    'cannot hold a convergence (two rounds plus the reserve — at or under ' +
+    "ninety minutes under the default reserve, more under the shell's " +
+    'reserve / compose-floor overrides) is refused up front, and the ' +
+    'fan-out before round 1 spends any wall too. ' +
+    (command.resumes
+      ? 'Ignored on a resumed run once it parses (the grammar and the ' +
+        'default rule still apply; the plan keeps its recorded wall). '
+      : '') +
+    'A QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over the ' +
+    "flag and the default. An explicit deadline, like the environment's, " +
+    "applies the huge tier's round reduction; the default does not. " +
+    'Pauses count against the wall and also price the next round; the ' +
+    'Review Deadline section of the code-review docs gives the ceilings ' +
+    '(about 3h20m / 5h20m / 7h20m on the 8h / 12h / 16h defaults).',
+});
 
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   'critical',
@@ -269,6 +316,12 @@ function isFlag(token: string): boolean {
   return token.length > 1 && token.startsWith('-');
 }
 
+/** What `--deadline` accepts: whole minutes or `none`, whitespace trimmed. */
+function isDeadlineValue(token: string): boolean {
+  const t = token.trim();
+  return /^\d+$/.test(t) || t.toLowerCase() === 'none';
+}
+
 function isPureInteger(token: string): boolean {
   return /^\d+$/.test(token);
 }
@@ -295,8 +348,14 @@ export { tokenizeArgs } from '../../utils/shell-args.js';
  */
 function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (isFlag(token)) return null;
-  if (isPureInteger(token)) {
-    return { type: 'pr-number', number: Number(token) };
+  // A PR number carrying the sentence's own trailing punctuation is still
+  // a PR number ("有更新了，重新评审 6711。"): normalise the mark for the
+  // integer test only — callers keep the original spelling in extraTokens
+  // and warning text, and path-shaped tokens are untouched (review R2-4
+  // on #15998).
+  const integerForm = token.replace(/[.,，。!！?？;；、]+$/, '');
+  if (isPureInteger(integerForm)) {
+    return { type: 'pr-number', number: Number(integerForm) };
   }
   const urlMatch = PR_URL_RE.exec(token);
   if (urlMatch) {
@@ -443,6 +502,13 @@ export function parseReviewArgs(
     | { kind: 'discarded'; value: string }
     | { kind: 'kept-as-target'; value: string };
   const effortIssues: EffortIssue[] = [];
+  // `--deadline` is not a `/review` flag at all (it belongs to the capture
+  // commands), but it takes a value, so its leftovers ride the same
+  // disposal pool as the three value flags above: a deadline-shaped value
+  // is consumed with the flag, anything else is an invalid value of it and
+  // is rescued or discarded exactly as `--effort`'s would be.
+  const deadlineIssues: EffortIssue[] = [];
+  const consumedDeadlineValues: string[] = [];
   // `--severity-floor` shares the value-token grammar and therefore the same
   // deferred-warning problem; its issues are a separate list because its
   // resolution sentence is its own.
@@ -457,7 +523,11 @@ export function parseReviewArgs(
   interface Kept {
     token: string;
     /** Set when this token arrived as an invalid value of the named flag. */
-    invalidValueOf?: '--effort' | '--severity-floor' | '--topology';
+    invalidValueOf?:
+      | '--effort'
+      | '--severity-floor'
+      | '--topology'
+      | '--deadline';
   }
   const kept: Kept[] = [];
 
@@ -609,6 +679,48 @@ export function parseReviewArgs(
       continue;
     }
 
+    // `--deadline` is a capture-command option (fetch-pr / capture-local /
+    // plan-diff), not a `/review` flag — but it takes a value, and the
+    // generic unknown-flag arm below would leave that value on the line,
+    // where `90` reads as PR #90 and `none` as a file. Consume it, and say
+    // which wall the run gets instead.
+    if (token === '--deadline' || token.startsWith('--deadline=')) {
+      unknownFlags.push('--deadline');
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        if (value === '') {
+          deadlineIssues.push({ kind: 'missing' });
+        } else if (isDeadlineValue(value)) {
+          consumedDeadlineValues.push(value);
+        } else if (isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--deadline' });
+        } else {
+          deadlineIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      if (next === undefined || isFlag(next)) {
+        deadlineIssues.push({ kind: 'missing' });
+        continue;
+      }
+      if (next === '') {
+        deadlineIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (isDeadlineValue(next)) {
+        consumedDeadlineValues.push(next);
+        i++;
+        continue;
+      }
+      // Not a deadline: the ordinary invalid-value disposal decides whether
+      // it is the target the caller meant (a PR number or URL) or a typo.
+      kept.push({ token: next, invalidValueOf: '--deadline' });
+      i++;
+      continue;
+    }
+
     if (isFlag(token)) {
       unknownFlags.push(token);
       warnings.push(`Unrecognized flag ${JSON.stringify(token)}; ignored.`);
@@ -756,6 +868,7 @@ export function parseReviewArgs(
     '--effort': effortIssues,
     '--severity-floor': floorIssues,
     '--topology': topologyIssues,
+    '--deadline': deadlineIssues,
   };
   let rescuedPr = false;
   for (const k of kept) {
@@ -785,6 +898,31 @@ export function parseReviewArgs(
     }
     targetTokens.push(k.token);
   }
+  // A PR-shaped token outranks a file-shaped one regardless of arrival
+  // order: prose typed before a PR number ("有更新了，重新评审 6711")
+  // classifies as a file path, and first-token-wins let the sentence steal
+  // the target while the number was demoted to extraTokens. An explicit
+  // path spelling (`./6711`) is not PR-shaped and stays a file target when
+  // no PR-shaped token is present; beside one, the PR wins and the path is
+  // disclosed as an extra.
+  const prIdx = targetTokens.findIndex(isPrShapedToken);
+  // Whether the PR target is a bare number PROMOTED over preceding prose —
+  // a positional guess, not a target the user typed first. The guess may
+  // aim the review, but it never grants a public write: comment.effective
+  // stays false for it (review R2-1 on #15998), so the write gate, which
+  // re-parses this same verbatim record, refuses posting. The warning is
+  // decided AFTER the URL preference below, from the token that actually
+  // became the target (review R2-2).
+  let promotedNumberTarget = false;
+  if (prIdx > 0) {
+    const promotedShape = classifyToken(targetTokens[prIdx]);
+    promotedNumberTarget =
+      promotedShape !== null &&
+      promotedShape !== 'invalid-url' &&
+      promotedShape.type === 'pr-number';
+    const [prToken] = targetTokens.splice(prIdx, 1);
+    targetTokens.unshift(prToken);
+  }
   // Same preference for positional spellings: when the target tokens hold
   // both a bare number and a same-number PR URL, the URL becomes the
   // target regardless of arrival order.
@@ -802,30 +940,32 @@ export function parseReviewArgs(
   const extraTokens: string[] = [];
   const trailingExtras: string[] = [];
   for (const tok of targetTokens) {
-    if (targetAssigned) {
-      // A bare number restating the assigned URL target's number is the
-      // same intent restated, not an extra argument (mirror of the
-      // rescue loop's restatement handling).
-      const classifiedRestate = classifyToken(tok);
-      if (
-        target.type === 'pr-url' &&
-        classifiedRestate !== null &&
-        classifiedRestate !== 'invalid-url' &&
-        classifiedRestate.type === 'pr-number' &&
-        classifiedRestate.number === target.number
-      ) {
-        continue;
-      }
-      extraTokens.push(tok);
-      trailingExtras.push(tok);
-      continue;
-    }
     const classified = classifyToken(tok);
+    // The malformed-URL diagnostic is position-independent: the PR-shape
+    // preference above can move a number ahead of a malformed URL, and the
+    // refused URL keeps its specific warning instead of demoting into the
+    // generic extra-argument line (review nit on #15998).
     if (classified === 'invalid-url') {
       warnings.push(
         `Unrecognized URL ${JSON.stringify(tok)} — not a PR/CR URL (expected …/pull/<number> or …/codereview/<id>); refusing to guess a target from it.`,
       );
       extraTokens.push(tok);
+      continue;
+    }
+    if (targetAssigned) {
+      // A bare number restating the assigned URL target's number is the
+      // same intent restated, not an extra argument (mirror of the
+      // rescue loop's restatement handling).
+      if (
+        target.type === 'pr-url' &&
+        classified !== null &&
+        classified.type === 'pr-number' &&
+        classified.number === target.number
+      ) {
+        continue;
+      }
+      extraTokens.push(tok);
+      trailingExtras.push(tok);
       continue;
     }
     target = classified ?? { type: 'local' };
@@ -854,7 +994,15 @@ export function parseReviewArgs(
   const isMinimal = topology === 'minimal';
 
   const commentRequested = commentRequestedByFlag || defaults.comment === true;
-  const commentEffective = commentRequested && isPr && !isMinimal;
+  // A promoted bare number never grants a public write (review R2-1 on
+  // #15998): the positional guess may aim the review, but posting authority
+  // requires a target the user typed, and the write gate re-parses this
+  // same verbatim record. A URL that superseded the promoted number is an
+  // explicit target and keeps its authority.
+  const promotedNumberFinal =
+    promotedNumberTarget && target.type === 'pr-number';
+  const commentEffective =
+    commentRequested && isPr && !isMinimal && !promotedNumberFinal;
   if (commentRequestedByFlag && !isPr) {
     warnings.push(
       'Warning: `--comment` flag is ignored because the review target is not a PR.',
@@ -870,6 +1018,20 @@ export function parseReviewArgs(
       commentRequestedByFlag
         ? 'Warning: `--comment` is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.'
         : 'Warning: the `review.comment` setting is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.',
+    );
+  } else if (
+    commentRequested &&
+    promotedNumberFinal &&
+    target.type === 'pr-number'
+  ) {
+    // Decided after the URL preference, from the token that actually became
+    // the target, and fired exactly when the promotion withheld a requested
+    // posting authority (review R2-2): a demoted number never draws it, and
+    // a re-review nobody asked to post costs no confirmation turn.
+    warnings.push(
+      commentRequestedByFlag
+        ? `Bare number ${target.number} was promoted to the PR target from prose, so \`--comment\` posting authority is withheld — a count is indistinguishable from a PR id; confirm the intended PR and re-invoke with its number typed first to post.`
+        : `Bare number ${target.number} was promoted to the PR target from prose, so the \`review.comment\` setting's posting authority is withheld — a count is indistinguishable from a PR id; confirm the intended PR and re-invoke with its number typed first to post.`,
     );
   }
 
@@ -996,6 +1158,38 @@ export function parseReviewArgs(
       `Invalid review.effort value ${JSON.stringify(invalidConfiguredEffort)} in settings; ${resolution}.`,
     );
   }
+  const deadlinePrefix =
+    '`--deadline` is an option of the capture commands (`fetch-pr`, ' +
+    '`capture-local`, `plan-diff`), not of /review; ignored';
+  for (const value of consumedDeadlineValues) {
+    warnings.push(
+      `${deadlinePrefix} together with its value ${JSON.stringify(value)}.`,
+    );
+  }
+  for (const issue of deadlineIssues) {
+    switch (issue.kind) {
+      case 'missing':
+        warnings.push(`${deadlinePrefix} (it had no value).`);
+        break;
+      case 'invalid-eq':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline.`,
+        );
+        break;
+      case 'discarded':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline and was discarded.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline — treating it as the review target.`,
+        );
+        break;
+      default:
+        break;
+    }
+  }
 
   // The floor resolves like the effort — explicit flag over configured
   // setting over the built-in default — except the default is `auto`: the
@@ -1100,6 +1294,7 @@ export function parseReviewArgs(
     topologySource,
     ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
     resume: { requested: resumeRequested, effective: resumeEffective },
+    promotedNumberTarget: promotedNumberFinal,
     extraTokens,
     unknownFlags,
     warnings,
@@ -1283,6 +1478,10 @@ export const parseArgsCommand: CommandModule = {
     );
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
+      // Step 0's write is the round's FIRST into `.qwen/tmp`: the scratch
+      // directory is refused here when the workspace redirected it, before
+      // this file — or anything after it — lands through the link.
+      if (writesIntoReviewTmp(out)) ensureReviewTmpDir('parse-args');
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, json, 'utf8');
     }

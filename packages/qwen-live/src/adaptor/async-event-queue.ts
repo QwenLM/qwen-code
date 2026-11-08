@@ -114,8 +114,8 @@ export class AsyncEventQueue<T> {
     // Progress-shaped events drop first; identify by the `type` field the
     // BackendEvent union carries. Anything without it falls back to
     // oldest-first.
-    let index = this.buffered.findIndex(
-      (item) => (item as { type?: string }).type === 'progress',
+    let index = this.buffered.findIndex((item) =>
+      ['progress', 'activity'].includes((item as { type?: string }).type ?? ''),
     );
     if (index === -1) index = 0;
     this.buffered.splice(index, 1);

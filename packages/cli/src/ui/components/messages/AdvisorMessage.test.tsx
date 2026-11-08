@@ -84,4 +84,23 @@ describe('AdvisorMessage', () => {
       }
     }
   });
+
+  it('bounds a completed review while it is in the live tool region', () => {
+    const { lastFrame } = renderWithProviders(
+      <AdvisorMessage
+        text={Array.from({ length: 20 }, (_, index) => `line-${index}`).join(
+          '\n',
+        )}
+        model="qwen3-max"
+        containerWidth={80}
+        availableTerminalHeight={12}
+        isPending
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('line-0');
+    expect(output).not.toContain('line-19');
+    expect(output).toContain('more lines');
+  });
 });

@@ -3,6 +3,7 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  turnCompleteEvent,
   type DaemonRequestRecord,
   type MockDaemonController,
   type WebShellDaemonScenario,
@@ -19,6 +20,189 @@ const standaloneFeatures = [
 
 const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
 
+for (const target of ['draft', 'session'] as const) {
+  test(`desktop activates subscription in a no-workspace ${target}`, async ({
+    page,
+  }, testInfo) => {
+    const sessionId = 'standalone-subscription';
+    const modelId = 'qwen3.8-max(qwen-subscription)';
+    const scenario = createWebShellDaemonScenario({
+      capabilities: {
+        features: [...standaloneFeatures, 'standalone_session_options_v1'],
+      },
+      standaloneSessions: [standaloneSummary(sessionId, 'No-workspace chat')],
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+    await page.addInitScript(() => {
+      Object.assign(window, {
+        __TAURI__: { core: { invoke: async () => undefined } },
+      });
+    });
+    await page.route('**/workspace/auth/providers', (route) =>
+      route.fulfill({
+        json: {
+          v: 1,
+          workspaceCwd: scenario.workspaceCwd,
+          providers: [],
+          groups: [],
+        },
+      }),
+    );
+    await page.route('**/standalone/session-options', (route) =>
+      route.fulfill({
+        json: {
+          v: 1,
+          initialized: true,
+          current: { authType: 'openai', modelId: scenario.currentModel },
+          approvalMode: 'default',
+          providers: [
+            {
+              kind: 'model_provider',
+              status: 'ok',
+              authType: 'openai',
+              current: true,
+              models: [
+                {
+                  modelId: scenario.currentModel,
+                  baseModelId: scenario.currentModel,
+                  name: 'Previous standalone model',
+                  isCurrent: true,
+                  isRuntime: false,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    await page.route(/\/auth\/subscription(?:\?.*)?$/, (route) =>
+      route.fulfill({
+        json: { enabled: true, plansUrl: 'https://plans.example' },
+      }),
+    );
+    await page.route(/\/auth\/subscription\/flows(?:\?.*)?$/, (route) =>
+      route.fulfill({
+        json: {
+          id: 'signed-in',
+          status: 'ready',
+          userInfo: {
+            sub: 'test',
+            email: 'user@example.test',
+            member_type: 'pro',
+          },
+        },
+      }),
+    );
+    await page.route('**/auth/subscription/flows/signed-in', (route) =>
+      route.fulfill({ status: 204 }),
+    );
+    const workspaceActivations: string[] = [];
+    let accountModelRequests = 0;
+    await page.route('**/workspaces/*/auth/subscription', async (route) => {
+      workspaceActivations.push(new URL(route.request().url()).pathname);
+      await route.fulfill({ status: 403 });
+    });
+    await page.route('**/auth/subscription/model', async (route) => {
+      accountModelRequests++;
+      scenario.state.models = {
+        currentModelId: scenario.currentModel,
+        availableModels: [{ modelId, name: 'Qwen Max' }],
+      };
+      await route.fulfill({
+        json: { modelId: 'qwen3.8-max' },
+      });
+    });
+
+    if (target === 'draft') {
+      await gotoNewStandaloneChat(page);
+      await expect(
+        page.locator('[data-web-shell-model-button]'),
+      ).toHaveAttribute('aria-label', /Previous standalone model/);
+    } else {
+      await page.goto(`/session/${sessionId}?context=standalone`);
+      await daemon.sse.waitForConnection(sessionId);
+      await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+    }
+    await fillComposer(page, '/auth');
+    await page.locator('[data-web-shell-composer-submit]').click();
+    await page
+      .getByRole('button', {
+        name: 'Qwen Account with Subscription',
+        exact: true,
+      })
+      .click();
+
+    const success = page.locator('[data-subscription-success]');
+    const retry = page.getByRole('button', { name: 'Try again', exact: true });
+    const outcome = success.or(retry).first();
+    await expect(outcome).toBeVisible();
+    expect(await outcome.textContent()).toContain('Qwen Pro');
+    expect(workspaceActivations).toEqual([]);
+    expect(accountModelRequests).toBe(1);
+    if (target === 'session') {
+      expect(daemon.modelRequests()).toEqual([
+        expect.objectContaining({
+          method: 'POST',
+          path: `/session/${sessionId}/model`,
+          body: { modelId },
+        }),
+      ]);
+      expect(scenario.currentModel).toBe(modelId);
+    } else {
+      await page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'close' })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-model-button]'),
+      ).toHaveAttribute('aria-label', /qwen3\.8-max|Qwen Max/i);
+      await fillComposer(page, 'Test the newly selected subscription model');
+      await page.locator('[data-web-shell-composer-submit]').click();
+      const created = await waitForRequest(
+        daemon,
+        (request) =>
+          request.method === 'POST' && request.path === '/standalone/sessions',
+      );
+      expect(requestBody(created)['modelServiceId']).toBe(modelId);
+      const createdSessionId = requestBody(created)['sessionId'];
+      await waitForRequest(
+        daemon,
+        (request) =>
+          request.method === 'POST' &&
+          request.path === `/session/${createdSessionId}/prompt`,
+      );
+    }
+  });
+}
+
+test('hides the empty no-workspace group while keeping New session available @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: standaloneFeatures },
+    standaloneSessions: [],
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'GET' && request.path === '/standalone/sessions',
+  );
+
+  await expect(page.getByTestId('standalone-active-group')).toHaveCount(0);
+  await clickNewTask(page);
+  await expect(page.locator('[data-web-shell-composer-submit]')).toBeVisible();
+  await selectNoWorkspaceTarget(page);
+  await fillComposer(page, 'Start the first standalone conversation');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'POST' && request.path === '/standalone/sessions',
+  );
+});
+
 /** Standalone creation calls, ignoring the Recents list reads. */
 function standaloneCreates(
   daemon: MockDaemonController,
@@ -27,6 +211,81 @@ function standaloneCreates(
     (request) =>
       request.method === 'POST' && request.path === '/standalone/sessions',
   );
+}
+
+for (const entry of ['composer', 'sidebar'] as const) {
+  test(`lists a new standalone session before its first turn finishes from the ${entry} @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const scenario = createWebShellDaemonScenario({
+      capabilities: { features: standaloneFeatures },
+      standaloneSessions: [
+        standaloneSummary(
+          '11111111-1111-4111-8111-111111111111',
+          'Existing conversation',
+        ),
+      ],
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+    await page.goto('/');
+    const group = page.getByTestId('standalone-active-group');
+    await expect(
+      group.getByText('Existing conversation', { exact: true }),
+    ).toBeVisible();
+
+    if (entry === 'composer') {
+      await selectNoWorkspaceTarget(page);
+    } else {
+      await group
+        .getByRole('button', { name: 'No-workspace sessions', exact: true })
+        .hover();
+      await group
+        .getByRole('button', { name: 'New session', exact: true })
+        .click();
+    }
+    expect(standaloneCreates(daemon)).toHaveLength(0);
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      1,
+    );
+
+    await fillComposer(page, 'Start a standalone conversation');
+    await page.locator('[data-web-shell-composer-submit]').click();
+    const create = await waitForRequest(
+      daemon,
+      (request) =>
+        request.method === 'POST' && request.path === '/standalone/sessions',
+    );
+    const sessionId = String(requestBody(create)['sessionId']);
+    await daemon.sse.waitForConnection(sessionId);
+    await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+    await waitForRequest(
+      daemon,
+      (request) => request.path === `/session/${sessionId}/prompt`,
+    );
+    await expect(
+      page.getByRole('button', { name: 'esc to cancel' }),
+    ).toBeVisible();
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Standalone 2',
+      }),
+    ).toBeVisible();
+
+    scenario.standaloneSessions.find(
+      (session) => session.sessionId === sessionId,
+    )!.displayName = 'Completed conversation';
+    await daemon.sendEvent(
+      turnCompleteEvent('prompt-e2e', { id: 1, sessionId }),
+    );
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Completed conversation',
+      }),
+    ).toBeVisible();
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      2,
+    );
+  });
 }
 
 test('the composer no-workspace target creates an exact standalone session @smoke', async ({
@@ -64,15 +323,32 @@ test('the composer no-workspace target creates an exact standalone session @smok
   );
 });
 
-test('the sidebar New task keeps the primary workspace route on a capable daemon @smoke', async ({
+test('the sidebar New session keeps the primary workspace route on a capable daemon @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
     capabilities: { features: standaloneFeatures },
+    standaloneSessions: [
+      standaloneSummary(
+        '11111111-1111-4111-8111-111111111111',
+        'Existing standalone conversation',
+      ),
+    ],
   });
   const daemon = await installScenario(page, scenario, testInfo);
 
   await gotoNewTask(page);
+  await expect(
+    page
+      .getByTestId('standalone-active-group')
+      .getByText('Existing standalone conversation', {
+        exact: true,
+      }),
+  ).toBeVisible();
+  const standaloneReadsBeforeCreate = daemon.requests.filter(
+    (request) =>
+      request.method === 'GET' && request.path === '/standalone/sessions',
+  ).length;
   await fillComposer(page, 'Start a workspace conversation');
   await page.locator('[data-web-shell-composer-submit]').click();
 
@@ -82,6 +358,23 @@ test('the sidebar New task keeps the primary workspace route on a capable daemon
   );
   expect(requestBody(create)['cwd']).toBe(scenario.workspaceCwd);
   expect(standaloneCreates(daemon)).toEqual([]);
+
+  const sessionId = scenario.sessionId;
+  await daemon.sse.waitForConnection(sessionId);
+  await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+  await waitForRequest(
+    daemon,
+    (request) => request.path === `/session/${sessionId}/prompt`,
+  );
+  await expect(
+    page.getByRole('button', { name: 'esc to cancel' }),
+  ).toBeVisible();
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'GET' && request.path === '/standalone/sessions',
+    ),
+  ).toHaveLength(standaloneReadsBeforeCreate);
 });
 
 test('keeps workspace navigation reachable inside a standalone chat @smoke', async ({
@@ -110,12 +403,10 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
 
   // Row actions are hidden until the row is hovered.
   await workspaceRow.hover();
-  const newTaskButtons = sidebar.getByRole('button', {
-    name: 'New task',
-    exact: true,
-  });
-  await expect(newTaskButtons).toHaveCount(2);
-  await newTaskButtons.last().click();
+  await workspaceRow
+    .locator('..')
+    .getByRole('button', { name: 'New session', exact: true })
+    .click();
 
   await fillComposer(page, 'Back to the workspace');
   await page.locator('[data-web-shell-composer-submit]').click();
@@ -134,7 +425,9 @@ test('hides the standalone entry point without the capability @smoke', async ({
   const daemon = await installScenario(page, scenario, testInfo);
 
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   // A single workspace with no creation capabilities and no standalone
   // support hides the composer picker entirely.
   await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
@@ -150,46 +443,240 @@ test('hides the standalone entry point without the capability @smoke', async ({
   expect(standaloneCreates(daemon)).toEqual([]);
 });
 
-test('an uncertain standalone create stays recoverable and is never retried @smoke', async ({
+for (const isArchived of [false, true]) {
+  test(`an uncertain ${isArchived ? 'archived ' : ''}standalone create stays recoverable and is never retried @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const scenario = createWebShellDaemonScenario({
+      capabilities: { features: standaloneFeatures },
+      standaloneCreateError: {
+        status: 500,
+        code: 'standalone_creation_outcome_unknown',
+        message: 'creation outcome is unknown',
+      },
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+
+    await gotoNewStandaloneChat(page);
+    await fillComposer(page, 'Do not duplicate this conversation');
+    await page.locator('[data-web-shell-composer-submit]').click();
+
+    await expect(page.getByText('Creation may have succeeded')).toBeVisible();
+    expect(
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'POST' && request.path === '/standalone/sessions',
+      ),
+    ).toHaveLength(1);
+    expect(daemon.requests).not.toContainEqual(
+      expect.objectContaining({ method: 'POST', path: '/session' }),
+    );
+
+    await expect(
+      page.locator('[data-web-shell-composer-submit]'),
+    ).toBeDisabled();
+    // The composer picker is not offered while the outcome is unknown, and a
+    // plain new task is blocked by the recovery guard, so neither path may
+    // start a second create.
+    await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
+    await clickNewTask(page);
+    expect(
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'POST' && request.path === '/standalone/sessions',
+      ),
+    ).toHaveLength(1);
+
+    const group = page.getByTestId('standalone-active-group');
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      0,
+    );
+    const sessionId = String(
+      requestBody(standaloneCreates(daemon)[0])['sessionId'],
+    );
+    scenario.standaloneSessions.push({
+      ...standaloneSummary(sessionId, 'Recovered conversation'),
+      isArchived,
+    });
+    await page
+      .getByRole('button', { name: 'Check status', exact: true })
+      .click();
+    if (isArchived) {
+      await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+        0,
+      );
+      expect(standaloneCreates(daemon)).toHaveLength(1);
+      await page
+        .getByRole('button', { name: 'Unarchive', exact: true })
+        .click();
+      const unarchive = await waitForRequest(
+        daemon,
+        (request) =>
+          request.method === 'POST' &&
+          request.path === '/standalone/sessions/unarchive',
+      );
+      expect(requestBody(unarchive)).toEqual({ sessionIds: [sessionId] });
+    }
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Recovered conversation',
+      }),
+    ).toBeVisible();
+    expect(standaloneCreates(daemon)).toHaveLength(1);
+  });
+}
+
+test('no-workspace sessions remain visible beside collapsed Workspaces and persist independently @smoke', async ({
+  page,
+}, testInfo) => {
+  const sessionId = '33333333-3333-4333-8333-333333333333';
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [...standaloneFeatures, 'workspace_qualified_rest_core'],
+    },
+    standaloneSessions: [
+      standaloneSummary(sessionId, 'Independent conversation'),
+    ],
+  });
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+
+  const sidebar = page.getByRole('complementary');
+  const projects = sidebar
+    .getByRole('button', {
+      name: 'Workspaces',
+      exact: true,
+    })
+    .first();
+  await expect(sidebar.getByTestId('recent-sessions')).toBeVisible();
+  const group = sidebar.getByTestId('standalone-active-group');
+  const toggle = group.getByRole('button', {
+    name: 'No-workspace sessions',
+    exact: true,
+  });
+  const row = group.getByText('Independent conversation', { exact: true });
+  await expect(row).toBeVisible();
+  await projects.click();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(group).toBeVisible();
+  await expect(row).toBeVisible();
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toBeVisible();
+
+  await toggle.click();
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toHaveCount(0);
+  await projects.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'true');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+  await sidebar
+    .getByRole('button', { name: 'Search sessions', exact: true })
+    .click();
+  await sidebar
+    .getByRole('textbox', { name: 'Search sessions', exact: true })
+    .fill('Independent');
+  await expect(row).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.workspace-expanded:standalone:active',
+      ),
+    ),
+  ).toBe('false');
+  await row.click();
+  await expect(page).toHaveURL(
+    new URL(
+      `/session/${sessionId}?context=standalone`,
+      String(testInfo.project.use.baseURL),
+    ).href,
+  );
+});
+
+test('no-workspace category matches peer header geometry and expansion affordances @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
-    capabilities: { features: standaloneFeatures },
-    standaloneCreateError: {
-      status: 500,
-      code: 'standalone_creation_outcome_unknown',
-      message: 'creation outcome is unknown',
+    capabilities: {
+      features: [
+        ...standaloneFeatures,
+        'workspace_qualified_rest_core',
+        'session_organization',
+      ],
     },
+    standaloneSessions: [standaloneSummary('standalone-header', 'Standalone')],
   });
-  const daemon = await installScenario(page, scenario, testInfo);
+  scenario.sessions[0].isPinned = true;
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
 
-  await gotoNewStandaloneChat(page);
-  await fillComposer(page, 'Do not duplicate this conversation');
-  await page.locator('[data-web-shell-composer-submit]').click();
-
-  await expect(page.getByText('Creation may have succeeded')).toBeVisible();
-  expect(
-    daemon.requests.filter(
-      (request) =>
-        request.method === 'POST' && request.path === '/standalone/sessions',
-    ),
-  ).toHaveLength(1);
-  expect(daemon.requests).not.toContainEqual(
-    expect.objectContaining({ method: 'POST', path: '/session' }),
+  const sidebar = page.getByRole('complementary');
+  const names = ['Pinned', 'Workspaces', 'No-workspace sessions', 'Recent'];
+  const toggles = names.map((name) =>
+    sidebar.getByRole('button', { name, exact: true }).first(),
   );
+  for (const toggle of toggles) {
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  }
 
-  await expect(page.locator('[data-web-shell-composer-submit]')).toBeDisabled();
-  // The composer picker is not offered while the outcome is unknown, and a
-  // plain new task is blocked by the recovery guard, so neither path may
-  // start a second create.
-  await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
-  await clickNewTask(page);
-  expect(
-    daemon.requests.filter(
-      (request) =>
-        request.method === 'POST' && request.path === '/standalone/sessions',
+  const geometry = await Promise.all(
+    toggles.map((toggle) =>
+      toggle.evaluate((button) => {
+        const header = button.parentElement!;
+        const label = button.querySelector('span')!;
+        const style = getComputedStyle(button);
+        return {
+          height: header.getBoundingClientRect().height,
+          labelLeft: label.getBoundingClientRect().left,
+          labelTop:
+            label.getBoundingClientRect().top -
+            header.getBoundingClientRect().top,
+          color: style.color,
+          marginBottom: getComputedStyle(header.parentElement!).marginBottom,
+        };
+      }),
     ),
-  ).toHaveLength(1);
+  );
+  for (const header of geometry) {
+    expect(header.height).toBe(32);
+    expect(header.labelLeft).toBe(geometry[1].labelLeft);
+    expect(header.labelTop).toBe(geometry[1].labelTop);
+    expect(header.color).toBe(geometry[1].color);
+  }
+  expect(geometry[2].marginBottom).toBe('0px');
+
+  const toggle = toggles[2];
+  const chevron = toggle.locator('svg');
+  await expect(chevron).toHaveCount(1);
+  await expect(chevron).toHaveAttribute('aria-hidden', 'true');
+  const labelBox = await toggle.locator('span').boundingBox();
+  const iconBox = await chevron.boundingBox();
+  expect(iconBox!.x).toBeGreaterThanOrEqual(labelBox!.x + labelBox!.width);
+  await page.mouse.move(1000, 700);
+  await expect(chevron).toHaveCSS('opacity', '0');
+  await toggle.hover();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  await page.mouse.move(1000, 700);
+  await page.keyboard.press('Tab');
+  await toggle.focus();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  const collapsedPath = await chevron.locator('path').getAttribute('d');
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(chevron.locator('path')).not.toHaveAttribute(
+    'd',
+    collapsedPath!,
+  );
+  await page.keyboard.press('Space');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
 });
 
 test('standalone Recents keeps lifecycle actions on exact standalone routes @smoke', async ({
@@ -210,7 +697,9 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
   await page.goto(
     `/session/${encodeURIComponent(currentSessionId)}?context=standalone`,
   );
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(currentSessionId);
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: connection.sessionId, replayedCount: 0 }),
@@ -244,12 +733,33 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toHaveCount(0);
-  await page.getByRole('button', { name: 'Archived', exact: true }).click();
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('button', { name: 'Archived conversations', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
 
-  await openSessionAction(page, 'Renamed conversation', 'Restore');
+  const archivedRow = page
+    .locator(
+      '[data-web-shell-archived-sessions] [data-web-shell-session-title]',
+      { hasText: 'Renamed conversation' },
+    )
+    .locator('..');
+  await archivedRow.hover();
+  await archivedRow
+    .getByRole('button', { name: 'Restore', exact: true })
+    .click();
+  await expect(
+    page.locator('[data-web-shell-archived-sessions]'),
+  ).not.toContainText('Renamed conversation');
+  await page
+    .getByRole('region', { name: 'Settings', exact: true })
+    .getByRole('button', { name: 'back', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
@@ -285,7 +795,7 @@ async function installScenario(
 
 async function clickNewTask(page: Page): Promise<void> {
   const newTask = page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first();
   await expect(newTask).toBeEnabled();
   await newTask.click();
@@ -293,7 +803,9 @@ async function clickNewTask(page: Page): Promise<void> {
 
 async function gotoNewTask(page: Page): Promise<void> {
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await clickNewTask(page);
 }
 
@@ -301,7 +813,7 @@ async function selectNoWorkspaceTarget(page: Page): Promise<void> {
   await page.locator('button[aria-label="Workspace"]').click();
   await page
     .getByRole('menuitemradio', {
-      name: 'No workspace (standalone)',
+      name: 'No workspace',
       exact: true,
     })
     .click();
@@ -309,7 +821,9 @@ async function selectNoWorkspaceTarget(page: Page): Promise<void> {
 
 async function gotoNewStandaloneChat(page: Page): Promise<void> {
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await selectNoWorkspaceTarget(page);
 }
 
@@ -325,9 +839,10 @@ async function openSessionAction(
   actionName: string,
 ): Promise<void> {
   const row = page
-    .getByRole('button', { name: sessionName, exact: true })
+    .locator('[data-web-shell-session-title]', { hasText: sessionName })
     .locator('..');
-  await row.getByRole('button', { name: 'Conversation actions' }).click();
+  await row.hover();
+  await row.getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem', { name: actionName, exact: true }).click();
 }
 

@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as tls from 'node:tls';
+import yargs from 'yargs/yargs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import {
@@ -150,6 +151,41 @@ describe('createChannelWorkerSupervisor', () => {
     vi.unstubAllEnvs();
   });
 
+  it('passes flag-shaped channel names through the real worker parser as values', async () => {
+    const { daemonWorkerCommand } = await import(
+      '../commands/channel/daemon-worker.js'
+    );
+    const child = new FakeChild();
+    const spawnWorker = vi.fn((_execPath: string, _argv: string[]) => child);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'secret-token',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['--insecure'] },
+      spawnWorker,
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: child.pid,
+      channels: ['--insecure'],
+    });
+    await started;
+    try {
+      const handler = vi.fn();
+      const parsed = await yargs(spawnWorker.mock.calls[0]![1].slice(3))
+        .exitProcess(false)
+        .command({ ...daemonWorkerCommand, command: '$0', handler })
+        .parseAsync();
+      expect(handler).toHaveBeenCalledOnce();
+      expect(parsed['channel']).toEqual(['--insecure']);
+      expect(parsed).not.toHaveProperty('insecure');
+    } finally {
+      await supervisor.stop();
+    }
+  });
+
   it('accepts loop MCP registration before the worker ready signal', async () => {
     const child = new FakeChild();
     const registerChannelLoopMcp = vi.fn(async () => {});
@@ -279,6 +315,7 @@ describe('createChannelWorkerSupervisor', () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'stale-daemon-token');
     vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
+    vi.stubEnv('QWEN_MANAGED_RUNTIME_BROKER_TOKEN', 'broker-secret');
     vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
     vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-secret');
     vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'aws-secret');
@@ -314,10 +351,8 @@ describe('createChannelWorkerSupervisor', () => {
         '/repo/dist/index.js',
         'channel',
         'daemon-worker',
-        '--channel',
-        'telegram',
-        '--channel',
-        'feishu',
+        '--channel=telegram',
+        '--channel=feishu',
       ],
       expect.objectContaining({
         env: expect.objectContaining({
@@ -336,6 +371,7 @@ describe('createChannelWorkerSupervisor', () => {
       .env;
     expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(env).not.toHaveProperty('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN');
+    expect(env).not.toHaveProperty('QWEN_MANAGED_RUNTIME_BROKER_TOKEN');
     expect(env).toHaveProperty('CUSTOM', 'value');
     expect(env).toHaveProperty('QWEN_DAEMON_TOKEN', 'secret-token');
     expect(env).toHaveProperty('OPENAI_API_KEY', 'openai-secret');

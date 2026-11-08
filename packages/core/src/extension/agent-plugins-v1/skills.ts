@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { SkillConfig } from '../../skills/types.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeContent } from '../../utils/textUtils.js';
+import { isNodeError } from '../../utils/errors.js';
 import { parse as parseYaml } from '../../utils/yaml-parser.js';
 import { resolveContainedExistingPath } from './paths.js';
 
@@ -16,6 +17,7 @@ const debugLogger = createDebugLogger('AGENT_PLUGINS_V1');
 
 export async function loadAgentPluginSkills(
   pluginRoot: string,
+  onError?: (error: unknown) => void,
 ): Promise<SkillConfig[]> {
   const skillsPath = path.join(pluginRoot, 'skills');
   let resolvedSkillsPath: string;
@@ -26,7 +28,8 @@ export async function loadAgentPluginSkills(
       return [];
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    if (isNodeError(error) && error.code === 'ENOENT') return [];
+    onError?.(error);
     debugLogger.warn(
       `Disabling Agent Plugins skills: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -39,6 +42,7 @@ export async function loadAgentPluginSkills(
       withFileTypes: true,
     });
   } catch (error) {
+    if (!(isNodeError(error) && error.code === 'ENOENT')) onError?.(error);
     debugLogger.warn(
       `Disabling Agent Plugins skills: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -62,6 +66,7 @@ export async function loadAgentPluginSkills(
       const content = await fs.promises.readFile(resolvedManifest, 'utf8');
       skills.push(parseAgentPluginSkill(content, resolvedManifest, entry.name));
     } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) onError?.(error);
       debugLogger.warn(
         `Skipping Agent Plugins skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`,
       );

@@ -45,8 +45,21 @@ import {
   type ScratchTreeArgs,
 } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  adminEntryOf,
+  isolateHostGitConfig,
+  plantAdminEntry,
+  plantRepository,
+} from './lib/test-utils.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
+
+// Skipped on win32 for the same reason as the sibling suites: `mountRootFor`
+// refuses every absolute Windows path (a drive letter is a colon), so
+// containment is unavailable there by design and this gate never speaks. The
+// assertion would fail for that reason and nothing else — first inside the
+// merge queue, where that lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
 describe('runScratchTree', () => {
   let repo: string;
@@ -85,6 +98,134 @@ describe('runScratchTree', () => {
     rmSync(repo, { recursive: true, force: true });
     gitIsolation.dispose();
   });
+
+  itWhereContainmentExists(
+    'runs nothing on the host when BOTH trees point at a planted repository',
+    () => {
+      // What this pins is the OUTCOME — no host execution, and a refusal —
+      // for the hardest shape reviewed code can build: both the scratch tree
+      // and the review worktree rewritten to admin entries under the mount
+      // that name one planted common dir, carrying `filter.*.process`.
+      //
+      // HONEST LIMIT: it does not isolate the reuse-path gate. Removing that
+      // gate leaves this green, because the reset declines this tree for its
+      // own reasons before reaching a checkout — so the gate is defence in
+      // depth here, not a demonstrated load-bearing check. Said out loud
+      // rather than left to look proven.
+      const first = run();
+      expect(first.available).toBe(true);
+      const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+      // A COHERENT planted repository carrying a real filter, so the oracle is
+      // the property itself: if the reset's `checkout --force` runs through this
+      // pointer, the filter executes on the host and writes the canary. No
+      // file-based marker can serve here — the reset's `clean -ffdx` removes
+      // untracked files, so reuse and rebuild leave the tree looking the same.
+      //
+      // `process`, not `smudge`: any filter shape serves, because which
+      // refusal speaks first is not the pin. The repo-local filter screen
+      // resolves through the same planted pointer, so it sees the plant's
+      // config and refuses before the location gate is ever asked — either
+      // refusal certifies the property, and the sibling tests that carry no
+      // filter are where the location gate is load-bearing.
+      const canary = join(repo, 'PWNED-SCRATCH');
+      const fakeCommon = plantRepository(
+        join(repo, '.qwen', 'tmp', '.evil-common'),
+        join(repo, '.git'),
+        canary,
+        'process',
+      );
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-scratch'),
+        adminEntryOf(tree),
+        tree,
+        fakeCommon,
+      );
+      // BOTH trees, pointing at ONE planted common dir. The reset's own gate
+      // compares the two trees' common dirs, so poisoning the scratch tree
+      // alone makes it refuse for a reason unrelated to this one — the shape
+      // that actually reaches its checkout is the pair.
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-wt'),
+        adminEntryOf(worktree),
+        worktree,
+        fakeCommon,
+      );
+
+      const second = run();
+      // Nothing checked out through the planted pointer — the property. The
+      // command's own verdict may be a refusal (the rebuild gate refuses the
+      // poisoned review worktree next), but what must never happen is the
+      // reset running first and executing the filter. Either layer's refusal
+      // certifies it: the filter screen (which resolves through the same
+      // plant and sees its config), or the location gate (the admin entry is
+      // inside the review temp dir).
+      expect(existsSync(canary)).toBe(false);
+      expect(second.available).toBe(false);
+      expect(JSON.stringify(second)).toMatch(/content filter|review temp dir/);
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses to stand one up through a rewritten review-worktree gitfile',
+    () => {
+      // The sibling screen below catches a repo-local `filter.*.smudge|clean` in
+      // the REAL config. It cannot catch a pointer that names a different
+      // repository entirely — nor `filter.<x>.process`, which its regex does not
+      // match and which also executes — so the pointer itself has to be checked.
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(worktree),
+        worktree,
+        join(repo, '.git'),
+      );
+
+      const r = run();
+      expect(JSON.stringify(r)).toContain('review temp dir');
+      expect(
+        existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+      ).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'does not REUSE a scratch tree through a review-worktree gitfile rewritten to the common dir',
+    () => {
+      // The reuse route asked the location question of the SCRATCH pointer
+      // only, never of the review worktree's — which is what `headSha` and
+      // every comparison inside the reset resolve through. Rewritten to the
+      // repository's own common dir it resolves OUTSIDE the mount, so the
+      // location question admitted it, and an unpinned run answered
+      // `available: true, reused: true` with the MAIN head and reset the
+      // verifier's tree to the user's own commit: a wrong verdict carrying a
+      // deterministic source tag.
+      const first = run();
+      expect(first.available).toBe(true);
+      const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+      expect(git(tree, 'rev-parse', 'HEAD')).toBe(headSha);
+
+      // Main moves on, so the head a rewritten pointer answers is
+      // distinguishable from the one this review is pinned to.
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 999;\n');
+      git(repo, 'commit', '-qam', 'main moved on');
+      const mainHead = git(repo, 'rev-parse', 'HEAD');
+      rmSync(join(worktree, '.git'), { force: true });
+      writeFileSync(join(worktree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+
+      const second = run();
+      expect(second.available).toBe(false);
+      expect(second.reused).toBe(false);
+      expect(second.headSha).toBeUndefined();
+      expect(JSON.stringify(second)).toContain('common dir');
+      // The fixture really does distinguish the two heads, so the verdict
+      // above is about the rewrite and not about a no-op commit.
+      expect(mainHead).not.toBe(headSha);
+      // Swept for a rebuild the gate then refused is the expected outcome; if
+      // a tree does survive, it is still at the reviewed head, not the user's.
+      if (existsSync(tree)) {
+        expect(git(tree, 'rev-parse', 'HEAD')).toBe(headSha);
+      }
+    },
+  );
 
   it('stands up a sibling tree at the commit under review', () => {
     const r = run();
@@ -130,7 +271,7 @@ describe('runScratchTree', () => {
     const pwned = join(repo, 'PWNED-included-smudge');
     writeFileSync(
       join(repo, 'innocuous.cfg'),
-      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${pwned.replaceAll('\\', '/')}\n`,
     );
     git(worktree, 'config', 'include.path', join(repo, 'innocuous.cfg'));
     writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
@@ -669,7 +810,7 @@ describe('runScratchTree', () => {
     expect(r.note).not.toContain('already in place');
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'says linking FAILED rather than "no node_modules" when the farm throws',
     () => {
       // Folding a link failure into the same `null` the absent case uses told
@@ -789,7 +930,7 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('git checkout HEAD -- <original>');
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports UNMEASURED rather than clean when the residue check cannot run',
     () => {
       // A `git status` that dies (a tree too dirty for its buffer, an index it
@@ -952,7 +1093,7 @@ describe('runScratchTree', () => {
   // subdirectory — the guard would be a no-op and the assertion below would fail
   // on the merge-queue-only Windows leg. Every other chmod-permission test in
   // this repo skips win32 for the same reason.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps the measured residue when the tree could not be created',
     () => {
       // The failure path must not collapse to the empty-residue default: a note
@@ -1218,6 +1359,32 @@ describe('runScratchTree --standalone', () => {
     expect(r.note).not.toContain('NOT clean');
   });
 
+  itWhereContainmentExists(
+    'refuses to build the standalone tree through a rewritten review-worktree gitfile',
+    () => {
+      // `headSha` is read through the review worktree's own gitfile, inside
+      // the mount, and with no --fetched-sha pin nothing else answers for
+      // which commit that is: a planted HEAD would put the plant's content
+      // in the tree the agent is told holds the commit under review — the
+      // substitution the linked shape refuses at its rebuild gate.
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-wt'),
+        adminEntryOf(worktree),
+        worktree,
+        join(repo, '.git'),
+      );
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('review temp dir');
+      // The tree was never created, which is what says the build never ran.
+      expect(
+        existsSync(
+          scratchWorktreePath(worktree, 'prose-exec--round-1--abc123'),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('says the containment is of STATE — a command-valued key written inside still executes there', () => {
     // R14-1: "dies with the tree" read as a sandbox. `git config
     // core.hooksPath .githooks`, a committed hook, then `git commit` ran the
@@ -1344,15 +1511,17 @@ describe('runScratchTree --standalone', () => {
     const linked = runScratchTree({ worktree, label });
     expect(linked.available).toBe(true);
     expect(statSync(join(linked.path!, '.git')).isFile()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(
-      linked.path!,
-    );
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).toContain(linked.path!.replaceAll('\\', '/'));
 
     const r = run(label);
     expect(r.available).toBe(true);
     expect(r.path).toBe(linked.path);
     expect(statSync(join(r.path!, '.git')).isDirectory()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain(r.path!);
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).not.toContain(r.path!.replaceAll('\\', '/'));
     expect(existsSync(join(repo, '.git', 'worktrees', basename(r.path!)))).toBe(
       false,
     );
@@ -1371,9 +1540,9 @@ describe('runScratchTree --standalone', () => {
     expect(linked.reused).toBe(false);
     expect(linked.standalone).toBe(false);
     expect(statSync(join(linked.path!, '.git')).isFile()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(
-      linked.path!,
-    );
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).toContain(linked.path!.replaceAll('\\', '/'));
   });
 
   it('rebuilds over a symlink at the path without following it', () => {
@@ -1390,7 +1559,7 @@ describe('runScratchTree --standalone', () => {
     expect(existsSync(join(victim, '.git'))).toBe(false);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports a tree that could not be built — the shared tree still unmeasured',
     () => {
       const parent = join(repo, '.qwen', 'tmp');

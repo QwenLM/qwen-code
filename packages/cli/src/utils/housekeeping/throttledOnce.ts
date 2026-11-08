@@ -47,9 +47,20 @@ export async function runThrottledOnce(
   // matches the rest of the codebase's convention for ~/.qwen/ subdirs
   // (e.g., file-token-storage.ts, sharedTokenManager.ts) so a slow main-app
   // initialization doesn't get races us into creating a world-readable dir.
-  await mkdir(dirname(opts.lockPath), { recursive: true, mode: 0o700 }).catch(
-    () => {},
-  );
+  //
+  // Deliberately NOT recursive. On a bind mount whose source directory was
+  // deleted underneath us, the mountpoint still stats as a directory while
+  // creating entries inside it fails with ENOENT. Node's recursive mkdir reads
+  // that ENOENT as "parent is missing", creates the parent (EEXIST), confirms
+  // it is a directory, retries the leaf, gets ENOENT again — forever. The
+  // returned promise never settles, so the `.catch` below never runs and this
+  // `await` wedges the whole housekeeping chain for the life of the process.
+  // CI hit exactly that: orphaned e2e sandbox containers whose workspace had
+  // already been cleaned up each burned a core on ~2.5k failing mkdir/s.
+  //
+  // One level is all this needs: every caller puts lockPath directly in the
+  // global qwen dir, whose own parent is $HOME.
+  await mkdir(dirname(opts.lockPath), { mode: 0o700 }).catch(() => {});
 
   const firstFreshForMs = await markerFreshForMs(
     opts.markerPath,
