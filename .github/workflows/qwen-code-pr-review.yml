@@ -648,8 +648,25 @@ jobs:
           # aside drains on a later run, a fresh one waits. Name-scoped and
           # never matching $QWEN_HOME itself. A runner that never runs triage
           # hands nothing back, so the copies there stay until removed by hand.
-          find "$RUNNER_TEMP" -maxdepth 1 -name 'qwen-home.stale-*' -mmin +240 -exec chmod -R u+rwX {} + 2>/dev/null || true
-          find "$RUNNER_TEMP" -maxdepth 1 -name 'qwen-home.stale-*' -mmin +240 -exec rm -rf {} + 2>/dev/null || true
+          # -type d is load-bearing: find matches a symlink by name and reports
+          # the link's own mtime, and chmod -R follows a symlink operand, so a
+          # planted `qwen-home.stale-*` link would make this pre-checkout step
+          # rewrite a tree outside RUNNER_TEMP. The rm below only unlinks the
+          # link, so it is no cover. The recursion itself must stay: a
+          # hand-back restores the owner without the write bit, so nested
+          # directories need u+w before rm can unlink them.
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec chmod -R u+rwX {} + 2>/dev/null || true
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec rm -rf {} + 2>/dev/null || true
+          # The deletion above is best-effort, but silence is not: a copy it
+          # could not remove would otherwise look exactly like a clean run,
+          # and the cost of the miss is a full tree walk on every later run.
+          # The report is deliberately NOT age-gated (a partial rm bumps the
+          # directory's own mtime) and never fatal — only the two $QWEN_HOME
+          # checks above may fail this step.
+          survivors="$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' 2>/dev/null | tr '\n' ' ' || true)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::qwen-home quarantine(s) survived the drain (no ownership hand-back has made them removable yet); retried every run, and they need manual cleanup: $survivors"
+          fi
           # Pool members without passwordless sudo would otherwise lose the
           # whole review to a directory this user cannot unlink. On Linux a
           # same-parent rename needs write access to the PARENT, not to the

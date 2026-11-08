@@ -9,6 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -7912,11 +7913,19 @@ describe('stale agent-home reclaim guard (#16616)', () => {
       sudoBlocked = false,
       sudoDeletes = false,
       sudoChownRepairs = false,
+      chmodBlocked = false,
       binDir,
     } = {},
   ) => {
     binDir = binDir ?? join(runnerTemp, 'stub-bin');
     mkdirSync(binDir, { recursive: true });
+    // A chmod that always fails leaves a mode-0555 copy unremovable, which is
+    // the shape the drain reports rather than deletes.
+    if (chmodBlocked) {
+      const chmodStub = join(binDir, 'chmod');
+      writeFileSync(chmodStub, '#!/bin/sh\nexit 1\n');
+      chmodSync(chmodStub, 0o755);
+    }
     if (sudoBlocked || sudoDeletes || sudoChownRepairs) {
       const sudoStub = join(binDir, 'sudo');
       writeFileSync(
@@ -7941,7 +7950,7 @@ describe('stale agent-home reclaim guard (#16616)', () => {
       env: {
         ...process.env,
         RUNNER_TEMP: runnerTemp,
-        ...(sudoBlocked || sudoDeletes || sudoChownRepairs
+        ...(sudoBlocked || sudoDeletes || sudoChownRepairs || chmodBlocked
           ? { PATH: `${binDir}:/usr/bin:/bin` }
           : {}),
       },
@@ -8154,6 +8163,64 @@ describe('stale agent-home reclaim guard (#16616)', () => {
             // A drained copy may already be gone.
           }
         }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'does not follow a planted symlink while repairing mode bits',
+    () => {
+      // find matches a symlink by name and reports the link's own mtime, and
+      // chmod -R follows a symlink operand — so without -type d, anyone able
+      // to write RUNNER_TEMP could point this pre-checkout step at a tree
+      // outside it.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const victim = join(
+        mkdtempSync(join(tmpdir(), 'qwen-home-victim-')),
+        'd',
+      );
+      const lure = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-3');
+      try {
+        mkdirSync(victim);
+        writeFileSync(join(victim, 'file'), 'x');
+        chmodSync(victim, 0o500);
+        symlinkSync(victim, lure);
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        lutimesSync(lure, fiveHoursAgo, fiveHoursAgo);
+        const out = runGuard(runnerTemp);
+        expect(out.status, out.stderr).toBe(0);
+        expect(statSync(victim).mode & 0o200).toBe(0);
+      } finally {
+        chmodSync(victim, 0o755);
+        rmSync(victim, { recursive: true, force: true });
+        rmSync(runnerTemp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'reports a quarantine the drain could not remove instead of claiming a clean sweep',
+    () => {
+      // Silence would make "drained" and "never drainable" identical in the
+      // log, while every later run re-walks the whole stranded tree.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stranded = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-4');
+      try {
+        mkdirSync(stranded);
+        writeFileSync(join(stranded, 'settings.json'), '{}');
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        utimesSync(stranded, fiveHoursAgo, fiveHoursAgo);
+        chmodSync(stranded, 0o555);
+        const out = runGuard(runnerTemp, { chmodBlocked: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).toContain('survived the drain');
+        expect(out.stdout).toContain('qwen-home.stale-20260101T000000Z-4');
+        expect(existsSync(stranded)).toBe(true);
+      } finally {
+        if (existsSync(stranded)) chmodSync(stranded, 0o755);
         rmSync(runnerTemp, { recursive: true, force: true });
         rmSync(binDir, { recursive: true, force: true });
       }
