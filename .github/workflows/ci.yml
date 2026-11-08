@@ -101,8 +101,8 @@ env:
   # re-runs every suite after `npm ci`, and a push to main always classifies
   # `full` (classify_pr computes a profile only for pull_request), so what
   # the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -143,11 +143,8 @@ jobs:
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
-      # Lint & Static's own routing: every pull request reaches the fleet,
-      # including untrusted forks (maintainer decision 2026-10-31 — the lane
-      # executes PR code on the shared pool and that risk is accepted). The
-      # association gate in ubuntu_runner still governs every other Linux
-      # lane; do not "simplify" the two outputs into one.
+      pr_test_runner: '${{ steps.pick_runner.outputs.pr_test_runner }}'
+      # Untrusted forks route to the disposable ARM64 pool; see pick_runner.
       lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
@@ -196,11 +193,8 @@ jobs:
       # Keep push routing aligned with the classifier above so a hosted queue
       # does not delay the downstream ECS jobs.
       #
-      # lint_runner is the one deliberate divergence: Lint & Static routes
-      # EVERY pull request to the fleet, untrusted forks included (maintainer
-      # decision 2026-10-31, risk accepted — see the classify_pr outputs
-      # comment). The kill-switch and LINUX_RUNNER_FLEET=hosted still force
-      # hosted, and non-PR events inherit ubuntu_runner unchanged.
+      # Untrusted fork build, test, lint and no-AK integration jobs use the
+      # disposable ARM64 pool without depending on repository variables.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
@@ -242,12 +236,13 @@ jobs:
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
-          # Lint & Static routes every pull request to the fleet (maintainer
-          # decision 2026-10-31); non-PR events inherit ubuntu_runner unchanged.
+          pr_test_runner="${ubuntu_runner}"
           lint_runner="${ubuntu_runner}"
-          if [[ "${EVENT_NAME}" == "pull_request" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" ]]; then
-            lint_runner="${fleet_runner}"
+          if [[ "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
+            pr_test_runner='["self-hosted", "ecs-qwen-ephemeral"]'
+            lint_runner="${pr_test_runner}"
           fi
+          echo "pr_test_runner=${pr_test_runner}" >> "${GITHUB_OUTPUT}"
           echo "lint_runner=${lint_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected lint runner: ${lint_runner}"
 
@@ -420,10 +415,10 @@ jobs:
   # also starts from the newest cached build and rebuilds only the
   # workspaces whose inputs changed (scripts/ci-build-cache.mjs).
   test_build:
-    name: 'Build unit-test tree (ubuntu-latest, Node 22.x)'
+    name: 'Build unit-test tree (Linux, Node 22.x)'
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     permissions:
       contents: 'read'
@@ -890,7 +885,7 @@ jobs:
     # have. So a push run is lint, static analysis and unit tests —
     # lint/static in `lint_and_static`, unit tests here.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || ''["ubuntu-latest"]'') }}'
     # Every Vitest run takes one eighth of its suite's files (`--shard`): the
     # unsharded lane ran 45-59 minutes, almost all of it the CLI and core
     # suites one after the other. A shard keeps the old ceiling's headroom
@@ -1559,12 +1554,7 @@ jobs:
     # same release-sync convention: stay running on skip_ci PRs so a required
     # context still reports, with the per-step guards making it a no-op pass.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    # Reads lint_runner, NOT ubuntu_runner: this lane routes every pull
-    # request to the fleet, untrusted forks included (maintainer decision
-    # 2026-10-31 — the lane executes PR code and the shared-pool risk is
-    # accepted). test and the integration lanes keep the association-gated
-    # ubuntu_runner. The kill-switch and hosted-fleet overrides still apply,
-    # inside pick_runner.
+    # Shares the external-PR disposable-pool routing with test and integration_no_ak.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     # Pool-scoped like test's, not a bare constant: this lane was beheaded twice
     # running honestly on cold-cache hk3-pool runners — at 30 minutes flat
@@ -2982,14 +2972,8 @@ jobs:
     # A draft pull request skips it (and the browser smoke): it cannot merge,
     # and `ready_for_review` starts the full run that gates the merge.
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
-    # Reads lint_runner, NOT ubuntu_runner: like lint_and_static, this lane
-    # executes PR code on the pool for every pull request — accepted under the
-    # same 2026-10-31 decision, and it carries NO secrets by construction
-    # (every model key is emptied at the integration step; the job's only
-    # token is the read-only checkout grant). The lane publishes a run-unique
-    # HOME from its first step (lint's shape) and empties every model key at
-    # the gate, so the pool exposure is the class already accepted for lint.
-    # test and integration_cli keep the association-gated ubuntu_runner.
+    # Shares lint's hosted/disposable routing for untrusted forks. Model keys
+    # are empty; the job receives only the read-only checkout token.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     strategy:
       fail-fast: false
