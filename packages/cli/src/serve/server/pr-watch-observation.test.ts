@@ -295,6 +295,32 @@ describe('detectPrTransitions', () => {
     expect(types(s3.transitions)).toEqual(['merge_conflict']);
   });
 
+  it('does not re-fire merge_conflict while the PR stays conflicting', () => {
+    const s0 = detectPrTransitions(
+      identity,
+      undefined,
+      obs({ mergeable: 'mergeable' }),
+      T0,
+    );
+    const s1 = detectPrTransitions(
+      identity,
+      s0.state,
+      obs({ mergeable: 'conflicting' }),
+      T1,
+    );
+    expect(types(s1.transitions)).toEqual(['merge_conflict']);
+    // Edge-triggered, not level-triggered: a second consecutive conflicting
+    // observation must not append another merge_conflict (or a PR that stays
+    // conflicting would prompt every tick until the pending cap evicts).
+    const s2 = detectPrTransitions(
+      identity,
+      s1.state,
+      obs({ mergeable: 'conflicting' }),
+      T2,
+    );
+    expect(s2.transitions).toEqual([]);
+  });
+
   it('fires a first conflicting after UNKNOWN views', () => {
     const s0 = detectPrTransitions(identity, undefined, obs(), T0);
     // mergeable UNKNOWN (absent) — stored stays undefined.
@@ -558,6 +584,36 @@ describe('observeWorkspacePrBindings', () => {
     expect(after.kind).toBe('state');
     if (after.kind === 'state') {
       expect(after.state.pending?.map((p) => p.type)).toEqual(['head_change']);
+    }
+  });
+
+  it('plumbs the view mergeable into the watch file and conflict detection', async () => {
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const view = vi.fn(async (url: string) =>
+      okResult(url, { mergeable: 'mergeable' }),
+    );
+    // Baseline observation initialises silently.
+    await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, { now: () => Date.parse(T0) }),
+    );
+    // A conflicting view must reach the detector: the watch file carries
+    // mergeable and a merge_conflict pending entry (pins observationFromView).
+    view.mockImplementation(async (url: string) =>
+      okResult(url, { mergeable: 'conflicting' }),
+    );
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, { now: () => Date.parse(T1) }),
+    );
+    expect(result.observed).toBe(1);
+    const stored = readPrWatchStateSync(dir, id);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') {
+      expect(stored.state.mergeable).toBe('conflicting');
+      expect(stored.state.pending?.map((p) => p.type)).toEqual([
+        'merge_conflict',
+      ]);
     }
   });
 
