@@ -613,7 +613,8 @@ jobs:
       # an interrupted review, or stale per-run capture-tools dirs under
       # RUNNER_TEMP. Reset all of them per run. The sweeps are best-effort
       # EXCEPT the agent home: a foreign-owned qwen-home that survives the
-      # reclaim fails the job here, before checkout — proceeding would only
+      # reclaim is renamed out of the way, and one that cannot even be
+      # renamed fails the job here, before checkout — proceeding would only
       # die later at the first settings write (PR #16610 incident).
       - name: 'Clean stale agent state'
         run: |-
@@ -627,12 +628,27 @@ jobs:
           # pool this host user cannot unlink it. `rm || true` plus mkdir -p
           # on the still-existing dir both "succeed", so the job used to run
           # on and die minutes later writing settings.json (PR #16610
-          # incident). Reclaim via sudo when available; otherwise fail HERE,
-          # before the checkout, with the cause named.
+          # incident). Reclaim via sudo when available; otherwise quarantine
+          # it with a same-parent rename, and fail HERE only when even that
+          # is refused — before the checkout, with the cause named.
           if [ -e "$QWEN_HOME" ]; then
             sudo -n rm -rf "$QWEN_HOME" 2>/dev/null ||
               sudo -n chown -R "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
             rm -rf "$QWEN_HOME" 2>/dev/null || true
+          fi
+          # Pool members without passwordless sudo would otherwise lose the
+          # whole review to a directory this user cannot unlink. A same-parent
+          # rename needs write access to the PARENT, not to the directory —
+          # the one permission this job is known to have — so the review can
+          # proceed on a fresh home while the leftover keeps its contents
+          # under a timestamped name. Same posture as 'Clean stale .qwen
+          # before checkout', which renames what it cannot delete; a read-only
+          # parent refuses the rename and still fails fast below.
+          if [ -e "$QWEN_HOME" ]; then
+            quarantine="${QWEN_HOME}.stale-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+            if mv -- "$QWEN_HOME" "$quarantine" 2>/dev/null; then
+              echo "::warning::could not delete a foreign-owned qwen-home; moved it to $quarantine so this review can proceed — that directory needs manual cleanup"
+            fi
           fi
           if [ -e "$QWEN_HOME" ]; then
             echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
