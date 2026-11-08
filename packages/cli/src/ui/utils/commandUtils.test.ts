@@ -14,11 +14,15 @@ import {
   copyToClipboard,
   getUrlOpenCommand,
   CodePage,
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  consumesContextAnnouncementLatch,
   findMidInputSlashCommand,
   findSlashCommandTokens,
   getBestSlashCommandMatch,
+  isContextFilesAnnouncement,
 } from './commandUtils.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { CommandKind, type SlashCommand } from '../commands/types.js';
 
 // Mock child_process
 vi.mock('child_process');
@@ -1257,5 +1261,118 @@ describe('getBestSlashCommandMatch', () => {
     const result = getBestSlashCommandMatch('review', withHint);
     expect(result).not.toBeNull();
     expect(result!.suffix).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// consumesContextAnnouncementLatch
+// ---------------------------------------------------------------------------
+describe('consumesContextAnnouncementLatch', () => {
+  const makeCommand = (name: string, modelInvocable: boolean): SlashCommand =>
+    ({
+      name,
+      description: `${name} desc`,
+      kind: modelInvocable ? CommandKind.SKILL : CommandKind.BUILT_IN,
+      modelInvocable,
+      action: vi.fn(),
+    }) as SlashCommand;
+
+  const slashCommands = [
+    makeCommand('feat-dev', true),
+    makeCommand('help', false),
+  ];
+  const options = (shellModeActive: boolean) => ({
+    shellModeActive,
+    slashCommands,
+  });
+
+  it('admits a plain prompt', () => {
+    expect(consumesContextAnnouncementLatch('hello', options(false))).toBe(
+      true,
+    );
+  });
+
+  it('rejects blank input (dropped by the queue)', () => {
+    expect(consumesContextAnnouncementLatch('', options(false))).toBe(false);
+  });
+
+  it('rejects /btw side-questions (fork via runForkedAgent, no main turn)', () => {
+    expect(
+      consumesContextAnnouncementLatch('/btw side note', options(false)),
+    ).toBe(false);
+  });
+
+  it('consumes ?btw (not a slash command, goes to the main model)', () => {
+    expect(
+      consumesContextAnnouncementLatch('?btw side note', options(false)),
+    ).toBe(true);
+  });
+
+  it('rejects local slash commands (no model turn)', () => {
+    expect(consumesContextAnnouncementLatch('/help', options(false))).toBe(
+      false,
+    );
+  });
+
+  it('rejects unknown slash commands', () => {
+    expect(
+      consumesContextAnnouncementLatch('/no-such-command x', options(false)),
+    ).toBe(false);
+  });
+
+  it('admits model-invocable slash commands (expanded to submit_prompt)', () => {
+    expect(
+      consumesContextAnnouncementLatch('/feat-dev implement X', options(false)),
+    ).toBe(true);
+  });
+
+  it('rejects plain input while shell mode is active', () => {
+    expect(consumesContextAnnouncementLatch('ls -la', options(true))).toBe(
+      false,
+    );
+  });
+
+  it('admits model-invocable slash commands even while shell mode is active', () => {
+    // Slash commands are routed before the shell-mode intercept.
+    expect(
+      consumesContextAnnouncementLatch('/feat-dev implement X', options(true)),
+    ).toBe(true);
+  });
+
+  it('rejects local slash commands while shell mode is active', () => {
+    expect(consumesContextAnnouncementLatch('/help', options(true))).toBe(
+      false,
+    );
+  });
+});
+
+describe('isContextFilesAnnouncement', () => {
+  it('matches an INFO item with the announcement prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} QWEN.md`,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a non-INFO item even when text starts with the prefix', () => {
+    // A user prompt literally starting with "Read context files:" must
+    // not be treated as the announcement after a rewind.
+    expect(
+      isContextFilesAnnouncement({
+        type: 'user',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} please`,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects an INFO item without the prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: 'Memory refreshed successfully.',
+      }),
+    ).toBe(false);
   });
 });

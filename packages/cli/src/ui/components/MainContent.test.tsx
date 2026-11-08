@@ -5,8 +5,8 @@
  */
 
 import type React from 'react';
-import { describe, expect, it, vi } from 'vitest';
-import { render } from 'ink-testing-library';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { MainContent } from './MainContent.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -18,6 +18,8 @@ import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
+
+afterEach(cleanup);
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
@@ -102,6 +104,10 @@ vi.mock('../selection/use-text-selection.js', () => ({
   TextSelectionController: () => null,
 }));
 
+vi.mock('../context-menu/ContentMouseController.js', () => ({
+  ContentMouseController: () => null,
+}));
+
 vi.mock('./shared/ScrollableList.js', async () => {
   const actual = await vi.importActual<
     typeof import('./shared/ScrollableList.js')
@@ -136,6 +142,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     auth: {
       authError: null,
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,
@@ -172,10 +179,10 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     settingInputRequests: [],
     pluginChoiceRequests: [],
     loopDetectionConfirmationRequest: null,
-    geminiMdFileCount: 0,
+    memoryFileCount: 0,
     streamingState: {} as UIState['streamingState'],
     initError: null,
-    pendingGeminiHistoryItems: [],
+    pendingLlmHistoryItems: [],
     thought: null,
     shellModeActive: false,
     userMessages: [],
@@ -267,6 +274,42 @@ const renderMainContent = (uiState: UIState) =>
   );
 
 describe('<MainContent />', () => {
+  it.each([false, true])(
+    'preserves completed summary state and group identity in pending rows (VP: %s)',
+    (useTerminalBuffer) => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer,
+          pendingHistoryItems: [
+            { type: 'gemini', text: 'before' },
+            {
+              type: 'gemini_thought',
+              text: 'summary',
+              thoughtGroupId: -7,
+              isStreaming: false,
+            },
+            {
+              type: 'gemini_thought_content',
+              text: 'continuation',
+              thoughtGroupId: -7,
+              isStreaming: false,
+            },
+            { type: 'gemini_content', text: 'after' },
+          ],
+        }),
+      );
+      const thoughtProps = historyItemDisplayPropsSpy.mock.calls
+        .map(([props]) => props)
+        .filter((props) => props.item.thoughtGroupId === -7);
+      expect(thoughtProps).toHaveLength(2);
+      for (const props of thoughtProps) {
+        expect(props.isPending).toBe(true);
+        expect(props.item.isStreaming).toBe(false);
+      }
+    },
+  );
+
   it('renders AppHeader inside Static at the top of the static content', () => {
     staticPropsSpy.mockClear();
     staticItemsSpy.mockClear();
@@ -884,6 +927,263 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
     });
 
+    it('hands keyboard and wheel scrolling to the /btw answer panel once its viewport exists', () => {
+      scrollableListPropsSpy.mockClear();
+      renderMainContent(createUIState({ useTerminalBuffer: true }));
+
+      expect(scrollableListPropsSpy.mock.calls.at(-1)?.[0].hasFocus).toBe(true);
+
+      // A pending answer has no scroller yet, so the transcript keeps the keys
+      // instead of leaving the pending window with no scroll owner at all.
+      scrollableListPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          btwItem: {
+            type: 'btw',
+            btw: { question: 'side', answer: '', isPending: true },
+          },
+        }),
+      );
+
+      expect(scrollableListPropsSpy.mock.calls.at(-1)?.[0].hasFocus).toBe(true);
+
+      scrollableListPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          btwItem: {
+            type: 'btw',
+            btw: { question: 'side', answer: 'long answer', isPending: false },
+          },
+        }),
+      );
+
+      expect(scrollableListPropsSpy.mock.calls.at(-1)?.[0].hasFocus).toBe(
+        false,
+      );
+    });
+
+    // Shared fixtures for the #9420 collapse tests. A tool batch renders
+    // twice transiently — the committed history copy plus the live pending
+    // copy — and both copies carry the same scheduler-minted `batchId`.
+    // The collapse matches on that identity, never on callIds: callIds are
+    // not globally unique (deterministic ids re-minted after core-history
+    // compaction, provider wire-id reuse).
+    const toolGroupFixture = (...callIds: string[]) => ({
+      type: 'tool_group' as const,
+      tools: callIds.map((callId) => ({
+        callId,
+        name: 'read_file',
+        description: `read ${callId}`,
+        status: ToolCallStatus.Executing,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      })),
+    });
+    const batched = (batchId: string, ...callIds: string[]) => ({
+      ...toolGroupFixture(...callIds),
+      batchId,
+    });
+    const lastVpDataIds = () =>
+      scrollableListPropsSpy.mock.calls
+        .at(-1)?.[0]
+        .data.map((item: { id: number }) => item.id);
+
+    it('collapses a tool_group duplicated across history and pending (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, ...batched('batch-1', 'call-A', 'call-B') }],
+          pendingHistoryItems: [batched('batch-1', 'call-A', 'call-B')],
+        }),
+      );
+
+      // The same in-flight tool batch must render once (the live pending
+      // copy, negative id), not twice (history id 1 + pending id -1). The
+      // exact list data is pinned so a duplicate that both replaces and
+      // appends is caught (a substring check passes with two -1 rows).
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1]);
+    });
+
+    it('collapses a duplicated tool_group separated by pending items (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, ...batched('batch-1', 'dup-call') }],
+          // The real lifecycle: onComplete commits the batch to history, then
+          // the continuation stream appends thought/content pending items
+          // before the scheduler clears the stale live copy — so the two
+          // copies are not adjacent in the combined list.
+          pendingHistoryItems: [
+            { type: 'gemini_thought' as const, text: 'thinking' },
+            batched('batch-1', 'dup-call'),
+          ],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1, -2]);
+    });
+
+    it('collapses a tool_group duplicated within the pending list (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            batched('batch-1', 'dup-call'),
+            batched('batch-1', 'dup-call'),
+          ],
+        }),
+      );
+
+      // Only the later (more current) copy survives.
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2]);
+    });
+
+    it('collapses pending duplicates separated by other pending items (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            batched('batch-1', 'dup-call'),
+            { type: 'gemini_thought' as const, text: 'between' },
+            batched('batch-1', 'dup-call'),
+          ],
+        }),
+      );
+
+      // The later (more current) copy survives even though the copies are
+      // not adjacent; it keeps its original positional id (-3).
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2, -3]);
+    });
+
+    it('keeps tool_groups of unrelated batches side by side (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, ...batched('batch-1', 'call-A') },
+            { id: 2, ...batched('batch-2', 'call-B') },
+          ],
+          pendingHistoryItems: [batched('batch-3', 'call-C')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
+    });
+
+    it('keeps committed tool_groups sharing callIds when no pending copy is live (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // Two committed batches with identical callIds (e.g. accepted-
+          // speculation runs whose synthetic callIds collide) and no live
+          // pending copy: nothing is duplicated, both rows must survive.
+          // Restored-session groups carry no batchId and take this shape.
+          history: [
+            { id: 1, ...toolGroupFixture('dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'between' },
+            { id: 3, ...toolGroupFixture('dup-call') },
+          ],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, 3]);
+    });
+
+    it('keeps an unrelated committed batch that collides with a live batch before it commits (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // Pre-commit shape: the live batch ('batch-new') has not been
+          // committed yet, so it has no stale copy in history. The
+          // committed row belongs to an unrelated earlier batch whose
+          // callIds merely collide (ids re-minted after core-history
+          // compaction, provider wire-id reuse) and must keep rendering
+          // for the whole execution window of the new batch.
+          history: [{ id: 1, ...batched('batch-old', 'dup-call') }],
+          pendingHistoryItems: [batched('batch-new', 'dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, -1]);
+    });
+
+    it('keeps earlier committed batches whose callIds collide with the live pending batch (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // The unrelated earlier batch ('batch-old') sharing the live
+          // batch's callIds must keep rendering; only the stale committed
+          // copy of the live batch itself (id 3, 'batch-live') collapses
+          // against the pending copy.
+          history: [
+            { id: 1, ...batched('batch-old', 'dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'between' },
+            { id: 3, ...batched('batch-live', 'dup-call') },
+          ],
+          pendingHistoryItems: [batched('batch-live', 'dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
+    });
+
+    it('collapses two distinct duplicated tool_groups pending at once (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, ...batched('batch-A', 'call-A') },
+            { id: 2, ...batched('batch-B', 'call-B') },
+          ],
+          pendingHistoryItems: [
+            batched('batch-A', 'call-A'),
+            batched('batch-B', 'call-B'),
+          ],
+        }),
+      );
+
+      // Each live batch collapses exactly its own committed copy — the
+      // bookkeeping must key per batch, not collapse into one shared slot.
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1, -2]);
+    });
+
+    it('collapses a stale committed copy that is not the last history item (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, ...batched('batch-1', 'dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'after' },
+          ],
+          pendingHistoryItems: [batched('batch-1', 'dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 2, -1]);
+    });
+
     it('requests a full-height measurement only for pending plain-text confirmations', () => {
       scrollableListPropsSpy.mockClear();
 
@@ -1144,7 +1444,7 @@ describe('<MainContent />', () => {
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
         expect.objectContaining({
           availableTerminalHeight: 100,
-          availableTerminalHeightGemini: 65536,
+          availableTerminalHeightLlm: 65536,
         }),
       );
 
@@ -1174,7 +1474,7 @@ describe('<MainContent />', () => {
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
         expect.objectContaining({
           availableTerminalHeight: undefined,
-          availableTerminalHeightGemini: undefined,
+          availableTerminalHeightLlm: undefined,
         }),
       );
     });

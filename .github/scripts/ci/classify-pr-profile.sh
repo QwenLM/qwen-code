@@ -9,13 +9,25 @@
 # meant the same PR could classify differently in each workflow, silently,
 # because both fall back to `full` on their own errors.
 #
-# Usage: classify-pr-profile.sh <owner/repo> <pr-number>
-# Prints the profile (docs_only | github_ci_only | full) on stdout.
+# Usage: classify-pr-profile.sh <owner/repo> <pr-number> [mode]
+# mode `profile` (default) prints docs_only | github_ci_only | full.
+# mode `platform` prints true | false — whether the macOS and Windows lanes
+# need to run for this PR. Both modes take the SAME listing through this
+# script, for the reason above: a second copy of the listing contract is a
+# second way for two call sites to see different files for the same PR.
 # Exit codes: 0 classified; 2 file listing failed; 3 classifier failed.
 set -euo pipefail
 
-repo="${1:?usage: classify-pr-profile.sh <owner/repo> <pr-number>}"
-pr="${2:?usage: classify-pr-profile.sh <owner/repo> <pr-number>}"
+repo="${1:?usage: classify-pr-profile.sh <owner/repo> <pr-number> [mode]}"
+pr="${2:?usage: classify-pr-profile.sh <owner/repo> <pr-number> [mode]}"
+mode="${3:-profile}"
+# Each mode also names what a TRUNCATED listing must fall back to — the
+# conservative answer differs per mode (run everything vs. run the lanes).
+case "$mode" in
+  profile) classifier='classify-profile.mjs'; truncated='full' ;;
+  platform) classifier='classify-platform-sensitivity.mjs'; truncated='true' ;;
+  *) echo "classify-pr-profile: unknown mode '${mode}'" >&2; exit 3 ;;
+esac
 
 # mktemp + trap, not a fixed name: the self-hosted pool is persistent and
 # shared, so a predictable path is a leftover-file landmine, and ci.yml's
@@ -33,13 +45,14 @@ fi
 
 # The list-files endpoint caps at 3,000 entries. A truncated listing can be
 # all docs while an omitted later entry is source, so any mismatch against
-# the PR's own changed-file count conservatively classifies as `full`.
+# the PR's own changed-file count conservatively classifies as the mode's
+# run-everything answer.
 declared="$(gh api "repos/${repo}/pulls/${pr}" --jq '.changed_files')" || exit 2
 retrieved="$(wc -l < "${files}")"
 if [ "${retrieved}" -ne "${declared}" ]; then
-  echo "classify-pr-profile: retrieved ${retrieved} file entries but PR declares ${declared}; classifying full." >&2
-  echo "full"
+  echo "classify-pr-profile: retrieved ${retrieved} file entries but PR declares ${declared}; classifying ${truncated}." >&2
+  echo "${truncated}"
   exit 0
 fi
 
-node "$(dirname "$0")/classify-profile.mjs" "${files}" || exit 3
+node "$(dirname "$0")/${classifier}" "${files}" || exit 3

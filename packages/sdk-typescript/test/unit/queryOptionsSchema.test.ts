@@ -6,9 +6,46 @@ import { describe, expect, it } from 'vitest';
 import { QueryOptionsSchema } from '../../src/types/queryOptionsSchema.js';
 
 describe('QueryOptionsSchema', () => {
+  it('retains App resource limits in parsed MCP configuration', () => {
+    const server = {
+      httpUrl: 'https://example.com/mcp',
+      appResourceMaxBytes: 0,
+      appResourceTimeoutMs: 150.9,
+    };
+    expect(
+      QueryOptionsSchema.parse({ mcpServers: { apps: server } }).mcpServers?.[
+        'apps'
+      ],
+    ).toEqual(server);
+  });
+
   it('accepts empty options', () => {
     const result = QueryOptionsSchema.safeParse({});
     expect(result.success).toBe(true);
+  });
+
+  it('accepts automatic and legacy MCP negotiation policies', () => {
+    expect(
+      QueryOptionsSchema.safeParse({
+        mcpServers: {
+          legacy: { command: 'node', versionNegotiation: 'legacy' },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      QueryOptionsSchema.safeParse({
+        mcpServers: {
+          automatic: { command: 'node', versionNegotiation: 'auto' },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      QueryOptionsSchema.safeParse({
+        mcpServers: {
+          invalid: { command: 'node', versionNegotiation: 'modern' },
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it('accepts fallbackModel with up to 3 models', () => {

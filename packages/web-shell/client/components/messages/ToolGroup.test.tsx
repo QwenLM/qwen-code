@@ -2,15 +2,38 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import { hasActiveAgents } from '../../adapters/toolClassification';
-import { I18nProvider } from '../../i18n';
-import { WebShellCustomizationProvider } from '../../customization';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
+import type { SessionContentGenerator } from './AssistantMessage';
+import {
+  hasActiveAgents,
+  isSubAgentToolCall,
+} from '../../adapters/toolClassification';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
+import { getTranslator, I18nProvider } from '../../i18n';
+import { sanitizeControlChars } from './toolFormatting';
+import {
+  WebShellCustomizationProvider,
+  type MarkdownRenderContext,
+} from '../../customization';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
+import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
+import { McpAppHostContext } from '../../mcpAppHostContext';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import {
+  result as managedResult,
+  notStartedResult,
+  blockedResult,
+  previewOnlyResult,
+} from '../managed/managed-tool-result.test-fixtures';
 
-vi.mock('../../App', async () => {
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),
@@ -19,7 +42,6 @@ vi.mock('../../App', async () => {
 });
 
 const {
-  buildUnifiedDiff,
   extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,
@@ -27,7 +49,6 @@ const {
   getActiveTool,
   getRawFileDiff,
   getToolHeaderKind,
-  hasExpandableContent,
   isWebFetchToolName,
   languageForPath,
   shouldAutoExpand,
@@ -57,17 +78,78 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   };
 }
 
+describe('ReadFile output availability', () => {
+  it.each(['failed', 'completed'] as const)(
+    'labels missing %s read details',
+    (status) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status,
+        }),
+        { forceExpanded: true },
+      );
+      expect(container.textContent).toContain(
+        'Output is unavailable for this tool call.',
+      );
+    },
+  );
+
+  it('distinguishes an explicitly empty read from missing output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        rawOutput: '',
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps waiting for an active read without output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('Waiting for output…');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('recognizes a recorded empty text block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        content: [{ type: 'content', content: { type: 'text', text: '' } }],
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps an opaque recorded result distinct from missing output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', rawOutput: { type: 'structured' } }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+});
+
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
   customization = {},
+  language: 'en' | 'zh-CN' = 'en',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <WebShellCustomizationProvider value={customization}>
           <ToolLine tool={tool} {...props} />
         </WebShellCustomizationProvider>
@@ -86,16 +168,64 @@ function renderToolGroup(
     isStreaming?: boolean;
     beforeToolCallId?: string;
   }>,
+  renderModeOrCompactSummary:
+    | 'interactive'
+    | 'readonly'
+    | 'document'
+    | boolean = 'interactive',
+  onOpenSubagent?: (tool: ACPToolCall) => void,
+  onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
+  language: 'en' | 'zh-CN' = 'en',
+  generateContent?: SessionContentGenerator,
+  mcpAppHostUrl?: string,
+  documentExpanded = true,
 ): HTMLElement {
+  const renderMode =
+    typeof renderModeOrCompactSummary === 'string'
+      ? renderModeOrCompactSummary
+      : 'interactive';
+  const compactSummary =
+    typeof renderModeOrCompactSummary === 'boolean'
+      ? renderModeOrCompactSummary
+      : false;
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
+    const toolGroup = (
+      <ToolGroup
+        tools={tools}
+        thoughts={thoughts}
+        compactSummary={compactSummary}
+        generateContent={generateContent}
+      />
+    );
+    const group = mcpAppHostUrl ? (
+      <McpAppHostContext.Provider value={mcpAppHostUrl}>
+        {toolGroup}
+      </McpAppHostContext.Provider>
+    ) : (
+      toolGroup
+    );
     root.render(
-      <I18nProvider language="en">
-        <WebShellCustomizationProvider value={customization}>
-          <ToolGroup tools={tools} thoughts={thoughts} />
-        </WebShellCustomizationProvider>
+      <I18nProvider language={language}>
+        <TranscriptRenderModeProvider value={renderMode}>
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            <WebShellCustomizationProvider value={customization}>
+              {onOpenMonitor ? (
+                <MonitorDetailsProvider onOpen={onOpenMonitor}>
+                  {group}
+                </MonitorDetailsProvider>
+              ) : onOpenSubagent ? (
+                <SubagentDetailsProvider onOpen={onOpenSubagent}>
+                  {group}
+                </SubagentDetailsProvider>
+              ) : (
+                group
+              )}
+            </WebShellCustomizationProvider>
+          </TranscriptDocumentExpandedProvider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -111,6 +241,9 @@ const t = (key: string, values?: Record<string, string | number>): string => {
   }
   if (key === 'toolGroup.summary') {
     return `Ran ${values?.count ?? 0} tool${values?.count === 1 ? '' : 's'}`;
+  }
+  if (key === 'toolGroup.summary.ranAgents') {
+    return `Ran ${values?.count ?? 0} agent${values?.count === 1 ? '' : 's'}`;
   }
   if (key === 'toolGroup.summary.editedFiles') {
     return `Edited ${values?.count ?? 0} files`;
@@ -145,6 +278,88 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
+  it.each([
+    [notStartedResult, 'Command not executed'],
+    [blockedResult, 'Output delivery blocked'],
+    [previewOnlyResult, 'Command succeeded'],
+  ])(
+    'renders the shared result facts in tool summaries: %s',
+    (result, expected) => {
+      const container = renderToolLine(
+        makeTool({ toolResult: result }),
+        { onToolResultOpen: vi.fn() },
+        {},
+      );
+      if (result === previewOnlyResult) {
+        expect(container.textContent).not.toContain(expected);
+        const header = container.querySelector(
+          '[role="button"]',
+        ) as HTMLElement;
+        act(() => header.click());
+      }
+      expect(container.textContent).toContain(expected);
+    },
+  );
+  it('rerenders a result-only revision change and opens its canonical Item', () => {
+    const onOpen = vi.fn();
+    const customization = {};
+    const tool = makeTool({
+      rawOutput: 'unchanged preview',
+      toolResult: managedResult,
+    });
+    const container = renderToolLine(
+      tool,
+      { onToolResultOpen: onOpen },
+      customization,
+    );
+    expect(container.textContent).not.toContain('Capture complete');
+    const header = container.querySelector('[role="button"]') as HTMLElement;
+    act(() => header.click());
+    expect(container.textContent).toContain('Capture complete');
+    const { root } = mounted.at(-1)!;
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider value={customization}>
+            <ToolLine
+              tool={{
+                ...tool,
+                toolResult: {
+                  ...managedResult,
+                  projection_revision: 2,
+                  capture_status: 'partial',
+                  delivery_status: 'blocked',
+                },
+              }}
+              onToolResultOpen={onOpen}
+            />
+          </WebShellCustomizationProvider>
+        </I18nProvider>,
+      ),
+    );
+    expect(container.textContent).toContain('Capture incomplete');
+    expect(container.textContent).toContain('Output delivery blocked');
+    const button = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'View output',
+    );
+    act(() => button!.click());
+    expect(onOpen).toHaveBeenCalledWith('item-1');
+  });
+  it('counts agents separately only for compact summaries', () => {
+    const tools = [
+      makeTool({ callId: 'agent-1', toolName: 'Agent' }),
+      makeTool({ callId: 'agent-2', toolName: 'Agent' }),
+      makeTool({ callId: 'read', toolName: 'Read' }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t, undefined, true)).toBe(
+      'Ran 2 agents · Ran 1 tool',
+    );
+    expect(formatToolGroupSummary(tools, t)).toBe(
+      'Read 1 files Called 2 other tools',
+    );
+  });
+
   it('uses the active tool in running summaries', () => {
     const tools = [
       makeTool({ callId: 'done', status: 'completed' }),
@@ -315,6 +530,20 @@ describe('tool group summary logic', () => {
     );
   });
 
+  it('describes file tool counts as operation counts', () => {
+    const tools = [
+      makeTool({ toolName: 'edit' }),
+      makeTool({ callId: 'edit-2', toolName: 'edit' }),
+      makeTool({ callId: 'read', toolName: 'read_file' }),
+      makeTool({ callId: 'search', toolName: 'grep' }),
+      makeTool({ callId: 'web-search', toolName: 'web_search' }),
+    ];
+
+    expect(formatToolGroupSummary(tools, getTranslator('zh-CN'))).toBe(
+      '已编辑文件 2 次 已读取文件 1 次 已搜索 2 次',
+    );
+  });
+
   it('formats a single shell summary as only the semantic description', () => {
     expect(
       formatSingleToolSummary(
@@ -440,6 +669,100 @@ describe('tool group summary logic', () => {
     expect(summary?.textContent).not.toContain('timeout: 30000ms');
   });
 
+  it('opens a completed MCP App result in the session transcript', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__show_dashboard',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Dashboard</main>',
+            toolResult: { content: [] },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        }),
+      ],
+      {},
+      undefined,
+      false,
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      'http://localhost:5173',
+    );
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+
+    const content = container.querySelector(
+      '[class*="chatSummaryContentClip"]',
+    );
+    const iframe = container.querySelector('iframe');
+    expect(iframe).not.toBeNull();
+    iframe!.dataset['testState'] = 'preserved';
+    act(() => container.querySelector('button')?.click());
+    expect(content).toBe(
+      container.querySelector('[class*="chatSummaryContentClip"]'),
+    );
+    expect((content as HTMLElement | null)?.style.display).toBe('none');
+    act(() => container.querySelector('button')?.click());
+    expect(container.querySelector('iframe')).toBe(iframe);
+    expect(iframe?.dataset['testState']).toBe('preserved');
+    expect((content as HTMLElement | null)?.style.display).toBe('');
+  });
+
+  it.each([
+    { scenario: 'compacted', fallbackText: 'Dashboard ready' },
+    {
+      scenario: 'failed to load',
+      fallbackText:
+        "Warning: MCP App 'ui://demo/dashboard' from 'demo' could not be displayed: resource read timed out (limit: 10000 ms)\n\nDashboard ready",
+    },
+  ])(
+    'renders a $scenario MCP App fallback without an iframe',
+    ({ fallbackText }) => {
+      const container = renderToolGroup(
+        [
+          makeTool({
+            toolName: 'mcp__demo__show_dashboard',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'Dashboard ready' },
+              },
+            ],
+            rawOutput: {
+              type: 'mcp_app',
+              serverName: 'demo',
+              resourceUri: 'ui://demo/dashboard',
+              html: '',
+              toolResult: {},
+              toolArguments: {},
+              fallbackText,
+            },
+          }),
+        ],
+        {},
+        undefined,
+        false,
+        undefined,
+        undefined,
+        'en',
+        undefined,
+        'http://localhost:5173',
+      );
+
+      expect(container.textContent).toContain(fallbackText);
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+    },
+  );
+
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
       makeTool({
@@ -459,6 +782,7 @@ describe('tool group summary logic', () => {
         args: { file_path: 'README.md' },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     expect(container.textContent).toContain('Shell');
     expect(container.textContent).toContain('查询用户工作空间列表');
@@ -526,50 +850,17 @@ describe('tool output session links', () => {
   });
 });
 
-describe('tool expandability', () => {
-  it('only marks tools with actual detail views as expandable by output', () => {
+describe('workflow tool classification', () => {
+  it('does not mistake workflow live output for a subagent panel', () => {
     expect(
-      hasExpandableContent(
+      isSubAgentToolCall(
         makeTool({
-          toolName: 'Shell',
-          content: [{ type: 'content', content: { text: 'first\nsecond' } }],
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      hasExpandableContent(
-        makeTool({
-          toolName: 'list_directory',
-          rawOutput: 'a\nb',
+          toolName: 'workflow',
+          status: 'in_progress',
+          subContent: '{"runId":"wf_expected"}',
         }),
       ),
     ).toBe(false);
-  });
-
-  it('does not expand skill rows that only have the skill name', () => {
-    expect(
-      hasExpandableContent(
-        makeTool({
-          toolName: 'skill',
-          title: 'Skill: Use skill: "review"',
-          args: { skill: 'review' },
-        }),
-      ),
-    ).toBe(false);
-    expect(
-      hasExpandableContent(
-        makeTool({
-          toolName: 'skill',
-          args: { skill: 'review' },
-          content: [
-            {
-              type: 'content',
-              content: { type: 'text', text: '# Code Review' },
-            },
-          ],
-        }),
-      ),
-    ).toBe(true);
   });
 });
 
@@ -616,6 +907,213 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it.each(['Shell', 'ReadFile'])(
+    'preserves literal successful %s output under Chinese',
+    (toolName) => {
+      const literal =
+        "You've used up your weekly credits. Please try again after the reset.";
+      const container = renderToolLine(
+        makeTool({
+          toolName,
+          status: 'completed',
+          args:
+            toolName === 'Shell'
+              ? { command: 'cat literal.txt' }
+              : { path: '/tmp/literal.txt' },
+          rawOutput: literal,
+        }),
+        { forceExpanded: toolName === 'ReadFile' },
+        {},
+        'zh-CN',
+      );
+      expect(container.textContent).toContain(literal);
+      expect(container.textContent).not.toContain('周额度已用完');
+    },
+  );
+
+  it('shows the Advisor verdict and expands the full review', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'advisor',
+        status: 'completed',
+        rawOutput: {
+          type: 'advisor_review',
+          verdict: 'Sound approach.',
+          risks: 'Retry handling is unclear.',
+          missingEvidence: 'No integration result.',
+          recommendation: 'Run the integration test.',
+        },
+      }),
+    ]);
+
+    act(() => {
+      (container.querySelector('button') as HTMLElement).click();
+    });
+
+    expect(container.textContent).toContain('Sound approach.');
+    expect(container.textContent).toContain('Retry handling is unclear.');
+    expect(container.textContent).toContain('Run the integration test.');
+  });
+
+  it('expands a workflow tool into its live execution graph', () => {
+    const tool = makeTool({
+      toolName: 'workflow',
+      status: 'in_progress',
+      subContent: '```json\n{"runId":"wf_channel","status":"running"}\n```',
+    });
+    const task: DaemonSessionWorkflowTaskStatus = {
+      kind: 'workflow',
+      id: 'wf_channel',
+      label: 'Channel analysis',
+      description: 'Analyze channel packages',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 200,
+      isBackgrounded: false,
+      currentPhase: 'Inspect',
+      phaseVisits: [
+        {
+          id: 'phase-inspect',
+          index: 0,
+          title: 'Inspect',
+          startedAt: 1_010,
+        },
+      ],
+      dispatches: [
+        {
+          id: 'dispatch-architecture',
+          phaseVisitId: 'phase-inspect',
+          label: 'Architecture Agent',
+          prompt: 'Inspect the channel architecture',
+          status: 'running',
+          dependsOn: [],
+          queuedAt: 1_020,
+          startedAt: 1_030,
+        },
+      ],
+      agentsDispatched: 1,
+      agentsCompleted: 0,
+      tokensSpent: 120,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowDetailsProvider tasks={[task]}>
+            <ToolGroup tools={[tool]} />
+          </WorkflowDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    const content = container.querySelector(
+      '[class*="chatSummaryContentClip"]',
+    ) as HTMLElement;
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+    expect(content.className).toContain('chatSummaryContentCollapsed');
+    expect(content.getAttribute('aria-hidden')).toBe('true');
+    expect(content.hasAttribute('inert')).toBe(true);
+    expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+    act(() => summary.click());
+
+    expect(summary.getAttribute('aria-expanded')).toBe('true');
+    expect(content.className).not.toContain('chatSummaryContentCollapsed');
+    expect(content.getAttribute('aria-hidden')).toBe('false');
+    expect(content.hasAttribute('inert')).toBe(false);
+    expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
+    expect(container.textContent).toContain('Architecture Agent');
+  });
+
+  it.each([
+    ['custom_tool', 'First line.\n' + 'Bounded exported answer. '.repeat(8)],
+    [
+      'tool_call',
+      JSON.stringify({
+        schemaVersion: 1,
+        documentId: `g1_${'a'.repeat(64)}`,
+        title: 'Capacity estimate',
+        summary:
+          'Four workers at 25 requests/s give 100 requests/s. Adjust inputs locally.',
+      }),
+    ],
+  ])(
+    'keeps the full safe %s text preview visible in document mode',
+    (toolName, text) => {
+      const container = renderToolGroup(
+        [makeTool({ toolName, status: 'completed', rawOutput: text })],
+        {},
+        undefined,
+        'document',
+      );
+      // Valid JSON is pretty-printed for display; other text is shown exactly
+      // as recorded, including its trailing whitespace.
+      const expected =
+        toolName === 'tool_call'
+          ? JSON.stringify(JSON.parse(text) as unknown, null, 2)
+          : text;
+      expect(container.textContent).toContain(expected);
+      expect(container.querySelector('iframe')).toBeNull();
+    },
+  );
+
+  it('keeps grouped tools and thoughts fully expanded in document mode', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'shell-1',
+          rawOutput: 'first document output',
+        }),
+        makeTool({
+          callId: 'shell-2',
+          rawOutput: 'second document output',
+        }),
+      ],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+    );
+
+    expect(container.textContent).toContain('first document output');
+    expect(container.textContent).toContain('second document output');
+    expect(container.textContent).toContain('document thought');
+    expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
+    expect(
+      (
+        container.querySelector(
+          '[class*="chatSummaryContentClip"]',
+        ) as HTMLElement | null
+      )?.style.display,
+    ).not.toBe('none');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
+  });
+
+  it('honors the document-wide collapsed state for tools and thoughts', () => {
+    const container = renderToolGroup(
+      [makeTool({ rawOutput: 'document tool output' })],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      undefined,
+      false,
+    );
+
+    expect(container.textContent).not.toContain('document tool output');
+    expect(container.textContent).not.toContain('document thought');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
+  });
+
   it('renders the aggregate summary for a multi-tool group', () => {
     const container = renderToolGroup([
       makeTool({
@@ -699,7 +1197,6 @@ describe('tool row rendering', () => {
       const content = container.querySelector(
         '[class*="chatSummaryContentClip"]',
       );
-      expect(content?.className).not.toContain('chatSummaryContentCollapsed');
       expect(content?.textContent).toContain('custom 5s');
 
       act(() => {
@@ -781,6 +1278,83 @@ describe('tool row rendering', () => {
     }
   });
 
+  it('keeps a running shell collapsed and lets the user toggle it', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'in_progress',
+        rawOutput: '{}',
+      }),
+      makeTool({ callId: 'read', toolName: 'ReadFile' }),
+    ]);
+    act(() => container.querySelector('button')?.click());
+
+    const shell = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    expect(shell.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[class*="expandedCard"]')).toBeNull();
+
+    act(() => shell.click());
+    expect(shell.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+
+    act(() => shell.click());
+    expect(shell.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[class*="expandedCard"]')).toBeNull();
+  });
+
+  it('keeps an empty shell expandable after it completes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (tool: ACPToolCall) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolLine tool={tool} summaryOnly />
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render(makeTool({ status: 'in_progress' }));
+    const shell = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    act(() => shell.click());
+
+    render(makeTool({ status: 'completed' }));
+    expect(shell.getAttribute('aria-expanded')).toBe('true');
+    act(() => shell.click());
+    expect(shell.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[class*="expandedCard"]')).toBeNull();
+    act(() => shell.click());
+    expect(shell.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+  });
+
+  it.each(['glob', 'todo_write'])(
+    'lets a contentless %s tool expand and collapse',
+    (toolName) => {
+      const container = renderToolLine(makeTool({ toolName }), {
+        summaryOnly: true,
+      });
+      const row = container.querySelector(
+        '[class*="lineExpandable"]',
+      ) as HTMLElement;
+
+      expect(row.getAttribute('aria-expanded')).toBe('false');
+      act(() => row.click());
+      expect(row.getAttribute('aria-expanded')).toBe('true');
+      expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+      act(() => row.click());
+      expect(row.getAttribute('aria-expanded')).toBe('false');
+      expect(container.querySelector('[class*="expandedCard"]')).toBeNull();
+    },
+  );
+
   it('keeps the failed label out of the collapsed chat summary', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'Shell', status: 'failed' }),
@@ -802,7 +1376,9 @@ describe('tool row rendering', () => {
     expect(errorIcon?.getAttribute('role')).toBe('img');
     expect(errorIcon?.getAttribute('aria-label')).toBe('Failed');
     expect(errorIcon?.querySelector('svg')).not.toBeNull();
-    expect(container.textContent).not.toContain('Failed');
+    expect(
+      container.querySelector('[class*="lineMain"]')?.textContent,
+    ).not.toContain('Failed');
   });
 
   it('shows an error icon instead of the failed label on expanded tool rows', () => {
@@ -824,7 +1400,7 @@ describe('tool row rendering', () => {
     expect(errorIcon?.textContent).not.toContain('Failed');
   });
 
-  it('shows an error icon in the expanded single-tool card title', () => {
+  it('shows a failure label in the expanded shell card', () => {
     const container = renderToolGroup([
       makeTool({
         toolName: 'Shell',
@@ -836,13 +1412,13 @@ describe('tool row rendering', () => {
     const summary = container.querySelector('button') as HTMLButtonElement;
     act(() => summary.click());
 
-    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    const titleRow = container.querySelector('[class*="shellHeading"]');
     expect(titleRow).not.toBeNull();
-    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
-    expect(titleRow?.textContent).not.toContain('Failed');
+    expect(titleRow?.textContent).toContain('Failed');
+    expect(titleRow?.querySelector('.lucide-circle-x')).not.toBeNull();
   });
 
-  it('renders no status icon in the expanded completed tool card title', () => {
+  it('shows completion without claiming success for unstructured shell output', () => {
     const container = renderToolGroup([
       makeTool({
         toolName: 'Shell',
@@ -854,9 +1430,10 @@ describe('tool row rendering', () => {
     const summary = container.querySelector('button') as HTMLButtonElement;
     act(() => summary.click());
 
-    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    const titleRow = container.querySelector('[class*="shellHeading"]');
     expect(titleRow).not.toBeNull();
-    expect(titleRow?.querySelector('[class*="iconError"]')).toBeNull();
+    expect(titleRow?.textContent).toContain('Completed');
+    expect(titleRow?.textContent).not.toContain('Succeeded');
   });
 
   it('shows an error icon in the expanded failed todo card title', () => {
@@ -869,6 +1446,7 @@ describe('tool row rendering', () => {
         },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -883,6 +1461,7 @@ describe('tool row rendering', () => {
         content: [{ type: 'content', content: { text: 'Permission denied' } }],
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -893,6 +1472,7 @@ describe('tool row rendering', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'glob', status: 'failed' }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1222,7 +1802,7 @@ describe('tool row rendering', () => {
       root.render(
         <I18nProvider language="en">
           <MonitorDetailsProvider onOpen={onOpen}>
-            <ToolLine tool={tool} forceExpandable />
+            <ToolLine tool={tool} />
           </MonitorDetailsProvider>
         </I18nProvider>,
       );
@@ -1261,7 +1841,7 @@ describe('tool row rendering', () => {
       root.render(
         <I18nProvider language="en">
           <MonitorDetailsProvider onOpen={onOpen}>
-            <ToolLine tool={tool} forceExpandable />
+            <ToolLine tool={tool} />
           </MonitorDetailsProvider>
         </I18nProvider>,
       );
@@ -1285,7 +1865,7 @@ describe('tool row rendering', () => {
     expect(line.getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('keeps a non-expandable monitor tool line static when details are unavailable', async () => {
+  it('expands an empty monitor inline when details are unavailable', async () => {
     const onOpen = vi.fn().mockResolvedValue(false);
     const tool = makeTool({
       toolName: 'monitor',
@@ -1314,8 +1894,11 @@ describe('tool row rendering', () => {
     });
 
     expect(onOpen).toHaveBeenCalledWith(tool);
-    expect(line.getAttribute('role')).toBeNull();
-    expect(line.getAttribute('aria-expanded')).toBeNull();
+    expect(line.getAttribute('role')).toBe('button');
+    expect(line.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+    act(() => line.click());
+    expect(line.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('keeps a mixed group static when only its background agent is active', () => {
@@ -1336,6 +1919,11 @@ describe('tool row rendering', () => {
     expect(
       container.querySelector('[class*="chatSummaryTextActive"]'),
     ).toBeNull();
+    // The marker is scoped to "a background agent is the row's only active
+    // work", not to single-tool rows, so a mixed row must keep it too.
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).not.toBeNull();
   });
 
   it('keeps a mixed group animated while a foreground tool is active', () => {
@@ -1358,6 +1946,245 @@ describe('tool row rendering', () => {
       container.querySelector('[class*="chatSummaryTextActive"]'),
     ).not.toBeNull();
   });
+
+  it('marks the summary icon while only a background agent is active', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        executionMode: 'background',
+      }),
+    ]);
+
+    // The icon marker is the only liveness cue a detached card gets, so it
+    // must not come with the shimmer or a timer the design keeps off it.
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toMatch(/\b\d+s\b/);
+  });
+
+  it('leaves the summary icon unmarked while a foreground tool animates it', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        executionMode: 'background',
+      }),
+      makeTool({
+        callId: 'foreground',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      }),
+    ]);
+
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).toBeNull();
+  });
+
+  it('leaves the summary icon unmarked once the background agent settles', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'completed',
+        executionMode: 'background',
+      }),
+    ]);
+
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).toBeNull();
+  });
+
+  it('shows a live elapsed and current activity for a running foreground agent', () => {
+    // Fake timers: the elapsed string is rounded from a wall-clock gap, so a
+    // live-clock fixture flips 45s to 46s on a loaded worker with no code
+    // regression.
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+          subTools: [
+            makeTool({
+              callId: 'sub-read',
+              toolName: 'read',
+              status: 'in_progress',
+              args: { file_path: 'src/app.ts' },
+            }),
+          ],
+        }),
+      ]);
+
+      expect(container.textContent).toContain('Running');
+      expect(container.textContent).toContain('(ReadFile src/app.ts)');
+      expect(container.textContent).toContain('45s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the task description on a running foreground agent row', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'foreground-agent',
+        toolName: 'agent',
+        status: 'in_progress',
+        executionMode: 'foreground',
+        startTime: Date.now() - 45_000,
+        args: { description: 'Trace the retry loop to its root cause' },
+        subTools: [
+          makeTool({
+            callId: 'sub-read',
+            toolName: 'read',
+            status: 'in_progress',
+            args: { file_path: 'src/app.ts' },
+          }),
+        ],
+      }),
+    ]);
+
+    expect(container.textContent).toContain(
+      'Trace the retry loop to its root cause',
+    );
+    expect(container.textContent).toContain('(ReadFile src/app.ts)');
+  });
+
+  it('renders no empty parentheses without a live sub-tool', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+          subTools: [
+            makeTool({
+              callId: 'sub-done',
+              toolName: 'read',
+              status: 'completed',
+            }),
+          ],
+        }),
+      ]);
+
+      expect(container.textContent).toContain('45s');
+      expect(container.textContent).not.toContain('()');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the running foreground agent summary elapsed ticking', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+        }),
+      ]);
+
+      expect(container.textContent).toContain('45s');
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain('46s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not tick an elapsed on the background agent summary', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'background',
+          toolName: 'agent',
+          status: 'pending',
+          executionMode: 'background',
+          startTime: 1_000,
+        }),
+      ]);
+
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(container.textContent).not.toMatch(/\b\d+s\b/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['line', 'summary'] as const)(
+    'keeps the %s unavailable until the subagent session is ready',
+    (mode) => {
+      const onOpen = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const render = (subagentSessionReady: boolean) => {
+        const tool = makeTool({
+          toolName: 'agent',
+          status: 'in_progress',
+          title: undefined,
+          subagentSessionReady,
+        });
+        act(() =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <SubagentDetailsProvider onOpen={onOpen}>
+                {mode === 'line' ? (
+                  <ToolLine tool={tool} />
+                ) : (
+                  <ToolGroup tools={[tool]} />
+                )}
+              </SubagentDetailsProvider>
+            </I18nProvider>,
+          ),
+        );
+        return tool;
+      };
+      render(false);
+      const button = container.querySelector('button')!;
+      expect(button.getAttribute('aria-disabled')).toBe('true');
+      expect(button.title).toBe('创建中');
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      act(() => button.click());
+      expect(onOpen).not.toHaveBeenCalled();
+      const ready = render(true);
+      expect(button.hasAttribute('aria-disabled')).toBe(false);
+      act(() => button.click());
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(ready);
+    },
+  );
 
   it('opens on-demand agent details without mounting inline content', () => {
     const onOpen = vi.fn();
@@ -1387,6 +2214,89 @@ describe('tool row rendering', () => {
     act(() => {
       (
         container.querySelector('[class*="lineExpandable"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('keeps the agent row static while its launch approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'pending',
+      args: { subagent_type: 'Explore' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-1',
+                toolCallId: tool.callId,
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // No expand affordance while the launch approval is unanswered: the row
+    // must not open details for an agent that has not started yet.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
+    act(() => {
+      (container.querySelector('[class*="lineButton"]') as HTMLElement).click();
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('keeps the agent row openable while a sub-tool approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [{ callId: 'sub-1', toolName: 'web_fetch', status: 'pending' }],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-sub',
+                toolCallId: 'sub-1',
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // A sub-tool approval is not the agent's own launch approval: the row
+    // stays openable so the pending sub-tool stays reachable in the details
+    // panel.
+    expect(
+      container.querySelector('button[class*="lineButton"]'),
+    ).not.toBeNull();
+    act(() => {
+      (
+        container.querySelector('button[class*="lineButton"]') as HTMLElement
       ).click();
     });
     expect(onOpen).toHaveBeenCalledWith(tool);
@@ -1443,7 +2353,7 @@ describe('tool row rendering', () => {
     expect(header.textContent).toContain('packages/web-shell/client');
   });
 
-  it('uses the shell tool name for expanded cards from action summaries', () => {
+  it('keeps the shell title with a separate output section in expanded cards', () => {
     const container = renderToolLine(
       makeTool({
         toolName: 'run_shell_command',
@@ -1469,9 +2379,15 @@ describe('tool row rendering', () => {
     act(() => header.click());
 
     const cardTitle = container.querySelector(
-      '[class*="expandedCardTitleRow"] [class*="expandedCardTitle"]',
+      '[data-shell-command-card] [class*="expandedCardTitle"]',
     );
     expect(cardTitle?.textContent).toBe('Shell');
+    expect(
+      container.querySelector('[data-shell-command-card] summary')?.textContent,
+    ).toBe('Command');
+    expect(container.querySelectorAll('pre')[0]?.textContent).toBe(
+      'dataworks-infra workspace list',
+    );
   });
 
   it('shows complete skill content in the expanded card body', () => {
@@ -1525,6 +2441,141 @@ describe('tool row rendering', () => {
 });
 
 describe('thinking rows in the compact summary', () => {
+  it('passes each expanded thought streaming state to the Markdown customization', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const transformMarkdown = vi.fn(
+      (content: string, context: MarkdownRenderContext) =>
+        `${content} ${context.isStreaming ? 'pending' : 'settled'}`,
+    );
+    const customization = { markdown: { transformMarkdown } };
+    const tools = [makeTool({ toolName: 'ReadFile' })];
+    const render = (isStreaming: boolean) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={customization}>
+              <ToolGroup
+                tools={tools}
+                thoughts={[{ content: 'thought citation', isStreaming }]}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+    };
+
+    render(true);
+    act(() => container.querySelector('button')?.click());
+    const thoughtHeader = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    );
+    expect(thoughtHeader).not.toBeNull();
+    act(() => thoughtHeader?.click());
+    expect(container.textContent).toContain('thought citation pending');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: true,
+    });
+
+    render(false);
+    expect(container.textContent).toContain('thought citation settled');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: false,
+    });
+  });
+
+  it('expands a single-agent compact summary before opening agent details', () => {
+    const onOpenSubagent = vi.fn();
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'inspect' },
+        }),
+      ],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      onOpenSubagent,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenSubagent).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    const thoughtSummary = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    )!;
+    act(() => thoughtSummary.click());
+    expect(container.textContent).toContain('main-agent thought');
+  });
+
+  it('expands a single-monitor compact summary before opening monitor details', () => {
+    const onOpenMonitor = vi.fn().mockResolvedValue(true);
+    const container = renderToolGroup(
+      [makeTool({ callId: 'monitor-1', toolName: 'Monitor' })],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      undefined,
+      onOpenMonitor,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenMonitor).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="compact-thinking-summary"]'),
+    ).not.toBeNull();
+  });
+
+  it('nests parallel-agent details behind the compact summary', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'first' },
+        }),
+        makeTool({
+          callId: 'agent-2',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'second' },
+        }),
+      ],
+      {},
+      [{ content: 'thinking' }],
+      true,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    expect(outerSummary.textContent).toContain('Ran 2 agents');
+    expect(
+      container.querySelector('[data-testid="compact-parallel-agents"]'),
+    ).toBeNull();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('false');
+
+    act(() => outerSummary.click());
+    const parallelSummary = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('Parallel agents'))!;
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('false');
+    expect(parallelSummary.textContent).toContain('2/2 done');
+
+    act(() => parallelSummary.click());
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(2);
+  });
+
   it('shows a running summary while a thought is streaming', () => {
     const container = renderToolGroup(
       [
@@ -1541,6 +2592,15 @@ describe('thinking rows in the compact summary', () => {
     expect(container.querySelector('button')?.textContent).toContain(
       'Thinking',
     );
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).toBeNull();
+
+    act(() => container.querySelector('button')?.click());
+
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).not.toBeNull();
   });
 
   it('renders a completed thought line that expands its content on click', () => {
@@ -1560,7 +2620,7 @@ describe('thinking rows in the compact summary', () => {
       container.querySelector('button')?.click();
     });
     const thoughtHeader = Array.from(
-      container.querySelectorAll('[role="button"]'),
+      container.querySelectorAll('[data-testid="compact-thinking-summary"]'),
     ).find((el) =>
       (el as HTMLElement).textContent?.includes('Done thinking'),
     ) as HTMLElement;
@@ -1569,6 +2629,124 @@ describe('thinking rows in the compact summary', () => {
     expect(container.textContent).not.toContain('private chain of thought');
     act(() => thoughtHeader.click());
     expect(container.textContent).toContain('private chain of thought');
+  });
+
+  it('expands the thought when the header row is clicked outside the button', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private chain of thought' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const header = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(container.textContent).not.toContain('private chain of thought');
+    // The pointer-styled row is the hit target, not just the nested controls.
+    act(() => header.click());
+    expect(container.textContent).toContain('private chain of thought');
+    act(() => header.click());
+    expect(container.textContent).not.toContain('private chain of thought');
+    const chevron = header.querySelector(
+      '[class*="chatSummaryThoughtChevron"]',
+    ) as HTMLElement;
+    expect(chevron).toBeTruthy();
+    act(() => chevron.click());
+    expect(container.textContent).toContain('private chain of thought');
+  });
+
+  it('does not toggle the folded thought on clicks inside the translation popover', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'started' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'request-1',
+        seq: 0,
+        text: '翻译结果',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 12,
+        outputTokens: 4,
+      };
+    });
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private thought for translation' }],
+      false,
+      undefined,
+      undefined,
+      'zh-CN',
+      generateContent,
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const header = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    // The popover renders through a portal, but React events from it still
+    // bubble through the React tree into the header row.
+    const translateButton =
+      header.querySelector<HTMLButtonElement>('button[title="翻译"]');
+    expect(translateButton).not.toBeNull();
+    await act(async () => translateButton?.click());
+    expect(document.body.textContent).toContain('翻译结果');
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    const translationContent = document.body.querySelector(
+      '[class*="translationContent"]',
+    ) as HTMLElement;
+    expect(translationContent).toBeTruthy();
+    act(() => translationContent.click());
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    const retranslateButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === '重新翻译');
+    expect(retranslateButton).toBeTruthy();
+    await act(async () => retranslateButton?.click());
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
   });
 
   it('keeps the single tool compact when thinking is folded in', () => {
@@ -1614,9 +2792,11 @@ describe('thinking rows in the compact summary', () => {
       ],
     );
 
+    act(() => container.querySelector('button')?.click());
     act(() => {
-      container.querySelector('button')?.click();
-      for (const header of container.querySelectorAll('[role="button"]')) {
+      for (const header of container.querySelectorAll(
+        '[data-testid="compact-thinking-summary"]',
+      )) {
         (header as HTMLElement).click();
       }
     });
@@ -1630,6 +2810,46 @@ describe('thinking rows in the compact summary', () => {
     expect(
       positions.every((v, i) => v >= 0 && (i === 0 || v > positions[i - 1]!)),
     ).toBe(true);
+  });
+
+  it('renders a thought bound to a later parallel agent after the agent group', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'first' },
+        }),
+        makeTool({
+          callId: 'agent-2',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'second' },
+        }),
+      ],
+      {},
+      [{ content: 'second agent reasoning', beforeToolCallId: 'agent-2' }],
+      true,
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const parallelBlock = container.querySelector(
+      '[data-testid="compact-parallel-agents"]',
+    );
+    const thoughtHeader = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(parallelBlock).toBeTruthy();
+    expect(thoughtHeader).toBeTruthy();
+    expect(
+      parallelBlock!.compareDocumentPosition(thoughtHeader) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    expect(container.textContent).not.toContain('second agent reasoning');
+    act(() => thoughtHeader.click());
+    expect(container.textContent).toContain('second agent reasoning');
   });
 });
 
@@ -1695,9 +2915,916 @@ describe('tool output logic', () => {
     ).toBe(fileDiff);
   });
 
+  it('keeps confirmed diff content on a subsequently cancelled tool', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          wasCancelled: true,
+          content: [
+            {
+              type: 'diff',
+              oldText: 'old content',
+              newText: 'confirmed content',
+            },
+          ],
+        }),
+      ),
+    ).toContain('confirmed content');
+  });
+
   it('builds a unified diff for changed content blocks', () => {
     expect(buildUnifiedDiff('same\nold', 'same\nnew')).toBe(
       ' same\n-old\n+new',
     );
+  });
+
+  it('uses a typed file-diff preview without raw output', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'DOCUMENT_DIFF_DETAIL',
+          },
+        }),
+      ),
+    ).toContain('DOCUMENT_DIFF_DETAIL');
+  });
+
+  it('uses an old-text-only preview for a delete-only diff', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'deleted content',
+          },
+        }),
+      ),
+    ).toContain('-deleted content');
+  });
+
+  it('builds a diff from the edit tool’s real parameter names on the full projection', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'REAL_PARAMETER_DIFF',
+          },
+        }),
+      ),
+    ).toContain('REAL_PARAMETER_DIFF');
+  });
+
+  it('does not render an attempted real-parameter diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
+  });
+
+  it('does not render an attempted typed diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
+  });
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted typed diff for a %s safe projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-edit',
+        kind: 'tool',
+        toolCallId: 'edit-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: {
+          kind: 'file_diff',
+          path: 'document.ts',
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block], {
+        safeToolProjection: true,
+      });
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toBeDefined();
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted raw-input diff for a %s default projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-default-edit',
+        kind: 'tool',
+        toolCallId: 'edit-default-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: { kind: 'generic' },
+        rawInput: {
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block]);
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toMatchObject({
+        status: 'completed',
+        wasCancelled: true,
+      });
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
+});
+
+describe('pending edit approval rows', () => {
+  it('locks the row while an approval is pending, even for mixed-case tool names', () => {
+    // Daemon adapters pass tool names through unnormalized; the pending-edit
+    // treatment must not silently stop applying when the wire value carries
+    // case variations (every sibling is*ToolName helper lowercases
+    // internally).
+    const tool = makeTool({
+      toolName: 'WriteFile',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+    });
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: tool.callId,
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+
+    // The native diff editor owns the approval interaction: no auto-expand
+    // and no expand affordance while the approval is outstanding.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+  });
+
+  // R3-11: the approval reaches sub-agent rows through a different path than a
+  // top-level edit — hasSubToolApproval keeps the agent row shown and the panel
+  // only receives the approval while the host owns the diff preview. Neither
+  // half had a witness.
+  it('keeps a sub-agent row open for a nested edit approval the host owns', () => {
+    const tool = makeTool({
+      callId: 'agent-1',
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [
+        { callId: 'sub-edit', toolName: 'WriteFile', status: 'pending' },
+      ],
+    });
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: 'sub-edit',
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+
+    // The approval belongs to a tool call inside the agent, not to the agent's
+    // own launch, so the row must stay open — collapsing it would hide the
+    // edit the user is being asked to approve.
+    expect(container.textContent).toContain('WriteFile');
+
+    // Control: the same agent with nothing pending stays collapsed, so the
+    // assertion above is about the approval and not about agent rows always
+    // rendering their sub-tools.
+    const withoutApproval = renderToolLine(
+      tool,
+      {},
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(withoutApproval.textContent).not.toContain('WriteFile');
+  });
+
+  it('keeps pending edit rows expandable when the host does not own the diff', () => {
+    const tool = makeTool({
+      toolName: 'WriteFile',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+    });
+    const container = renderToolLine(tool, {
+      approval: {
+        id: 'perm-edit',
+        toolCallId: tool.callId,
+        toolName: 'WriteFile',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
+
+    expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
+  });
+
+  it('hands a pending bare-write row back to the shell already expanded', () => {
+    const tool = makeTool({
+      toolName: 'write',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+      // The hand-back only matters if the edit is on screen again, so the
+      // fixture has to carry the diff the lock presupposes — without content
+      // `extractDiff` returns '' and the expanded card renders empty.
+      content: [
+        {
+          type: 'diff',
+          oldText: 'old content',
+          newText: 'handed back content',
+        },
+      ],
+    });
+
+    // While the host shows the diff natively the row is deliberately locked:
+    // `write` is an edit alias, so the native editor owns the interaction.
+    const hostOwned = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-write',
+          toolCallId: tool.callId,
+          toolName: 'write',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(hostOwned.querySelector('[class*="lineExpandable"]')).toBeNull();
+
+    // Handing the preview back has to unlock *and* auto-expand it, or the user
+    // is left with an approval whose content is nowhere on screen. The expanded
+    // renderer already handles the bare name, so only shouldAutoExpand has to
+    // agree with isEditToolName about it.
+    const handedBack = renderToolLine(tool, {
+      approval: {
+        id: 'perm-write',
+        toolCallId: tool.callId,
+        toolName: 'write',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
+    expect(
+      handedBack.querySelector('[class*="lineExpandable"]'),
+    ).not.toBeNull();
+    expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+    // ...and the edit itself is lookable again — the whole point of the
+    // hand-back (#10557). Without content in the fixture the expanded card is
+    // empty and the two assertions above pass with nothing on screen.
+    expect(handedBack.textContent).toContain('handed back content');
+  });
+});
+
+describe('generic tool card details', () => {
+  it('pretty-prints arguments and a compact JSON result on expansion', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__github__pull_request_read',
+        args: { method: 'get_check_runs', owner: 'QwenLM' },
+        rawOutput: '{"total_count":38,"check_runs":[{"name":"smoke"}]}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Arguments');
+    expect(text).toContain('Result');
+    expect(text).toContain('"method": "get_check_runs"');
+    expect(text).toContain('"total_count": 38');
+    expect(text).not.toContain('"total_count":38');
+  });
+
+  it('keeps a non-JSON result as plain text', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__echo',
+        rawOutput: 'line one\nline two',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('line one');
+    expect(container.textContent).toContain('line two');
+    expect(container.querySelector('[class*="payloadText"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadJson"]')).toBeNull();
+  });
+
+  it('shows the failure text in the Result block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__fail',
+        status: 'failed',
+        content: [{ type: 'content', content: { type: 'text', text: 'boom' } }],
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('boom');
+  });
+
+  it('offers Show more for a payload over the inline cap', () => {
+    const tail = 'TAIL-MARKER';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__dump',
+        rawOutput: `${'x'.repeat(4200)}${tail}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('renders a payload under the inline cap whole without Show more', () => {
+    const tail = 'SHORT-TAIL';
+    const rawOutput = `${'a'.repeat(3900 - tail.length)}${tail}`;
+    expect(rawOutput).toHaveLength(3900);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__short', rawOutput }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain(tail);
+    expect(container.textContent).not.toContain('Content truncated');
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Show more',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('offers Show more when pretty-printing grows a payload past the cap', () => {
+    const tail = 'TAIL-MARKER';
+    const items = [
+      ...Array.from({ length: 160 }, (_, i) => ({ id: i, name: 'x' })),
+      { id: 160, name: tail },
+    ];
+    const compact = JSON.stringify(items);
+    // Guard the fixture: the raw payload fits inline, the formatted one does
+    // not, so the button must follow the formatted length.
+    expect(compact.length).toBeLessThanOrEqual(4000);
+    expect(JSON.stringify(items, null, 2).length).toBeGreaterThan(4000);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__grow', rawOutput: compact }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('stops at the expanded cap and keeps the truncation notice', () => {
+    const midMarker = 'MID-MARKER';
+    const pastCap = 'PAST-40K-MARKER';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__huge',
+        rawOutput: `${'x'.repeat(39_900)}${midMarker}${'x'.repeat(100)}${pastCap}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(midMarker);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(midMarker);
+    expect(container.textContent).not.toContain(pastCap);
+    expect(container.textContent).toContain('Content truncated');
+  });
+
+  it('keeps the header description out of the expanded body', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title: 'Inspect check runs',
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(
+      'Inspect check runs',
+    ).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a long description in the expanded card detail', () => {
+    const title =
+      `Inspect check runs ${'and report failures '.repeat(4)}`.trim();
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title,
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(title).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a long search description in the expanded card detail', () => {
+    const title =
+      `Search the repository ${'for matching files '.repeat(4)}`.trim();
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'grep_search',
+        title,
+        args: { pattern: 'needle' },
+        rawOutput: 'No matches found',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(title);
+  });
+
+  it('keeps a malformed todo description in the expanded card detail', () => {
+    const description = 'Malformed todo payload';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'todo_write',
+        title: description,
+        args: { todos: 'not-a-list' },
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(description).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a short description when a custom header omits it', () => {
+    const description = 'Inspect check runs';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title: description,
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+      { renderToolHeaderExtra: () => <span>custom header</span> },
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(description);
+  });
+
+  it('keeps a short description in a single-tool document detail', () => {
+    const description = 'Inspect check runs';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__inspect',
+          title: description,
+          args: { method: 'get_check_runs' },
+          rawOutput: '{"total_count":38}',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(description);
+  });
+
+  it('keeps a long description when a single-tool card hides its header', () => {
+    const description = `Inspect check runs ${'and report failures '.repeat(8)}`;
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__inspect',
+          title: description,
+          args: { method: 'get_check_runs' },
+          rawOutput: '{"total_count":38}',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).toContain(description.trim());
+  });
+
+  it('does not render an empty Arguments section', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__empty', args: {}, rawOutput: 'ok' }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain('Arguments');
+    expect(container.textContent).toContain('Result');
+  });
+
+  it('joins every text content block in the Result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__multi',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'first block' } },
+          { type: 'content', content: { type: 'text', text: 'second block' } },
+        ],
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('first block');
+    expect(container.textContent).toContain('second block');
+  });
+
+  it('shows a waiting Result for a pending call with arguments', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'in_progress',
+        args: { method: 'ping' },
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('Waiting for output…');
+  });
+
+  it('shows a waiting Result for a pending call with no payload', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__slow', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(
+      'Waiting for output…',
+    ).length;
+    expect(occurrences - 1).toBe(1);
+    expect(container.textContent).toContain('Result');
+  });
+
+  it('sanitizes control characters in generic payloads', () => {
+    const raw = 'a\u202eb\x1bc';
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__unsafe', rawOutput: raw }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('\\u202e');
+    expect(text).toContain('\\u001b');
+    expect(text).not.toContain('\u202e');
+    expect(text).not.toContain('\x1b');
+  });
+
+  it('sanitizes control characters in generic JSON payloads', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__unsafe-json',
+        rawOutput: '{"n":"a\u202eb"}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('\\u202e');
+    expect(text).not.toContain('\u202e');
+  });
+
+  it('offers Show more when escaping grows the payload past the cap', () => {
+    const tail = 'NUL-TAIL';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__nul',
+        rawOutput: `${'\u0000'.repeat(2000)}${tail}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    const payload = container.querySelector('[class*="payloadText"]');
+    expect(payload).not.toBeNull();
+    expect(payload?.textContent?.length ?? 0).toBeLessThanOrEqual(4003);
+    expect(container.textContent).toContain('Content truncated');
+    expect(container.textContent).not.toContain(tail);
+
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('does not repeat a cancelled call input as the result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'completed',
+        wasCancelled: true,
+        args: { method: 'ping' },
+        rawOutput: {
+          status: 'cancelled',
+          reason: '{"method":"ping"}',
+          text: 'partial',
+        },
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('partial');
+    expect(text).not.toContain('"reason"');
+    expect(text.split('"method": "ping"').length - 1).toBe(1);
+  });
+
+  it('does not render the cancelled input dump as the result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'completed',
+        wasCancelled: true,
+        args: { method: 'ping' },
+        rawOutput: {
+          status: 'cancelled',
+          reason: '{"method":"ping"}',
+          text: '{"method":"ping"}',
+        },
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Cancelled');
+    expect(text.split('"method": "ping"').length - 1).toBe(1);
+  });
+
+  it.each(['output', 'stdout'] as const)(
+    'keeps cancelled %s output visible',
+    (key) => {
+      const output = `partial-${key}`;
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'mcp__demo__cancel-output',
+          status: 'completed',
+          wasCancelled: true,
+          rawOutput: {
+            status: 'cancelled',
+            reason: '{"method":"ping"}',
+            [key]: output,
+          },
+        }),
+        { forceExpanded: true },
+      );
+
+      const text = container.textContent ?? '';
+      expect(text).toContain(output);
+      expect(text).not.toContain('"reason"');
+    },
+  );
+
+  it('keeps a cancelled string output visible', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__cancel-string',
+        status: 'completed',
+        wasCancelled: true,
+        rawOutput: 'partial-string',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('partial-string');
+  });
+
+  it('shows Cancelled when a cancelled call has no output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__cancel-empty',
+        status: 'completed',
+        wasCancelled: true,
+        rawOutput: {},
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Cancelled');
+    expect(container.textContent).not.toContain('Waiting for output…');
+  });
+
+  it('offers Show more for a large arguments payload', () => {
+    const tail = 'ARG-TAIL';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__bigargs',
+        args: { body: `${'y'.repeat(4200)}${tail}` },
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Show more',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('offers Show more when escaping grows the arguments past the cap', () => {
+    const tail = 'ARG-ESCAPED-TAIL';
+    // JSON.stringify escapes C0 bytes but leaves the bidi controls that
+    // sanitizeControlChars renders as `\u202e`, so this payload only crosses
+    // the inline cap once escaping is counted.
+    const args = { note: `${'\u202e'.repeat(500)}${'a'.repeat(3000)}${tail}` };
+    const raw = JSON.stringify(args, null, 2);
+    expect(raw.length).toBeLessThanOrEqual(4000);
+    expect(sanitizeControlChars(raw).length).toBeGreaterThan(4000);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__bidiargs', args }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('bounds generic arguments in document mode', () => {
+    const tail = 'ARG-DOCUMENT-TAIL';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__bigargs',
+          args: { content: `${'x'.repeat(50_000)}${tail}` },
+          rawOutput: 'ok',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    expect(container.textContent).toContain('Content truncated');
+  });
+
+  it('keeps document-mode JSON formatting above the interactive budget', () => {
+    const items = Array.from({ length: 1200 }, (_, i) => ({
+      id: i,
+      name: 'x'.repeat(30),
+    }));
+    const raw = JSON.stringify(items);
+    const formatted = JSON.stringify(items, null, 2);
+    expect(raw.length).toBeGreaterThan(40_000);
+    expect(formatted.length).toBeLessThan(100_000);
+
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__docjson',
+          rawOutput: raw,
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.querySelector('[class*="payloadJson"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadText"]')).toBeNull();
+  });
+
+  it('shows the full payload without Show more in document mode', () => {
+    const tail = 'DOCUMENT-TAIL';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__dump',
+          rawOutput: `${'x'.repeat(4200)}${tail}`,
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).toContain(tail);
+    expect(container.textContent).not.toContain('Show more');
+  });
+
+  it('keeps highlighting for a many-line JSON result within the char budget', () => {
+    const items = Array.from({ length: 400 }, (_, i) => ({ id: i }));
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__many',
+          rawOutput: JSON.stringify(items),
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    // Pretty-printed, the payload spans well over 1000 lines but stays within
+    // the render cap; it must render as a highlighted JSON block, not fall back
+    // to the plain-text container.
+    expect(container.querySelector('[class*="payloadJson"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadText"]')).toBeNull();
   });
 });

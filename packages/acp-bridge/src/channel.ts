@@ -36,12 +36,14 @@ export interface AcpChannel {
   transportFailed?: Promise<unknown>;
   /** Present only on daemon-owned bounded transports. */
   transportGuard?: AcpChannelTransportGuard;
-  /** Best-effort terminate; resolves when teardown is complete. */
+  /** Best-effort terminate; resolves when owned teardown is complete. */
   kill(): Promise<void>;
+  /** Resolves only after this owned child leaves process-registry accounting. */
+  registryReleased?: Promise<void>;
   /**
    * Synchronous force-kill for the second-signal force-exit path.
-   * Fires SIGKILL on the underlying child (or equivalent in-process
-   * tear-down) and returns immediately — no Promise. The daemon's
+   * Force-kills the owned process tree (or equivalent in-process tear-down)
+   * and returns immediately — no Promise. The daemon's
    * signal handler can call this before `process.exit(1)` so that
    * double-Ctrl+C doesn't leave the agent child running after the
    * daemon vanishes.
@@ -70,7 +72,14 @@ export interface AcpChannelExitInfo {
   signalCode: NodeJS.Signals | null;
 }
 
+export interface ChannelFactoryStartupContext {
+  // Report the blocking condition when the bridge startup deadline expires.
+  getTimeoutError?: () => Error;
+}
+
 export type ChannelFactory = (
   workspaceCwd: string,
   childEnvOverrides?: Readonly<Record<string, string | undefined>>,
+  signal?: AbortSignal,
+  startup?: ChannelFactoryStartupContext,
 ) => Promise<AcpChannel>;

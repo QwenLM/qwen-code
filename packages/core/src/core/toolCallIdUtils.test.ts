@@ -5,14 +5,23 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { Content, Part } from '@google/genai';
+import type { Content, FunctionCall, Part } from '@google/genai';
 import {
   collectToolCallIdsFromHistory,
   dedupeToolCallsById,
+  getCachedToolCallFingerprint,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
+  getToolCallFingerprint,
+  isReplayOfHandledToolCall,
   normalizeModelToolCallIds,
+  recordHandledToolCall,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
+import {
+  markToolCallArgumentsIncomplete,
+  toolCallArgumentsWereIncomplete,
+} from './incomplete-tool-call-args.js';
 
 describe('toolCallIdUtils', () => {
   it('suffixes cross-turn duplicate ids and drops same-turn replays', () => {
@@ -101,6 +110,36 @@ describe('toolCallIdUtils', () => {
     ).toEqual([undefined, undefined]);
   });
 
+  it('carries the incomplete-arguments marker across normalization', () => {
+    const parts: Part[] = [
+      { functionCall: { id: 'call-1', name: 'write_file', args: {} } },
+      { functionCall: { name: 'read_file', args: {} } },
+    ];
+    markToolCallArgumentsIncomplete([parts[0]!]);
+
+    const normalized = normalizeModelToolCallIds(
+      parts,
+      new Set<string>(),
+      new Set<string>(),
+    );
+
+    // The marker is non-enumerable, so the `{ ...functionCall, id }` rebuild
+    // drops it unless it is re-attached — and without it both scheduler
+    // consumers of `hadIncompleteArguments` are unreachable (#12970).
+    expect(toolCallArgumentsWereIncomplete(normalized[0]!.functionCall!)).toBe(
+      true,
+    );
+    expect(toolCallArgumentsWereIncomplete(normalized[1]!.functionCall!)).toBe(
+      false,
+    );
+    // Still invisible to enumeration, so it cannot leak into history or a log.
+    expect(Object.keys(normalized[0]!.functionCall!)).toEqual([
+      'id',
+      'name',
+      'args',
+    ]);
+  });
+
   it('reserves a fresh model tool call id', () => {
     const usedIds = new Set<string>();
     const reservedIds = new Map<string, string>();
@@ -160,5 +199,121 @@ describe('toolCallIdUtils', () => {
       calls[3],
       calls[4],
     ]);
+  });
+
+  describe('replay detection fingerprints', () => {
+    it('treats a handled id as a replay only when name and args match', () => {
+      const handled = new Map<string, string>();
+      recordHandledToolCall(
+        handled,
+        'shell_0',
+        getToolCallFingerprint('run_shell_command', { command: 'ls -la' }),
+      );
+
+      expect(
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', { command: 'ls -la' }),
+        ),
+      ).toBe(true);
+      expect(
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', {
+            command: 'git status',
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('read_file', { command: 'ls -la' }),
+        ),
+      ).toBe(false);
+      expect(
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_1',
+          getToolCallFingerprint('run_shell_command', { command: 'ls -la' }),
+        ),
+      ).toBe(false);
+    });
+
+    it('ignores argument key order in fingerprints', () => {
+      expect(getToolCallFingerprint('edit', { a: 1, b: [2, 3] })).toBe(
+        getToolCallFingerprint('edit', { b: [2, 3], a: 1 }),
+      );
+      expect(getToolCallFingerprint('edit', { a: 1 })).not.toBe(
+        getToolCallFingerprint('edit', { a: 2 }),
+      );
+    });
+
+    it('caches the fingerprint per carrier object, hashing args once', () => {
+      const request = {
+        name: 'run_shell_command',
+        args: { command: 'echo once' },
+      };
+      const first = getCachedToolCallFingerprint(
+        request,
+        request.name,
+        request.args,
+      );
+      expect(first).toBe(
+        getToolCallFingerprint('run_shell_command', { command: 'echo once' }),
+      );
+
+      // Mutating the args afterwards must not change the cached identity:
+      // the cache assumes a carrier's call identity never changes, so the
+      // second lookup is a pure cache hit with no re-hash.
+      request.args.command = 'echo mutated';
+      expect(
+        getCachedToolCallFingerprint(request, request.name, request.args),
+      ).toBe(first);
+    });
+
+    it('serves getFunctionCallFingerprint cache hits without rehashing', () => {
+      const functionCall: FunctionCall = {
+        id: 'call_cache',
+        name: 'write_file',
+        args: { file_path: 'a.ts', content: 'original' },
+      };
+
+      const first = getFunctionCallFingerprint(functionCall);
+      (functionCall.args as Record<string, unknown>)['content'] = 'mutated';
+
+      expect(getFunctionCallFingerprint(functionCall)).toBe(first);
+    });
+
+    it('keeps the first occurrence when recording a colliding id', () => {
+      const handled = new Map<string, string>();
+      recordHandledToolCall(
+        handled,
+        'shell_0',
+        getToolCallFingerprint('run_shell_command', { command: 'first' }),
+      );
+      recordHandledToolCall(
+        handled,
+        'shell_0',
+        getToolCallFingerprint('run_shell_command', { command: 'second' }),
+      );
+
+      expect(
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', { command: 'first' }),
+        ),
+      ).toBe(true);
+      expect(
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', { command: 'second' }),
+        ),
+      ).toBe(false);
+    });
   });
 });

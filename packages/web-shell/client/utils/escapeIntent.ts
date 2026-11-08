@@ -8,7 +8,7 @@ export type EscArmedAction = 'cancel' | 'clear';
 export interface EscapeContext {
   /** A pending approval or blocking dialog swallows Escape entirely. */
   blocked: boolean;
-  /** A turn is in flight (streamingState !== 'idle'). */
+  /** A turn is in flight (streaming, or the daemon reports an active prompt). */
   streaming: boolean;
   /** The composer currently has text that could be cleared. */
   hasInput: boolean;

@@ -11,16 +11,12 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::approval::{
-    consume_existing_profile_approval, consume_prepare_approval, validate_profile,
-    ExistingProfileApprovalScope,
-};
 use super::engine::unsupported_engine_refusal;
 use super::platform::{
     BrowserConsentOutcome, BrowserConsentRequest, ExistingProfileSetupOutcome,
     ExistingProfileSetupRequest, PrepareAction, PrepareAttachment, PrepareAttachmentKind,
-    PrepareAuthorization, PrepareOutcome, PrepareProfile, PrepareProfileMode, PrepareRequest,
-    PrepareSideEffects, PrepareStrategy,
+    PrepareOutcome, PrepareProfile, PrepareProfileMode, PrepareRequest, PrepareSideEffects,
+    PrepareStrategy,
 };
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::types::{
@@ -30,6 +26,39 @@ use super::BrowserEngine;
 
 const PROFILE_MARKER: &str = ".qwen-cua-driver-owned-profile.json";
 const PROFILE_SCHEMA: &str = "qwen-cua-driver-browser-profile-v1";
+
+fn validate_profile(profile: &PrepareProfile) -> Result<(), BrowserRefusal> {
+    match profile.mode {
+        PrepareProfileMode::IsolatedNew => {
+            if profile.name.is_some() {
+                return Err(refusal(
+                    BrowserRefusalCode::BrowserConsentRequired,
+                    "profile.name is not valid with mode=isolated_new",
+                ));
+            }
+        }
+        PrepareProfileMode::IsolatedNamed => {
+            let Some(name) = profile.name.as_deref() else {
+                return Err(refusal(
+                    BrowserRefusalCode::BrowserConsentRequired,
+                    "profile.name is required with mode=isolated_named",
+                ));
+            };
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err(refusal(
+                    BrowserRefusalCode::BrowserConsentRequired,
+                    "profile.name must be 1-64 ASCII letters, digits, '-' or '_'",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 async fn claim_with_optional_consent<T, Claim, Consent>(
     claim: &mut Pin<Box<Claim>>,
@@ -299,15 +328,9 @@ fn cleanup_created_profile(profile: &PreparedProfile) {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_linux_isolated_browser_command(
-    command: &mut Command,
-    native_wayland: bool,
-    no_sandbox: bool,
-) {
+fn configure_linux_isolated_browser_command(command: &mut Command, no_sandbox: bool) {
     command.arg("--password-store=basic");
-    if native_wayland {
-        command.arg("--ozone-platform=wayland");
-    }
+    command.arg("--ozone-platform=x11");
     if no_sandbox {
         command.arg("--no-sandbox");
     }
@@ -335,12 +358,8 @@ fn isolated_browser_command(executable: &str, profile: &Path) -> Command {
         .arg("--window-size=900,640");
     #[cfg(target_os = "linux")]
     {
-        let native_wayland = std::env::var("XDG_SESSION_TYPE")
-            .is_ok_and(|session| session.eq_ignore_ascii_case("wayland"))
-            && std::env::var_os("WAYLAND_DISPLAY").is_some()
-            && std::env::var_os("DISPLAY").is_none();
         let no_sandbox = std::env::var("CUA_E2E_BROWSER_NO_SANDBOX").as_deref() == Ok("1");
-        configure_linux_isolated_browser_command(&mut command, native_wayland, no_sandbox);
+        configure_linux_isolated_browser_command(&mut command, no_sandbox);
     }
     let stderr = if std::env::var_os("CUA_E2E_BROWSER_STDERR").is_some() {
         Stdio::inherit()
@@ -670,19 +689,6 @@ impl BrowserEngine {
             )
         })?;
         validate_profile(profile_request)?;
-        match request.authorization.as_ref() {
-            Some(PrepareAuthorization::McpHost) => {}
-            Some(PrepareAuthorization::ApprovalArtifact(token)) => {
-                consume_prepare_approval(token, request.pid, profile_request)?;
-            }
-            None => {
-                return Err(refusal(
-                    BrowserRefusalCode::BrowserConsentRequired,
-                    "browser preparation needs MCP host approval or a fresh browser-approve token",
-                ))
-            }
-        }
-
         let classification = self.platform.classify_browser(request.pid).await?;
         if !classification.supports_cdp || classification.engine != BrowserEngineFamily::Chromium {
             return Err(unsupported_engine_refusal(
@@ -769,7 +775,6 @@ impl BrowserEngine {
             Protected,
             BoundedManifest,
             LaunchGrant,
-            LegacyArtifact,
             Unrestricted,
         }
 
@@ -779,11 +784,6 @@ impl BrowserEngine {
                 "strategy=existing_profile requires an exact window_id approval anchor",
             )
         })?;
-        let scope = ExistingProfileApprovalScope {
-            pid: request.pid,
-            window_id,
-            session: request.session.clone(),
-        };
         let mode = crate::tool::current_dispatch_authorization_context()
             .map(|context| context.mode())
             .map(Ok)
@@ -803,10 +803,10 @@ impl BrowserEngine {
                     "bounded existing-profile attachment requires a live session authorization context",
                 )
             })?;
-            let manifest = context.bounded_manifest().ok_or_else(|| {
+            let manifest = context.capability_manifest().ok_or_else(|| {
                 refusal(
                     BrowserRefusalCode::BrowserConsentRequired,
-                    "bounded existing-profile attachment requires an approved session manifest",
+                    "bounded existing-profile attachment requires an approved capability manifest",
                 )
             })?;
             manifest
@@ -824,27 +824,6 @@ impl BrowserEngine {
             ConsentPath::LaunchGrant
         } else if self.approval_broker.provider_id().is_some() {
             ConsentPath::Protected
-        } else if crate::authorization::legacy_existing_profile_approval_enabled() {
-            match request.authorization.as_ref() {
-                Some(PrepareAuthorization::ApprovalArtifact(token)) => {
-                    consume_existing_profile_approval(token, &scope)?;
-                    ConsentPath::LegacyArtifact
-                }
-                // The ordinary MCP destructive-tool marker proves transport
-                // provenance, not a person's approval of their authenticated
-                // profile. It is deliberately insufficient here.
-                Some(PrepareAuthorization::McpHost) | None => {
-                    return Err(refusal(
-                        BrowserRefusalCode::BrowserConsentRequired,
-                        "legacy existing-profile compatibility requires a fresh operation-bound browser-approve artifact",
-                    )
-                    .with_detail(serde_json::json!({
-                        "approval_request_id": uuid::Uuid::new_v4().to_string(),
-                        "approval_command": "qwen-cua-driver browser-approve --strategy existing_profile --pid <pid> --window-id <window_id> --session <session>",
-                        "legacy_approval_enabled": true,
-                    })));
-                }
-            }
         } else {
             return Err(refusal(
                 BrowserRefusalCode::BrowserConsentRequired,
@@ -853,7 +832,6 @@ impl BrowserEngine {
             .with_detail(serde_json::json!({
                 "permission_mode": mode.as_str(),
                 "authorization_required": true,
-                "legacy_approval_enabled": false,
                 "authorization_host": self.approval_broker.provider_id(),
             })));
         };
@@ -985,7 +963,7 @@ impl BrowserEngine {
 
         // Host authorization is requested only after the exact process,
         // native window, browser product, and endpoint owner have all been
-        // proven. Bounded manifests, launch grants, and unrestricted mode
+        // proven. Bounded capability manifests, launch grants, and unrestricted mode
         // never enter this callback path.
         let protected_consent = if matches!(consent_path, ConsentPath::Protected) {
             let transport_session = request
@@ -1456,15 +1434,15 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn isolated_launch_can_select_native_wayland_and_test_vm_sandbox_mode() {
+    fn isolated_launch_selects_x11_and_test_vm_sandbox_mode() {
         let mut command = Command::new("chromium-under-test");
-        configure_linux_isolated_browser_command(&mut command, true, true);
+        configure_linux_isolated_browser_command(&mut command, true);
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.iter().any(|arg| arg == "--password-store=basic"));
-        assert!(args.iter().any(|arg| arg == "--ozone-platform=wayland"));
+        assert!(args.iter().any(|arg| arg == "--ozone-platform=x11"));
         assert!(args.iter().any(|arg| arg == "--no-sandbox"));
     }
 }

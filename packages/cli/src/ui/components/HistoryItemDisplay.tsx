@@ -5,13 +5,13 @@
  */
 
 import type React from 'react';
-import { memo, useMemo, useRef, useCallback } from 'react';
+import { memo, useMemo, useRef, useCallback, useState } from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
 } from '../utils/textUtils.js';
-import type { HistoryItem } from '../types.js';
+import { ToolCallStatus, type HistoryItem } from '../types.js';
 import {
   UserMessage,
   UserShellMessage,
@@ -32,7 +32,7 @@ import {
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import { theme } from '../semantic-colors.js';
 import {
   MarkdownDisplay,
@@ -47,7 +47,7 @@ import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
 import { Help } from './Help.js';
 import type { SlashCommand } from '../commands/types.js';
 import { ExtensionsList } from './views/ExtensionsList.js';
-import { getMCPServerStatus } from '@qwen-code/qwen-code-core';
+import { getMCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
@@ -56,15 +56,20 @@ import { DoctorReport } from './views/DoctorReport.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { AdvisorMessage } from './messages/AdvisorMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import { useToolDetailsExpanded } from '../contexts/ToolDetailsExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
+import { hyperlinkAtCell } from '../utils/hyperlink-at.js';
+import { getScreenBuffer } from '../selection/screen-buffer.js';
 import {
   measureElementPosition,
   layoutRowForEvent,
@@ -82,7 +87,7 @@ interface HistoryItemDisplayProps {
   commands?: readonly SlashCommand[];
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
-  availableTerminalHeightGemini?: number;
+  availableTerminalHeightLlm?: number;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
@@ -126,12 +131,16 @@ const ClickableThinkMessage: React.FC<{
   const ref = useRef<DOMElement>(null);
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
+  const { stdout } = useStdout();
   const settings = useSettings();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled;
-  const isActive = !isPending;
+  // Quiet while the context menu owns the pointer so a click on the menu
+  // overlay can't also toggle the thought underneath it.
+  const { menu: contextMenu } = useContextMenu();
+  const isActive = !isPending && contextMenu === null;
 
   useMouseEvents(
     useCallback(
@@ -168,10 +177,20 @@ const ClickableThinkMessage: React.FC<{
         const press = pressRef.current;
         pressRef.current = null;
         if (isInside && press?.col === event.col && press.row === event.row) {
-          onToggle();
+          // 鼠标事件广播给所有订阅者：单击落在 OSC 8 链接上时，
+          // ContentMouseController 负责打开链接，这里不再切换折叠，
+          // 否则一次单击会既折叠思考块又打开链接。
+          const url = hyperlinkAtCell(
+            getScreenBuffer(stdout)?.frame ?? null,
+            col,
+            row,
+          );
+          if (!url) {
+            onToggle();
+          }
         }
       },
-      [onToggle, terminalHeight],
+      [onToggle, terminalHeight, stdout],
     ),
     { isActive },
   );
@@ -188,6 +207,120 @@ const ClickableThinkMessage: React.FC<{
         clickable={clickable}
       />
     </Box>
+  );
+};
+
+function hasRequiredToolInteraction(
+  props: React.ComponentProps<typeof ToolGroupMessage>,
+): boolean {
+  if (props.isUserInitiated) return true;
+  if (
+    props.embeddedShellFocused &&
+    props.toolCalls.some(
+      (tool) =>
+        tool.ptyId === props.activeShellPtyId &&
+        tool.status === ToolCallStatus.Executing,
+    )
+  ) {
+    return true;
+  }
+
+  return props.toolCalls.some((tool) => {
+    if (tool.status === ToolCallStatus.Confirming) return true;
+    const display = tool.resultDisplay;
+    return (
+      typeof display === 'object' &&
+      display !== null &&
+      'type' in display &&
+      display.type === 'task_execution' &&
+      'pendingConfirmation' in display &&
+      display.pendingConfirmation !== undefined
+    );
+  });
+}
+
+type CollapsibleToolGroupMessageProps = React.ComponentProps<
+  typeof ToolGroupMessage
+> & {
+  expansionKey?: string;
+};
+
+export const CollapsibleToolGroupMessage: React.FC<
+  CollapsibleToolGroupMessageProps
+> = ({ expansionKey, ...props }) => {
+  const settings = useSettings();
+  const [locallyExpanded, setLocallyExpanded] = useState(false);
+  const { expandedBatchIds, expandBatch } = useToolDetailsExpanded();
+  const ref = useRef<DOMElement>(null);
+  const pressRef = useRef<{ col: number; row: number } | null>(null);
+  const { rows: terminalHeight } = useTerminalSize();
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const clickable =
+    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
+    mouseTrackingEnabled;
+  const collapsed =
+    settings.merged.ui?.showToolCallDetails === false &&
+    !locallyExpanded &&
+    !(expansionKey && expandedBatchIds.has(expansionKey)) &&
+    !props.fullDetail &&
+    !hasRequiredToolInteraction(props);
+
+  useMouseEvents(
+    useCallback(
+      (event: MouseEvent) => {
+        if (!collapsed || !ref.current) return;
+        if (event.name === 'move') {
+          if (
+            pressRef.current &&
+            (event.col !== pressRef.current.col ||
+              event.row !== pressRef.current.row)
+          ) {
+            pressRef.current = null;
+          }
+          return;
+        }
+        if (event.name !== 'left-press' && event.name !== 'left-release') {
+          pressRef.current = null;
+          return;
+        }
+        const metrics = measureElementPosition(ref.current);
+        const col = event.col - 1;
+        const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
+        const isInside =
+          col >= metrics.x &&
+          col < metrics.x + metrics.width &&
+          row >= metrics.y &&
+          row < metrics.y + metrics.height;
+        if (event.name === 'left-press') {
+          pressRef.current = isInside
+            ? { col: event.col, row: event.row }
+            : null;
+          return;
+        }
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (isInside && press?.col === event.col && press.row === event.row) {
+          if (expansionKey) {
+            expandBatch(expansionKey);
+          } else {
+            setLocallyExpanded(true);
+          }
+        }
+      },
+      [collapsed, terminalHeight, expansionKey, expandBatch],
+    ),
+    { isActive: collapsed && clickable },
+  );
+
+  if (!collapsed) return <ToolGroupMessage {...props} />;
+
+  return (
+    <ToolGroupMessage
+      {...props}
+      hideDetails
+      expandHint={clickable ? 'click to expand' : 'ctrl+o to expand'}
+      summaryRef={ref}
+    />
   );
 };
 
@@ -211,6 +344,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'summary':
     case 'insight_progress':
     case 'btw':
+    case 'advisor':
     case 'away_recap':
     case 'user':
     case 'user_prompt_submit_blocked':
@@ -235,7 +369,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
-  availableTerminalHeightGemini,
+  availableTerminalHeightLlm,
   sourceCopyIndexOffsets,
   thoughtExpanded,
   fullDetail = false,
@@ -252,7 +386,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   // `gemini_thought_content` items; all of them key off the head id so one
   // click expands the whole group. Continuations receive the head id via
   // `thoughtHeadId`; the head itself falls back to its own id.
-  const thoughtGroupHeadId = thoughtHeadId ?? item.id;
+  const thoughtGroupId =
+    item.type === 'gemini_thought' || item.type === 'gemini_thought_content'
+      ? item.thoughtGroupId
+      : undefined;
+  const thoughtGroupHeadId = thoughtGroupId ?? thoughtHeadId ?? item.id;
   // Ctrl+O full-detail forces every thought open; otherwise honor an explicit
   // `thoughtExpanded` prop, then the global Alt+T toggle / per-group click set.
   const resolvedThoughtExpanded =
@@ -304,7 +442,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             omittedImageCount={itemForDisplay.omittedImageCount}
             isPending={isPending}
             availableTerminalHeight={
-              availableTerminalHeightGemini ?? availableTerminalHeight
+              availableTerminalHeightLlm ?? availableTerminalHeight
             }
             contentWidth={contentWidth}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -318,7 +456,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           omittedImageCount={itemForDisplay.omittedImageCount}
           isPending={isPending}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -327,10 +465,10 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_thought' && (
         <ClickableThinkMessage
           text={itemForDisplay.text.trimEnd()}
-          isPending={isPending}
+          isPending={isPending && itemForDisplay.isStreaming !== false}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
@@ -340,10 +478,10 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text.trimEnd()}
-          isPending={isPending}
+          isPending={isPending && itemForDisplay.isStreaming !== false}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
         />
@@ -353,6 +491,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           text={itemForDisplay.text}
           linkUrl={itemForDisplay.linkUrl}
           linkText={itemForDisplay.linkText}
+          presentation={itemForDisplay.presentation}
         />
       )}
       {itemForDisplay.type === 'success' && (
@@ -398,7 +537,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'tool_group' && (
-        <ToolGroupMessage
+        <CollapsibleToolGroupMessage
           toolCalls={itemForDisplay.tools}
           groupId={itemForDisplay.id}
           availableTerminalHeight={availableTerminalHeight}
@@ -411,6 +550,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
           fullDetail={fullDetail}
+          expansionKey={itemForDisplay.batchId}
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (
@@ -449,6 +589,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           breakdown={itemForDisplay.breakdown}
           builtinTools={itemForDisplay.builtinTools}
           mcpTools={itemForDisplay.mcpTools}
+          instructionFiles={itemForDisplay.instructionFiles}
           memoryFiles={itemForDisplay.memoryFiles}
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}
@@ -479,6 +620,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
         <BtwMessage btw={itemForDisplay.btw} containerWidth={contentWidth} />
+      )}
+      {itemForDisplay.type === 'advisor' && (
+        <AdvisorMessage
+          text={itemForDisplay.text}
+          model={itemForDisplay.model}
+          containerWidth={contentWidth}
+        />
       )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
         <Box flexDirection="column">

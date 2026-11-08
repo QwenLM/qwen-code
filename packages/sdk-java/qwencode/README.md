@@ -119,6 +119,48 @@ Before creating a session, the SDK requires the daemon to advertise the REST tra
 
 An indeterminate completion is an outcome boundary, not a session-reuse boundary. After `PromptAdmissionUnknownException` or `PromptOutcomeIndeterminateException`, that `DaemonSessionClient` permanently rejects further prompts even if local stream cleanup later succeeds; close or destroy the session instead. An observation timeout is published without waiting forever for a blocked stream close, while cleanup continues asynchronously and retains bounded client capacity until it finishes.
 
+## Hosted Harness private API
+
+`HostedHarnessClient` is the Java control-plane transport for `qwen serve --profile hosted-harness`. Construction performs capability negotiation, verifies the deployment capability digest, and pins the process `bootId`. Every Session request then carries protocol and generation fencing automatically. This API keeps model-loop events raw; product services remain responsible for public Session, Turn, Event, tenant, and workspace authorization state.
+
+```java
+Map<String, Object> text = Map.of("type", "text", "text", "hello");
+String payloadDigest = SubmitHarnessTurn.computePayloadDigest(List.of(text));
+
+try (HostedHarnessClient harness = HostedHarnessClient.builder()
+        .baseUri(URI.create("http://127.0.0.1:4170"))
+        .bearerToken(System.getenv("QWEN_SERVER_TOKEN"))
+        .capabilityDigest(System.getenv(
+                "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"))
+        .build()) {
+    HarnessSessionRef session = harness.createSession(
+            CreateHarnessSession.builder()
+                    .harnessSessionId(UUID.randomUUID().toString())
+                    .build());
+    PromptReceipt receipt = harness.submitTurn(
+            SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(UUID.randomUUID().toString())
+                    .addContent(text)
+                    .payloadDigest(payloadDigest)
+                    .build());
+    try (HarnessEventStream events = harness.streamEvents(
+            StreamHarnessEvents.builder()
+                    .session(session)
+                    .lastEventId(receipt.getLastEventId())
+                    .eventEpoch(receipt.getEventEpoch())
+                    .build())) {
+        for (DaemonEvent event = events.next(); event != null;
+                event = events.next()) {
+            // Persist/project the raw Harness event in the Java product service.
+        }
+    }
+    harness.detachSession(session);
+}
+```
+
+The client permits only one active prompt identity per Session while allowing different Sessions to run concurrently. A retry after `PromptAdmissionUnknownException` must reuse the same `promptId`, payload digest, prompt content, and deadline. The payload digest is a cross-language contract: it is the SHA-256 of a canonical form of the prompt content, sent on the wire as `sha256:<64 lowercase hex>` (object members appear in JavaScript `JSON.stringify` own-key order — array-index keys (`"0"` through `"4294967294"`, no leading zero) ascending numerically first, then the remaining keys in insertion order — applied recursively, array order preserved), the client emits as the wire `prompt` exactly the key order its digest covers, and the server re-derives the identical value by re-serializing the parsed `prompt` member with JavaScript `JSON.stringify` semantics (compact separators, literal non-ASCII). The canonical form is versioned by the SDK: the digest is reproducible across JVM processes for a given release, but a release that changes it changes every persisted digest whose stored key order was not already canonical, so the client accepts a persisted digest computed over the as-built key order when the canonical recomputation does not match, and re-sends the prompt in exactly the shape that digest covers — a legacy row reaches its replay path instead of failing the client-side self-check. That compatibility arm covers one generation: it rescues a row written before the form changed, not a row this release writes, so a second consecutive form change still needs the stored rows quiesced. Do not rewrite a stored digest or a stored input to make it match. SSE boot, epoch, or sequence changes fail closed for transcript/status reconciliation. `close()` releases local HTTP, heartbeat, timer, and stream resources only; it never destroys remote Sessions implicitly. Event streams are bounded by a 45-second idle watchdog that measures peer silence while a consumer is parked in `next()` — time between `next()` calls is not charged (see `Builder.sseIdleTimeout`; `Duration.ZERO` disables it for callers that own the deadline). The watchdog checks every tenth of the budget but no more often than every 100 ms, so an idle abort lands between the budget and the budget plus max(100 ms, a tenth of the budget) — 45 to 49.5 seconds at the default — and any outer supervisor deadline should sit above that upper bound. The abort surfaces as `HostedHarnessStreamIdleException`, a `DaemonTransportException`: it proves the stream went silent, never that the reported work stopped. The hosted events route emits keepalive comments every 15 seconds so legitimately silent phases — long tool calls, slow model phases, approval waits — do not trip the bound, which a custom `sseIdleTimeout` should therefore stay comfortably above. The Harness advertises those keepalives as the `event-keepalive/1` feature; against a Harness that does not advertise it, the client arms no watchdog, so a rolling upgrade never aborts the quiet streams of an older Harness.
+
 ## Legacy stdio API
 
 The existing `com.alibaba.qwen.code.cli` API remains available:
@@ -142,7 +184,7 @@ public static void runTransportOptionsExample() {
             .setIncludePartialMessages(true)
             .setTurnTimeout(new Timeout(120L, TimeUnit.SECONDS))
             .setMessageTimeout(new Timeout(90L, TimeUnit.SECONDS))
-            .setAllowedTools(Arrays.asList("read_file", "write_file", "list_directory"));
+            .setAllowedTools(Arrays.asList("read_file", "write_file", "glob"));
 
     List<String> result = QwenCodeCli.simpleQuery("who are you, what are your capabilities?", options);
     result.forEach(logger::info);
@@ -220,6 +262,7 @@ The SDK supports different permission modes for controlling tool execution:
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
 - **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
+- **`auto`**: An LLM classifier approves tool calls.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Session Event Consumers and Assistant Content Consumers
@@ -315,7 +358,7 @@ The `TransportOptions` class allows configuration of how the SDK communicates wi
 - `permissionMode`: Permission mode that controls tool execution
 - `env`: Environment variables to pass to the CLI process
 - `maxSessionTurns`: Limits the number of conversation turns in a session
-- `coreTools`: List of core tools that should be available to the AI
+- `coreTools`: A non-empty allowlist of core tools. An omitted or empty list is treated as unspecified; an empty list does not disable tools. MCP and other non-core tools have separate registration and permission rules. Use `excludeTools` to exclude named tools explicitly; `allowedTools` controls approval rather than registration.
 - `excludeTools`: List of tools to exclude from being available to the AI
 - `allowedTools`: List of tools that are pre-approved for use without additional confirmation
 - `authType`: Authentication type to use for the session
@@ -344,16 +387,17 @@ The SDK uses a thread pool for managing concurrent operations with the following
 - **Keep-Alive Time**: 60 seconds
 - **Queue Capacity**: 300 tasks (using LinkedBlockingQueue)
 - **Thread Naming**: "qwen_code_cli-pool-{number}"
-- **Daemon Threads**: false
+- **Daemon Threads**: true
 - **Rejected Execution Handler**: CallerRunsPolicy
+
+Tasks still running or queued in the default pool are abandoned when the JVM exits. Callers that require completion must wait for those tasks explicitly.
 
 ## Error Handling
 
 The SDK provides specific exception types for different error scenarios:
 
-- `SessionControlException`: Thrown when there's an issue with session control (creation, initialization, etc.)
+- `SessionControlException`: Thrown when there's an issue with session control, including attempting to use a closed or unavailable session. Session construction and `start()` can throw it directly; `QwenCodeCli.newSession()` wraps lower-level creation and initialization failures in a `RuntimeException`.
 - `SessionSendPromptException`: Thrown when there's an issue sending a prompt or receiving a response
-- `SessionClosedException`: Thrown when attempting to use a closed session
 
 ## FAQ / Troubleshooting
 

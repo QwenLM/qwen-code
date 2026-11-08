@@ -15,12 +15,15 @@
  *  - deleting the session → remove the task
  *
  * These run from the shared session archive/delete choke points, so both the
- * REST and ACP surfaces are covered. Every function is best-effort and a no-op
- * when no task is bound to the given sessions (returning the input array
- * unchanged skips the write), so it's side-effect-free for ordinary sessions.
+ * REST and ACP surfaces are covered. Archive updates skip writes when no task
+ * matches. Deletion also records session tombstones when a task file exists,
+ * because an in-flight one-shot may be temporarily absent from that file.
  */
 
+import { access } from 'node:fs/promises';
 import {
+  cronTaskSessionDeletionId,
+  getCronFilePath,
   updateCronTasks,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -45,24 +48,29 @@ function isBoundTask(
 export async function disableTasksForSessions(
   projectRoot: string,
   sessionIds: string[],
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   if (sessionIds.length === 0) return;
   const targets = new Set(sessionIds);
-  await updateCronTasks(projectRoot, (tasks) => {
-    let changed = false;
-    const next = tasks.map((task) => {
-      if (
-        isBoundTask(task) &&
-        targets.has(task.sessionId) &&
-        task.enabled !== false
-      ) {
-        changed = true;
-        return { ...task, enabled: false, disabledByArchive: true };
-      }
-      return task;
-    });
-    return changed ? next : tasks;
-  });
+  await updateCronTasks(
+    projectRoot,
+    (tasks) => {
+      let changed = false;
+      const next = tasks.map((task) => {
+        if (
+          isBoundTask(task) &&
+          targets.has(task.sessionId) &&
+          task.enabled !== false
+        ) {
+          changed = true;
+          return { ...task, enabled: false, disabledByArchive: true };
+        }
+        return task;
+      });
+      return changed ? next : tasks;
+    },
+    options,
+  );
 }
 
 /**
@@ -77,54 +85,77 @@ export async function enableTasksForSessions(
   projectRoot: string,
   sessionIds: string[],
   now: number = Date.now(),
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   if (sessionIds.length === 0) return;
   const targets = new Set(sessionIds);
-  await updateCronTasks(projectRoot, (tasks) => {
-    let changed = false;
-    const next = tasks.map((task) => {
-      if (
-        isBoundTask(task) &&
-        targets.has(task.sessionId) &&
-        task.enabled === false &&
-        task.disabledByArchive === true
-      ) {
-        changed = true;
-        const resumed: DurableCronTask = { ...task, enabled: true };
-        delete resumed.disabledByArchive;
-        const minute = now - (now % 60_000);
-        if (resumed.recurring) {
-          // Recurring anchor is lastFiredAt: resume from now, not catching up
-          // fires missed while archived.
-          resumed.lastFiredAt = minute;
-        } else {
-          // A one-shot anchors on createdAt: without re-seating it, the
-          // scheduler reads the original long-past slot as a MISSED one-shot on
-          // reload and fires + permanently deletes the task. (Reachable: archive
-          // a task, PATCH it to recurring:false while disabled — the route
-          // re-seat only touches recurring anchors — then unarchive.)
-          resumed.createdAt = now;
-          resumed.lastFiredAt = minute;
+  await updateCronTasks(
+    projectRoot,
+    (tasks) => {
+      let changed = false;
+      const next = tasks.map((task) => {
+        if (
+          isBoundTask(task) &&
+          targets.has(task.sessionId) &&
+          task.enabled === false &&
+          task.disabledByArchive === true
+        ) {
+          changed = true;
+          const resumed: DurableCronTask = { ...task, enabled: true };
+          delete resumed.disabledByArchive;
+          const minute = now - (now % 60_000);
+          if (resumed.recurring) {
+            // Recurring anchor is lastFiredAt: resume from now, not catching up
+            // fires missed while archived.
+            resumed.lastFiredAt = minute;
+          } else {
+            // A one-shot anchors on createdAt: without re-seating it, the
+            // scheduler reads the original long-past slot as a MISSED one-shot on
+            // reload and fires + permanently deletes the task. (Reachable: archive
+            // a task, PATCH it to recurring:false while disabled — the route
+            // re-seat only touches recurring anchors — then unarchive.)
+            resumed.createdAt = now;
+            resumed.lastFiredAt = minute;
+          }
+          return resumed;
         }
-        return resumed;
-      }
-      return task;
-    });
-    return changed ? next : tasks;
-  });
+        return task;
+      });
+      return changed ? next : tasks;
+    },
+    options,
+  );
 }
 
 /** Removes every task bound to one of `sessionIds` (deleted sessions). */
 export async function removeTasksForSessions(
   projectRoot: string,
   sessionIds: string[],
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   if (sessionIds.length === 0) return;
-  const targets = new Set(sessionIds);
-  await updateCronTasks(projectRoot, (tasks) => {
-    const next = tasks.filter(
-      (task) => !isBoundTask(task) || !targets.has(task.sessionId),
-    );
-    return next.length === tasks.length ? tasks : next;
-  });
+  try {
+    await access(getCronFilePath(projectRoot));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  const targets = new Set(sessionIds.map(cronTaskSessionDeletionId));
+  const removedIds: string[] = [];
+  await updateCronTasks(
+    projectRoot,
+    (tasks) => {
+      const next = tasks.filter((task) => {
+        if (
+          !isBoundTask(task) ||
+          !targets.has(cronTaskSessionDeletionId(task.sessionId))
+        )
+          return true;
+        removedIds.push(task.id);
+        return false;
+      });
+      return next.length === tasks.length ? tasks : next;
+    },
+    { ...options, deletionIds: () => [...removedIds, ...targets] },
+  );
 }

@@ -16,6 +16,16 @@ pub struct DoubleClickTool {
     state: Arc<ToolState>,
 }
 
+fn background_action_for_element(
+    has_ax_open: bool,
+) -> cua_driver_core::background_input::BackgroundAction {
+    if has_ax_open {
+        cua_driver_core::background_input::BackgroundAction::AxSemantic
+    } else {
+        cua_driver_core::background_input::BackgroundAction::WindowPointer
+    }
+}
+
 impl DoubleClickTool {
     pub fn new(state: Arc<ToolState>) -> Self {
         Self { state }
@@ -38,7 +48,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["pid"],
             "properties": {
-                "session": { "type": "string", "description": "Optional session id: declares/uses the agent cursor and per-session state for this run. The same id works over MCP, the CLI, or the raw socket, and follows the run across apps/windows. Omit to run cursor-less." },
+                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "pid":           { "type": "integer" },
                 "x":             { "type": "number",  "description": "Screen X coordinate (pixel path)." },
                 "y":             { "type": "number",  "description": "Screen Y coordinate (pixel path)." },
@@ -46,6 +56,7 @@ fn def() -> &'static ToolDef {
                 "element_index": cua_driver_core::tool_schema::element_index_schema(),
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
                 "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),
+                "app_context": { "type": "boolean", "description": "Use app-bound native click routing." },
                 "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema()
             },
             "additionalProperties": false
@@ -65,6 +76,12 @@ impl Tool for DoubleClickTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        if args.bool_or("app_context", false) {
+            let mut args = args;
+            args["button"] = serde_json::json!("left");
+            args["count"] = serde_json::json!(2);
+            return super::click::invoke_app_click(Arc::clone(&self.state), args).await;
+        }
         let pid = match args.require_i32("pid") {
             Ok(v) => v,
             Err(e) => return e,
@@ -90,12 +107,14 @@ impl Tool for DoubleClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
 
@@ -103,7 +122,7 @@ impl Tool for DoubleClickTool {
         if let (Some(idx), Some(wid)) = (element_index, window_id) {
             // Retain out of the cache so a concurrent get_window_state can't
             // free the element mid-action (use-after-free → daemon crash).
-            let element_guard = match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            let element_guard = match element_cache.get_element_retained(pid, wid, idx) {
                 Some(e) => e,
                 None => {
                     return ToolResult::error(format!(
@@ -113,16 +132,47 @@ impl Tool for DoubleClickTool {
             };
             let element_ptr = element_guard.as_ptr();
 
+            // Choose one background actuator before dispatch. An element that
+            // advertises AXOpen uses the exact semantic route; all other
+            // elements require the stricter routed-pointer proof. Do not let a
+            // failed AXOpen silently cross into an ungated pointer fallback.
+            let has_ax_open = tokio::task::spawn_blocking(move || unsafe {
+                copy_action_names(element_ptr as AXUIElementRef)
+                    .iter()
+                    .any(|action| action == "AXOpen")
+            })
+            .await
+            .unwrap_or(false);
+            let _mutation_lease = if !delivery_mode.is_foreground() {
+                let action = background_action_for_element(has_ax_open);
+                match super::gate_background_window_action(pid, wid, Some(element_ptr), action)
+                    .await
+                {
+                    Ok(lease) => Some(lease),
+                    Err(refusal_result) => return refusal_result,
+                }
+            } else {
+                None
+            };
+
             // Thread the resolved session cursor key into the blocking AX path
             // so its ClickPulse lands on THIS session's cursor, not "default".
             let ck = cursor_key.clone();
             let result = tokio::task::spawn_blocking(move || {
-                ax_double_click(pid, wid, element_ptr, idx, &ck)
+                ax_double_click(
+                    pid,
+                    wid,
+                    element_ptr,
+                    idx,
+                    &ck,
+                    has_ax_open,
+                    delivery_mode.is_foreground(),
+                )
             })
             .await;
 
             return match result {
-                Ok(Ok(msg)) => ToolResult::text(msg),
+                Ok(Ok(result)) => result,
                 Ok(Err(e)) => ToolResult::error(format!("double_click failed: {e}")),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
@@ -154,12 +204,53 @@ impl Tool for DoubleClickTool {
         // local point as screen-absolute).
         let (screen_x, screen_y, win_local_x, win_local_y) = if let Some(wid) = window_id {
             match super::px_frame::resolve_or_refuse(wid).await {
-                Ok(frame) => frame.to_screen(cx, cy),
+                Ok(frame) => {
+                    let translated = frame.to_screen(cx, cy);
+                    if !delivery_mode.is_foreground()
+                        && (translated.2 < 0.0
+                            || translated.3 < 0.0
+                            || translated.2 > frame.bounds.width
+                            || translated.3 > frame.bounds.height)
+                    {
+                        return ToolResult::error(format!(
+                            "double_click: window-local point ({:.1}, {:.1}) pt lies outside \
+                             window {wid}'s {:.0}×{:.0} pt frame; background delivery refused",
+                            translated.2, translated.3, frame.bounds.width, frame.bounds.height
+                        ));
+                    }
+                    translated
+                }
                 Err(refusal) => return refusal,
             }
         } else {
             (cx, cy, cx, cy)
         };
+
+        let _mutation_lease = if !delivery_mode.is_foreground() {
+            if let Some(wid) = window_id {
+                match super::gate_background_window_action(
+                    pid,
+                    wid,
+                    None,
+                    cua_driver_core::background_input::BackgroundAction::WindowPointer,
+                )
+                .await
+                {
+                    Ok(lease) => Some(lease),
+                    Err(refusal_result) => return refusal_result,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(refusal) =
+            super::click::libreoffice_pixel_refusal(crate::apps::bundle_id_for_pid(pid).as_deref())
+        {
+            return refusal;
+        }
 
         // Pin overlay above the target window before animating.
         if let Some(wid) = window_id {
@@ -182,7 +273,7 @@ impl Tool for DoubleClickTool {
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let do_click = move || -> anyhow::Result<()> {
                 if let Some(wid) = window_id {
-                    crate::input::mouse::click_at_xy_with_window_local(
+                    crate::input::mouse::click_at_xy_with_window_delivery(
                         pid,
                         screen_x,
                         screen_y,
@@ -191,6 +282,7 @@ impl Tool for DoubleClickTool {
                         wid,
                         2,
                         &[],
+                        crate::input::mouse::WindowClickDelivery::from_foreground(fg),
                     )
                 } else {
                     crate::input::mouse::click_at_xy(pid, screen_x, screen_y, 2, &[])
@@ -235,19 +327,26 @@ fn ax_double_click(
     element_ptr: usize,
     idx: usize,
     cursor_key: &str,
-) -> anyhow::Result<String> {
+    has_ax_open: bool,
+    foreground: bool,
+) -> anyhow::Result<ToolResult> {
     let element = element_ptr as AXUIElementRef;
 
     // Try AXOpen first (Finder items, openable list rows, document cells).
-    let actions = unsafe { copy_action_names(element) };
-    if actions.iter().any(|a| a == "AXOpen") {
+    if has_ax_open {
         let err = unsafe { perform_action(element, "AXOpen") };
         if err == kAXErrorSuccess {
-            return Ok(format!("AXOpen performed on element [{idx}]."));
+            return Ok(ToolResult::text(format!(
+                "AXOpen performed on element [{idx}]."
+            )));
         }
-        tracing::debug!(
-            "AXOpen returned {err} for element [{idx}], falling back to pixel double-click"
-        );
+        return Ok(super::ax_action_unconfirmed("AXOpen", Some(idx), err));
+    }
+
+    if let Some(refusal) =
+        super::click::libreoffice_pixel_refusal(crate::apps::bundle_id_for_pid(pid).as_deref())
+    {
+        return Ok(refusal);
     }
 
     // Resolve screen center and fall back to pixel double-click.
@@ -276,8 +375,35 @@ fn ax_double_click(
              screen coordinates as window-local for element [{idx}]."
             )
         })?;
-    crate::input::mouse::click_at_xy_with_window_local(pid, cx, cy, wx, wy, wid, 2, &[])?;
-    Ok(format!(
+    crate::input::mouse::click_at_xy_with_window_delivery(
+        pid,
+        cx,
+        cy,
+        wx,
+        wy,
+        wid,
+        2,
+        &[],
+        crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
+    )?;
+    Ok(ToolResult::text(format!(
         "✅ Double-clicked element [{idx}] at ({cx:.1}, {cy:.1})."
-    ))
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_element_route_does_not_guess_across_actuator_classes() {
+        assert_eq!(
+            background_action_for_element(true),
+            cua_driver_core::background_input::BackgroundAction::AxSemantic
+        );
+        assert_eq!(
+            background_action_for_element(false),
+            cua_driver_core::background_input::BackgroundAction::WindowPointer
+        );
+    }
 }

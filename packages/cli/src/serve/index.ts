@@ -6,6 +6,11 @@
 
 export { createServeApp, type ServeAppDeps } from './server.js';
 export {
+  getServeAppLifecycle,
+  type ServeAppLifecycle,
+  type ServeAppLifecycleBindingOptions,
+} from './serve-app-lifecycle.js';
+export {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
@@ -60,6 +65,7 @@ export {
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
+  type ServeSessionResourcesStatus,
   type ServeSessionAgentTaskStatus,
   type ServeSessionMonitorTaskStatus,
   type ServeSessionProcessTaskLifecycleStatus,

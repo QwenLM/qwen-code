@@ -10,15 +10,22 @@ import {
   parseConfiguredChannels,
   registerBackgroundResponseRelay,
   registerPermissionRelay,
+  resolveChannelLocale,
   registerSessionCleanup,
   sessionsPath,
 } from './runtime.js';
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
-  hashDaemonWorkspace: (workspace: string) =>
-    workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    APPROVAL_MODES: actual.APPROVAL_MODES,
+    isInternalSecretEnvVar: actual.isInternalSecretEnvVar,
+    Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
+    hashDaemonWorkspace: (workspace: string) =>
+      workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
+  };
+});
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: () => ({ merged: {} }),
@@ -37,6 +44,22 @@ vi.mock('./channel-registry.js', () => ({
       : undefined,
   supportedTypes: async () => ['telegram'],
 }));
+
+describe('resolveChannelLocale', () => {
+  it.each([
+    ['zh', 'zh'],
+    ['zh-CN', 'zh'],
+    ['zh_CN', 'zh'],
+    ['Chinese', 'zh'],
+    ['中文', 'zh'],
+    ['en', 'en'],
+    ['auto', 'en'],
+    ['ja', 'en'],
+    [undefined, 'en'],
+  ] as const)('maps %s to %s', (value, expected) => {
+    expect(resolveChannelLocale(value)).toBe(expected);
+  });
+});
 
 it('isolates daemon route stores by workspace hash', () => {
   expect(daemonSessionRoutesPath('/workspace')).toBe(
@@ -372,12 +395,24 @@ describe('registerBackgroundResponseRelay', () => {
       router as never,
       new Map([['telegram', channel as never]]),
     );
-    bridge.emit('backgroundResponse', 'session-1', 'Background final answer.');
+    const context = {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: true,
+    };
+    bridge.emit(
+      'backgroundResponse',
+      'session-1',
+      'Background final answer.',
+      context,
+    );
 
     await vi.waitFor(() => {
       expect(channel.dispatchBackgroundResponse).toHaveBeenCalledWith(
         'session-1',
         'Background final answer.',
+        context,
       );
     });
   });

@@ -8,6 +8,10 @@
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Включает встроенный Generated UI в поддерживаемых локальных сеансах. Перезапустите соответствующий сеанс, чтобы применить изменения.',
+
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
@@ -137,11 +141,11 @@ export default {
   'Search:': 'Поиск:',
   'type to filter…': 'введите для фильтрации…',
   'No skills are currently available.': 'Сейчас навыков нет.',
-  'All available skills are locked at a higher scope (see below).':
-    'Все доступные навыки заблокированы на более высоком уровне (см. ниже).',
   'No skills match the search.': 'Нет навыков, соответствующих поиску.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Заблокированы настройками более высокого уровня (здесь переключить нельзя):',
+  'Locked by settings entries you cannot toggle here:':
+    'Заблокированы записями настроек (здесь переключить нельзя):',
+  '{{count}} locked not shown':
+    'Не показано заблокированных навыков: {{count}}',
   'higher scope': 'более высокий уровень',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [заблокировано: {{scope}}]',
@@ -194,6 +198,8 @@ export default {
     'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Не удаётся откатиться к сжатому ходу. Попробуйте более недавний ход.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Не удаётся откатить диалог к этому ходу: он больше не соответствует истории модели (например, после повторной попытки). Попробуйте более недавний ход.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Восстановление файлов недоступно для этого хода (нет записанных изменений или ход был до текущей сессии).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -429,6 +435,7 @@ export default {
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
   'Hide Tips': 'Скрыть подсказки',
+  'Show Tool Call Arguments': 'Показывать аргументы вызовов инструментов',
   'Show Line Numbers in Code': 'Показывать номера строк в коде',
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
@@ -463,6 +470,7 @@ export default {
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
   'Tool Schema Compliance': 'Соответствие Tool Schema',
+  Unset: 'Не задано',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   'Auto (follow user input)': 'Авто (следовать вводу пользователя)',
@@ -576,6 +584,10 @@ export default {
     'Это расширение установит следующие навыки:',
   'This extension will install the following subagents:':
     'Это расширение установит следующие подагенты:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Это расширение установит следующие рабочие процессы (скрипты JavaScript, которые могут запускать подагентов):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Эти скрипты рабочих процессов изменились по сравнению с установленной версией: {{names}}.',
   'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',
@@ -640,6 +652,7 @@ export default {
   'Context files:': 'Контекстные файлы:',
   'Skills:': 'Навыки:',
   'Agents:': 'Агенты:',
+  'Workflows:': 'Рабочие процессы:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'Не удалось установить связанное расширение.',
@@ -738,6 +751,12 @@ export default {
   '{{count}} hooks configured': '{{count}} хуков настроено',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Откройте это меню повторно, чтобы перезагрузить определения хуков.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Изменения параметров управления хуками и настроек безопасности HTTP требуют перезапуска.',
+  'Failed to reload hook definitions: {{error}}':
+    'Не удалось перезагрузить определения хуков: {{error}}',
   'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',
   // Hooks - Detail Step
   'Exit codes:': 'Коды выхода:',
@@ -809,8 +828,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция, захваченная на поддерживаемой границе отправки).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
@@ -1065,6 +1084,12 @@ export default {
     'Сжатие истории чата не уменьшило размер. Это может указывать на проблемы с промптом сжатия.',
   'Could not compress chat history due to a token counting error.':
     'Не удалось сжать историю чата из-за ошибки подсчета токенов.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была пустой.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
+  'Could not compress chat history due to an API error.':
+    'Не удалось сжать историю чата из-за ошибки API.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1109,6 +1134,13 @@ export default {
   'Clear Authentication': 'Очистить аутентификацию',
   disabled: 'отключен',
   enabled: 'включен',
+  'disabled (bare mode)': 'отключен (минимальный режим)',
+  'disabled (safe mode)': 'отключен (безопасный режим)',
+  'disabled (disableAllHooks)': 'отключен (disableAllHooks)',
+  'disabled (not approved)': 'отключен (не одобрен)',
+  'disabled (rejected)': 'отключен (отклонён)',
+  'disabled (folder not trusted)': 'отключен (папка не доверенная)',
+  'disabled (turned off for this session)': 'отключен (выключен в этой сессии)',
   'Server:': 'Сервер:',
   Reconnect: 'Переподключить',
   'View tools': 'Просмотреть инструменты',
@@ -1475,10 +1507,16 @@ export default {
   'No tasks currently running': 'Нет запущенных задач',
   'No entry to show.': 'Нет записи для отображения.',
   'needs approval': 'требует подтверждения',
+  'Large workflow': 'Большой workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Большой workflow: запланировано агентов: {{agents}} (порог предупреждения {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Большой workflow: ожидается ~{{tokens}} выходных токенов (порог предупреждения {{cap}}).',
   'rejected — edit config to re-approve':
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  'from nested agent': 'от вложенного агента',
   Running: 'Выполняется',
   Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
@@ -1773,6 +1811,10 @@ export default {
     'Контекст превышает лимит! Используйте /compress или /clear для уменьшения.',
   'No API response yet. Send a message to see actual usage.':
     'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
+  'Estimated usage, including the conversation':
+    'Оценка использования с учётом беседы',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Данных об использовании от провайдера пока нет. Это локальные оценки с учётом беседы.',
   'Estimated pre-conversation overhead':
     'Оценочные накладные расходы перед беседой',
   'Context window': 'Контекстное окно',
@@ -1784,9 +1826,14 @@ export default {
   'System prompt': 'Системная подсказка',
   'Built-in tools': 'Встроенные инструменты',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Файлы инструкций',
+  'Auto memory': 'Автопамять',
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
+  'Startup context': 'Стартовый контекст',
+  Unattributed: 'Не распределено',
+  'Cached prefix': 'Кэшированный префикс',
   'Run /context detail for per-item breakdown.':
     'Выполните /context detail для детализации по элементам.',
   active: 'активно',
@@ -1988,6 +2035,18 @@ export default {
   'not updatable': 'обновление недоступно',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Получить второе мнение о текущем разговоре от модели-рецензента',
+  'Consulting advisor...': 'Консультация с советником...',
+  'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
+  'No conversation context available for /advisor':
+    'Нет контекста разговора, доступного для /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Фокус слишком длинный (макс. {{max}} символов)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Выполняется другая операция, дождитесь её завершения перед запуском /advisor',
+  'No response received.': 'Ответ не получен.',
+  'No model configured.': 'Модель не настроена.',
   'Manage Arena sessions': 'Управлять сессиями Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Запустить сессию Arena, где несколько моделей соревнуются на одной и той же задаче',
@@ -2064,6 +2123,10 @@ export default {
   'to retry last request': 'чтобы повторить последний запрос',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Недействительный API Key. Coding Plan API Keys начинаются с "sk-sp-". Проверьте.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Недействительный API Key. Ключи с оплатой по использованию начинаются с "sk-" или "sk-ws-". Для ключей Token Plan ("sk-sp-") используйте запись Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Недействительный API Key. Token Plan API Keys начинаются с "sk-sp-". Создайте ключ в консоли Token Plan или используйте запись Standard API Key для ключа с оплатой по использованию.',
   'Lock release warning': 'Предупреждение о снятии блокировки',
   'Metadata write warning': 'Предупреждение о записи метаданных',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -2133,6 +2196,8 @@ export default {
   out: 'вых.',
   'In/Out': 'Вх/Вых',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Обновление до указанной версии требует автономной установки. Установите версию {{version}} вручную, используя текущий способ установки.',
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2207,6 +2272,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

@@ -14,6 +14,12 @@ import {
   MAX_STALL_ATTEMPTS,
   MAX_WORKFLOW_STALL_MS_ENV,
 } from './workflow-stall.js';
+import {
+  isWorkflowAgentFailedError,
+  type WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
+import { DEFAULT_RETRY_OPTIONS } from '../../utils/retry.js';
+import { getRetryDelayMs } from '../../utils/retryPolicy.js';
 
 describe('resolveStallMs', () => {
   it('uses the per-call override when positive', () => {
@@ -46,6 +52,51 @@ describe('resolveStallMs', () => {
   it('ignores a negative per-call value (falls through to default)', () => {
     expect(resolveStallMs(-5, {})).toBe(DEFAULT_STALL_MS);
   });
+
+  // The default is not an arbitrary round number: it has to outlast the
+  // transport's own silent retry ladder, or a request that is retrying exactly
+  // as designed reads as a stall. `DEFAULT_RETRY_OPTIONS` in utils/retry.ts
+  // sleeps 1.5s, 3s, 6s, 12s, 24s, 30s between attempts, and agent-core
+  // consumes each `retry` stream event without emitting anything the watchdog
+  // counts as progress — so the whole ladder is one silent stretch.
+  //
+  // Asserting the relationship rather than the literal keeps this meaningful if
+  // either number is retuned later.
+  //
+  // The ladder is DERIVED from `DEFAULT_RETRY_OPTIONS`, not hand-copied: a
+  // local literal would keep this test green while a retune of the real
+  // options pushed the real ladder past the window — the exact false-stall
+  // regression this test exists to prevent. Mirrors retryWithBackoff's error
+  // path: `maxAttempts - 1` sleeps, `currentDelay` doubling from
+  // `initialDelayMs` under the `maxDelayMs` cap, each sleep run through
+  // `getRetryDelayMs` with the ±30% jitter that path applies.
+  const transportLadderMs = (random: () => number) => {
+    const { maxAttempts, initialDelayMs, maxDelayMs } = DEFAULT_RETRY_OPTIONS;
+    let currentDelay = initialDelayMs;
+    let total = 0;
+    for (let sleep = 1; sleep < maxAttempts; sleep++) {
+      total += getRetryDelayMs({
+        attempt: 1,
+        initialDelayMs: currentDelay,
+        maxDelayMs,
+        jitterRatio: 0.3,
+        random,
+      });
+      currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+    }
+    return total;
+  };
+
+  it('outlasts the transport retry ladder it has to survive', () => {
+    const nominal = transportLadderMs(() => 0.5); // jitter cancels out
+    const worstCase = transportLadderMs(() => 1); // every sleep +30%, then capped
+    expect(nominal).toBe(76_500);
+    expect(worstCase).toBe(89_250);
+    // The window has to outlast the ladder on an UNLUCKY run, not just the
+    // nominal sum: a `DEFAULT_STALL_MS` retuned into the (76.5s, 89.25s] band
+    // would false-trip under jitter while a nominal-only assertion stayed green.
+    expect(DEFAULT_STALL_MS).toBeGreaterThan(worstCase);
+  });
 });
 
 describe('attachStallWatchdog', () => {
@@ -56,15 +107,19 @@ describe('attachStallWatchdog', () => {
     vi.useRealTimers();
   });
 
-  it('fires after stallMs of no activity once the first response has arrived', () => {
+  it('fires after stallMs of silence once armed (ROUND_START)', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
-    // #8: not armed until the first progress event (the time-to-first-response
-    // window is not a stall) — so advancing past stallMs here does nothing.
+    // Not armed until the first progress event — so advancing past stallMs
+    // here does nothing. In a real dispatch that event is ROUND_START, which
+    // fires before the request reaches the wire (see the doc comment on
+    // `attachStallWatchdog`), so this pre-arm silence is only round 1's
+    // pre-generator work, NOT the time-to-first-token window — that window is
+    // watched, and is pinned by the test below.
     vi.advanceTimersByTime(2000);
     expect(wd.stalled()).toBe(false);
-    // First response arrives → watchdog arms; then silence trips it.
+    // ROUND_START arrives → watchdog arms; then silence trips it.
     emitter.emit(AgentEventType.ROUND_START, {} as never);
     vi.advanceTimersByTime(999);
     expect(wd.stalled()).toBe(false);
@@ -75,15 +130,36 @@ describe('attachStallWatchdog', () => {
     wd.dispose();
   });
 
-  it('does NOT fire during the time-to-first-response window (#8)', () => {
+  // Replaces a test that asserted the watchdog does not fire during the
+  // time-to-first-response window. That test never emitted ROUND_START, so it
+  // only proved that a silent emitter does not trip a watchdog that was never
+  // armed — and it encoded a model of the transport that is not true. In a real
+  // dispatch ROUND_START has already fired by this point: `sendMessageStream`
+  // returns a lazily iterated generator, so the `await` on it resolves before
+  // the request reaches the wire, and agent-core emits ROUND_START on the very
+  // next line. These two tests pin what actually happens.
+  it('does not arm before the first progress event', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
-    // A reasoning model thinking for a long time before the first token emits
-    // no events; that must not be treated as a stall.
+    // Nothing emitted: the timer was never armed, so nothing can elapse.
     vi.advanceTimersByTime(10_000);
     expect(wd.stalled()).toBe(false);
     expect(controller.signal.aborted).toBe(false);
+    wd.dispose();
+  });
+
+  it('DOES count the time-to-first-token window, because ROUND_START precedes the request', () => {
+    const emitter = new AgentEventEmitter();
+    const controller = new AbortController();
+    const wd = attachStallWatchdog(emitter, controller, 1000);
+    // Exactly what agent-core does: emit ROUND_START immediately after
+    // `await sendMessageStream(...)` resolves — i.e. before any bytes are sent.
+    emitter.emit(AgentEventType.ROUND_START, {} as never);
+    // The provider is still connecting/queueing/thinking; no deltas yet.
+    vi.advanceTimersByTime(1001);
+    expect(wd.stalled()).toBe(true);
+    expect(controller.signal.reason).toBe('stalled');
     wd.dispose();
   });
 
@@ -134,6 +210,330 @@ describe('attachStallWatchdog', () => {
   });
 });
 
+describe('attachStallWatchdog retry waits', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const meta = { subagentId: 'a', round: 1, promptId: 'p', timestamp: 0 };
+  const startWait = (
+    emitter: AgentEventEmitter,
+    waitId: string,
+    delayMs: number,
+  ) =>
+    emitter.emit(AgentEventType.RETRY_WAIT, {
+      ...meta,
+      phase: 'start',
+      waitId,
+      delayMs,
+    });
+  const endWait = (emitter: AgentEventEmitter, waitId: string) =>
+    emitter.emit(AgentEventType.RETRY_WAIT, { ...meta, phase: 'end', waitId });
+  const setup = (stallMs = 1000) => {
+    const emitter = new AgentEventEmitter();
+    const controller = new AbortController();
+    const wd = attachStallWatchdog(emitter, controller, stallMs);
+    emitter.emit(AgentEventType.ROUND_START, {} as never);
+    return { emitter, controller, wd };
+  };
+
+  it.each([60_000, 120_000, 240_000, 300_000])(
+    'holds through a %ims stream rate-limit wait under the default window',
+    (delayMs) => {
+      const { emitter, controller, wd } = setup(DEFAULT_STALL_MS);
+      startWait(emitter, 'w', delayMs);
+      vi.advanceTimersByTime(delayMs);
+      expect(wd.stalled()).toBe(false);
+      endWait(emitter, 'w');
+      vi.advanceTimersByTime(DEFAULT_STALL_MS - 1);
+      expect(wd.stalled()).toBe(false);
+      // A request that hangs after the wait still trips the watchdog.
+      vi.advanceTimersByTime(1);
+      expect(wd.stalled()).toBe(true);
+      expect(controller.signal.reason).toBe('stalled');
+      wd.dispose();
+    },
+  );
+
+  it('holds through consecutive waits on one dispatch', () => {
+    const { emitter, wd } = setup(DEFAULT_STALL_MS);
+    for (const [i, delayMs] of [60_000, 120_000, 240_000, 300_000].entries()) {
+      startWait(emitter, `w${i}`, delayMs);
+      vi.advanceTimersByTime(delayMs);
+      endWait(emitter, `w${i}`);
+    }
+    expect(wd.stalled()).toBe(false);
+    wd.dispose();
+  });
+
+  it('gives the resumed request a full window after an early end (skip)', () => {
+    const { emitter, wd } = setup();
+    startWait(emitter, 'w', 60_000);
+    vi.advanceTimersByTime(5_000);
+    endWait(emitter, 'w');
+    vi.advanceTimersByTime(999);
+    expect(wd.stalled()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(wd.stalled()).toBe(true);
+    wd.dispose();
+  });
+
+  it('bounds a wait whose end never arrives by its delay plus stallMs', () => {
+    const { emitter, wd } = setup();
+    startWait(emitter, 'w', 10_000);
+    vi.advanceTimersByTime(10_999);
+    expect(wd.stalled()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(wd.stalled()).toBe(true);
+    wd.dispose();
+  });
+
+  it('keeps an expired wait as the time base instead of stalling at its end', () => {
+    const { emitter, wd } = setup();
+    startWait(emitter, 'w', 10_000);
+    vi.advanceTimersByTime(10_500);
+    // Re-armed after the wait expired without an end: the remaining window is
+    // measured from the wait's end, not from the old ROUND_START.
+    endWait(emitter, 'unknown');
+    emitter.emit(AgentEventType.TOOL_CALL, {} as never);
+    emitter.emit(AgentEventType.TOOL_RESULT, {} as never);
+    vi.advanceTimersByTime(999);
+    expect(wd.stalled()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(wd.stalled()).toBe(true);
+    wd.dispose();
+  });
+
+  it('ignores repeated, unknown and late notifications', () => {
+    const { emitter, wd } = setup();
+    startWait(emitter, 'w', 5_000);
+    vi.advanceTimersByTime(4_000);
+    startWait(emitter, 'w', 5_000); // duplicate start does not renew
+    endWait(emitter, 'other'); // unknown end does not count as resume
+    vi.advanceTimersByTime(1_000);
+    endWait(emitter, 'w');
+    endWait(emitter, 'w'); // duplicate end does not extend
+    vi.advanceTimersByTime(500);
+    startWait(emitter, 'w', 60_000); // restart of an ended wait does not renew
+    vi.advanceTimersByTime(500);
+    expect(wd.stalled()).toBe(true);
+    wd.dispose();
+  });
+
+  it('keeps an overlapping wait active when the other one ends', () => {
+    for (const first of ['a', 'b']) {
+      const { emitter, wd } = setup();
+      startWait(emitter, 'a', 10_000);
+      startWait(emitter, 'b', 20_000);
+      vi.advanceTimersByTime(2_000);
+      endWait(emitter, first);
+      vi.advanceTimersByTime(first === 'a' ? 17_999 : 7_999);
+      expect(wd.stalled()).toBe(false);
+      endWait(emitter, first === 'a' ? 'b' : 'a');
+      vi.advanceTimersByTime(999);
+      expect(wd.stalled()).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(wd.stalled()).toBe(true);
+      wd.dispose();
+    }
+  });
+
+  it('keeps tool suspension and still honors a wait after the last tool', () => {
+    const { emitter, wd } = setup();
+    emitter.emit(AgentEventType.TOOL_CALL, {} as never);
+    emitter.emit(AgentEventType.TOOL_CALL, {} as never);
+    startWait(emitter, 'w', 30_000);
+    vi.advanceTimersByTime(10_000);
+    emitter.emit(AgentEventType.TOOL_RESULT, {} as never);
+    vi.advanceTimersByTime(5_000);
+    expect(wd.stalled()).toBe(false); // one tool still in flight
+    emitter.emit(AgentEventType.TOOL_RESULT, {} as never);
+    vi.advanceTimersByTime(15_999);
+    expect(wd.stalled()).toBe(false); // the wait is still active
+    vi.advanceTimersByTime(1);
+    expect(wd.stalled()).toBe(true);
+    wd.dispose();
+  });
+
+  it('arms on a wait that starts before any progress event', () => {
+    const emitter = new AgentEventEmitter();
+    const controller = new AbortController();
+    const wd = attachStallWatchdog(emitter, controller, 1000);
+    startWait(emitter, 'w', 5_000);
+    vi.advanceTimersByTime(5_999);
+    expect(wd.stalled()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(wd.stalled()).toBe(true);
+    wd.dispose();
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'does not register an invalid delay %s',
+    (delayMs) => {
+      const { emitter, wd } = setup();
+      startWait(emitter, 'w', delayMs);
+      vi.advanceTimersByTime(1000);
+      expect(wd.stalled()).toBe(true);
+      wd.dispose();
+    },
+  );
+
+  it('splits an over-long wait instead of overflowing setTimeout', () => {
+    const { emitter, wd } = setup();
+    const delayMs = 3 * 2 ** 31;
+    startWait(emitter, 'w', delayMs);
+    vi.advanceTimersByTime(2 ** 31);
+    expect(wd.stalled()).toBe(false);
+    vi.advanceTimersByTime(delayMs - 2 ** 31 + 999);
+    expect(wd.stalled()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(wd.stalled()).toBe(true);
+    wd.dispose();
+  });
+
+  it('detaches its listeners and timer on dispose', () => {
+    const { emitter, controller, wd } = setup();
+    startWait(emitter, 'w', 5_000);
+    wd.dispose();
+    expect(emitter.rawListeners(AgentEventType.RETRY_WAIT)).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(60_000);
+    expect(controller.signal.aborted).toBe(false);
+  });
+});
+
+describe('runStallResilient with retry waits', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const waitThenFinish = (
+    signal: AbortSignal,
+    emitter: AgentEventEmitter,
+    delayMs: number,
+  ) =>
+    new Promise<void>((resolve, reject) => {
+      emitter.emit(AgentEventType.ROUND_START, {} as never);
+      emitter.emit(AgentEventType.RETRY_WAIT, {
+        subagentId: 'a',
+        round: 1,
+        promptId: 'p',
+        timestamp: 0,
+        phase: 'start',
+        waitId: 'w',
+        delayMs,
+      });
+      const t = setTimeout(() => {
+        emitter.emit(AgentEventType.RETRY_WAIT, {
+          subagentId: 'a',
+          round: 1,
+          promptId: 'p',
+          timestamp: 0,
+          phase: 'end',
+          waitId: 'w',
+        });
+        resolve();
+      }, delayMs);
+      signal.addEventListener('abort', () => {
+        clearTimeout(t);
+        reject(new Error('did not complete (terminate mode: CANCELLED).'));
+      });
+    });
+
+  it('keeps a legitimate wait on the same dispatch attempt', async () => {
+    let calls = 0;
+    const p = runStallResilient(
+      async (signal, emitter) => {
+        calls += 1;
+        await waitThenFinish(signal, emitter, 2_000);
+        return 'ok';
+      },
+      { stallMs: 500 },
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(p).resolves.toBe('ok');
+    expect(calls).toBe(1);
+  });
+
+  it('still retries a request that hangs after its wait', async () => {
+    let calls = 0;
+    const p = runStallResilient(
+      async (signal, emitter) => {
+        calls += 1;
+        if (calls === 1) {
+          await waitThenFinish(signal, emitter, 2_000);
+          // The resumed request never answers.
+          await new Promise((_, reject) =>
+            signal.addEventListener('abort', () =>
+              reject(
+                new Error('did not complete (terminate mode: CANCELLED).'),
+              ),
+            ),
+          );
+        }
+        return 'ok';
+      },
+      { stallMs: 500 },
+    );
+    await vi.advanceTimersByTimeAsync(2_499);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).resolves.toBe('ok');
+    expect(calls).toBe(2);
+  });
+
+  it('ignores a late wait from a finished attempt', async () => {
+    const emitters: AgentEventEmitter[] = [];
+    let calls = 0;
+    const p = runStallResilient(
+      async (signal, emitter) => {
+        calls += 1;
+        emitters.push(emitter);
+        emitter.emit(AgentEventType.ROUND_START, {} as never);
+        if (calls === 1) {
+          await new Promise((_, reject) =>
+            signal.addEventListener('abort', () =>
+              reject(
+                new Error('did not complete (terminate mode: CANCELLED).'),
+              ),
+            ),
+          );
+        }
+        await new Promise((_, reject) =>
+          signal.addEventListener('abort', () =>
+            reject(new Error('did not complete (terminate mode: CANCELLED).')),
+          ),
+        );
+        return 'unreachable';
+      },
+      { stallMs: 500 },
+    );
+    const settled = p.catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls).toBe(2);
+    // The stale attempt's emitter has no watchdog left to shield.
+    emitters[0]!.emit(AgentEventType.RETRY_WAIT, {
+      subagentId: 'a',
+      round: 1,
+      promptId: 'p',
+      timestamp: 0,
+      phase: 'start',
+      waitId: 'late',
+      delayMs: 60_000,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls).toBe(3);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(isWorkflowAgentFailedError(await settled)).toBe(true);
+  });
+});
+
 describe('runStallResilient', () => {
   it('returns the result on success (no stall, no retry)', async () => {
     let calls = 0;
@@ -157,8 +557,9 @@ describe('runStallResilient', () => {
       emitter: AgentEventEmitter,
     ): Promise<string> => {
       calls += 1;
-      // Emit a first response event so the watchdog arms (#8: the time-to-
-      // first-response window is not a stall), then go silent → it trips.
+      // Emit ROUND_START so the watchdog arms — in a real dispatch that fires
+      // before the request reaches the wire, so the time-to-first-token window
+      // IS watched — then go silent → it trips.
       emitter.emit(AgentEventType.ROUND_START, {} as never);
       await new Promise<void>((resolve) => {
         if (signal.aborted) return resolve();
@@ -176,6 +577,8 @@ describe('runStallResilient', () => {
       caught = e;
     }
     expect(calls).toBe(MAX_STALL_ATTEMPTS);
+    expect(isWorkflowAgentFailedError(caught)).toBe(true);
+    expect((caught as WorkflowAgentFailedError).kind).toBe('stalled');
     expect(String(caught)).toMatch(/stalled on all 3 attempts/);
   });
 
@@ -187,8 +590,9 @@ describe('runStallResilient', () => {
     ): Promise<string> => {
       calls += 1;
       if (calls < 2) {
-        // First attempt stalls: emit a first response event to arm the
-        // watchdog (#8), then go silent until it aborts.
+        // First attempt stalls: emit ROUND_START to arm the watchdog — in a
+        // real dispatch that fires before the request reaches the wire — then
+        // go silent until it aborts.
         emitter.emit(AgentEventType.ROUND_START, {} as never);
         await new Promise<void>((resolve) => {
           if (signal.aborted) return resolve();

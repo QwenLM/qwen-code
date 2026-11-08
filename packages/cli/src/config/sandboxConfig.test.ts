@@ -35,6 +35,8 @@ vi.mock('../utils/package.js', () => ({
   })),
 }));
 
+const { getPackageJson } = await import('../utils/package.js');
+
 const { loadSandboxConfig, resetSandboxProbeCacheForTest } = await import(
   './sandboxConfig.js'
 );
@@ -118,6 +120,7 @@ describe('loadSandboxConfig sandbox command selection', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     delete process.env['SANDBOX'];
     delete process.env['QWEN_SANDBOX'];
   });
@@ -335,6 +338,33 @@ describe('loadSandboxConfig sandbox command selection', () => {
     expect(config?.command).toBe('sandbox-exec');
     expect(spawnSync).not.toHaveBeenCalled();
   });
+
+  it('keeps Seatbelt without a packaged image', async () => {
+    installed('sandbox-exec');
+    vi.mocked(getPackageJson).mockResolvedValueOnce(undefined);
+    vi.stubEnv('QWEN_SANDBOX_IMAGE', undefined);
+    await expect(
+      loadSandboxConfig({}, { sandbox: 'sandbox-exec' }),
+    ).resolves.toEqual({ command: 'sandbox-exec' });
+    expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it.each(['argument', 'settings', 'environment', 'inherited'] as const)(
+    'rejects retired bwrap from %s without probing or starting it',
+    async (source) => {
+      installed('bwrap');
+      if (source === 'environment') vi.stubEnv('QWEN_SANDBOX', 'bwrap');
+      if (source === 'inherited') vi.stubEnv('SANDBOX', 'bwrap');
+      const settings =
+        source === 'settings' ? { tools: { sandbox: 'bwrap' } } : {};
+      const args = source === 'argument' ? { sandbox: 'bwrap' } : {};
+      await expect(loadSandboxConfig(settings, args)).rejects.toThrow(
+        /Whole-CLI bwrap has been removed.*tools.executionSandbox/,
+      );
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(commandExistsSync).not.toHaveBeenCalled();
+    },
+  );
 
   it('returns undefined when the sandbox is disabled', async () => {
     installed('docker');

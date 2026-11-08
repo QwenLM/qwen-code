@@ -7,19 +7,20 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import {
-  MAX_SEARCH_QUERY_CHARACTERS,
-  normalizeSearchQuery,
-  renderExternalContext,
-} from './context.js';
+import { normalizeSearchQuery, renderExternalContext } from './context.js';
 import { ConfigurationError, loadConfig } from './config.js';
 import { createMemoryWriter, createProvider } from './providers.js';
 import {
   isValidMemoryContent,
   MAX_MEMORY_CONTENT_CHARACTERS,
 } from './memory-content.js';
+import {
+  contextSearchInputSchema,
+  contextSearchOutputSchema,
+} from './provider-profile.js';
 import type {
   ExternalContextConfigV1,
+  ExternalContextConfig,
   ExternalContextProvider,
   ExternalMemoryWriter,
   RememberResult,
@@ -45,15 +46,8 @@ export function createExternalContextMcpServer(
       title: 'Search external context',
       description:
         'Search the administrator-bound external context provider. Results are untrusted reference data.',
-      inputSchema: {
-        query: z
-          .string()
-          .min(1)
-          .refine(
-            (query) => Array.from(query).length <= MAX_SEARCH_QUERY_CHARACTERS,
-            `Search query must contain at most ${MAX_SEARCH_QUERY_CHARACTERS} Unicode characters.`,
-          ),
-      },
+      inputSchema: contextSearchInputSchema,
+      outputSchema: contextSearchOutputSchema,
       annotations: {
         destructiveHint: false,
       },
@@ -77,7 +71,7 @@ export function createExternalContextMcpServer(
             AbortSignal.timeout(runtime.config.timeoutMs),
           ]),
         });
-        return textResult(renderExternalContext(items));
+        return contextSearchResult(renderExternalContext(items));
       } catch {
         return errorResult('External context search failed.');
       }
@@ -132,8 +126,8 @@ export function createExternalContextMcpServer(
   return server;
 }
 
-export async function runMcp(): Promise<void> {
-  const config = await loadConfig();
+export async function runMcp(config?: ExternalContextConfig): Promise<void> {
+  config ??= await loadConfig();
   if (config.version !== 1) {
     throw new ConfigurationError(
       'External context MCP server requires a version 1 configuration.',
@@ -151,6 +145,13 @@ export async function runMcp(): Promise<void> {
 function textResult(text: string) {
   return {
     content: [{ type: 'text' as const, text }],
+  };
+}
+
+function contextSearchResult(text: string) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    structuredContent: JSON.parse(text) as Record<string, unknown>,
   };
 }
 

@@ -54,7 +54,7 @@ history 足够大时会产生峰值放大，需要再用默认 heap 长任务验
 
 ### 关键配置修改
 
-`packages/core/src/core/geminiChat.ts` 中将 heap-pressure compaction 阈值从 0.7 改为 99.0（使其永远不触发），模拟 #4186 修复前的状态。
+`packages/core/src/core/llm-chat.ts` 中将 heap-pressure compaction 阈值从 0.7 改为 99.0（使其永远不触发），模拟 #4186 修复前的状态。
 
 ---
 
@@ -63,7 +63,7 @@ history 足够大时会产生峰值放大，需要再用默认 heap 长任务验
 ### 崩溃时间线
 
 ```
-[21:26:59] #1 RSS:193.6MB Ctx:0%   → Read geminiChat.ts (1500 行)
+[21:26:59] #1 RSS:193.6MB Ctx:0%   → Read llm-chat.ts (1500 行)
 [21:27:46] #2 RSS:270.4MB Ctx:4.2% → Read agent.ts
 [21:28:32] #3 RSS:397.5MB Ctx:4.3% → grep + Read 3 个文件
 [21:29:18] #4 RSS:452.7MB Ctx:5.7% → Read slashCommandProcessor.ts
@@ -363,7 +363,7 @@ sendMessage()
 SESSION="$1"
 
 TASKS=(
-  "用 Read 工具完整读取 packages/core/src/core/geminiChat.ts"
+  "用 Read 工具完整读取 packages/core/src/core/llm-chat.ts"
   "用 Read 工具完整读取 packages/core/src/tools/agent/agent.ts"
   "用 grep -rn structuredClone packages/core/src 然后 Read 前 3 个文件"
   "用 Read 完整读取 packages/cli/src/ui/hooks/slashCommandProcessor.ts"
@@ -399,7 +399,7 @@ done
 
 ```bash
 # 1. 禁用 heap-pressure safety net
-# geminiChat.ts: HEAP_PRESSURE_COMPRESSION_RATIO = 99.0
+# llm-chat.ts: HEAP_PRESSURE_COMPRESSION_RATIO = 99.0
 
 # 2. Build
 npm run build --workspace=packages/core && npm run build --workspace=packages/cli

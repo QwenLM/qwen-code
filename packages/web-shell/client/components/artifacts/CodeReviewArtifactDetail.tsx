@@ -13,8 +13,8 @@ import type { ArtifactWorkspaceActions } from './useArtifactWorkspaceTarget';
 // packages/cli/src/commands/review/findings.ts. The parser below fails closed
 // on any value missing here, so when the CLI adds one, update this copy and
 // the contract fixture (__fixtures__/code-review-artifact-v1.json) with it.
-// The CLI-side vocabulary snapshot (packages/cli/src/commands/review/
-// findings.test.ts) turns red on that change and names this file.
+// The CLI-side vocabulary snapshot (packages/cli/src/commands/review/findings.test.ts)
+// turns red on that change and names this file.
 const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
 const CONFIDENCES = ['high', 'low'] as const;
 const SOURCES = ['review', 'build', 'test', 'probe', 'lint'] as const;
@@ -42,6 +42,11 @@ interface ReviewFinding {
   /** The executed evidence that settled the verdict, or its `not run` line. */
   witness?: string;
   suggestedFix?: string;
+  /**
+   * The acceptance criterion the suggested fix owes: the test that must go
+   * red if the fix is removed.
+   */
+  fixWitness?: string;
   category?: string;
   locations: FindingLocation[];
   /** Local evidence paths; rendered as workspace images where possible. */
@@ -216,6 +221,9 @@ function parseFinding(value: unknown, index: number): ReviewFinding {
       : {}),
     ...(optionalString(source['suggestedFix'], `${label}.suggestedFix`)
       ? { suggestedFix: source['suggestedFix'] as string }
+      : {}),
+    ...(optionalString(source['fixWitness'], `${label}.fixWitness`)
+      ? { fixWitness: source['fixWitness'] as string }
       : {}),
     ...(optionalString(source['category'], `${label}.category`)
       ? { category: source['category'] as string }
@@ -605,6 +613,12 @@ export function CodeReviewArtifactDetail({
                 <Detail
                   label={t('codeReview.suggestedFix')}
                   value={finding.suggestedFix}
+                />
+              )}
+              {finding.fixWitness && (
+                <Detail
+                  label={t('codeReview.fixWitness')}
+                  value={finding.fixWitness}
                 />
               )}
               {finding.outcome && (

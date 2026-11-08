@@ -20,21 +20,53 @@ export const CODING_PLAN_GLOBAL_BASE_URL =
 const MODELSTUDIO_MODELS: ModelSpec[] = [
   {
     id: 'qwen3.5-plus',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 1000000,
     enableThinking: true,
     modalities: { image: true, video: true },
   },
   {
     id: 'qwen3.6-plus',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     description: 'Currently available to Pro subscribers only.',
     contextWindowSize: 1000000,
     enableThinking: true,
     modalities: { image: true, video: true },
   },
-  { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
+  {
+    id: 'qwen3.7-plus',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    enableThinking: true,
+  },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
   {
     id: 'kimi-k2.5',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 262144,
     enableThinking: true,
     modalities: { image: true, video: true },
@@ -44,6 +76,13 @@ const MODELSTUDIO_MODELS: ModelSpec[] = [
   { id: 'qwen3-coder-next', contextWindowSize: 262144 },
   {
     id: 'qwen3-max-2026-01-23',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 262144,
     enableThinking: true,
   },
@@ -77,6 +116,7 @@ export const codingPlanProvider: ProviderConfig = {
   envKey: CODING_PLAN_ENV_KEY,
   models: MODELSTUDIO_MODELS,
   modelsEditable: true,
+  supportsModelDiscovery: true,
   modelNamePrefix: (baseUrl) =>
     baseUrl === CODING_PLAN_GLOBAL_BASE_URL
       ? 'ModelStudio Coding Plan for Global/Intl'

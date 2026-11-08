@@ -1,13 +1,18 @@
-# cua-driver TypeScript SDK
+# @qwen-code/cua-sdk
 
 Rust-backed TypeScript/Node SDK for Cua Driver client applications.
+
+The package root exposes the complete typed driver SDK. The
+`@qwen-code/cua-sdk/computer-use` subpath exposes the smaller high-level API for
+application discovery, revision observations, element-token actions, and state
+verification. Both entrypoints ship in this one npm package. The `/runtime` entrypoint supplies global `cua` to Node REPL, including explicit desktop input and the repository browser SDK facade. SDK, browser SDK and native release use version 0.27.0; Node REPL ships the same version.
 
 ## Product boundary
 
 The package root exposes the native SDK:
 
 ```ts
-import { CuaDriver } from "@trycua/cua-driver"
+import { CuaDriver } from "@qwen-code/cua-sdk"
 ```
 
 `EmbeddedCuaDriverHost` is exported from both the package root and the
@@ -28,22 +33,33 @@ agent SDK.
 
 ## SDK example
 
+On macOS, the package root supplies a main-thread AppKit pump for the default
+native cursor and live PiP. Construct the SDK on Node's main thread; Worker
+threads cannot initialize this UI. `shutdown()` waits for the owning preview
+and cursor cleanup. Pass `--no-overlay` or `--no-pip` to the Node script to
+disable either surface. PiP also respects `experimental_pip: false` in
+`~/.cua-driver/config.json`. Raw Rust/Python embedding must supply its own
+main-thread UI host and remains UI-disabled by default on macOS.
+
+The preview is a transparent, borderless floating window, initially near the
+lower-right. Each source keeps its aspect ratio in an independent card. Hover
+a rear card to bring it forward; drag a card or the Move preview handle to
+reposition the whole window. Floating controls appear on hover.
+
 ```ts
 import {
-  CaptureScope,
   CuaDriver,
   CursorReducedMotion,
   EndSessionInput,
   GetDesktopStateInput,
   SetAgentCursorThemeInput,
   StartSessionInput,
-} from "@trycua/cua-driver"
+} from "@qwen-code/cua-sdk"
 
 const driver = CuaDriver.create(undefined) // same process; no daemon
 await driver.startSession(
   StartSessionInput.new({
     session: "demo",
-    captureScope: CaptureScope.Desktop,
   }),
 )
 
@@ -67,13 +83,23 @@ try {
 ```
 
 SDK operations are asynchronous and require a native library matching the host
-OS and architecture. The macOS native package requires macOS 13 or newer.
+OS and architecture. The package postinstall downloads the SDK library and
+Node runtime from the exact same-version `qwen-cua-driver` GitHub Release and
+verifies the archive against that release's `checksums.txt`. It caches the native library and Node adapter. Windows installs use the normal input path by default. Explicit `CUA_DRIVER_USE_UIACCESS=1` stages the optional worker under Program Files and requires a valid trusted signature. It
+does not install the driver application or daemon. The
+macOS payload requires macOS 13 or newer.
 Desktop calls return a typed `ToolResult` with text,
 images, verification/error metadata, and `structuredJson` / `rawJson` for
 platform-extensible results. Session lifecycle calls return dedicated generated
 records.
 
-The agent cursor is session-owned. Its default theme and custom dotLottie
+`startSession` is optional for ordinary calls. The runtime creates one
+implicit session for this SDK transport and reuses it until shutdown, explicit
+end, or five minutes of inactivity. Use a named session when application code
+needs to configure or inspect that run explicitly.
+
+The agent cursor is session-owned and initializes on the first cursor-bearing
+action, including `moveCursor`. Its default theme and custom dotLottie
 authoring workflow are documented in
 [`docs/cursor-themes.md`](../docs/cursor-themes.md). Custom source is compiled
 and installed with the local CLI; SDK and MCP tools select only an installed
@@ -113,7 +139,7 @@ bundle `qwen-cua-driver`, start it as a direct child, and connect both applicati
 code and its agent runtime to the same private daemon:
 
 ```ts
-import { CuaDriver, EmbeddedCuaDriverHost } from "@trycua/cua-driver"
+import { CuaDriver, EmbeddedCuaDriverHost } from "@qwen-code/cua-sdk"
 
 const embedded = new EmbeddedCuaDriverHost(
   "/path/inside/YourApp.app/Contents/Resources/qwen-cua-driver",
@@ -148,7 +174,7 @@ import {
   hasRequiredMacOSPermissions,
   openMacOSScreenRecordingSettings,
   requestMacOSPermissions,
-} from "@trycua/cua-driver/electron"
+} from "@qwen-code/cua-sdk/electron"
 
 const permissions = requestMacOSPermissions()
 if (!hasRequiredMacOSPermissions(permissions) && !permissions.screenRecording) {
@@ -169,13 +195,20 @@ for its generation, observe unexpected termination with
 Rust host also closes a parent-liveness pipe on normal destruction so the daemon
 cannot remain orphaned after a host crash.
 
-The npm package installs one optional native package selected for the current
-OS and CPU. It does not bundle the `qwen-cua-driver` executable: ship that executable
-outside ASAR, preserve its executable bit, and sign it before signing and
-notarizing the enclosing app.
+The npm package is platform-neutral and publishes no platform companion
+packages. Set `QWEN_CUA_SDK_NATIVE_DIR` to use a locally built or separately
+staged SDK library and Node runtime; release consumers normally need no
+override. The package does not install the `qwen-cua-driver` executable: an
+application that embeds the daemon must obtain it from the same GitHub Release,
+place it outside ASAR, preserve its executable bit, and sign it before signing
+and notarizing the enclosing app.
 
-Each native package also carries Cua's copy-mode build of the pinned
-`@ubjs/node` N-API runtime. Upstream `0.31.0-3` returns Rust-owned memory through
+Windows release payloads statically link the Microsoft C runtime, so importing
+the SDK on a clean x64 or ARM64 Windows installation does not require a
+separate Visual C++ Redistributable installation.
+
+Each release payload also carries Cua's copy-mode build of the pinned UBRN
+N-API runtime. Upstream `0.31.0-3` returns Rust-owned memory through
 external ArrayBuffers, which Electron 20 and newer intentionally reject because
 of V8's memory cage. The copy-mode runtime keeps the generated UniFFI API and
 RustBuffer ownership contract unchanged, but copies at the native/JavaScript

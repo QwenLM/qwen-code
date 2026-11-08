@@ -13,14 +13,18 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { subscriptionModelUnavailable } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { validateTheme } from './theme.js';
 import { initializeI18n, resolveLanguageSetting } from '../i18n/index.js';
 
 export interface InitializationResult {
   authError: string | null;
+  authNotice?: string;
+  skipStartupAuthDialog?: boolean;
   themeError: string | null;
   shouldOpenAuthDialog: boolean;
-  geminiMdFileCount: number;
+  memoryFileCount: number;
 }
 
 export interface InitializeAppOptions {
@@ -68,6 +72,15 @@ export async function initializeApp(
   // over settings.security.auth.selectedType
   const authType = config.getModelsConfig().getCurrentAuthType();
   const authError = await performInitialAuth(config, authType);
+  const inactiveSubscription =
+    authType === AuthType.QWEN_SUBSCRIPTION && !config.getAuthType();
+  const authNotice =
+    inactiveSubscription &&
+    authError?.includes(subscriptionModelUnavailable(config.getModel()))
+      ? authError
+      : undefined;
+  const skipStartupAuthDialog =
+    inactiveSubscription && (authError === null || authNotice !== undefined);
 
   const themeError = validateTheme(settings);
 
@@ -80,8 +93,10 @@ export async function initializeApp(
 
   return {
     authError,
+    ...(authNotice ? { authNotice } : {}),
+    ...(skipStartupAuthDialog ? { skipStartupAuthDialog } : {}),
     themeError,
     shouldOpenAuthDialog,
-    geminiMdFileCount: config.getGeminiMdFileCount(),
+    memoryFileCount: config.getMemoryFileCount(),
   };
 }

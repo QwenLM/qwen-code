@@ -7,16 +7,27 @@
 import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
+  utimesSync,
+  writeSync,
+  type BigIntStats,
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
+import { isSameFile } from './lib/same-file.js';
+import { untrustedGitfile } from './lib/worktree.js';
 import {
   isSafeRepositoryRelativePath,
   MAX_IDENTITY_BYTES,
@@ -25,6 +36,11 @@ import {
   validateRepositoryContext,
 } from './lib/repository-context.js';
 import { stringifyPlanReport } from './lib/report.js';
+import {
+  contextRoleRunsInThisReview,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
 
 interface RepoContextArgs {
   plan: string;
@@ -42,19 +58,12 @@ interface MutablePlan {
   mergeBaseSha?: unknown;
   baseFetchFailed?: unknown;
   repositoryContext?: unknown;
+  reviewProfile?: unknown;
   [key: string]: unknown;
 }
 
 export const REPOSITORY_CONTEXT_PROVIDERS: readonly RepositoryContextProvider[] =
   [manifestRepositoryContextProvider];
-
-function sameFile(left: string, right: string): boolean {
-  if (left === right) return true;
-  if (!existsSync(left) || !existsSync(right)) return false;
-  const leftStat = statSync(left);
-  const rightStat = statSync(right);
-  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
-}
 
 function recordedWorktreeMatches(
   recordedPath: string,
@@ -359,14 +368,66 @@ export function runRepoContext(
 ): void {
   const planPath = resolve(args.plan);
   const outPath = resolve(args.out);
-  if (sameFile(planPath, outPath)) {
+  if (isSameFile(planPath, outPath)) {
     throw new Error('repo-context: --out must differ from --plan');
   }
-  const worktree = realpathSync(resolve(args.worktree));
-  if (!statSync(worktree).isDirectory()) {
-    throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
+  // A worktree removed after fetch-pr created it — the #9205 shape, a
+  // concurrent same-PR cleanup mid-review, or a plain manual delete — used to
+  // surface as a bare `ENOENT … lstat '<path>'` from `realpathSync`, which
+  // names neither the cause nor the remedy. Name both.
+  const worktreeRoot = resolve(args.worktree);
+  let worktree: string;
+  try {
+    worktree = realpathSync(worktreeRoot);
+    if (!statSync(worktree).isDirectory()) {
+      throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
+    }
+  } catch (err) {
+    // Only ENOENT is a missing worktree. ENOTDIR — a regular file as a path
+    // COMPONENT — is a malformed --worktree argument; re-running fetch-pr
+    // cannot fix it, and absorbing it here would lose the precise
+    // diagnosis, so it rethrows below. (`isAbsentError` treats both as
+    // absent, which is right for the identity-file lookups, not here.)
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // fetch-pr only recreates a PR target's worktree; repo-context also
+      // runs for local and file-path reviews, so scope the remedy.
+      throw new Error(
+        `repo-context: worktree ${worktreeRoot} is missing — recreate the ` +
+          `review worktree (for PR targets: re-run \`qwen review fetch-pr\`)`,
+      );
+    }
+    throw err;
+  }
+  // Every read below — `rev-parse --git-common-dir`, `cat-file -e`, `ls-tree`,
+  // `show <base>:<path>` — resolves the repository through this worktree's own
+  // `.git`, which sits inside the directory the review sandbox hands the
+  // reviewed code read-write. The identity files this command extracts are the
+  // ones the trust boundary exists to take from the MERGE BASE rather than
+  // from the PR head; read through a rewritten pointer they come from a
+  // repository the PR author planted, and the whole boundary is decorative.
+  // Same gate, same reason, as the writes in `scratch-tree` and `fetch-pr`.
+  const untrusted = untrustedGitfile(worktree);
+  if (untrusted !== null) {
+    throw new Error(
+      `repo-context: refusing to read the repository context — ${untrusted}. ` +
+        `The merge-base identity files would come from whichever repository ` +
+        `that pointer names. Sweep the tree (\`qwen review cleanup\`) and ` +
+        `re-fetch before re-running.`,
+    );
   }
 
+  // The plan's identity, captured BEFORE the provider work. The providers
+  // take real time, the plan path is shared per PR, and a concurrent capture
+  // can replace the file mid-computation — this run would then write contents
+  // derived from the OLD plan and restore the NEW run's epoch over them,
+  // leaving the other run's ledger and transcripts to pass an exact mtime
+  // fence against a plan they never described. Compared just before the
+  // write; a moved identity aborts rather than corrupts. Statted with
+  // `{ bigint: true }`: a number-backed `Stats.ino` rounds a 64-bit file id
+  // (NTFS) at the JS boundary, so two DISTINCT plans whose ids land in one
+  // double-rounding bucket would compare as one file and the guard below
+  // would fail open (#12574).
+  const planStatBefore = statSync(planPath, { bigint: true });
   const plan = readPlan(planPath);
   if (plan.worktreePath !== undefined) {
     if (
@@ -397,15 +458,153 @@ export function runRepoContext(
         );
   if (context === null) delete plan.repositoryContext;
   else plan.repositoryContext = context;
+  if (
+    plan.reviewProfile === DOCS_NAV_PROFILE &&
+    context &&
+    context.requiredAgents.some((role) =>
+      contextRoleRunsInThisReview(
+        role,
+        plan as RosterPlan,
+        reviewMode(plan as RosterPlan),
+      ),
+    )
+  ) {
+    delete plan.reviewProfile;
+    writeStderrLine(
+      'Repository-required reviewers keep this navigation change on the full review path.',
+    );
+  }
 
   mkdirSync(dirname(outPath), { recursive: true });
   atomicWriteFileSync(outPath, `${JSON.stringify(context, null, 2)}\n`);
-  atomicWriteFileSync(planPath, stringifyPlanReport(plan));
+  // The plan's mtime is the RUN EPOCH: deadline stamps, prompt records,
+  // transcripts and the run-session ledger are all fenced on it, and entries
+  // written before this enrichment (fetch-pr's session entry, ~an
+  // orchestrator turn earlier) must stay inside the fence. This write
+  // enriches the same run's plan — it is not a re-capture — so the mtime is
+  // restored after it; letting it advance re-keyed the epoch mid-run and
+  // silently orphaned everything recorded before this command ran.
+  const planStat = statSync(planPath, { bigint: true });
+  // Compare-and-refuse: if the plan is no longer the file this run read —
+  // mtime moved or inode swapped since the capture above — another run owns
+  // the path now, and writing stale derived contents under ITS epoch is the
+  // one outcome worse than doing nothing. The inode disjunct compares exact
+  // bigints; a volume reporting no id at all (`ino === 0n`: FAT/exFAT/SMB)
+  // leaves the fence to the mtime disjunct, as before.
+  if (
+    // `mtimeNs` rather than `mtimeMs`: the bigint millisecond field
+    // truncates toward zero while the number field rounds, and the sub-
+    // millisecond remainder is what the epoch-restore fidelity pins below.
+    Math.abs(Number(planStat.mtimeNs - planStatBefore.mtimeNs)) > 1e6 ||
+    (planStatBefore.ino !== 0n &&
+      planStat.ino !== 0n &&
+      planStat.ino !== planStatBefore.ino)
+  ) {
+    throw new Error(
+      `repo-context: the plan at ${planPath} changed while repository ` +
+        'context was being computed (another run captured it); aborting ' +
+        'rather than writing stale contents under its epoch.',
+    );
+  }
+  const serialized = stringifyPlanReport(plan);
+  // The cheapest way to keep the epoch is not to move it: an enrichment that
+  // changes nothing (the common case on a resumed run, where the plan
+  // already carries its context) skips the write entirely, so the
+  // commit-then-restore window cannot open at all.
+  let planUnchanged = false;
+  try {
+    planUnchanged = readFileSync(planPath, 'utf8') === serialized;
+  } catch {
+    planUnchanged = false;
+  }
+  if (!planUnchanged) {
+    commitPlanPreservingEpoch(planPath, serialized, planStat);
+    // The temp file was stamped BEFORE the rename, so the commit should
+    // land exactly on the anchor. Verify it anyway:
+    // an unrestored epoch fences out this run's own evidence, and a silent
+    // one is worse than a loud one. Compared with a millisecond of tolerance
+    // rather than exact float equality — `mtimeMs` is a float derived from a
+    // nanosecond counter, and the last bits do not survive every filesystem's
+    // round trip. One millisecond is exactly the ledger fence's own
+    // tolerance (`PLAN_MTIME_TOLERANCE_MS`) — the binding rail — so the
+    // warning fires precisely when the drift exceeds what that rail
+    // tolerates; the strict `since` readers bind tighter still, but a drift
+    // under 1ms cannot cross a whole-mtime boundary they compare against.
+    if (
+      Math.abs(statSync(planPath).mtimeMs - Number(planStat.mtimeNs) / 1e6) > 1
+    ) {
+      writeStderrLine(
+        `WARNING: could not restore the plan's timestamp at ${planPath}; ` +
+          `the run epoch has moved, and evidence recorded before this ` +
+          `command may no longer be visible to this run.`,
+      );
+    }
+  }
   writeStdoutLine(
     context === null
       ? `Wrote null repository context to ${outPath}`
       : `Wrote repository context (${context.provider}) to ${outPath}`,
   );
+}
+
+/**
+ * Commit the enriched plan without ever exposing an advanced run epoch.
+ *
+ * The plain write-then-restore pair had two windows, both found by audit.
+ * (R2-11) the atomic rename commits the temp file's FRESH mtime, and the
+ * separate `utimesSync` restore lands a syscall later — a kill between the
+ * two leaves the plan enriched with an advanced epoch, and the
+ * skip-when-identical guard above then makes the damage permanent: a retry
+ * sees identical bytes, never rewrites, and nothing ever restores the
+ * epoch. So the TEMP file is stamped with the anchor's times BEFORE the
+ * rename: at every instant the plan path exists, it carries the epoch this
+ * run's evidence is fenced on. (R8-49) the compare-and-refuse upstream ran
+ * a full read+compare+write before its rename, and a concurrent capture
+ * landing in that window was silently overwritten with stale contents
+ * under the OTHER run's epoch — so identity is re-checked against the
+ * anchor immediately before the rename, leaving only the two adjacent
+ * syscalls no userspace sequence can close.
+ *
+ * Exported for its probes.
+ */
+export function commitPlanPreservingEpoch(
+  planPath: string,
+  serialized: string,
+  anchor: BigIntStats,
+): void {
+  const tmp = `${planPath}.${process.pid}.enrich-tmp`;
+  rmSync(tmp, { force: true });
+  const fd = openSync(tmp, 'wx', 0o644);
+  try {
+    writeSync(fd, serialized);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    // Nanoseconds end to end: the bigint millisecond fields truncate toward
+    // zero, and restoring from them would move the epoch by up to a
+    // millisecond — the drift the sub-millisecond epoch test pins.
+    utimesSync(tmp, Number(anchor.atimeNs) / 1e9, Number(anchor.mtimeNs) / 1e9);
+    // `{ bigint: true }` again: the anchor's id is exact, and comparing it
+    // against a rounded double would fail open for two captures whose file
+    // ids land in one double-rounding bucket above 2^53 (#12574).
+    const now = statSync(planPath, { bigint: true });
+    if (
+      Math.abs(Number(now.mtimeNs - anchor.mtimeNs)) > 1e6 ||
+      (anchor.ino !== 0n && now.ino !== 0n && now.ino !== anchor.ino)
+    ) {
+      throw new Error(
+        `repo-context: the plan at ${planPath} changed while repository ` +
+          'context was being committed (another run captured it); aborting ' +
+          'rather than overwriting its capture with stale contents.',
+      );
+    }
+    renameSync(tmp, planPath);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 export const repoContextCommand: CommandModule = {

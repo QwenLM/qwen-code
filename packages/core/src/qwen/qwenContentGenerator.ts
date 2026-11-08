@@ -12,8 +12,6 @@ import { type Config } from '../config/config.js';
 import type {
   GenerateContentParameters,
   GenerateContentResponse,
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
 } from '@google/genai';
@@ -171,15 +169,6 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
     return this.executeWithCredentialManagement(() =>
       super.generateContentStream(request, userPromptId),
     );
-  }
-
-  /**
-   * Override to use dynamic token and endpoint with automatic retry
-   */
-  override async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    return super.countTokens(request);
   }
 
   /**

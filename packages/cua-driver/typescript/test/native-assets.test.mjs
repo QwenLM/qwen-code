@@ -1,0 +1,331 @@
+import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { test } from "node:test"
+import { c as createTar } from "tar"
+
+import {
+  hasNativePayload,
+  nativeTarget,
+  resolveNativeDirectory,
+} from "../dist/native-assets.js"
+import {
+  ensureNativePayload,
+  installUiAccessWorker,
+  parseChecksums,
+  uiAccessWorkerPath,
+} from "../scripts/install-native.mjs"
+
+test("release target mapping uses Qwen binary archives", () => {
+  assert.equal(
+    nativeTarget("darwin", "arm64", "1.2.3").archive,
+    "cua-driver-rs-1.2.3-darwin-universal-binary.tar.gz",
+  )
+  assert.equal(
+    nativeTarget("linux", "x64", "1.2.3").archive,
+    "cua-driver-rs-1.2.3-linux-x86_64-binary.tar.gz",
+  )
+  assert.equal(
+    nativeTarget("win32", "arm64", "1.2.3").archive,
+    "cua-driver-rs-1.2.3-windows-arm64-binary.zip",
+  )
+  assert.deepEqual(nativeTarget("win32", "x64", "1.2.3").companions, [])
+  assert.throws(() => nativeTarget("freebsd", "x64", "1.2.3"))
+})
+
+test("an explicit native directory is authoritative", () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-sdk-native-explicit-"))
+  const target = nativeTarget(process.platform, process.arch, "1.2.3")
+  try {
+    assert.throws(() =>
+      resolveNativeDirectory(
+        { QWEN_CUA_SDK_NATIVE_DIR: directory },
+        process.platform,
+        process.arch,
+        "1.2.3",
+      ),
+    )
+    writeFileSync(join(directory, target.library), "library")
+    writeFileSync(join(directory, target.runtime), "runtime")
+    for (const companion of target.companions ?? []) {
+      writeFileSync(join(directory, companion), "companion")
+    }
+    assert.equal(
+      resolveNativeDirectory(
+        { QWEN_CUA_SDK_NATIVE_DIR: directory },
+        process.platform,
+        process.arch,
+        "1.2.3",
+      ),
+      directory,
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("native installer verifies and extracts the matching release archive", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-sdk-native-install-"))
+  const source = join(directory, "source")
+  const cache = join(directory, "cache")
+  mkdirSync(source)
+  const version = "9.8.7"
+  const target = nativeTarget("linux", "x64", version)
+  const destination = join(cache, version, target.cacheKey)
+  mkdirSync(destination, { recursive: true })
+  writeFileSync(join(destination, target.library), "uncommitted-library")
+  writeFileSync(join(destination, target.runtime), "uncommitted-runtime")
+  const env = {
+    QWEN_CUA_SDK_CACHE_DIR: cache,
+    QWEN_CUA_SDK_RELEASE_BASE_URL: "https://release.invalid/tag",
+  }
+  writeFileSync(join(source, target.library), "sdk-library")
+  writeFileSync(join(source, target.runtime), "node-runtime")
+  const archive = join(directory, target.archive)
+  await createTar({ cwd: source, file: archive, gzip: true }, [
+    target.library,
+    target.runtime,
+  ])
+  const archiveBytes = readFileSync(archive)
+  const checksum = createHash("sha256").update(archiveBytes).digest("hex")
+  const requests = []
+  const fetchImpl = async (url) => {
+    requests.push(String(url))
+    return String(url).endsWith("checksums.txt")
+      ? new Response(`${checksum}  ${target.archive}\n`)
+      : new Response(archiveBytes)
+  }
+
+  try {
+    assert.throws(
+      () => resolveNativeDirectory(env, "linux", "x64", version),
+      /native payload is not installed/u,
+    )
+    const installed = await ensureNativePayload({
+      arch: "x64",
+      env,
+      fetchImpl,
+      platform: "linux",
+      version,
+    })
+    assert.equal(installed, destination)
+    assert.equal(hasNativePayload(installed, target), true)
+    assert.equal(
+      readFileSync(join(installed, target.library), "utf8"),
+      "sdk-library",
+    )
+    assert.equal(
+      readFileSync(join(installed, target.runtime), "utf8"),
+      "node-runtime",
+    )
+    assert.equal(
+      JSON.parse(readFileSync(join(installed, "complete.json"), "utf8"))
+        .version,
+      version,
+    )
+    assert.deepEqual(requests, [
+      "https://release.invalid/tag/checksums.txt",
+      `https://release.invalid/tag/${target.archive}`,
+    ])
+
+    requests.length = 0
+    assert.equal(
+      await ensureNativePayload({
+        arch: "x64",
+        env: { QWEN_CUA_SDK_CACHE_DIR: cache },
+        fetchImpl,
+        platform: "linux",
+        version,
+      }),
+      installed,
+    )
+    assert.deepEqual(requests, [])
+    assert.equal(
+      resolveNativeDirectory(env, "linux", "x64", version),
+      destination,
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("checksum mismatch never exposes a native payload", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-sdk-native-mismatch-"))
+  const version = "9.8.6"
+  const target = nativeTarget("linux", "x64", version)
+  const env = {
+    QWEN_CUA_SDK_CACHE_DIR: join(directory, "cache"),
+    QWEN_CUA_SDK_RELEASE_BASE_URL: "https://release.invalid/tag",
+  }
+  const fetchImpl = async (url) =>
+    String(url).endsWith("checksums.txt")
+      ? new Response(`${"0".repeat(64)}  ${target.archive}\n`)
+      : new Response("corrupt")
+  try {
+    await assert.rejects(
+      ensureNativePayload({
+        arch: "x64",
+        env,
+        fetchImpl,
+        platform: "linux",
+        version,
+      }),
+      /checksum mismatch/u,
+    )
+    assert.equal(
+      hasNativePayload(
+        join(env.QWEN_CUA_SDK_CACHE_DIR, version, target.cacheKey),
+        target,
+      ),
+      false,
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("checksum parser accepts sha256sum output only", () => {
+  assert.deepEqual(
+    [...parseChecksums(`${"a".repeat(64)}  archive.tar.gz\ninvalid\n`)],
+    [["archive.tar.gz", "a".repeat(64)]],
+  )
+})
+
+test("UIAccess worker uses the versioned secure Windows path", () => {
+  assert.equal(
+    uiAccessWorkerPath("1.2.3", { ProgramFiles: String.raw`C:\Program Files` }),
+    join(
+      String.raw`C:\Program Files`,
+      "Qwen",
+      "CuaDriver",
+      "1.2.3",
+      "qwen-cua-driver-uia.exe",
+    ),
+  )
+  assert.throws(() => uiAccessWorkerPath("1.2.3", {}), /ProgramFiles/u)
+})
+
+test("default Windows native installation needs no UIAccess worker or Program Files", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-sdk-windows-ordinary-"));
+  try {
+    const target = nativeTarget("win32", "x64", "1.2.3");
+    writeFileSync(join(directory, target.library), "library fixture");
+    writeFileSync(join(directory, target.runtime), "runtime fixture");
+    const result = await ensureNativePayload({
+      env: { QWEN_CUA_SDK_NATIVE_DIR: directory }, platform: "win32", arch: "x64", version: "1.2.3",
+      fetchImpl: () => { throw new Error("explicit native payload must not download"); },
+    });
+    assert.equal(result, directory);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("installUiAccessWorker explains mkdir and copy permission failures", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-deploy-denial-"))
+  const env = { ProgramFiles: directory }
+  const destination = uiAccessWorkerPath("0.0.0-test", env)
+  try {
+    for (const stage of ["mkdir", "copy"]) {
+      const denial = Object.assign(new Error(`${stage} EPERM`), {
+        code: "EPERM",
+      })
+      const calls = []
+      await assert.rejects(
+        installUiAccessWorker(
+          "source.exe",
+          "0.0.0-test",
+          env,
+          async (path) => {
+            calls.push(path)
+          },
+          async () => {
+            if (stage === "mkdir") throw denial
+          },
+          async () => {
+            throw denial
+          },
+        ),
+        (error) => {
+          assert.equal(error.cause, denial)
+          assert.ok(error.message.includes(destination))
+          assert.match(
+            error.message,
+            /Rerun the SDK installation from an elevated terminal with CUA_DRIVER_USE_UIACCESS=1/u,
+          )
+          assert.doesNotMatch(error.message, /install\.ps1/u)
+          return true
+        },
+      )
+      assert.deepEqual(calls, ["source.exe"])
+    }
+    const enospc = Object.assign(new Error("mkdir ENOSPC"), { code: "ENOSPC" })
+    await assert.rejects(
+      installUiAccessWorker(
+        "source.exe",
+        "0.0.0-test",
+        env,
+        async () => {},
+        async () => {
+          throw enospc
+        },
+      ),
+      (error) => error === enospc,
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("installed UIAccess worker is reverified before reuse without writing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-installed-worker-"))
+  const env = { ProgramFiles: directory }
+  const destination = uiAccessWorkerPath("0.0.0-test", env)
+  mkdirSync(join(directory, "Qwen", "CuaDriver", "0.0.0-test"), {
+    recursive: true,
+  })
+  writeFileSync(destination, "installed worker")
+  const calls = []
+  const unexpectedWrite = async () => {
+    throw new Error("must not write")
+  }
+  try {
+    assert.equal(
+      await installUiAccessWorker(
+        "source.exe",
+        "0.0.0-test",
+        env,
+        async (path) => {
+          calls.push(path)
+        },
+        unexpectedWrite,
+        unexpectedWrite,
+      ),
+      destination,
+    )
+    assert.deepEqual(calls, ["source.exe", destination])
+    const invalid = new Error("HashMismatch")
+    await assert.rejects(
+      installUiAccessWorker(
+        "source.exe",
+        "0.0.0-test",
+        env,
+        async (path) => {
+          if (path === destination) throw invalid
+        },
+        unexpectedWrite,
+        unexpectedWrite,
+      ),
+      (error) => error === invalid,
+    )
+    assert.equal(readFileSync(destination, "utf8"), "installed worker")
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

@@ -11,6 +11,8 @@ pub mod apps;
 #[cfg(target_os = "macos")]
 pub mod ax;
 #[cfg(target_os = "macos")]
+mod background_mutation;
+#[cfg(target_os = "macos")]
 pub mod browser;
 #[cfg(target_os = "macos")]
 pub mod capture;
@@ -22,6 +24,8 @@ pub mod focus_guard;
 pub mod focus_steal;
 #[cfg(target_os = "macos")]
 pub mod input;
+#[cfg(target_os = "macos")]
+pub mod key_focus_guard;
 #[cfg(target_os = "macos")]
 pub mod permissions;
 #[cfg(target_os = "macos")]
@@ -105,10 +109,12 @@ pub fn register_tools_with_cursor_and_provider(
 ) -> ToolRegistry {
     #[cfg(target_os = "macos")]
     {
-        let cursor_overlay_available =
+        let mut cursor_overlay_available =
             cursor_overlay_facility_available(cfg.enabled, session::has_graphic_access());
         if cursor_overlay_available {
             cursor::overlay::init(cfg);
+            cursor_overlay_available =
+                cursor::overlay::is_started() || cursor::overlay::start_on_main_thread().is_ok();
         }
         let mut r = ToolRegistry::new_with_protected_consent_provider(provider);
         tools::register_all(
@@ -148,3 +154,7 @@ mod cursor_overlay_host_tests {
         assert!(!cursor_overlay_facility_available(false, false));
     }
 }
+
+pub mod apple_events;
+
+pub mod document_edit;

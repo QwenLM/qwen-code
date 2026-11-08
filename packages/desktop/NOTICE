@@ -1,23 +1,4 @@
-Craft Agents
-Copyright 2026 Craft Docs Ltd.
+Qwen Code Desktop Shell
+Copyright 2026 Qwen Team
 
-This product includes software developed by Craft Docs Ltd.
-https://craft.do
-
----
-
-This project uses the Claude Agent SDK, which is subject to Anthropic's
-Commercial Terms of Service: https://www.anthropic.com/legal/commercial-terms
-
----
-
-OpenWork
-Copyright 2026 Model Studio AI
-
-OpenWork includes modifications and extensions developed by Model Studio AI.
-https://github.com/modelstudioai/openwork
-
----
-
-Third-party dependencies are listed in package.json files and are subject
-to their respective licenses.
+This distribution includes Qwen Code and the Node.js runtime. Qwen Code is licensed under the Apache License 2.0. Node.js license notices are included with the bundled runtime.

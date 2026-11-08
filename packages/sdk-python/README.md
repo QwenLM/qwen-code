@@ -23,6 +23,17 @@ pip install --pre qwen-code-sdk
 You can also point the SDK at an explicit CLI binary or script with
 `path_to_qwen_executable`.
 
+On Windows, command names are resolved only from the effective child `PATH`,
+including case-insensitive overrides in `QueryOptions.env`. Supported command
+extensions are `.com`, `.exe`, `.bat`, and `.cmd`; extensionless npm shell shims
+and unrelated `PATHEXT` associations are ignored. The current directory is searched
+only when explicitly included in `PATH`. Explicit Python or JavaScript file paths
+continue to use their corresponding runtime.
+
+Closing a running Windows command shim uses the system `taskkill /T /F` command to
+stop both the shim and its CLI descendants before the parent process exits. Exit
+and stderr cleanup waits are bounded so an inherited pipe cannot stall shutdown.
+
 Before using the SDK, verify that the CLI works in the same environment:
 
 ```bash
@@ -141,12 +152,15 @@ Common fields:
 - `path_to_qwen_executable`: `qwen`, an absolute binary path, or a `.js` CLI
   bundle
 - `model`: model override for this session
-- `permission_mode`: one of `default`, `plan`, `auto-edit`, or `yolo`; `yolo`
-  auto-approves all tools, so use it only in trusted or sandboxed environments
+- `permission_mode`: one of `default`, `plan`, `auto-edit`, `auto`, or `yolo`;
+  `auto` lets an LLM classifier approve tool calls; `yolo` auto-approves all
+  tools, so use it only in trusted or sandboxed environments
 - `env`: extra environment variables passed to the CLI process
 - `system_prompt` / `append_system_prompt`: override or extend the system
   prompt
-- `core_tools`, `exclude_tools`, `allowed_tools`: constrain tool availability
+- `core_tools`: a non-empty allowlist of core tools. An omitted or empty list is treated as unspecified; `core_tools=[]` does not disable tools. MCP and other non-core tools have separate registration and permission rules.
+- `exclude_tools`: exclude named tools explicitly.
+- `allowed_tools`: bypass approval for matching tools; this is not a tool-registration allowlist.
 - `timeout`: seconds for control requests, permission callbacks, and stream
   close waits
 

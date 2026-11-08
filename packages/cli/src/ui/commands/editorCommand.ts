@@ -18,6 +18,7 @@ export const editorCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
   action: (): OpenDialogActionReturn => ({
     type: 'dialog',
     dialog: 'editor',

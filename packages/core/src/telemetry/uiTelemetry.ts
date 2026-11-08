@@ -19,13 +19,26 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
-export type UiEvent =
+export interface UiSubagentIdentity {
+  id: string;
+  type: string;
+  taskName?: string;
+}
+
+export type UiEvent = (
   | (ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE })
   | (ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR })
-  | (ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+  | (ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL })
+) &
+  Partial<{
+    subagent_id: string;
+    subagent_type: string;
+    subagent_task_name: string;
+  }>;
 
 export {
   EVENT_API_ERROR,
@@ -104,9 +117,75 @@ export interface ModelMetrics extends ModelMetricsCore {
   bySource: Record<string, ModelMetricsCore>;
 }
 
+/** One timed, non-internal response, for the per-request speed timeline. */
+export interface RequestTimingSample {
+  /** Event time, epoch ms. */
+  at: number;
+  ttftMs: number;
+  /** Generation window; below 100 ms it measures no output rate. */
+  generationMs: number;
+  outputTokens: number;
+  /** Subagent that issued the request; absent for the main conversation. */
+  source?: string;
+}
+
+/** One failed API call. */
+export interface RequestFailureSample {
+  /** Event time, epoch ms. */
+  at: number;
+  /** HTTP status code, else error type, else `unknown`. */
+  kind: string;
+  source?: string;
+}
+
+/**
+ * Model totals for the daemon stats route. Generation timing lives here, not
+ * in `ModelMetrics`, because `models` is also written to managed usage records
+ * whose model entries are validated against a closed set of keys.
+ */
+export interface StatsModelMetrics extends ModelMetricsCore {
+  generation?: GenerationMetrics;
+  /** Most recent timed responses, oldest first, capped at `MAX_TIMING_SAMPLES`. */
+  timingSamples?: RequestTimingSample[];
+  /** Failed calls by kind, and the most recent ones (oldest first). */
+  failures?: {
+    byKind: Record<string, number>;
+    recent: RequestFailureSample[];
+  };
+}
+
+/** Per-model response timeline length kept for the stats route. */
+export const MAX_TIMING_SAMPLES = 200;
+/** Per-model failure timeline length kept for the stats route. */
+export const MAX_FAILURE_SAMPLES = 50;
+
+function eventTime(event: { 'event.timestamp'?: string }): number {
+  const parsed = Date.parse(event['event.timestamp'] ?? '');
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function pushCapped<T>(list: T[], item: T, cap: number): void {
+  list.push(item);
+  if (list.length > cap) list.splice(0, list.length - cap);
+}
+
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
+  /** Provider-normalized model totals exposed by the daemon stats route. */
+  statsModels?: Record<string, StatsModelMetrics>;
+  /** Per-event output estimates; absent for models restored from raw-only history. */
+  billableOutputTokens?: Record<
+    string,
+    { total: number; bySource: Record<string, number> }
+  >;
   generation?: GenerationMetrics;
+  /**
+   * Per-instance subagent metadata (invocation id → business name + agent
+   * type).
+   */
+  sourceMeta?: Record<string, { name: string; type: string }>;
+  /** Per-instance subagent counters keyed by invocation id. */
+  sourceMetrics?: Record<string, ModelMetricsCore>;
   tools: {
     totalCalls: number;
     totalSuccess: number;
@@ -152,6 +231,64 @@ const createInitialModelMetrics = (): ModelMetrics => ({
   bySource: Object.create(null) as Record<string, ModelMetricsCore>,
 });
 
+/**
+ * `structuredClone` copies own properties onto a FRESH object with
+ * `Object.prototype` — it does not preserve the null prototype above, so a
+ * plain clone silently re-arms the crash that comment describes, permanently,
+ * for every `bySource` map it touches. Every snapshot/restore clone goes
+ * through here so the guard survives a replay rollback.
+ */
+const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
+  const clone = structuredClone(metrics);
+  for (const model of Object.values(clone.models)) {
+    model.bySource = Object.assign(
+      Object.create(null) as Record<string, ModelMetricsCore>,
+      model.bySource,
+    );
+  }
+  if (clone.sourceMeta) {
+    clone.sourceMeta = Object.assign(
+      Object.create(null) as NonNullable<SessionMetrics['sourceMeta']>,
+      clone.sourceMeta,
+    );
+  }
+  if (clone.sourceMetrics) {
+    clone.sourceMetrics = Object.assign(
+      Object.create(null) as NonNullable<SessionMetrics['sourceMetrics']>,
+      clone.sourceMetrics,
+    );
+  }
+  if (clone.statsModels) {
+    clone.statsModels = Object.assign(
+      Object.create(null) as NonNullable<SessionMetrics['statsModels']>,
+      clone.statsModels,
+    );
+    for (const model of Object.values(clone.statsModels)) {
+      if (model.failures) {
+        model.failures.byKind = Object.assign(
+          Object.create(null) as Record<string, number>,
+          model.failures.byKind,
+        );
+      }
+    }
+  }
+  if (clone.billableOutputTokens) {
+    clone.billableOutputTokens = Object.assign(
+      Object.create(null) as NonNullable<
+        SessionMetrics['billableOutputTokens']
+      >,
+      clone.billableOutputTokens,
+    );
+    for (const model of Object.values(clone.billableOutputTokens)) {
+      model.bySource = Object.assign(
+        Object.create(null) as Record<string, number>,
+        model.bySource,
+      );
+    }
+  }
+  return clone;
+};
+
 const createInitialSkillMetrics = (): SkillMetrics => ({
   totalCalls: 0,
   totalSuccess: 0,
@@ -159,12 +296,61 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   byName: {},
 });
 
+/** Shortest generation window that counts toward output speed. */
+const MIN_THROUGHPUT_WINDOW_MS = 100;
+
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
   totalTtftMs: 0,
   totalGenerationDurationMs: 0,
   totalThroughputOutputTokens: 0,
 });
+
+const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
+  if (event.total_token_count > 0) return event.total_token_count;
+  const input =
+    event.input_token_count > 0
+      ? event.input_token_count
+      : event.cached_content_token_count;
+  return (
+    input +
+    event.output_token_count +
+    (outputIncludesThoughts(event.auth_type) ? 0 : event.thoughts_token_count)
+  );
+};
+
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
+
+const getLegacySubagentId = (
+  event: { prompt_id?: string; subagent_name?: string },
+  sessionId?: string,
+): string | undefined => {
+  if (
+    !sessionId ||
+    !event.subagent_name ||
+    !event.prompt_id ||
+    isInternalPromptId(event.prompt_id)
+  ) {
+    return undefined;
+  }
+
+  const parts = event.prompt_id.split('#');
+  if (parts.length !== 3) return undefined;
+
+  const [promptSessionId, subagentId, round] = parts;
+  return promptSessionId === sessionId && subagentId && /^\d+$/.test(round)
+    ? subagentId
+    : undefined;
+};
 
 const createInitialMetrics = (): SessionMetrics => ({
   models: {},
@@ -188,6 +374,52 @@ const createInitialMetrics = (): SessionMetrics => ({
   skills: createInitialSkillMetrics(),
 });
 
+/**
+ * The slice of telemetry state a session-swap replay overwrites.
+ *
+ * `LlmClient.initialize()` takes this snapshot immediately before it
+ * replays an incoming session's stored history — it is the only caller that
+ * knows whether a replay is about to happen (the decision is the client's
+ * private `initializedSessionId`, not the config session id). Everything
+ * after that replay can still fail: the rest of initialization,
+ * background-agent recovery, building the resumed history, the UI swap. The
+ * `/resume` and `/branch` catch blocks roll core back to the old session,
+ * but this service has no subtraction API — `resetSession` clears one bucket
+ * and `reset()` would take the surviving session's live data with it — so an
+ * abandoned swap would otherwise leak a full copy of the dead session's
+ * history into the process-wide totals for the life of the process, and
+ * `persistSessionUsage` would later write that inflated figure out (#9833).
+ *
+ * Callers never take or restore snapshots directly; they open a swap
+ * transaction on `LlmClient` (`beginTelemetrySwap`), which owns the
+ * snapshot for exactly one swap and settles or aborts it.
+ * Restore overwrites rather than subtracts, so it is safe to apply after a
+ * rollback has already replayed something else on top (the `/branch`
+ * rollback re-initializes the parent session).
+ */
+export interface UiTelemetryReplaySnapshot {
+  readonly metrics: SessionMetrics;
+  readonly sessionId: string;
+  /** Absent when the session had no bucket yet — restore removes it again. */
+  readonly sessionMetrics: SessionMetrics | undefined;
+  readonly sessionWasClosed: boolean;
+  /**
+   * The session the process was on when the replay began — the one a failed
+   * swap rolls back to. Absent when no session was initialized yet (the
+   * process's first replay). The `/branch` rollback's own re-initialize
+   * replays this session, and that replay's `resetSession` wipes its live
+   * bucket; only what the transcript persists comes back. Restore puts the
+   * captured bucket back so in-memory-only state (skill invocations are
+   * never persisted) survives the round trip.
+   */
+  readonly outgoingSessionId?: string;
+  /** Absent when the outgoing session had no bucket yet — restore removes it. */
+  readonly outgoingSessionMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionWasClosed?: boolean;
+  readonly lastPromptTokenCount: number;
+  readonly lastCachedContentTokenCount: number;
+}
+
 export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
@@ -206,12 +438,17 @@ export class UiTelemetryService extends EventEmitter {
         this.#sessionMetrics.set(sessionId, createInitialMetrics());
       }
       this.#recordSessionStartTime(sessionId, event['event.timestamp']);
-      this.#accumulateEvent(this.#sessionMetrics.get(sessionId)!, event);
+      this.#accumulateEvent(
+        this.#sessionMetrics.get(sessionId)!,
+        event,
+        sessionId,
+      );
     }
 
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      event,
     });
   }
 
@@ -225,6 +462,47 @@ export class UiTelemetryService extends EventEmitter {
 
   getSessionStartTimeForSession(sessionId: string): Date {
     return this.#sessionStartTimes.get(sessionId) ?? this.#sessionStartTime;
+  }
+
+  /**
+   * Output tokens this session has been charged for so far, across every
+   * model and every source — the main loop and every subagent, because each
+   * content generator logs its API responses under the session that owns it.
+   * Read straight from the live bucket (no clone): the workflow token budget
+   * polls it on every `agent()` dispatch.
+   */
+  getTotalOutputTokens(sessionId: string): number {
+    const metrics = this.#sessionMetrics.get(sessionId);
+    if (!metrics) return 0;
+    let total = 0;
+    for (const model of Object.values(metrics.models)) {
+      total += model.tokens.candidates;
+    }
+    return total;
+  }
+
+  restoreSessionModelMetrics(
+    sessionId: string,
+    models: SessionMetrics['models'],
+  ): void {
+    const restoredTotal = Object.values(models).reduce(
+      (total, model) => total + model.tokens.candidates,
+      0,
+    );
+    // A warm owner already includes these requests. A cold owner restores
+    // the Session ledger without charging historical requests to this process.
+    if (this.getTotalOutputTokens(sessionId) >= restoredTotal) return;
+    const metrics =
+      this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
+    metrics.models = cloneSessionMetrics({
+      ...createInitialMetrics(),
+      models,
+    }).models;
+    // Raw history has no per-event convention. Never replace its full estimate
+    // with an authoritative count containing only subsequent live requests.
+    delete metrics.billableOutputTokens;
+    this.#sessionMetrics.set(sessionId, metrics);
+    this.#closedSessions.delete(sessionId);
   }
 
   recordSkillInvocation(
@@ -279,6 +557,103 @@ export class UiTelemetryService extends EventEmitter {
   }
 
   /**
+   * Captures everything a session replay is about to overwrite, so a session
+   * swap that fails after replaying can put the state back. See
+   * {@link UiTelemetryReplaySnapshot} for why a snapshot is the only
+   * compensation available (no subtraction API).
+   *
+   * `outgoingSessionId` is the session the process was on when the replay
+   * begins — the swap transaction's begin-time `outgoingHint`, falling back
+   * to `LlmClient.initializedSessionId`. An earlier failed swap's abort
+   * clears `initializedSessionId`, so keying on it alone would capture no
+   * outgoing session and lose the live bucket (#9844 review). Its bucket and
+   * closed flag are captured too: the `/branch` rollback re-initializes that
+   * session, and the re-initialize's `resetSession` wipes its live bucket —
+   * only what the transcript persists comes back (skill invocations never
+   * do), so restore must put the captured bucket back.
+   */
+  snapshotForReplay(
+    sessionId: string,
+    outgoingSessionId?: string,
+  ): UiTelemetryReplaySnapshot {
+    const outgoing =
+      outgoingSessionId && outgoingSessionId !== sessionId
+        ? outgoingSessionId
+        : undefined;
+    const sessionMetrics = this.#sessionMetrics.get(sessionId);
+    const outgoingSessionMetrics = outgoing
+      ? this.#sessionMetrics.get(outgoing)
+      : undefined;
+    return {
+      metrics: cloneSessionMetrics(this.#metrics),
+      sessionId,
+      sessionMetrics: sessionMetrics
+        ? cloneSessionMetrics(sessionMetrics)
+        : undefined,
+      sessionWasClosed: this.#closedSessions.has(sessionId),
+      outgoingSessionId: outgoing,
+      outgoingSessionMetrics: outgoingSessionMetrics
+        ? cloneSessionMetrics(outgoingSessionMetrics)
+        : undefined,
+      outgoingSessionWasClosed: outgoing
+        ? this.#closedSessions.has(outgoing)
+        : undefined,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+      lastCachedContentTokenCount: this.#lastCachedContentTokenCount,
+    };
+  }
+
+  /**
+   * Puts back the state {@link snapshotForReplay} captured, undoing the
+   * replay of an abandoned session swap. Overwrites rather than subtracts,
+   * so it stays correct when applied after the rollback's own re-initialize
+   * replayed something else on top. Only the snapshotted sessions' buckets
+   * are touched — every other session's live data survives, which is what
+   * makes this usable on a rollback path where the old session is still
+   * live. Emits `update` so keyed displays re-render the restored state.
+   */
+  restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
+    this.#metrics = cloneSessionMetrics(snapshot.metrics);
+    this.#restoreSessionState(
+      snapshot.sessionId,
+      snapshot.sessionMetrics,
+      snapshot.sessionWasClosed,
+    );
+    if (snapshot.outgoingSessionId) {
+      this.#restoreSessionState(
+        snapshot.outgoingSessionId,
+        snapshot.outgoingSessionMetrics,
+        snapshot.outgoingSessionWasClosed,
+      );
+    }
+    this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
+    this.#lastCachedContentTokenCount = snapshot.lastCachedContentTokenCount;
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+    });
+  }
+
+  #restoreSessionState(
+    sessionId: string,
+    metrics: SessionMetrics | undefined,
+    wasClosed: boolean | undefined,
+  ): void {
+    if (metrics) {
+      this.#sessionMetrics.set(sessionId, cloneSessionMetrics(metrics));
+    } else {
+      // No bucket existed before the replay; the replay created one. Drop it
+      // rather than leave an empty bucket that reads as a live session.
+      this.#sessionMetrics.delete(sessionId);
+    }
+    if (wasClosed) {
+      this.#closedSessions.add(sessionId);
+    } else {
+      this.#closedSessions.delete(sessionId);
+    }
+  }
+
+  /**
    * Resets metrics to the initial state (used when resuming a session).
    */
   reset(): void {
@@ -323,13 +698,17 @@ export class UiTelemetryService extends EventEmitter {
     }
   }
 
-  #accumulateEvent(metrics: SessionMetrics, event: UiEvent): boolean {
+  #accumulateEvent(
+    metrics: SessionMetrics,
+    event: UiEvent,
+    sessionId?: string,
+  ): boolean {
     switch (event['event.name']) {
       case EVENT_API_RESPONSE:
-        this.#accumulateApiResponse(metrics, event);
+        this.#accumulateApiResponse(metrics, event, sessionId);
         return true;
       case EVENT_API_ERROR:
-        this.#accumulateApiError(metrics, event);
+        this.#accumulateApiError(metrics, event, sessionId);
         return true;
       case EVENT_TOOL_CALL:
         this.#accumulateToolCall(metrics, event);
@@ -342,64 +721,198 @@ export class UiTelemetryService extends EventEmitter {
   #accumulateApiResponse(
     metrics: SessionMetrics,
     event: ApiResponseEvent,
+    sessionId?: string,
   ): void {
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
+    const statsModelMetrics = sessionId
+      ? this.#getOrCreateStatsModelMetrics(metrics, event.model)
+      : undefined;
     const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
-
-    for (const bucket of [modelMetrics, sourceMetrics]) {
+    const invocationMetrics = sessionId
+      ? this.#getOrCreateInvocationMetrics(metrics, event, sessionId)
+      : undefined;
+    const normalizedPromptTokens =
+      event.input_token_count > 0
+        ? event.input_token_count
+        : event.cached_content_token_count;
+    const normalizedTotalTokens = getEventTotalTokenCount(event);
+    const billable = metrics.billableOutputTokens?.[event.model];
+    if (billable) {
+      const output = getEventBillableOutputTokens(event);
+      const source = event.subagent_name ?? MAIN_SOURCE;
+      billable.total += output;
+      billable.bySource[source] = (billable.bySource[source] ?? 0) + output;
+    }
+    const accumulate = (
+      bucket: ModelMetricsCore,
+      prompt: number,
+      total: number,
+    ) => {
       bucket.api.totalRequests++;
       bucket.api.totalLatencyMs += event.duration_ms;
-
-      bucket.tokens.prompt += event.input_token_count;
+      bucket.tokens.prompt += prompt;
       bucket.tokens.candidates += event.output_token_count;
-      bucket.tokens.total += event.total_token_count;
+      bucket.tokens.total += total;
       bucket.tokens.cached += event.cached_content_token_count;
       bucket.tokens.thoughts += event.thoughts_token_count;
+    };
+    accumulate(modelMetrics, event.input_token_count, event.total_token_count);
+    accumulate(sourceMetrics, event.input_token_count, event.total_token_count);
+    if (statsModelMetrics) {
+      accumulate(
+        statsModelMetrics,
+        normalizedPromptTokens,
+        normalizedTotalTokens,
+      );
+    }
+    if (invocationMetrics) {
+      accumulate(
+        invocationMetrics,
+        normalizedPromptTokens,
+        normalizedTotalTokens,
+      );
     }
 
+    const ttftMs = event.ttft_ms;
+    const generationDurationMs = event.generation_ms;
+    // Events recorded before `generation_ms` existed also predate counting
+    // tool-call preparations as visible output, so their TTFT can span a
+    // whole tool-call-only request. Leave them out of timing entirely.
     if (
-      event.ttft_ms === undefined ||
-      !Number.isFinite(event.ttft_ms) ||
-      event.ttft_ms < 0 ||
+      ttftMs === undefined ||
+      !Number.isFinite(ttftMs) ||
+      ttftMs < 0 ||
+      generationDurationMs === undefined ||
+      !Number.isFinite(generationDurationMs) ||
+      generationDurationMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    const generation =
-      metrics.generation ??
-      (metrics.generation = createInitialGenerationMetrics());
-    const generationDurationMs = Math.max(0, event.duration_ms - event.ttft_ms);
+    const accumulateGeneration = (generation: GenerationMetrics) => {
+      generation.timedRequests++;
+      generation.totalTtftMs += ttftMs;
+      // A window this short means the output arrived in a burst, so dividing
+      // the whole response's tokens by it reads as thousands of tokens/s.
+      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
+        generation.totalGenerationDurationMs += generationDurationMs;
+        generation.totalThroughputOutputTokens += event.output_token_count;
+      }
+    };
 
-    generation.timedRequests++;
-    generation.totalTtftMs += event.ttft_ms;
-    if (generationDurationMs > 0) {
-      generation.totalGenerationDurationMs += generationDurationMs;
-      generation.totalThroughputOutputTokens += event.output_token_count;
+    const generation = (metrics.generation ??=
+      createInitialGenerationMetrics());
+    accumulateGeneration(generation);
+    if (statsModelMetrics) {
+      accumulateGeneration(
+        (statsModelMetrics.generation ??= createInitialGenerationMetrics()),
+      );
+      pushCapped(
+        (statsModelMetrics.timingSamples ??= []),
+        {
+          at: eventTime(event),
+          ttftMs,
+          generationMs: generationDurationMs,
+          outputTokens: event.output_token_count,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_TIMING_SAMPLES,
+      );
     }
     generation.last = {
       model: event.model,
-      ttftMs: event.ttft_ms,
+      ttftMs,
       generationDurationMs,
       outputTokens: event.output_token_count,
     };
   }
 
-  #accumulateApiError(metrics: SessionMetrics, event: ApiErrorEvent): void {
+  #accumulateApiError(
+    metrics: SessionMetrics,
+    event: ApiErrorEvent,
+    sessionId?: string,
+  ): void {
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
+    const statsModelMetrics = sessionId
+      ? this.#getOrCreateStatsModelMetrics(metrics, event.model)
+      : undefined;
     const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
+    const invocationMetrics = sessionId
+      ? this.#getOrCreateInvocationMetrics(metrics, event, sessionId)
+      : undefined;
+    const buckets = [
+      modelMetrics,
+      ...(statsModelMetrics ? [statsModelMetrics] : []),
+      sourceMetrics,
+      ...(invocationMetrics ? [invocationMetrics] : []),
+    ];
 
-    for (const bucket of [modelMetrics, sourceMetrics]) {
+    for (const bucket of buckets) {
       bucket.api.totalRequests++;
       bucket.api.totalErrors++;
       bucket.api.totalLatencyMs += event.duration_ms;
     }
+    if (statsModelMetrics) {
+      const kind =
+        event.status_code !== undefined && event.status_code !== ''
+          ? String(event.status_code)
+          : event.error_type || 'unknown';
+      const failures = (statsModelMetrics.failures ??= {
+        byKind: Object.create(null) as Record<string, number>,
+        recent: [],
+      });
+      failures.byKind[kind] = (failures.byKind[kind] ?? 0) + 1;
+      pushCapped(
+        failures.recent,
+        {
+          at: eventTime(event),
+          kind,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_FAILURE_SAMPLES,
+      );
+    }
+  }
+
+  #getOrCreateInvocationMetrics(
+    metrics: SessionMetrics,
+    event: {
+      subagent_name?: string;
+      subagent_type?: string;
+      subagent_id?: string;
+      subagent_task_name?: string;
+      prompt_id?: string;
+    },
+    sessionId?: string,
+  ): ModelMetricsCore | undefined {
+    const id = event.subagent_id ?? getLegacySubagentId(event, sessionId);
+    if (!id) return undefined;
+
+    const meta = (metrics.sourceMeta ??= Object.create(null) as Record<
+      string,
+      { name: string; type: string }
+    >);
+    const existingMeta = meta[id];
+    meta[id] = {
+      name:
+        event.subagent_task_name ??
+        existingMeta?.name ??
+        event.subagent_name ??
+        id,
+      type:
+        event.subagent_type ?? existingMeta?.type ?? event.subagent_name ?? '',
+    };
+    const sourceMetrics = (metrics.sourceMetrics ??= Object.create(
+      null,
+    ) as Record<string, ModelMetricsCore>);
+    return (sourceMetrics[id] ??= createInitialModelMetricsCore());
   }
 
   #accumulateToolCall(metrics: SessionMetrics, event: ToolCallEvent): void {
@@ -498,8 +1011,26 @@ export class UiTelemetryService extends EventEmitter {
   ): ModelMetrics {
     if (!metrics.models[modelName]) {
       metrics.models[modelName] = createInitialModelMetrics();
+      const billable = (metrics.billableOutputTokens ??= Object.create(
+        null,
+      ) as NonNullable<SessionMetrics['billableOutputTokens']>);
+      billable[modelName] = {
+        total: 0,
+        bySource: Object.create(null) as Record<string, number>,
+      };
     }
     return metrics.models[modelName];
+  }
+
+  #getOrCreateStatsModelMetrics(
+    metrics: SessionMetrics,
+    modelName: string,
+  ): StatsModelMetrics {
+    const statsModels = (metrics.statsModels ??= Object.create(null) as Record<
+      string,
+      StatsModelMetrics
+    >);
+    return (statsModels[modelName] ??= createInitialModelMetricsCore());
   }
 
   #getOrCreateSourceMetrics(

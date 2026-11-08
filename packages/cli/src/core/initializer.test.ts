@@ -44,7 +44,9 @@ describe('initializeApp', () => {
   let mockConfig: {
     getModelsConfig: ReturnType<typeof vi.fn>;
     getIdeMode: ReturnType<typeof vi.fn>;
-    getGeminiMdFileCount: ReturnType<typeof vi.fn>;
+    getMemoryFileCount: ReturnType<typeof vi.fn>;
+    getAuthType: ReturnType<typeof vi.fn>;
+    getModel: ReturnType<typeof vi.fn>;
   };
   let mockSettings: {
     merged: Record<string, unknown>;
@@ -60,7 +62,9 @@ describe('initializeApp', () => {
         wasAuthTypeExplicitlyProvided: vi.fn().mockReturnValue(false),
       }),
       getIdeMode: vi.fn().mockReturnValue(false),
-      getGeminiMdFileCount: vi.fn().mockReturnValue(0),
+      getMemoryFileCount: vi.fn().mockReturnValue(0),
+      getAuthType: vi.fn(),
+      getModel: vi.fn().mockReturnValue('saved-model'),
     };
 
     mockSettings = {
@@ -96,7 +100,7 @@ describe('initializeApp', () => {
 
     expect(result.authError).toBeNull();
     expect(result.themeError).toBeNull();
-    expect(result.geminiMdFileCount).toBe(0);
+    expect(result.memoryFileCount).toBe(0);
   });
 
   it('should return authError when auth fails', async () => {
@@ -109,9 +113,30 @@ describe('initializeApp', () => {
 
     expect(result.authError).toBe('Auth failed');
     expect(result.shouldOpenAuthDialog).toBe(true);
+    expect(result.skipStartupAuthDialog).toBeUndefined();
     // initializeApp does not clear the selected auth type on failure
     expect(mockSettings.setValue).not.toHaveBeenCalled();
   });
+
+  it.each([
+    null,
+    'The selected model, saved-model, is no longer available. Run /model to choose another model.',
+  ])(
+    'keeps the composer open for a configured subscription (%s)',
+    async (error) => {
+      mockConfig
+        .getModelsConfig()
+        .getCurrentAuthType.mockReturnValue('qwen-subscription');
+      mockPerformInitialAuth.mockResolvedValue(error);
+      const result = await initializeApp(
+        mockConfig as never,
+        mockSettings as never,
+      );
+      expect(result.skipStartupAuthDialog).toBe(true);
+      expect(result.authNotice).toBe(error ?? undefined);
+      expect(result.authError).toBe(error);
+    },
+  );
 
   it('should return themeError when theme validation fails', async () => {
     mockValidateTheme.mockReturnValue('Theme not found');

@@ -43,6 +43,11 @@ pub struct EmbeddedDriverHostOptions {
     pub startup_timeout_ms: Option<u64>,
     pub shutdown_timeout_ms: Option<u64>,
     pub permission_mode: Option<EmbeddedPermissionMode>,
+    #[uniffi(default = None)]
+    pub capability_manifest_path: Option<String>,
+    #[uniffi(default = false)]
+    pub approve_capability_manifest: bool,
+    /// Deprecated aliases retained for compatibility.
     pub session_policy_path: Option<String>,
     pub approve_session_policy: bool,
     pub dangerously_bypass_approvals: bool,
@@ -251,6 +256,8 @@ impl EmbeddedCuaDriverHost {
             startup_timeout_ms: None,
             shutdown_timeout_ms: None,
             permission_mode: None,
+            capability_manifest_path: None,
+            approve_capability_manifest: false,
             session_policy_path: None,
             approve_session_policy: false,
             dangerously_bypass_approvals: false,
@@ -428,6 +435,8 @@ impl EmbeddedCuaDriverHost {
                 Stdio::null()
             })
             .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        prevent_console_window(&mut command);
         for variable in safe_environment(&self.options.environment) {
             command.env(variable.name, variable.value);
         }
@@ -633,10 +642,10 @@ impl EmbeddedCuaDriverHost {
             .into(),
         ];
         if let Some(path) = &self.options.session_policy_path {
-            args.extend(["--session-policy".into(), path.clone()]);
+            args.extend(["--capability-manifest".into(), path.clone()]);
         }
         if self.options.approve_session_policy {
-            args.push("--approve-session-policy".into());
+            args.push("--approve-capability-manifest".into());
         }
         if self.options.dangerously_bypass_approvals {
             args.push("--dangerously-bypass-approvals".into());
@@ -732,13 +741,33 @@ fn validate_options(
     let permission_mode = options
         .permission_mode
         .unwrap_or(EmbeddedPermissionMode::Standard);
+    if options.capability_manifest_path.is_some()
+        && options.session_policy_path.is_some()
+        && options.capability_manifest_path != options.session_policy_path
+    {
+        return configuration_error(
+            "capability_manifest_path conflicts with deprecated session_policy_path",
+        );
+    }
+    let capability_manifest_path = options
+        .capability_manifest_path
+        .clone()
+        .or_else(|| options.session_policy_path.clone());
+    let capability_manifest_approved =
+        options.approve_capability_manifest || options.approve_session_policy;
+    let manifest_configured = capability_manifest_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty());
+    if capability_manifest_path.is_some() && !manifest_configured {
+        return configuration_error("capability manifest path must not be empty");
+    }
+    if manifest_configured != capability_manifest_approved {
+        return configuration_error(
+            "capability manifest path and approval acknowledgement must be supplied together",
+        );
+    }
     match permission_mode {
         EmbeddedPermissionMode::Standard => {
-            if options.session_policy_path.is_some() || options.approve_session_policy {
-                return configuration_error(
-                    "session policy options are valid only in bounded mode",
-                );
-            }
             if options.dangerously_bypass_approvals {
                 return configuration_error(
                     "dangerously_bypass_approvals is valid only in unrestricted mode",
@@ -746,15 +775,8 @@ fn validate_options(
             }
         }
         EmbeddedPermissionMode::Bounded => {
-            if options
-                .session_policy_path
-                .as_deref()
-                .is_none_or(|path| path.trim().is_empty())
-            {
-                return configuration_error("bounded mode requires session_policy_path");
-            }
-            if !options.approve_session_policy {
-                return configuration_error("bounded mode requires approve_session_policy=true");
+            if !manifest_configured {
+                return configuration_error("bounded mode requires a capability manifest");
             }
             if options.dangerously_bypass_approvals {
                 return configuration_error("bounded mode cannot bypass runtime approvals");
@@ -764,11 +786,6 @@ fn validate_options(
             if !options.dangerously_bypass_approvals {
                 return configuration_error(
                     "unrestricted mode requires dangerously_bypass_approvals=true",
-                );
-            }
-            if options.session_policy_path.is_some() || options.approve_session_policy {
-                return configuration_error(
-                    "unrestricted mode cannot use a bounded session policy",
                 );
             }
         }
@@ -795,8 +812,8 @@ fn validate_options(
         startup_timeout: Duration::from_millis(startup_timeout_ms),
         shutdown_timeout: Duration::from_millis(shutdown_timeout_ms),
         permission_mode,
-        session_policy_path: options.session_policy_path,
-        approve_session_policy: options.approve_session_policy,
+        session_policy_path: capability_manifest_path,
+        approve_session_policy: capability_manifest_approved,
         dangerously_bypass_approvals: options.dangerously_bypass_approvals,
         environment: options.environment,
         inherit_stderr: options.inherit_stderr,
@@ -831,12 +848,14 @@ pub(crate) fn allowed_environment_name(name: &str) -> bool {
                 | "LOCALAPPDATA"
                 | "PROGRAMDATA"
                 | "DISPLAY"
-                | "WAYLAND_DISPLAY"
                 | "XDG_RUNTIME_DIR"
                 | "XDG_SESSION_TYPE"
                 | "DBUS_SESSION_BUS_ADDRESS"
                 | "XAUTHORITY"
                 | "CUA_LOG"
+                | "CUA_DRIVER_RS_TELEMETRY_ENABLED"
+                | "CUA_TELEMETRY_ENABLED"
+                | "CUA_DRIVER_RS_UPDATE_CHECK"
         )
 }
 
@@ -846,9 +865,10 @@ pub(crate) fn inherited_managed_environment_name(name: &str) -> bool {
         "CUA_DRIVER_PERMISSION_MODE"
             | "CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS"
             | "CUA_DRIVER_DISABLE_UNRESTRICTED"
-            | "CUA_DRIVER_ALLOW_LEGACY_EXISTING_PROFILE_APPROVAL"
             | "CUA_DRIVER_SESSION_POLICY_FILE"
             | "CUA_DRIVER_SESSION_POLICY_APPROVED"
+            | "CUA_DRIVER_CAPABILITY_MANIFEST_FILE"
+            | "CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED"
             | "CUA_DRIVER_POLICY_FILE"
             | "CUA_DRIVER_MANAGED_POLICY_FILE"
     )
@@ -1111,6 +1131,18 @@ async fn terminate_startup_child(child: &mut Child, liveness: &mut ChildStdin) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn prevent_console_window(command: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleCP() -> u32;
+    }
+    if unsafe { GetConsoleCP() } == 0 {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1127,6 +1159,8 @@ mod tests {
             startup_timeout_ms: None,
             shutdown_timeout_ms: None,
             permission_mode: Some(mode),
+            capability_manifest_path: None,
+            approve_capability_manifest: false,
             session_policy_path: None,
             approve_session_policy: false,
             dangerously_bypass_approvals: false,
@@ -1138,6 +1172,11 @@ mod tests {
     #[test]
     fn authorization_modes_require_explicit_acknowledgements() {
         assert!(validate_options(options(EmbeddedPermissionMode::Standard)).is_ok());
+
+        let mut standard_manifest = options(EmbeddedPermissionMode::Standard);
+        standard_manifest.capability_manifest_path = Some("capabilities.yaml".into());
+        standard_manifest.approve_capability_manifest = true;
+        assert!(validate_options(standard_manifest).is_ok());
 
         let bounded = options(EmbeddedPermissionMode::Bounded);
         assert!(validate_options(bounded).is_err());
@@ -1151,15 +1190,55 @@ mod tests {
         let mut unrestricted = options(EmbeddedPermissionMode::Unrestricted);
         unrestricted.dangerously_bypass_approvals = true;
         assert!(validate_options(unrestricted).is_ok());
+
+        let mut unrestricted_manifest = options(EmbeddedPermissionMode::Unrestricted);
+        unrestricted_manifest.dangerously_bypass_approvals = true;
+        unrestricted_manifest.capability_manifest_path = Some("capabilities.yaml".into());
+        unrestricted_manifest.approve_capability_manifest = true;
+        assert!(validate_options(unrestricted_manifest).is_ok());
+    }
+
+    #[test]
+    fn capability_manifest_aliases_must_not_conflict() {
+        let mut options = options(EmbeddedPermissionMode::Standard);
+        options.capability_manifest_path = Some("capabilities-v3.yaml".into());
+        options.session_policy_path = Some("legacy-v2.yaml".into());
+        options.approve_capability_manifest = true;
+        assert!(validate_options(options).is_err());
     }
 
     #[test]
     fn environment_is_allowlisted_and_driver_controls_are_reserved() {
         assert!(allowed_environment_name("PATH"));
-        assert!(allowed_environment_name("WAYLAND_DISPLAY"));
+        assert!(!allowed_environment_name("WAYLAND_DISPLAY"));
         assert!(!allowed_environment_name("CUA_DRIVER_PERMISSION_MODE"));
         assert!(!allowed_environment_name("LD_PRELOAD"));
         assert!(!allowed_environment_name("NODE_OPTIONS"));
+    }
+
+    #[test]
+    fn embedded_environment_preserves_explicit_telemetry_and_update_preferences() {
+        for name in [
+            "CUA_DRIVER_RS_TELEMETRY_ENABLED",
+            "CUA_TELEMETRY_ENABLED",
+            "CUA_DRIVER_RS_UPDATE_CHECK",
+        ] {
+            let inherited = [(name.to_owned(), "0".to_owned())];
+            let values = merge_safe_environment(inherited.clone(), &[]);
+            assert!(values
+                .iter()
+                .any(|variable| variable.name == name && variable.value == "0"));
+
+            let values = merge_safe_environment(
+                inherited,
+                &[EmbeddedEnvironmentVariable {
+                    name: name.to_owned(),
+                    value: "false".to_owned(),
+                }],
+            );
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0].value, "false");
+        }
     }
 
     #[test]
@@ -1201,6 +1280,8 @@ mod tests {
     fn interactive_linux_session_environment_is_inherited() {
         let values = merge_safe_environment(
             [
+                ("DISPLAY".into(), ":7".into()),
+                ("XAUTHORITY".into(), "/tmp/cua-test-cookie".into()),
                 ("WAYLAND_DISPLAY".into(), "wayland-7".into()),
                 ("XDG_RUNTIME_DIR".into(), "/run/user/1000".into()),
                 ("XDG_SESSION_TYPE".into(), "wayland".into()),
@@ -1214,7 +1295,8 @@ mod tests {
         );
 
         for (name, value) in [
-            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("DISPLAY", ":7"),
+            ("XAUTHORITY", "/tmp/cua-test-cookie"),
             ("XDG_RUNTIME_DIR", "/run/user/1000"),
             ("XDG_SESSION_TYPE", "wayland"),
             ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
@@ -1225,7 +1307,8 @@ mod tests {
         }
         assert!(!values
             .iter()
-            .any(|variable| variable.name == "AT_SPI_BUS_ADDRESS"));
+            .any(|variable| variable.name == "AT_SPI_BUS_ADDRESS"
+                || variable.name == "WAYLAND_DISPLAY"));
     }
 
     #[test]
@@ -1323,5 +1406,77 @@ mod tests {
 
         assert_eq!(host.state(), EmbeddedDriverHostState::Stopped);
         assert!(!socket_path.exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn daemon_console_window_follows_the_host_console() {
+        use std::os::windows::process::CommandExt as _;
+
+        const ROLE: &str = "CUA_DRIVER_SDK_TEST_CONSOLE_ROLE";
+        const HOST_PID: &str = "CUA_DRIVER_SDK_TEST_CONSOLE_HOST_PID";
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+            fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        }
+        let rerun = [
+            "--exact",
+            "embedded::tests::daemon_console_window_follows_the_host_console",
+            "--nocapture",
+        ];
+        let assert_probe_passed = |output: std::process::Output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        match std::env::var(ROLE).as_deref() {
+            Ok("probe-without-console") => {
+                let window = unsafe { GetConsoleWindow() };
+                assert!(
+                    window.is_null(),
+                    "a console window was opened for the daemon"
+                );
+            }
+            Ok("probe-with-console") => {
+                let host: u32 = std::env::var(HOST_PID).unwrap().parse().unwrap();
+                let mut attached = [0u32; 64];
+                let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), 64) } as usize;
+                assert!(
+                    attached[..count.min(64)].contains(&host),
+                    "the daemon left its host's console"
+                );
+            }
+            Ok(host @ ("host-without-console" | "host-with-console")) => {
+                let mut probe = Command::new(std::env::current_exe().unwrap());
+                probe
+                    .args(rerun)
+                    .env(ROLE, host.replace("host-", "probe-"))
+                    .env(HOST_PID, std::process::id().to_string())
+                    .stdin(Stdio::null());
+                prevent_console_window(&mut probe);
+                assert_probe_passed(probe.output().await.unwrap());
+            }
+            _ => {
+                for (host, flags) in [
+                    ("host-without-console", DETACHED_PROCESS),
+                    ("host-with-console", CREATE_NO_WINDOW),
+                ] {
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args(rerun)
+                        .env(ROLE, host)
+                        .creation_flags(flags)
+                        .output()
+                        .unwrap();
+                    assert_probe_passed(output);
+                }
+            }
+        }
     }
 }

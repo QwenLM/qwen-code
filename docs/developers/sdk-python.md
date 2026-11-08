@@ -28,6 +28,14 @@ pip install --pre qwen-code-sdk
 ```
 
 If `qwen` is not on `PATH`, pass `path_to_qwen_executable` explicitly.
+On Windows, the SDK discovers npm's `qwen.cmd` shim only through the effective
+child `PATH`, ignoring extensionless shell shims and non-launchable `PATHEXT`
+associations. A command in the current directory is considered only when that
+directory is explicitly included in `PATH`.
+You can override the lookup path through the `env` option; Windows environment
+variable names are case-insensitive, so `PATH`, `Path`, and `path` are equivalent.
+Closing a running Windows shim stops its CLI process tree through the system
+`taskkill` utility; process exit and stderr cleanup waits have bounded timeouts.
 
 Before writing SDK code, make sure the CLI works in the same shell:
 
@@ -139,28 +147,28 @@ with query_sync(
 
 ### `QueryOptions`
 
-| Option                     | Type / values                                              | Description                                                                                                     |
-| -------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `cwd`                      | `str`                                                      | Working directory for the CLI process.                                                                          |
-| `model`                    | `str`                                                      | Model override for this SDK session.                                                                            |
-| `path_to_qwen_executable`  | `str`                                                      | `qwen`, an explicit binary path, or a `.js` CLI bundle.                                                         |
-| `permission_mode`          | `default`, `plan`, `auto-edit`, `yolo`                     | Tool execution approval mode. `yolo` auto-approves all tools; use it only in trusted or sandboxed environments. |
-| `can_use_tool`             | async callback                                             | Custom permission callback for tool requests.                                                                   |
-| `env`                      | `dict[str, str]`                                           | Extra environment variables passed to the CLI process.                                                          |
-| `system_prompt`            | `str`                                                      | Override the system prompt.                                                                                     |
-| `append_system_prompt`     | `str`                                                      | Append extra instructions to the system prompt.                                                                 |
-| `debug`                    | `bool`                                                     | Forward CLI stderr to stderr when no `stderr` hook exists.                                                      |
-| `max_session_turns`        | `int`                                                      | Maximum turns before the CLI ends the session.                                                                  |
-| `core_tools`               | `list[str]`                                                | Restrict the available tool set.                                                                                |
-| `exclude_tools`            | `list[str]`                                                | Exclude matching tools.                                                                                         |
-| `allowed_tools`            | `list[str]`                                                | Allow matching tools without callback approval.                                                                 |
-| `auth_type`                | `openai`, `anthropic`, `qwen-oauth`, `gemini`, `vertex-ai` | Authentication mode passed to the CLI.                                                                          |
-| `include_partial_messages` | `bool`                                                     | Emit partial assistant stream events.                                                                           |
-| `resume`                   | UUID string                                                | Resume a known session id.                                                                                      |
-| `continue_session`         | `bool`                                                     | Continue the latest CLI session.                                                                                |
-| `session_id`               | UUID string                                                | Start or correlate a session with a known id.                                                                   |
-| `timeout`                  | mapping                                                    | Timeouts in seconds.                                                                                            |
-| `stderr`                   | callable                                                   | Receives CLI stderr lines.                                                                                      |
+| Option                     | Type / values                                              | Description                                                                                                                                                       |
+| -------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwd`                      | `str`                                                      | Working directory for the CLI process.                                                                                                                            |
+| `model`                    | `str`                                                      | Model override for this SDK session.                                                                                                                              |
+| `path_to_qwen_executable`  | `str`                                                      | `qwen`, an explicit binary path, or a `.js` CLI bundle.                                                                                                           |
+| `permission_mode`          | `default`, `plan`, `auto-edit`, `auto`, `yolo`             | Tool execution approval mode. `auto` lets an LLM classifier approve tool calls; `yolo` auto-approves all tools; use it only in trusted or sandboxed environments. |
+| `can_use_tool`             | async callback                                             | Custom permission callback for tool requests.                                                                                                                     |
+| `env`                      | `dict[str, str]`                                           | Extra environment variables passed to the CLI process.                                                                                                            |
+| `system_prompt`            | `str`                                                      | Override the system prompt.                                                                                                                                       |
+| `append_system_prompt`     | `str`                                                      | Append extra instructions to the system prompt.                                                                                                                   |
+| `debug`                    | `bool`                                                     | Forward CLI stderr to stderr when no `stderr` hook exists.                                                                                                        |
+| `max_session_turns`        | `int`                                                      | Maximum turns before the CLI ends the session.                                                                                                                    |
+| `core_tools`               | `list[str]`                                                | Non-empty core-tool allowlist. Omitted or empty lists are unspecified; `core_tools=[]` does not disable tools.                                                    |
+| `exclude_tools`            | `list[str]`                                                | Exclude matching tools.                                                                                                                                           |
+| `allowed_tools`            | `list[str]`                                                | Allow matching tools without callback approval.                                                                                                                   |
+| `auth_type`                | `openai`, `anthropic`, `qwen-oauth`, `gemini`, `vertex-ai` | Authentication mode passed to the CLI.                                                                                                                            |
+| `include_partial_messages` | `bool`                                                     | Emit partial assistant stream events.                                                                                                                             |
+| `resume`                   | UUID string                                                | Resume a known session id.                                                                                                                                        |
+| `continue_session`         | `bool`                                                     | Continue the latest CLI session.                                                                                                                                  |
+| `session_id`               | UUID string                                                | Start or correlate a session with a known id.                                                                                                                     |
+| `timeout`                  | mapping                                                    | Timeouts in seconds.                                                                                                                                              |
+| `stderr`                   | callable                                                   | Receives CLI stderr lines.                                                                                                                                        |
 
 Use only one of `resume`, `continue_session`, or `session_id` in a request. The
 SDK raises `ValidationError` if these session options are combined.

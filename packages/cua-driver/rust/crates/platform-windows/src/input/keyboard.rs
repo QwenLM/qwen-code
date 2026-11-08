@@ -24,12 +24,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
     VIRTUAL_KEY,
 };
+use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetClassNameW, GetGUIThreadInfo, GetParent, GetWindowThreadProcessId,
     IsChild, PostMessageW, GUITHREADINFO, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
 // ── XAML / UWP host detection ────────────────────────────────────────────────
 //
@@ -427,16 +427,27 @@ pub fn post_key(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
 /// worker, the foreground swap may silently fail and SendInput land on the
 /// wrong window. Callers should funnel hotkey calls through the uia worker.
 pub fn send_key_synthesized(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
+    send_key_synthesized_after_focus(hwnd, key, modifiers, || Ok(()))
+}
+
+/// Foreground key delivery with a target-specific focus step performed only
+/// after Windows has confirmed the exact top-level HWND as foreground.
+///
+/// Element-addressed callers use this to avoid the activation/focus race:
+/// UIA `SetFocus` before `SetForegroundWindow` can be overwritten by the
+/// ensuing activation. The callback may establish and verify child focus; no
+/// input is inserted when either foreground or child-focus confirmation fails.
+pub fn send_key_synthesized_after_focus(
+    hwnd: u64,
+    key: &str,
+    modifiers: &[&str],
+    focus: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let target = HWND(hwnd as *mut _);
     if target.0.is_null() {
         bail!("invalid target hwnd");
     }
-    if let Some(msg) = crate::input::post_message_blocked_by_uipi(hwnd) {
-        // Same UIPI defense as the PostMessage path. SendInput from UIAccess
-        // _is_ allowed cross-integrity, but if our daemon is somehow at a
-        // lower integrity than target, SendInput would land in the wrong
-        // window (we couldn't set foreground). Better to surface the
-        // diagnostic early than silently no-op.
+    if let Some(msg) = crate::input::send_input_blocked_by_uipi(hwnd) {
         bail!(msg);
     }
     let key_vk = key_name_to_vk(key)?;
@@ -455,50 +466,12 @@ pub fn send_key_synthesized(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<
         events.push(key_input(*mvk, true));
     }
 
-    unsafe {
-        // Save & set foreground so SendInput lands on `target`.
-        let prev_fg = GetForegroundWindow();
-        // Robust auto bring-to-front (AttachThreadInput, same engine as
-        // bring_to_front / macOS with_foreground_assist) — a bare
-        // SetForegroundWindow is denied by the foreground-lock without UIAccess.
-        // Restored to prev_fg below.
-        let _ = crate::input::inject::force_foreground_attached(target);
-        // Brief settle so the foreground swap is processed before we send.
-        sleep(Duration::from_millis(8));
-
-        // Verify the swap actually happened. `SetForegroundWindow` returns a
-        // BOOL but Windows treats foreground-lock violations as a silent
-        // no-op in most cases (the call returns success-ish, the foreground
-        // doesn't change). The reliable check is observing the foreground
-        // after the settle. If we didn't get it, abort BEFORE SendInput —
-        // otherwise the events land on whatever app actually held foreground
-        // (typically the terminal hosting this process), which causes spooky
-        // side effects like Alt+Enter toggling the terminal into fullscreen.
-        let actual_fg = GetForegroundWindow();
-        if actual_fg != target {
-            // Don't restore — prev_fg is presumably still foreground anyway.
-            bail!(
-                "Foreground swap to target HWND {:?} was rejected by Windows \
-                 (actual foreground is HWND {:?}). This daemon is not at \
-                 UIAccess integrity, so SetForegroundWindow is subject to the \
-                 foreground-lock and the swap silently fails. Without the \
-                 swap, SendInput would land on the wrong window. Fix: install \
-                 / spawn the cua-driver-uia worker (UIAccess-manifested PE) \
-                 and route hotkey calls through it. Until then, the calling \
-                 app must already be foreground for delivery_mode:\"foreground\" \
-                 to be safe.",
-                target.0,
-                actual_fg.0
-            );
-        }
-
+    with_confirmed_foreground(target, "key delivery", focus, |_, _| unsafe {
         let sent = SendInput(&events, std::mem::size_of::<INPUT>() as i32);
         if sent as usize != events.len() {
-            // SendInput returns the number of events successfully inserted.
-            // Anything less is a partial insertion (blocked by another input
-            // injector, foreground UIPI denial, etc.).
-            let restored = SetForegroundWindow(prev_fg);
-            let _ = restored;
+            let mut releases = vec![key_input(key_vk, true)];
+            releases.extend(mod_vks.iter().rev().map(|vk| key_input(*vk, true)));
+            let _ = SendInput(&releases, std::mem::size_of::<INPUT>() as i32);
             bail!(
                 "SendInput inserted only {sent} of {} events. Likely cause: \
                  the daemon is not at UIAccess integrity, so SetForegroundWindow \
@@ -507,16 +480,8 @@ pub fn send_key_synthesized(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<
                 events.len()
             );
         }
-
-        // Brief settle to let the target process the keystrokes before we
-        // restore the previous foreground (otherwise the target might not
-        // get a chance to handle the accelerator before losing focus).
-        sleep(Duration::from_millis(40));
-        if !prev_fg.0.is_null() && prev_fg != target {
-            let _ = SetForegroundWindow(prev_fg);
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Foreground-delivery text entry: the `delivery_mode:"foreground"` rung for
@@ -531,92 +496,158 @@ pub fn send_key_synthesized(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<
 /// of a false success. Required for VCL/LibreOffice document grids and other
 /// targets where PostMessage WM_CHAR is silently dropped.
 pub fn send_text_synthesized(hwnd: u64, text: &str) -> Result<()> {
+    send_text_synthesized_after_focus(hwnd, text, || Ok(()))
+}
+
+/// Foreground Unicode delivery with child focus established after exact
+/// top-level activation and before `SendInput`.
+pub fn send_text_synthesized_after_focus(
+    hwnd: u64,
+    text: &str,
+    focus: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let target = HWND(hwnd as *mut _);
     if target.0.is_null() {
         bail!("invalid target hwnd");
     }
-    if let Some(msg) = crate::input::post_message_blocked_by_uipi(hwnd) {
+    if let Some(msg) = crate::input::send_input_blocked_by_uipi(hwnd) {
         bail!(msg);
     }
-    // Build the key-event sequence. Printable codepoints go through as Unicode
-    // packets (KEYEVENTF_UNICODE, wVk=0, wScan=code unit), but line breaks are
-    // mapped to a real VK_RETURN keystroke — mirroring the background path
-    // (`post_enter_keystroke`) — because terminals and rich editors honour an
-    // Enter key event, not a raw `\r`/`\n` Unicode packet. `\r\n` collapses to
-    // a single Return (the `\r` emits the Enter; the following `\n` is silent).
-    let return_vk = windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
-    let mut events: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
-    let mut prev_was_cr = false;
-    for ch in text.chars() {
-        match ch {
-            '\n' if prev_was_cr => {
-                prev_was_cr = false;
-            }
-            '\n' | '\r' => {
-                events.push(key_input(return_vk, false));
-                events.push(key_input(return_vk, true));
-                prev_was_cr = ch == '\r';
-            }
-            _ => {
-                prev_was_cr = false;
-                let mut buf = [0u16; 2];
-                for unit in ch.encode_utf16(&mut buf) {
-                    events.push(unicode_key_input(*unit, false));
-                    events.push(unicode_key_input(*unit, true));
+    let units = text_units(text);
+    with_confirmed_foreground(
+        target,
+        "text delivery",
+        focus,
+        |attachment, foreground_target| unsafe {
+            let attachment = attachment.expect("attached input queue");
+            for (index, unit) in units.iter().enumerate() {
+                super::user_input::checkpoint()?;
+                let current = GetForegroundWindow();
+                if !crate::win32::foreground_matches_target_or_owned_window(
+                    foreground_target,
+                    current.0 as usize as u64,
+                ) {
+                    bail!("foreground_lost: target changed after {index} UTF-16 units; remaining text was not sent; observe before retrying");
                 }
+                match attachment.send_and_await_read(&unit_events(unit), Duration::from_secs(2)) {
+                UnitRead::Read => {},
+                UnitRead::Short(sent) => {
+                    let releases = [unit_events(unit)[1], sentinel_key_input(true)];
+                    let _ = SendInput(&releases, std::mem::size_of::<INPUT>() as i32);
+                    bail!("text_delivery_stalled: only {sent} events for unit {index} were inserted; no replay");
+                },
+                UnitRead::Stalled => bail!("text_delivery_stalled: target did not read unit {index}; no replay; observe before retrying"),
             }
+            }
+            Ok(())
+        },
+    )
+}
+
+fn wait_for_exact_foreground(target: HWND, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if unsafe { GetForegroundWindow() } == target {
+            return true;
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(10));
     }
-    if events.is_empty() {
-        return Ok(());
+}
+
+/// Run one system-queue input transaction while `target`, or a live visible
+/// same-process window whose owner chain reaches `target`, is foreground.
+/// Foreground and optional child focus are checked against
+/// external Win32/UIA state instead of inferred from API return values or a
+/// fixed settle delay. The prior foreground is restored on every body/focus
+/// result after activation succeeds.
+static FOREGROUND_TRANSACTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn with_confirmed_foreground<T>(
+    target: HWND,
+    operation: &str,
+    focus: impl FnOnce() -> Result<()>,
+    body: impl FnOnce(
+        Option<&InputQueueAttachment>,
+        crate::win32::windows::ForegroundTarget,
+    ) -> Result<T>,
+) -> Result<T> {
+    let _foreground = FOREGROUND_TRANSACTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _user_input = super::user_input::Guard::start()?;
+    let previous = unsafe { GetForegroundWindow() };
+    let foreground_target = crate::win32::capture_foreground_target(target.0 as usize as u64)
+        .ok_or_else(|| {
+            anyhow::anyhow!("foreground_unavailable: target disappeared; no input was sent")
+        })?;
+    let _ = unsafe { crate::input::force_foreground_assisted(target) };
+    if !wait_for_exact_foreground(target, Duration::from_millis(500)) {
+        let actual = unsafe { GetForegroundWindow() };
+        let _ =
+            crate::win32::restore_input_foreground(previous.0 as usize as u64, foreground_target);
+        bail!(
+            "foreground_unavailable: Windows did not confirm exact target HWND {:?} for {operation} \
+             within 500 ms (actual foreground HWND {:?}). Route the request through the \
+             UIAccess-manifested cua-driver-uia worker; no input was sent.",
+            target.0,
+            actual.0
+        );
     }
 
-    unsafe {
-        // Save & set foreground so SendInput lands on `target`. Same verify-
-        // before-send guard as send_key_synthesized: a foreground-lock no-op
-        // would otherwise spray the text into whatever window actually held
-        // focus (typically the terminal hosting this daemon).
-        let prev_fg = GetForegroundWindow();
-        // Robust auto bring-to-front (AttachThreadInput, same engine as
-        // bring_to_front / macOS with_foreground_assist) — a bare
-        // SetForegroundWindow is denied by the foreground-lock without UIAccess.
-        // Restored to prev_fg below.
-        let _ = crate::input::inject::force_foreground_attached(target);
-        sleep(Duration::from_millis(8));
-        let actual_fg = GetForegroundWindow();
-        if actual_fg != target {
+    let mut attachment = None;
+    let result = (|| {
+        super::user_input::checkpoint()?;
+        focus()?;
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let actual = loop {
+            let actual = unsafe { GetForegroundWindow() };
+            if crate::win32::foreground_matches_target_or_owned_window(
+                foreground_target,
+                actual.0 as usize as u64,
+            ) {
+                break actual;
+            }
+            if Instant::now() >= deadline {
+                break actual;
+            }
+            sleep(Duration::from_millis(10));
+        };
+        if !crate::win32::foreground_matches_target_or_owned_window(
+            foreground_target,
+            actual.0 as usize as u64,
+        ) {
             bail!(
-                "Foreground swap to target HWND {:?} was rejected by Windows \
-                 (actual foreground is HWND {:?}). This daemon is not at \
-                 UIAccess integrity, so SetForegroundWindow is subject to the \
-                 foreground-lock and the swap silently fails. Without the swap, \
-                 SendInput would land on the wrong window. Fix: install / spawn \
-                 the cua-driver-uia worker (UIAccess-manifested PE) and route \
-                 type_text through it. Until then, the calling app must already \
-                 be foreground for delivery_mode:\"foreground\" to be safe.",
+                "foreground_unavailable: exact target HWND {:?} or a verified same-process \
+                 owned window was not foreground while preparing {operation} \
+                 (actual foreground HWND {:?}); no input was sent",
                 target.0,
-                actual_fg.0
+                actual.0
             );
         }
-
-        let sent = SendInput(&events, std::mem::size_of::<INPUT>() as i32);
-        if sent as usize != events.len() {
-            let _ = SetForegroundWindow(prev_fg);
-            bail!(
-                "SendInput inserted only {sent} of {} key events. Likely cause: \
-                 the daemon is not at UIAccess integrity, so SetForegroundWindow \
-                 was rejected and the events landed on the wrong window.",
-                events.len()
-            );
+        super::user_input::checkpoint()?;
+        attachment = InputQueueAttachment::attach(actual);
+        if attachment.is_none() {
+            bail!("foreground_unavailable: target input queue could not be attached for delivery confirmation; no input was sent");
         }
+        body(attachment.as_ref(), foreground_target)
+    })();
 
-        // Settle so the target processes the text before we yield focus back.
-        sleep(Duration::from_millis(40));
-        if !prev_fg.0.is_null() && prev_fg != target {
-            let _ = SetForegroundWindow(prev_fg);
-        }
+    let drained = attachment
+        .as_ref()
+        .is_none_or(|attachment| attachment.wait_for_drain(Duration::from_secs(2)));
+    drop(attachment);
+    if !drained {
+        bail!("text_delivery_stalled: target input queue did not drain; remaining input was not sent; observe before retrying");
     }
-    Ok(())
+    let restored =
+        crate::win32::restore_input_foreground(previous.0 as usize as u64, foreground_target);
+    result.and_then(|value| {
+        super::user_input::checkpoint()?;
+        restored.map(|()| value)
+    })
 }
 
 /// Build a single Unicode keyboard INPUT struct for one UTF-16 code unit,
@@ -700,7 +731,9 @@ fn is_extended(vk: VIRTUAL_KEY) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     matches!(
         vk,
-        VK_DELETE
+        VK_LWIN
+            | VK_RWIN
+            | VK_DELETE
             | VK_INSERT
             | VK_HOME
             | VK_END
@@ -712,7 +745,6 @@ fn is_extended(vk: VIRTUAL_KEY) -> bool {
             | VK_RIGHT
             | VK_RCONTROL
             | VK_RMENU
-            | VK_RWIN
             | VK_NUMLOCK
             | VK_SNAPSHOT
     )
@@ -778,4 +810,181 @@ fn key_name_to_vk(key: &str) -> Result<VIRTUAL_KEY> {
         }
     };
     Ok(vk)
+}
+
+/// Unassigned virtual key used as a harmless input-drain sentinel (the same
+/// "mask key" convention AutoHotkey uses): applications do not bind it and it
+/// produces no character.
+const DRAIN_SENTINEL_VK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+
+enum UnitRead {
+    Read,
+    Short(u32),
+    Stalled,
+}
+
+/// The caller's thread attached to the foreground thread's input queue for
+/// the duration of one foreground input transaction; detaches on drop.
+pub(crate) struct InputQueueAttachment {
+    own_thread: u32,
+    target_thread: u32,
+}
+
+impl InputQueueAttachment {
+    fn attach(foreground: HWND) -> Option<Self> {
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        let target_thread = unsafe { GetWindowThreadProcessId(foreground, None) };
+        let own_thread = unsafe { GetCurrentThreadId() };
+        if target_thread == 0 || target_thread == own_thread {
+            return None;
+        }
+        unsafe { AttachThreadInput(own_thread, target_thread, true) }
+            .as_bool()
+            .then_some(Self {
+                own_thread,
+                target_thread,
+            })
+    }
+
+    /// Block until the foreground thread has retrieved all input inserted so
+    /// far, bounded by `timeout`. A sentinel key press is appended behind the
+    /// caller's events; while attached, `GetKeyState` reflects the shared
+    /// queue's synchronous key state, whose toggle bit flips only when the
+    /// target thread reads the sentinel key-down.
+    fn wait_for_drain(&self, timeout: Duration) -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+        let toggled = || unsafe { GetKeyState(DRAIN_SENTINEL_VK.0 as i32) } & 1;
+        let before = toggled();
+        let sentinel = [sentinel_key_input(false), sentinel_key_input(true)];
+        let sent = unsafe { SendInput(&sentinel, std::mem::size_of::<INPUT>() as i32) };
+        if sent as usize != sentinel.len() {
+            let _ = unsafe {
+                SendInput(
+                    &[sentinel_key_input(true)],
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            };
+            sleep(Duration::from_millis(40));
+            return false;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if toggled() != before {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    "foreground input drain: target thread did not consume the sentinel within {} ms",
+                    timeout.as_millis()
+                );
+                return false;
+            }
+            sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Insert `events`, then yield until the sentinel key-up is read or `timeout`.
+    fn send_and_await_read(&self, events: &[INPUT], timeout: Duration) -> UnitRead {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+        let before = unsafe { GetKeyState(DRAIN_SENTINEL_VK.0 as i32) } & 1;
+        let sent = unsafe { SendInput(events, std::mem::size_of::<INPUT>() as i32) };
+        if (sent as usize) < events.len() {
+            return UnitRead::Short(sent);
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let state = unsafe { GetKeyState(DRAIN_SENTINEL_VK.0 as i32) };
+            if (state & 1) != before && state >= 0 {
+                return UnitRead::Read;
+            }
+            if Instant::now() >= deadline {
+                return UnitRead::Stalled;
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
+impl Drop for InputQueueAttachment {
+    fn drop(&mut self) {
+        use windows::Win32::System::Threading::AttachThreadInput;
+        let _ = unsafe { AttachThreadInput(self.own_thread, self.target_thread, false) };
+    }
+}
+
+fn sentinel_key_input(up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: DRAIN_SENTINEL_VK,
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+enum TextUnit {
+    Packet(u16),
+    Return,
+}
+
+/// One readable VK_PACKET, or one Return. A supplementary scalar is two Packets (high, low).
+fn text_units(text: &str) -> Vec<TextUnit> {
+    let mut units = Vec::with_capacity(text.len());
+    let mut prev_was_cr = false;
+    for ch in text.chars() {
+        match ch {
+            '\n' if prev_was_cr => {
+                prev_was_cr = false;
+            }
+            '\n' | '\r' => {
+                units.push(TextUnit::Return);
+                prev_was_cr = ch == '\r';
+            }
+            _ => {
+                prev_was_cr = false;
+                let mut buf = [0u16; 2];
+                for unit in ch.encode_utf16(&mut buf) {
+                    units.push(TextUnit::Packet(*unit));
+                }
+            }
+        }
+    }
+    units
+}
+
+/// The unit's key events followed by the drain sentinel, inserted by one SendInput.
+fn unit_events(unit: &TextUnit) -> [INPUT; 4] {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+    let (d, u) = match unit {
+        TextUnit::Packet(c) => (unicode_key_input(*c, false), unicode_key_input(*c, true)),
+        TextUnit::Return => (key_input(VK_RETURN, false), key_input(VK_RETURN, true)),
+    };
+    [d, u, sentinel_key_input(false), sentinel_key_input(true)]
+}
+
+pub struct DesktopKeyboard;
+impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
+    fn resolve(&self, key: &str) -> Result<u32, String> {
+        key_name_to_vk(key)
+            .map(|key| u32::from(key.0))
+            .map_err(|error| error.to_string())
+    }
+    fn transition(&self, code: u32, down: bool, _held: &[u32]) -> Result<(), String> {
+        let event = key_input(VIRTUAL_KEY(code as u16), !down);
+        let sent = unsafe { SendInput(&[event], std::mem::size_of::<INPUT>() as i32) };
+        if sent == 1 {
+            Ok(())
+        } else {
+            Err("SendInput did not accept the key transition".into())
+        }
+    }
 }

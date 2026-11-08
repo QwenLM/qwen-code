@@ -24,17 +24,14 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import { resolveUbrn } from "./resolve-ubrn.mjs"
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const driverRoot = resolve(scriptDirectory, "..")
 const typescriptRoot = join(driverRoot, "typescript")
-const upstreamRoot = join(
-  typescriptRoot,
-  "node_modules",
-  "uniffi-bindgen-react-native",
-)
+const upstreamRoot = resolveUbrn(typescriptRoot)
 const outputIndex = process.argv.indexOf("--output")
 if (outputIndex < 0 || !process.argv[outputIndex + 1]) {
   throw new Error("usage: build-node-runtime.mjs --output <path> [--target <triple>]")
@@ -44,11 +41,29 @@ const targetIndex = process.argv.indexOf("--target")
 const target = targetIndex < 0 ? undefined : process.argv[targetIndex + 1]
 if (targetIndex >= 0 && !target) throw new Error("missing --target value")
 
+function cargoEnvironment() {
+  const environment = { ...process.env }
+  const buildsWindowsMsvc = target
+    ? target.endsWith("-pc-windows-msvc")
+    : process.platform === "win32"
+  if (!buildsWindowsMsvc) return environment
+
+  // Native npm packages must load on a clean Windows installation. The
+  // upstream N-API runtime includes C++ objects, so MSVC's default dynamic
+  // CRT linkage otherwise leaves VCRUNTIME140.dll as an undeclared system
+  // prerequisite before any Cua code can run.
+  environment.RUSTFLAGS = [
+    environment.RUSTFLAGS?.trim(),
+    "-C target-feature=+crt-static",
+  ].filter(Boolean).join(" ")
+  return environment
+}
+
 const manifest = JSON.parse(readFileSync(join(typescriptRoot, "package.json"), "utf8"))
 const expectedVersion = manifest.devDependencies?.["uniffi-bindgen-react-native"]
 const upstreamManifestPath = join(upstreamRoot, "package.json")
 if (!existsSync(upstreamManifestPath)) {
-  throw new Error("missing pinned UBRN source; run npm ci in packages/cua-driver/typescript")
+  throw new Error("missing pinned UBRN source; run corepack pnpm install at the repository root")
 }
 const actualVersion = JSON.parse(readFileSync(upstreamManifestPath, "utf8")).version
 if (actualVersion !== expectedVersion) {
@@ -139,16 +154,25 @@ try {
   writeFileSync(registerPath, patchRegister(readFileSync(registerPath, "utf8")))
   const callPath = join(runtimeRoot, "napi", "src", "call", "mod.rs")
   writeFileSync(callPath, patchCall(readFileSync(callPath, "utf8")))
+  const entryPath = join(runtimeRoot, "napi", "src", "lib.rs")
+  writeFileSync(entryPath, readFileSync(entryPath, "utf8") + "\n" +
+    readFileSync(join(scriptDirectory, "node-main-run-loop.rs"), "utf8"))
 
   const args = ["build", "--release", "--manifest-path", join(runtimeRoot, "napi", "Cargo.toml")]
   if (target) args.push("--target", target)
-  const result = spawnSync("cargo", args, { stdio: "inherit" })
+  const result = spawnSync("cargo", args, {
+    env: cargoEnvironment(),
+    stdio: "inherit",
+  })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`cargo exited with status ${result.status}`)
 
+  const cargoTargetDirectory = process.env.CARGO_TARGET_DIR
+    ? resolve(process.env.CARGO_TARGET_DIR)
+    : join(runtimeRoot, "napi", "target")
   const targetDirectory = target
-    ? join(runtimeRoot, "napi", "target", target, "release")
-    : join(runtimeRoot, "napi", "target", "release")
+    ? join(cargoTargetDirectory, target, "release")
+    : join(cargoTargetDirectory, "release")
   const candidates = [
     "libuniffi_runtime_napi.dylib",
     "libuniffi_runtime_napi.so",

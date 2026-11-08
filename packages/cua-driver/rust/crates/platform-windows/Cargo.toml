@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 async-trait = "0.1"
 cua-driver-core = { path = "../cua-driver-core" }
 cua-driver-contract = { path = "../cua-driver-contract" }
@@ -45,7 +46,10 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
     "Win32_Graphics_OpenGL",
     "Win32_Security",
+    "Win32_Security_AppLocker",
+    "Win32_System_Pipes",
     "Win32_System_Com",
+    "Win32_System_Ole",
     "Win32_Storage_Xps",
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
@@ -81,3 +85,6 @@ windows = { version = "0.58", features = [
     "Win32_System_WinRT_Graphics_Capture",
 ] }
 base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

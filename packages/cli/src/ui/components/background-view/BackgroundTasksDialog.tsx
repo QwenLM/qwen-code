@@ -32,16 +32,22 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
+  MAX_RECENT_ACTIVITIES,
+} from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import type {
+  AgentTask,
+  BackgroundApproval,
+} from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import {
   isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
-  MAX_RECENT_ACTIVITIES,
-  type AgentTask,
-  type BackgroundApproval,
-  type MonitorTask,
-  type ToolCallConfirmationDetails,
-  type WorkflowApproval,
-  type WorkflowTask,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type {
+  WorkflowApproval,
+  WorkflowTask,
+} from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type { MonitorTask } from '@qwen-code/qwen-code-core/services/monitorRegistry.js';
+import type { ToolCallConfirmationDetails } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
 import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -1262,6 +1268,35 @@ const WorkflowDetailBody: React.FC<{
         </Fragment>
       )}
 
+      {entry.sizeWarning && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {`⚠ ${
+                entry.sizeWarning.axis === 'agents'
+                  ? t(
+                      'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+                      {
+                        agents: String(entry.sizeWarning.scheduledAgents),
+                        cap: String(entry.sizeWarning.agentCap),
+                      },
+                    )
+                  : t(
+                      'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
+                      {
+                        tokens: formatTokenCount(
+                          entry.sizeWarning.projectedTokens,
+                        ),
+                        cap: formatTokenCount(entry.sizeWarning.tokenCap),
+                      },
+                    )
+              }`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
       <Box />
       <Box>
         <Text bold dimColor>
@@ -1370,7 +1405,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   availableTerminalHeight,
   terminalWidth,
 }) => {
-  const { entries, selectedIndex, dialogOpen, dialogMode } =
+  const { entries, selectedIndex, dialogOpen, dialogMode, autoOpened } =
     useBackgroundTaskViewState();
   const isDetailMode =
     dialogMode === 'detail' || dialogMode === 'detail-from-panel';
@@ -1380,6 +1415,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     closeDialog,
     enterDetail,
     exitDetail,
+    acknowledgeAutoOpen,
     cancelSelected,
     resumeSelected,
     toggleSelectedWorkflowPause,
@@ -1542,6 +1578,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                   selectedApproval.approval.callId,
                   outcome,
                   payload,
+                  selectedApproval.approval.subagentId,
                 );
               return;
             }
@@ -1741,6 +1778,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
 
       if (dialogMode === 'list') {
+        // Only keys prose cannot produce acknowledge the auto-open. The
+        // selection matchers also carry bare `k`/`j` and Ctrl+P/Ctrl+N, and
+        // ordinary typed letters satisfy them — acknowledging on those let
+        // the next letter of the same sentence cancel or pause the run
+        // (#16432 R2-1). Bare k/j still move the selection; the disarm
+        // simply stays armed until a real arrow key arrives.
+        if (key.name === 'up' || key.name === 'down') {
+          acknowledgeAutoOpen();
+        }
         if (keyMatchers[Command.SELECTION_UP](key)) {
           moveSelectionUp();
           setPendingCancelEntryId(null);
@@ -1749,6 +1795,22 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         if (keyMatchers[Command.SELECTION_DOWN](key)) {
           moveSelectionDown();
           setPendingCancelEntryId(null);
+          return;
+        }
+        // An auto-open lands mid-keystroke and keypress dispatch is a
+        // broadcast, so a letter still aimed at the unmounted composer
+        // would cancel or pause the run, and Enter would arm the approval.
+        // Disarm those keys until a navigation key (above) acknowledges
+        // the open; user-initiated opens never carry the tag (#16432).
+        if (
+          autoOpened &&
+          (key.name === 'return' ||
+            ((key.sequence === 'x' ||
+              key.sequence === 'p' ||
+              key.sequence === 'r') &&
+              !key.ctrl &&
+              !key.meta))
+        ) {
           return;
         }
         if (key.name === 'return') {
@@ -1878,16 +1940,26 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       'Esc cancel',
     );
   } else if (dialogMode === 'list') {
-    hints.push('\u2191/\u2193 select', 'Enter view');
-    if (selectedEntry && isStoppableEntry(selectedEntry)) {
-      hints.push('x stop');
+    if (autoOpened) {
+      // Every destructive list key is swallowed until a navigation key
+      // acknowledges the auto-open, so advertising `Enter view` / `x stop`
+      // here would document keys that do nothing (#16432 R3-3).
+      hints.push('\u2191/\u2193 activate');
+    } else {
+      hints.push('\u2191/\u2193 select', 'Enter view');
+      if (selectedEntry && isStoppableEntry(selectedEntry)) {
+        hints.push('x stop');
+      }
+      if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
+      if (selectedEntryAllowsResume) hints.push('r resume');
+      if (
+        selectedEntry?.kind === 'agent' &&
+        selectedEntry.status === 'paused'
+      ) {
+        hints.push('x abandon');
+      }
+      hints.push('\u2190/Esc close');
     }
-    if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
-    if (selectedEntryAllowsResume) hints.push('r resume');
-    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
-      hints.push('x abandon');
-    }
-    hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 back', 'Esc close');
     if (selectedEntry && isStoppableEntry(selectedEntry)) {
@@ -1947,6 +2019,17 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                 ? `[workflow] ${t('needs approval')}`
                 : t('Background agent needs approval')}
             </Text>
+            {/* subagentId is set only on approvals bridged from a NESTED
+                agent onto this entry (see AgentTool's nested approval
+                bridge). Name the actual waiter so the user knows which of
+                the descendants is blocked. */}
+            {selectedApproval?.kind === 'agent' &&
+              selectedApproval.approval.subagentId !== undefined && (
+                <Text color={theme.text.secondary}>
+                  {t('from nested agent')}:{' '}
+                  {selectedApproval.approval.subagentId}
+                </Text>
+              )}
             <ToolConfirmationMessage
               confirmationDetails={approvalConfirmationDetails}
               config={config}

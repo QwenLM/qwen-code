@@ -53,6 +53,7 @@ pub struct SdkAdapter {
     runtime_prefix: String,
     runtime_scope: String,
     _session_end_hook: cua_driver_core::session::SessionEndHookRegistration,
+    _session_revive_hook: cua_driver_core::session::SessionReviveHookRegistration,
     session_lifecycle: tokio::sync::Mutex<()>,
 }
 
@@ -91,6 +92,14 @@ impl SdkAdapter {
                 sessions.scopes.entry(public.to_owned()).or_default();
                 sessions.mark_ended(public);
             });
+        let revive_sessions = public_sessions.clone();
+        let revive_prefix = runtime_prefix.clone();
+        let session_revive_hook =
+            cua_driver_core::session::register_scoped_session_revive_hook(move |session| {
+                if let Some(public) = session.strip_prefix(&revive_prefix) {
+                    revive_sessions.lock().unwrap().ended.remove(public);
+                }
+            });
         Ok(Arc::new(Self {
             driver,
             tools_list,
@@ -98,6 +107,7 @@ impl SdkAdapter {
             runtime_prefix,
             runtime_scope,
             _session_end_hook: session_end_hook,
+            _session_revive_hook: session_revive_hook,
             session_lifecycle: tokio::sync::Mutex::new(()),
         }))
     }
@@ -107,7 +117,7 @@ impl SdkAdapter {
     }
 
     pub fn is_known_tool(&self, name: &str) -> bool {
-        name == "type_text_chars"
+        matches!(name, "type_text_chars" | "start_session" | "end_session")
             || self
                 .tools_list
                 .get("tools")
@@ -150,10 +160,21 @@ impl SdkAdapter {
             .and_then(Value::as_str)
             .filter(|session| !session.is_empty() && *session != "default")
             .map(str::to_owned);
+        // The socket adapter's compatibility tombstone is keyed by the value
+        // its early guard sees. Explicit sessions use their public label;
+        // unnamed sessions use the transport-minted lifecycle id. Tracking
+        // both shapes lets an explicit start_session revive either episode.
+        let mirror_session = public_session.clone().or_else(|| {
+            arguments
+                .get("_session_id")
+                .and_then(Value::as_str)
+                .filter(|session| !session.is_empty() && *session != "default")
+                .map(str::to_owned)
+        });
         let ending_session = (name == "end_session")
-            .then_some(public_session.as_deref())
+            .then_some(mirror_session.as_deref())
             .flatten();
-        if let Some(session) = &public_session {
+        if let Some(session) = &mirror_session {
             self.public_sessions
                 .lock()
                 .unwrap()
@@ -200,7 +221,7 @@ impl SdkAdapter {
                     .unwrap()
                     .rollback_ended(session, marker, previous);
             }
-        } else if let Some(session) = public_session.as_deref() {
+        } else if let Some(session) = mirror_session.as_deref() {
             let capture_scope = value
                 .pointer("/structuredContent/capture_scope")
                 .cloned()
@@ -217,11 +238,17 @@ impl SdkAdapter {
     }
 
     pub fn is_session_ended(&self, session: &str) -> bool {
-        self.public_sessions
+        if !self
+            .public_sessions
             .lock()
             .unwrap()
             .ended
             .contains_key(session)
+        {
+            return false;
+        }
+        let internal = format!("{}{session}", self.runtime_prefix);
+        !cua_driver_core::session::recreates_on_next_call(&internal, &internal)
     }
 
     pub fn mark_all_sessions_ended(&self) {
@@ -279,12 +306,73 @@ impl SdkAdapter {
             .map(|_| ())
     }
 
-    pub fn create_trusted_session(
+    pub fn end_transport_sessions(&self, transport_session: &str) -> usize {
+        let owner = format!("{}{}", self.runtime_prefix, transport_session);
+        cua_driver_core::session::end_sessions_for_owner(
+            &owner,
+            cua_driver_core::session::SessionEndReason::ProcessExit,
+        )
+    }
+
+    pub fn operator_sessions_json(&self) -> Value {
+        let sessions = cua_driver_core::session::list_session_snapshots_with_prefix(
+            &self.runtime_prefix,
+            cua_driver_core::session::DEFAULT_SESSION_IDLE_TTL,
+        )
+        .into_iter()
+        .map(|session| {
+            let owner_short_id = session
+                .owner_transport
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .rev()
+                .take(8)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            let transport = match session.transport {
+                cua_driver_core::session::SessionTransport::Cli => "cli",
+                cua_driver_core::session::SessionTransport::Daemon => "daemon",
+                cua_driver_core::session::SessionTransport::McpStdio => "mcp_stdio",
+                cua_driver_core::session::SessionTransport::McpHttp => "mcp_http",
+            };
+            let client_kind = match session.client_kind {
+                cua_driver_core::session::SessionClientKind::Cli => "cli",
+                cua_driver_core::session::SessionClientKind::Direct => "direct",
+                cua_driver_core::session::SessionClientKind::Mcp => "mcp",
+                cua_driver_core::session::SessionClientKind::PythonSdk => "python_sdk",
+                cua_driver_core::session::SessionClientKind::TypescriptSdk => "typescript_sdk",
+            };
+            json!({
+                "session": session.public_label.as_deref().and_then(cursor_overlay::sanitize_session_label),
+                "implicit": session.implicit,
+                "state": if session.ending { "ending" } else { "active" },
+                "client_kind": client_kind,
+                "transport": transport,
+                "owner_short_id": owner_short_id,
+                "cursor_visible": cua_driver_core::session::cursor_visible(&session.runtime_id),
+                "recording_active": cua_driver_core::session::recording_active(&session.runtime_id),
+                "started_seconds_ago": session.started_for.as_secs(),
+                "idle_seconds": session.idle.as_secs(),
+                "expires_in_seconds": session.expires_in.as_secs(),
+            })
+        })
+        .collect::<Vec<_>>();
+        let count = sessions.len();
+        json!({
+            "sessions": sessions,
+            "count": count,
+        })
+    }
+
+    pub fn create_trusted_session_for_transport(
         &self,
         options: TrustedSessionOptions,
+        transport_session: &str,
     ) -> Result<Arc<CuaDriverSession>, String> {
         self.driver
-            .create_trusted_session(options)
+            .create_trusted_session_for_transport(options, transport_session)
             .map_err(|error| error.to_string())
     }
 
@@ -440,6 +528,77 @@ mod tests {
         assert!(!sdk.public_session_observation_state(session).ended);
 
         sdk.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn public_observation_mirror_revives_an_implicit_transport_session() {
+        let _runtime_guard = crate::test_runtime_lock().lock().await;
+        let sdk = SdkAdapter::load(host_driver()).await.expect("SDK adapter");
+        let transport_session = "adapter-implicit-transport";
+        let implicit_args = || {
+            json!({
+                "_session_id": transport_session,
+                "_transport_session_id": transport_session,
+            })
+        };
+
+        let started = sdk
+            .invoke_raw("start_session", implicit_args())
+            .await
+            .expect("start implicit session");
+        assert_ne!(started["isError"], true);
+
+        let ended = sdk
+            .invoke_raw("end_session", implicit_args())
+            .await
+            .expect("end implicit session");
+        assert_ne!(ended["isError"], true);
+        assert!(sdk.is_session_ended(transport_session));
+
+        let revived = sdk
+            .invoke_raw("start_session", implicit_args())
+            .await
+            .expect("revive implicit session");
+        assert_ne!(revived["isError"], true);
+        assert_eq!(revived["structuredContent"]["revived"], true);
+        assert!(
+            !sdk.is_session_ended(transport_session),
+            "successful implicit revival must clear the adapter's early tombstone"
+        );
+
+        sdk.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn idle_implicit_recreation_updates_the_daemon_mirror() {
+        let _runtime_guard = crate::test_runtime_lock().lock().await;
+        let sdk = SdkAdapter::load(host_driver()).await.expect("SDK adapter");
+        let transport = "g08-adapter-idle-transport";
+        let args = || json!({"_session_id": transport, "_transport_session_id": transport});
+        let first = sdk.invoke_raw("get_config", args()).await.unwrap();
+        assert_ne!(first["isError"], true, "{first}");
+        let internal = format!("{}{transport}", sdk.runtime_prefix);
+        assert_eq!(
+            cua_driver_core::session::evict_idle_with_prefix(std::time::Duration::ZERO, &internal),
+            [internal]
+        );
+        assert!(sdk.public_session_observation_state(transport).ended);
+        assert!(
+            !sdk.is_session_ended(transport),
+            "early daemon guard permits core recreation"
+        );
+        let next = sdk.invoke_raw("get_config", args()).await.unwrap();
+        assert_ne!(next["isError"], true, "{next}");
+        assert!(!sdk.public_session_observation_state(transport).ended);
+        let ended = sdk.invoke_raw("end_session", args()).await.unwrap();
+        assert_ne!(ended["isError"], true, "{ended}");
+        assert!(sdk.is_session_ended(transport));
+        let refused = sdk.invoke_raw("get_config", args()).await.unwrap();
+        assert_eq!(
+            refused["structuredContent"]["refusal"]["code"],
+            "session_ended"
+        );
+        sdk.shutdown().await.unwrap();
     }
 
     #[tokio::test]

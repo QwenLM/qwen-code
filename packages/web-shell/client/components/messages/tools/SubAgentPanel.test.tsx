@@ -4,12 +4,12 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../../i18n';
 import type { ACPToolCall } from '../../../adapters/types';
+import { WebShellCustomizationProvider } from '../../../customization';
+import { TranscriptRenderModeProvider } from '../../../transcriptRenderMode';
 import { formatTimestamp } from '../../MessageTimestamp';
 
-// SubAgentPanel pulls in ToolGroup, which imports App for TodoTimelineContext;
-// loading the real App module would drag the whole application graph into this
-// unit test.
-vi.mock('../../../App', async () => {
+// SubAgentPanel pulls in ToolGroup, which reads both todo contexts.
+vi.mock('../../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),
@@ -32,14 +32,34 @@ afterEach(() => {
   }
 });
 
-function renderPanel(tool: ACPToolCall): HTMLElement {
+function renderPanel(
+  tool: ACPToolCall,
+  options: {
+    compactThinking?: boolean;
+    hideHeader?: boolean;
+    renderMode?: 'interactive' | 'document';
+  } = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <SubAgentPanel tool={tool} defaultExpanded inline hideHeader />
+        <TranscriptRenderModeProvider
+          value={options.renderMode ?? 'interactive'}
+        >
+          <WebShellCustomizationProvider
+            value={{ compactThinking: options.compactThinking }}
+          >
+            <SubAgentPanel
+              tool={tool}
+              defaultExpanded
+              inline
+              hideHeader={options.hideHeader ?? true}
+            />
+          </WebShellCustomizationProvider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -58,6 +78,18 @@ function makeAgentWithSubTool(subTool: ACPToolCall): ACPToolCall {
 }
 
 describe('SubAgentPanel sub-tool timestamps', () => {
+  it('shows pending result processing on the original agent header', () => {
+    const container = renderPanel(
+      {
+        callId: 'agent-1',
+        toolName: 'Task',
+        status: 'completed',
+        backgroundResultPending: true,
+      },
+      { hideHeader: false },
+    );
+    expect(container.textContent).toContain('Awaiting processing');
+  });
   it('marks a failed sub-tool with an error icon instead of text', () => {
     const container = renderPanel(
       makeAgentWithSubTool({
@@ -176,6 +208,26 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     expect(container.textContent).not.toContain('Result');
   });
 
+  it('keeps the live stream fully expanded in compact document mode', () => {
+    const container = renderPanel(
+      {
+        callId: 'agent-1',
+        toolName: 'Task',
+        status: 'in_progress',
+        subContent: Array.from(
+          { length: 20 },
+          (_, index) => `stream line ${index}`,
+        ).join('\n'),
+      },
+      { compactThinking: true, renderMode: 'document' },
+    );
+    const stream = container.querySelector('pre[class*="stream"]');
+
+    expect(stream).not.toBeNull();
+    expect(stream?.className).not.toContain('streamCollapsed');
+    expect(container.querySelector('[aria-expanded]')).toBeNull();
+  });
+
   it('renders a completed agent stream text as the conclusion, not the live stream', () => {
     // The conclusion-first invariant: once complete, subContent is the
     // conclusion (assistant markdown), never the running <pre> stream.
@@ -209,7 +261,7 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     expect(stepWindow?.className).toContain('tools');
   });
 
-  it('hides non-standard sub-tool summaries until the row is expanded', () => {
+  it('hides non-standard sub-tool details until the row is expanded', () => {
     const container = renderPanel(
       makeAgentWithSubTool({
         callId: 'sub-1',
@@ -223,8 +275,60 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     ) as HTMLElement | undefined;
 
     expect(row).toBeDefined();
-    expect(container.textContent).not.toContain('2 item(s)');
+    expect(container.textContent).not.toContain('package.json');
     act(() => row!.click());
-    expect(container.textContent).toContain('2 item(s)');
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('package.json');
+  });
+});
+
+describe('SubAgentPanel agent path', () => {
+  it('keeps the path on the name title without rendering it as a chip', () => {
+    // Nothing in the projection can produce a path deeper than `/root/<name>`
+    // today: the nested sub-content fallback was unreachable, so a visible
+    // nested-path chip claimed a capability the wire never delivers. The path
+    // stays available on hover, where it is accurate at any depth.
+    const container = renderPanel(
+      {
+        callId: 'agent-1',
+        toolName: 'Task',
+        status: 'completed',
+        args: { subagent_type: 'security' },
+        agentPath: '/root/security/deps',
+      },
+      { hideHeader: false },
+    );
+    expect(container.textContent).not.toContain('/root/security/deps');
+    expect(
+      container.querySelector('[title="/root/security/deps"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps a depth-1 path off the visible header but on the name title', () => {
+    // At depth 1 the path's last segment *is* the type name the header already
+    // shows, so rendering both is noise; hover still gives the full path.
+    const container = renderPanel(
+      {
+        callId: 'agent-1',
+        toolName: 'Task',
+        status: 'completed',
+        args: { subagent_type: 'general-purpose' },
+        agentPath: '/root/general-purpose',
+      },
+      { hideHeader: false },
+    );
+    expect(container.textContent).not.toContain('/root/general-purpose');
+    expect(
+      container.querySelector('[title="/root/general-purpose"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders no path chrome when the daemon stamped no identity', () => {
+    const container = renderPanel(
+      { callId: 'agent-1', toolName: 'Task', status: 'completed' },
+      { hideHeader: false },
+    );
+    expect(container.querySelector('[title^="/root"]')).toBeNull();
+    expect(container.textContent).not.toContain('/root');
   });
 });

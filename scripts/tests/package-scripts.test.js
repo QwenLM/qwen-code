@@ -6,7 +6,11 @@
 
 import {
   chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -16,11 +20,25 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse, stringify } from 'yaml';
+
+import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
+import { checkReleaseTarballExecBits } from '../check-release-tarball-exec-bits.mjs';
+import { getPinnedPnpmPackage } from '../pnpm-package.js';
+import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
+import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '../..');
+const huskyTestEnv = {
+  HUSKY: '1',
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'core.hooksPath',
+  GIT_CONFIG_VALUE_0: '.husky/_',
+};
 
 function readPackageJson() {
   return JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -30,7 +48,1736 @@ function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
 }
 
+const heapCap = (value) => value?.match(/--max-old-space-size=(\d+)/)?.[1];
+
+/**
+ * Writes a throwaway package shaped like the generated CLI for the
+ * vendored-binary packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
+ * for a `-win32` platform) at the given modes, the manifest entry that makes
+ * a packer pick the tree up, and optionally
+ * `vendor/landlock-run/<platform>/qwen-landlock-run` binaries.
+ */
+function writeVendoredBinaryFixture(directory, platforms, landlock = {}) {
+  writeFileSync(
+    path.join(directory, 'package.json'),
+    JSON.stringify({
+      name: 'vendored-binary-fixture',
+      version: '1.0.0',
+      files: ['vendor'],
+    }),
+  );
+  const binaries = [];
+  for (const [platform, mode] of Object.entries(platforms)) {
+    binaries.push([
+      `vendor/ripgrep/${platform}/${platform.endsWith('-win32') ? 'rg.exe' : 'rg'}`,
+      mode,
+    ]);
+  }
+  for (const [platform, mode] of Object.entries(landlock)) {
+    binaries.push([`vendor/landlock-run/${platform}/qwen-landlock-run`, mode]);
+  }
+  for (const [relative, mode] of binaries) {
+    const binary = path.join(directory, relative);
+    mkdirSync(path.dirname(binary), { recursive: true });
+    writeFileSync(binary, '#!/bin/sh\n');
+    chmodSync(binary, mode);
+  }
+  return directory;
+}
+
+const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
+
 describe('package scripts', () => {
+  it('keeps documented CI variable defaults in sync with workflows', () => {
+    const guide = readWorkflow('docs/developers/development/ci-variables.md');
+    const docRows = new Map(
+      [
+        ...guide.matchAll(
+          /^\|\s*`(QWEN_\w+)`\s*\|\s*`([^`]+)`\s*\|\s*([^|]+)\s*\|/gm,
+        ),
+      ].map(([, name, value, usedIn]) => [
+        name,
+        {
+          defaultVal: value,
+          files: [...usedIn.matchAll(/`([^`]+\.yml)`/g)].map(([, f]) => f),
+        },
+      ]),
+    );
+
+    // These variables are documented below the test-execution table.
+    const excludedNonTestVariables = new Set([
+      'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES',
+      'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES',
+    ]);
+    const relatedRows = new Map(
+      [...guide.matchAll(/`(QWEN_RELEASE_\w+)` \(default `([^`]+)`/g)].map(
+        ([, name, value]) => [name, value],
+      ),
+    );
+
+    const workflowFiles = ['ci.yml', 'release.yml'];
+    const workflowVars = new Map();
+
+    for (const file of workflowFiles) {
+      const workflow = readWorkflow(`.github/workflows/${file}`);
+      for (const [, name] of workflow.matchAll(/vars\.(QWEN_\w+)/g)) {
+        if (!workflowVars.has(name)) {
+          workflowVars.set(name, { fallbacks: new Set(), files: new Set() });
+        }
+        const entry = workflowVars.get(name);
+        entry.files.add(file);
+      }
+      for (const [, name, fallback] of workflow.matchAll(
+        /vars\.(QWEN_\w+)\s*\|\|\s*'([^']+)'/g,
+      )) {
+        workflowVars.get(name).fallbacks.add(fallback);
+      }
+    }
+
+    // Every workflow variable must have a known fallback and a matching doc.
+    for (const [name, info] of workflowVars.entries()) {
+      expect(info.fallbacks.size, `No fallback found for ${name}`).toBe(1);
+      const [fallback] = info.fallbacks;
+      if (excludedNonTestVariables.has(name)) {
+        expect(info.files, `Unexpected workflow for ${name}`).toEqual(
+          new Set(['release.yml']),
+        );
+        expect(relatedRows.get(name), `Related variable ${name} drifted`).toBe(
+          fallback,
+        );
+        expect(docRows.has(name), `${name} is outside the test table`).toBe(
+          false,
+        );
+        continue;
+      }
+      const docEntry = docRows.get(name);
+      expect(
+        docEntry,
+        `Workflow variable ${name} missing from docs`,
+      ).toBeDefined();
+      expect(docEntry.defaultVal, `Default mismatch for ${name}`).toBe(
+        fallback,
+      );
+      expect(new Set(docEntry.files), `Used-in mismatch for ${name}`).toEqual(
+        info.files,
+      );
+    }
+
+    // A deleted workflow variable must not linger in the documentation.
+    for (const [name, docEntry] of docRows.entries()) {
+      expect(
+        workflowVars.has(name),
+        `Documented variable ${name} not found in test workflows`,
+      ).toBe(true);
+      expect(
+        docEntry.files.length,
+        `No workflow listed for ${name}`,
+      ).toBeGreaterThan(0);
+    }
+    for (const name of excludedNonTestVariables) {
+      expect(workflowVars.has(name), `Missing related variable ${name}`).toBe(
+        true,
+      );
+    }
+  });
+
+  it('accepts only an exact pnpm package-manager version', () => {
+    expect(getPinnedPnpmPackage({ packageManager: 'pnpm@11.24.0' })).toBe(
+      'pnpm@11.24.0',
+    );
+    // `corepack use pnpm@x.y.z` appends the tarball's integrity hash; the
+    // bootstrap must accept the string corepack itself writes.
+    const hashed =
+      'pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000';
+    expect(getPinnedPnpmPackage({ packageManager: hashed })).toBe(hashed);
+    expect(() =>
+      getPinnedPnpmPackage({ packageManager: 'pnpm@latest' }),
+    ).toThrow('packageManager must pin an exact pnpm version');
+    expect(() =>
+      getPinnedPnpmPackage({
+        packageManager: 'pnpm@11.24.0+sha512.not-hex',
+      }),
+    ).toThrow('packageManager must pin an exact pnpm version');
+  });
+
+  it('pins pnpm with the corepack integrity hash', () => {
+    expect(readPackageJson().packageManager).toMatch(
+      /^pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}$/,
+    );
+  });
+
+  it('keeps internal pnpm workspaces independent of manifest versions', () => {
+    const packageJson = {
+      dependencies: {
+        '@qwen-code/qwen-code-core': 'file:../core',
+        '@qwen-code/channel-base': '0.22.4',
+        fixture: 'file:../fixture',
+      },
+      devDependencies: {
+        '@qwen-code/acp-bridge': 'file:../acp-bridge',
+      },
+      optionalDependencies: {
+        '@qwen-code/sdk': '0.22.4',
+      },
+    };
+
+    expect(pnpmHooks.readPackage(packageJson)).toEqual({
+      dependencies: {
+        '@qwen-code/qwen-code-core': 'workspace:*',
+        '@qwen-code/channel-base': 'workspace:*',
+        fixture: 'file:../fixture',
+      },
+      devDependencies: {
+        '@qwen-code/acp-bridge': 'workspace:*',
+      },
+      optionalDependencies: {
+        '@qwen-code/sdk': 'workspace:*',
+      },
+    });
+  });
+
+  it('keeps the pnpm rewrite set in sync with the workspace manifests', () => {
+    const { workspaces } = readPackageJson();
+    const negated = workspaces
+      .filter((entry) => entry.startsWith('!'))
+      .map((entry) => entry.slice(1));
+    const directories = [];
+    for (const pattern of workspaces) {
+      if (pattern.startsWith('!')) continue;
+      if (pattern.endsWith('/*')) {
+        const parent = pattern.slice(0, -2);
+        for (const entry of readdirSync(path.join(root, parent))) {
+          directories.push(`${parent}/${entry}`);
+        }
+      } else {
+        directories.push(pattern);
+      }
+    }
+    const names = directories
+      .filter((directory) => !negated.includes(directory))
+      .map((directory) => {
+        const manifestPath = path.join(root, directory, 'package.json');
+        if (!existsSync(manifestPath)) return undefined;
+        return JSON.parse(readFileSync(manifestPath, 'utf8')).name;
+      })
+      .filter((name) => name !== undefined);
+
+    // A member missing from the set keeps its release version or file:
+    // specifier under pnpm, which is exactly the lockfile staleness the
+    // rewrite exists to prevent.
+    expect([...workspacePackageNames].sort()).toEqual(
+      [...new Set(names)].sort(),
+    );
+  });
+
+  it('mirrors the npm workspace boundaries in pnpm-workspace.yaml', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+
+    expect([...workspace.packages].sort()).toEqual(
+      [...readPackageJson().workspaces].sort(),
+    );
+  });
+
+  it('mirrors npm overrides in pnpm-workspace.yaml', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+    const { cliui, ...npmOverrides } = readPackageJson().overrides;
+
+    expect(workspace.overrides).toMatchObject({
+      ...npmOverrides,
+      'cliui>wrap-ansi': cliui['wrap-ansi'],
+    });
+  });
+
+  it('preserves the registry retry policy under pnpm', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+
+    expect(workspace).toMatchObject({
+      fetchRetries: 5,
+      fetchRetryMintimeout: 20000,
+      fetchRetryMaxtimeout: 120000,
+      fetchTimeout: 300000,
+    });
+  });
+
+  it('checks the pnpm lockfile for integrity and Playwright parity', () => {
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, 'scripts/check-lockfile.js')],
+      { cwd: root, encoding: 'utf8' },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('pnpm lockfile check passed.');
+    // Pins the Playwright parity block's existence and happy path: deleting it,
+    // or returning before it, goes red here. Its drift arms live in
+    // check-lockfile.test.js, which runs the script against perturbed fixtures.
+    expect(result.stdout).toContain('Playwright parity check passed.');
+  });
+
+  describe('check-lockfile failure branches', () => {
+    // Each case runs the real script against a temp root holding copies of
+    // the committed lockfiles with one mutation, so the detectors — not
+    // today's lockfile data — are what the assertions pin.
+    function runCheckLockfile(mutate) {
+      const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'check-lockfile-'));
+      try {
+        // The Playwright parity section reads the pinned manifests as
+        // well as the lockfiles, so the fixture carries them too: without
+        // them the run dies on a missing package.json before reaching the
+        // branch under test.
+        for (const file of [
+          'pnpm-lock.yaml',
+          'pnpm-workspace.yaml',
+          'package.json',
+          'packages/web-shell/package.json',
+        ]) {
+          const to = path.join(fixtureRoot, file);
+          mkdirSync(path.dirname(to), { recursive: true });
+          copyFileSync(path.join(root, file), to);
+        }
+        mutate(fixtureRoot);
+        return spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/check-lockfile.js')],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, CHECK_LOCKFILE_ROOT: fixtureRoot },
+          },
+        );
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true });
+      }
+    }
+
+    function mutatePnpmLock(fixtureRoot, mutate) {
+      const file = path.join(fixtureRoot, 'pnpm-lock.yaml');
+      const lock = parse(readFileSync(file, 'utf8'));
+      mutate(lock);
+      writeFileSync(file, stringify(lock));
+    }
+
+    it('fails closed when pnpm-lock.yaml has no packages section', () => {
+      const result = runCheckLockfile((fixtureRoot) => {
+        writeFileSync(
+          path.join(fixtureRoot, 'pnpm-lock.yaml'),
+          "lockfileVersion: '9.0'\n",
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('has no packages section');
+    });
+
+    it('accepts a git dependency pnpm keys by source instead of version', () => {
+      const resolved = 'git+https://github.com/example/git-dep.git#7ae66ab2';
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          lock.packages[`git-dep@${resolved}`] = {
+            resolution: { type: 'git' },
+          };
+        }),
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('pnpm lockfile check passed.');
+    });
+
+    it('fails when a registry package loses its integrity hash', () => {
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          lock.packages['left-pad@1.3.0'] = { resolution: {} };
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('missing "resolution.integrity"');
+      expect(result.stderr).toContain('- left-pad@1.3.0');
+    });
+  });
+
+  it('checks undeclared imports in web-shell shipped sources', () => {
+    // web-shell is published and keeps its shipped sources in client/, so the
+    // src/ globs reach none of it. Pinning the glob inside this block keeps a
+    // published package from silently dropping out of the check.
+    const config = readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
+    const start = config.indexOf(
+      'A package must declare what its own sources import',
+    );
+    const end = config.indexOf('export-html and insight carry', start);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(config.slice(start, end)).toContain(
+      "'packages/web-shell/client/**/*.{ts,tsx}'",
+    );
+  });
+
+  it('keeps the internal release-age exception independent of the version', () => {
+    const workspace = parse(
+      readFileSync(path.join(root, 'pnpm-workspace.yaml'), 'utf8'),
+    );
+
+    expect(workspace.minimumReleaseAgeExclude).toEqual([
+      '@qwen-code/channel-base',
+    ]);
+  });
+
+  it('imports packages without hard links so patch-package cannot corrupt the store', () => {
+    const workspace = parse(
+      readFileSync(path.join(root, 'pnpm-workspace.yaml'), 'utf8'),
+    );
+
+    // The root postinstall rewrites node_modules files in place. Under
+    // 'auto' or 'hardlink' those files are hard links into the
+    // content-addressable store, so the rewrite corrupts the store entry and
+    // every later worktree misses its --offline stage.
+    expect(readPackageJson().scripts.postinstall).toBe('patch-package');
+    expect(['clone-or-copy', 'copy', 'clone']).toContain(
+      workspace.packageImportMethod,
+    );
+  });
+
+  it('keeps the pnpm lockfile out of prettier so formatting cannot fight pnpm', () => {
+    const ignored = readFileSync(path.join(root, '.prettierignore'), 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('#'));
+
+    expect(ignored).toContain('pnpm-lock.yaml');
+  });
+
+  it('keeps channel workspace lock entries independent of release versions', () => {
+    const lockfile = parse(
+      readFileSync(path.join(root, 'pnpm-lock.yaml'), 'utf8'),
+    );
+    const specifiers = Object.values(lockfile.importers).flatMap((importer) =>
+      ['dependencies', 'devDependencies', 'optionalDependencies'].flatMap(
+        (field) => {
+          const entry = importer[field]?.['@qwen-code/channel-base'];
+          return entry ? [entry.specifier] : [];
+        },
+      ),
+    );
+
+    expect(specifiers.length).toBeGreaterThan(0);
+    expect(new Set(specifiers)).toEqual(new Set(['workspace:*']));
+  });
+
+  it('bootstraps worktrees and preserves explicit hook settings', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-setup-'));
+    const commandDir = path.join(binDir, 'runner bin');
+    const logFile = path.join(binDir, 'corepack.log');
+    mkdirSync(commandDir);
+    // The stub husky has to leave the wrapper the bootstrap verifies. It is
+    // confined to `.husky/_` and removed again unless a real Husky install
+    // already put one there.
+    const stubHooksDir = path.join(root, '.husky', '_');
+    const hadStubHooksDir = existsSync(stubHooksDir);
+
+    const runSetup = (envOverride = {}) => {
+      writeFileSync(logFile, '');
+      return spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ...huskyTestEnv,
+            ...envOverride,
+            PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            WORKTREE_SETUP_LOG: logFile,
+          },
+        },
+      );
+    };
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(commandDir, 'corepack.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if not "%2"=="exec" exit /b 0\r\n@if exist ".husky\\_\\pre-commit" exit /b 0\r\n@if not exist ".husky\\_" mkdir ".husky\\_"\r\n@type nul > ".husky\\_\\pre-commit"\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(commandDir, 'corepack'),
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$2" = "exec" ] || exit 0\n[ -e .husky/_/pre-commit ] && exit 0\nmkdir -p .husky/_\n: > .husky/_/pre-commit\n',
+        );
+        chmodSync(path.join(commandDir, 'corepack'), 0o755);
+      }
+
+      const result = runSetup();
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        '1 1 pnpm install --frozen-lockfile --offline',
+        '1 1 pnpm exec husky',
+      ]);
+      expect(runSetup({ HUSKY: '0' }).status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(
+        '1 1 pnpm install --frozen-lockfile --offline',
+      );
+      expect(runSetup({ GIT_CONFIG_VALUE_0: '/custom/hooks' }).status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(
+        '1 1 pnpm install --frozen-lockfile --offline',
+      );
+
+      // The pin above proves an explicit HUSKY value is honoured, but the
+      // state every real shell and CI job is in is unset. Deleting the key
+      // must still reach husky, so a gate that treats unset as disabled
+      // (e.g. `!== '1'`) goes red on the missing exec line.
+      const unsetEnv = {
+        ...process.env,
+        ...huskyTestEnv,
+        PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
+        WORKTREE_SETUP_LOG: logFile,
+      };
+      for (const key of Object.keys(unsetEnv)) {
+        if (key.toUpperCase() === 'HUSKY') delete unsetEnv[key];
+      }
+      writeFileSync(logFile, '');
+      const unsetResult = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        { cwd: root, encoding: 'utf8', env: unsetEnv },
+      );
+      expect(unsetResult.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        '1 1 pnpm install --frozen-lockfile --offline',
+        '1 1 pnpm exec husky',
+      ]);
+    } finally {
+      if (!hadStubHooksDir) {
+        rmSync(stubHooksDir, { recursive: true, force: true });
+      }
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The hook logic reads `core.hooksPath` from git and asks git which root owns
+   * the config husky would write. Neither is reachable from the injected
+   * `GIT_CONFIG_*` constant above: it pins the value for the child's whole
+   * lifetime, so the unset state — the only one where husky is asked to write —
+   * cannot come from it, and ownership comes from `git rev-parse`, which
+   * answers only for a real layout. These cases build throwaway trees with real
+   * git commands instead: a primary checkout (`.git` directory), a linked
+   * worktree and a `--separate-git-dir` clone (both `.git` files, only the
+   * clone owning its config), and a directory with no repository at all. The
+   * stub husky lets each case choose what husky writes and what it exits with.
+   */
+  it('installs hooks only where the checkout owns the repository config', () => {
+    const sandbox = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-hooks-'));
+    const commandDir = path.join(sandbox, 'bin');
+    const primary = path.join(sandbox, 'primary');
+    const linked = path.join(sandbox, 'linked');
+    const separate = path.join(sandbox, 'separate');
+    const separateGitDir = path.join(sandbox, 'separate-git');
+    const noRepo = path.join(sandbox, 'no-repo');
+    const logFile = path.join(sandbox, 'corepack.log');
+    const emptyConfig = path.join(sandbox, 'empty-config');
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_GLOBAL: emptyConfig,
+      GIT_CONFIG_SYSTEM: emptyConfig,
+    };
+    const installLine = '1 1 pnpm install --frozen-lockfile --offline';
+    const huskyLine = '1 1 pnpm exec husky';
+
+    try {
+      mkdirSync(commandDir, { recursive: true });
+      writeFileSync(emptyConfig, '');
+
+      // Stands in for husky: logs the invocation like the neighbouring stubs,
+      // then writes what husky writes and exits as the case asks.
+      const stub =
+        process.platform === 'win32'
+          ? '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if not "%2"=="exec" exit /b 0\r\n@if not "%STUB_HUSKY_EXIT%"=="" exit /b %STUB_HUSKY_EXIT%\r\n@if "%STUB_HUSKY_SETS_HOOKS_PATH%"=="1" git config core.hooksPath .husky/_\r\n@if not "%STUB_HUSKY_WRITES_HOOKS%"=="1" exit /b 0\r\n@if not exist ".husky\\_" mkdir ".husky\\_"\r\n@type nul > ".husky\\_\\pre-commit"\r\n'
+          : '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$2" = "exec" ] || exit 0\n[ -z "$STUB_HUSKY_EXIT" ] || exit "$STUB_HUSKY_EXIT"\n[ "$STUB_HUSKY_SETS_HOOKS_PATH" = "1" ] && git config core.hooksPath .husky/_\n[ "$STUB_HUSKY_WRITES_HOOKS" = "1" ] && mkdir -p .husky/_ && : > .husky/_/pre-commit\nexit 0\n';
+      writeFileSync(
+        path.join(
+          commandDir,
+          process.platform === 'win32' ? 'corepack.cmd' : 'corepack',
+        ),
+        stub,
+      );
+      if (process.platform !== 'win32') {
+        chmodSync(path.join(commandDir, 'corepack'), 0o755);
+      }
+
+      const seedCheckout = (checkout) => {
+        mkdirSync(path.join(checkout, 'scripts'), { recursive: true });
+        writeFileSync(
+          path.join(checkout, 'package.json'),
+          `${JSON.stringify({ packageManager: 'pnpm@11.24.0' }, null, 2)}\n`,
+        );
+        for (const script of ['setup-worktree.js', 'pnpm-package.js']) {
+          writeFileSync(
+            path.join(checkout, 'scripts', script),
+            readFileSync(path.join(root, 'scripts', script), 'utf8'),
+          );
+        }
+      };
+      const git = (args, cwd) =>
+        spawnSync('git', args, { cwd, encoding: 'utf8', env: gitEnv });
+      const identity = [
+        '-c',
+        'user.name=fixture',
+        '-c',
+        'user.email=fixture@example.com',
+      ];
+
+      seedCheckout(primary);
+      expect(git(['init', '--quiet', primary], sandbox).status).toBe(0);
+      expect(git(['add', '--all'], primary).status).toBe(0);
+      expect(
+        git([...identity, 'commit', '--quiet', '-m', 'fixture'], primary)
+          .status,
+      ).toBe(0);
+      expect(
+        git(['worktree', 'add', '--quiet', '--detach', linked], primary).status,
+      ).toBe(0);
+      expect(
+        git(
+          [
+            'clone',
+            '--quiet',
+            '--separate-git-dir',
+            separateGitDir,
+            primary,
+            separate,
+          ],
+          sandbox,
+        ).status,
+      ).toBe(0);
+      seedCheckout(noRepo);
+
+      const runSetup = (checkout, huskyStub = {}) => {
+        writeFileSync(logFile, '');
+        return spawnSync(
+          process.execPath,
+          [path.join(checkout, 'scripts', 'setup-worktree.js')],
+          {
+            cwd: checkout,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              HUSKY: '1',
+              STUB_HUSKY_SETS_HOOKS_PATH: huskyStub.setsHooksPath ? '1' : '0',
+              STUB_HUSKY_WRITES_HOOKS: huskyStub.writesHooks ? '1' : '0',
+              STUB_HUSKY_EXIT: huskyStub.exit ?? '',
+              PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
+              WORKTREE_SETUP_LOG: logFile,
+              // Read and write the throwaway trees' own config rather than the
+              // host checkout's, which already carries `core.hooksPath`.
+              GIT_CONFIG_COUNT: '0',
+              GIT_CONFIG_GLOBAL: emptyConfig,
+              GIT_CONFIG_SYSTEM: emptyConfig,
+            },
+          },
+        );
+      };
+      const hooksPathIsSet = (checkout) =>
+        git(['config', '--get', 'core.hooksPath'], checkout).status === 0;
+      const resetPrimaryHooks = () => {
+        git(['config', '--unset', 'core.hooksPath'], primary);
+        rmSync(path.join(primary, '.husky'), { recursive: true, force: true });
+      };
+
+      // A linked worktree with the key unset must not let husky add it to the
+      // config every worktree of the repository shares.
+      const linkedRun = runSetup(linked, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(linkedRun.status).toBe(0);
+      expect(linkedRun.stdout).toContain('skipping Husky');
+      // The skip leaves the worktree hook-less until it is re-run after the
+      // primary installs, so the notice must carry that recovery path.
+      expect(linkedRun.stdout).toContain(
+        'Re-run this script here once hooks are installed in the primary checkout.',
+      );
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(installLine);
+      expect(hooksPathIsSet(primary)).toBe(false);
+      expect(existsSync(path.join(linked, '.husky'))).toBe(false);
+
+      // The primary checkout owns the config husky writes, so the same unset
+      // key installs hooks there.
+      const primaryRun = runSetup(primary, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(primaryRun.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        installLine,
+        huskyLine,
+      ]);
+      expect(hooksPathIsSet(primary)).toBe(true);
+      expect(existsSync(path.join(primary, '.husky', '_', 'pre-commit'))).toBe(
+        true,
+      );
+
+      // A `.git` file does not by itself mean another root owns the config: a
+      // `--separate-git-dir` clone owns its own, so hooks install there.
+      const separateRun = runSetup(separate, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(separateRun.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        installLine,
+        huskyLine,
+      ]);
+      expect(hooksPathIsSet(separate)).toBe(true);
+
+      // With no repository at all there is no config to write, so husky is
+      // skipped rather than run into its `.git can't be found` soft failure.
+      const noRepoRun = runSetup(noRepo, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(noRepoRun.status).toBe(0);
+      expect(noRepoRun.stdout).toContain('skipping Husky');
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(installLine);
+      expect(existsSync(path.join(noRepo, '.husky'))).toBe(false);
+
+      // A husky that configures the hooks path but writes no wrappers still
+      // ships a hook-less checkout, so the on-disk half fires on its own.
+      resetPrimaryHooks();
+      const configOnly = runSetup(primary, { setsHooksPath: true });
+      expect(configOnly.status).toBe(1);
+      expect(configOnly.stderr).toContain('Husky did not install hooks');
+
+      // A husky that exits 0 having written nothing fails closed too.
+      resetPrimaryHooks();
+      const hookless = runSetup(primary);
+      expect(hookless.status).toBe(1);
+      expect(hookless.stderr).toContain('Husky did not install hooks');
+
+      // A husky that fails outright decides the exit code, not the install
+      // result that preceded it.
+      const failing = runSetup(primary, { exit: '7' });
+      expect(failing.status).toBe(7);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        installLine,
+        huskyLine,
+      ]);
+
+      // A git that answers but refuses to read the config (a shared pool's
+      // dubious-ownership exit 128, a config error) is not "key unset": the
+      // read failure must surface rather than land on a skip branch with a
+      // green exit. A script stub cannot shadow git.exe on Windows.
+      if (process.platform !== 'win32') {
+        writeFileSync(path.join(commandDir, 'git'), '#!/bin/sh\nexit 128\n');
+        chmodSync(path.join(commandDir, 'git'), 0o755);
+        const unreadable = runSetup(primary, {
+          setsHooksPath: true,
+          writesHooks: true,
+        });
+        expect(unreadable.status).toBe(1);
+        expect(unreadable.stdout).not.toContain('skipping Husky');
+        expect(unreadable.stderr).toContain('could not read core.hooksPath');
+      }
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'resolves the path variable under its native Windows casing',
+    () => {
+      const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-path-'));
+      const commandDir = path.join(binDir, 'runner bin');
+      const logFile = path.join(binDir, 'corepack.log');
+      mkdirSync(commandDir);
+
+      try {
+        writeFileSync(
+          path.join(commandDir, 'corepack.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n',
+        );
+
+        // Native shells expose the path variable as `Path`; a case-sensitive
+        // `env.PATH` read on the spread object would miss it and report
+        // Corepack unavailable.
+        const env = {
+          ...process.env,
+          ...huskyTestEnv,
+          WORKTREE_SETUP_LOG: logFile,
+        };
+        delete env.PATH;
+        delete env.Path;
+        delete env.HUSKY;
+        env.Path = `${commandDir}${path.delimiter}${process.env.Path ?? process.env.PATH ?? ''}`;
+        env.Husky = '0';
+
+        const result = spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/setup-worktree.js')],
+          {
+            cwd: root,
+            encoding: 'utf8',
+            env,
+          },
+        );
+
+        expect(result.status).toBe(0);
+        expect(readFileSync(logFile, 'utf8').trim()).toBe(
+          '1 1 pnpm install --frozen-lockfile --offline',
+        );
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('fails closed when Corepack is unavailable', () => {
+    const binDir = mkdtempSync(
+      path.join(tmpdir(), 'qwen-worktree-no-corepack-'),
+    );
+    const env = { ...process.env, PATH: binDir };
+    for (const name of Object.keys(env)) {
+      if (name !== 'PATH' && name.toUpperCase() === 'PATH') delete env[name];
+    }
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        { cwd: root, encoding: 'utf8', env },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('Corepack is required');
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'ignores a PATH entry that cannot be executed',
+    () => {
+      // A `corepack` left without its exec bit by a half-removed toolchain
+      // used to be chosen anyway, and the spawn then died with EACCES instead
+      // of the actionable message below.
+      const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-noexec-'));
+      const env = { ...process.env, PATH: binDir };
+
+      try {
+        writeFileSync(path.join(binDir, 'corepack'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'corepack'), 0o644);
+
+        const result = spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/setup-worktree.js')],
+          { cwd: root, encoding: 'utf8', env },
+        );
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('Corepack is required');
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('falls back to registry access when the pnpm store is incomplete', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-fallback-'));
+    const logFile = path.join(binDir, 'corepack.log');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'corepack.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%4"=="--offline" exit /b 1\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'corepack'),
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$4" != "--offline" ]\n',
+        );
+        chmodSync(path.join(binDir, 'corepack'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          // `PATH` holds only the stub directory, so the fallback stays pinned
+          // as needing no ambient tooling: with no git to resolve a repository
+          // the hook step reports itself skipped rather than failing an install
+          // that succeeded.
+          env: {
+            ...process.env,
+            HUSKY: '1',
+            PATH: binDir,
+            WORKTREE_SETUP_LOG: logFile,
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('skipping Husky');
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        '1 1 pnpm install --frozen-lockfile --offline',
+        '1 1 pnpm install --frozen-lockfile --prefer-offline',
+      ]);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves a worktree bootstrap interrupt status', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-signal-'));
+    const logFile = path.join(binDir, 'corepack.log');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'corepack.cmd'),
+          '@echo called>>"%WORKTREE_SETUP_LOG%"\r\n@exit /b 130\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'corepack'),
+          '#!/bin/sh\necho called >> "$WORKTREE_SETUP_LOG"\nkill -INT $$\n',
+        );
+        chmodSync(path.join(binDir, 'corepack'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            WORKTREE_SETUP_LOG: logFile,
+          },
+        },
+      );
+
+      expect(result.status).toBe(130);
+      expect(readFileSync(logFile, 'utf8').trim()).toBe('called');
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not couple Node REPL to Qwen release versions', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain('INDEPENDENT_PACKAGES.map((name)');
+    expect(INDEPENDENT_PACKAGES).toContain('@qwen-code/node-repl-mcp');
+  });
+
+  it('smoke-tests the real worktree bootstrap on every supported host', () => {
+    const workflow = parse(
+      readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
+    );
+    const job = workflow.jobs.install;
+
+    expect(job.strategy.matrix.os).toEqual([
+      'ubuntu-latest',
+      'macos-latest',
+      'windows-latest',
+    ]);
+    expect(job.strategy['fail-fast']).toBe(false);
+    expect(
+      job.steps.find(
+        (step) => step.name === 'Install frozen pnpm worktree dependencies',
+      )?.run,
+    ).toBe('node scripts/setup-worktree.js');
+
+    // The pnpm linker only materializes declared dependencies, so a
+    // workspace import that npm's hoisting hides breaks typecheck and tests
+    // in the bootstrapped tree; resolve one through the worst offender.
+    const resolveCheck = job.steps.find(
+      (step) => step.name === 'Verify workspace links resolve',
+    );
+    expect(resolveCheck?.run).toContain(
+      '@qwen-code/qwen-code-core/package.json',
+    );
+    expect(resolveCheck?.run).toContain('packages/vscode-ide-companion');
+
+    // `git diff --exit-code` misses untracked files; the install must leave
+    // the porcelain output empty on every host, including Windows (hence
+    // the explicit POSIX shell).
+    const cleanCheck = job.steps.find(
+      (step) => step.name === 'Ensure bootstrap keeps the worktree clean',
+    );
+    expect(cleanCheck?.shell).toBe('bash');
+    expect(cleanCheck?.run).toContain('git status --porcelain');
+
+    // The checks only mean anything after the install; pin the order.
+    const stepNames = job.steps.map((step) => step.name);
+    expect(
+      stepNames.indexOf('Install frozen pnpm worktree dependencies'),
+    ).toBeLessThan(stepNames.indexOf('Verify workspace links resolve'));
+    expect(stepNames.indexOf('Verify workspace links resolve')).toBeLessThan(
+      stepNames.indexOf('Ensure bootstrap keeps the worktree clean'),
+    );
+
+    // A post-merge run is the only witness of a regression on main, so
+    // consecutive merges must not cancel each other.
+    expect(workflow.concurrency['cancel-in-progress']).toBe(
+      "${{ github.event_name == 'pull_request' }}",
+    );
+
+    // Substring check on the raw job text: an exact `step.run` match is
+    // bypassed by any other spelling of a build step (block scalar,
+    // compound command).
+    const installJob = getWorkflowJob(
+      readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
+      'install',
+    );
+    expect(installJob).not.toContain('npm run build');
+    expect(installJob).not.toContain('node scripts/build.js');
+  });
+
+  it('runs the pnpm smoke workflow when a dependency input changes', () => {
+    const workflow = parse(
+      readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
+    );
+    // The install validates pnpm-lock.yaml against the workspace manifests,
+    // so these are the inputs that can change its result.
+    const expectedPaths = [
+      '.github/workflows/pnpm-worktree-smoke.yml',
+      '.npmrc',
+      '.pnpmfile.mjs',
+      'package.json',
+      'packages/*/package.json',
+      '!packages/desktop/package.json',
+      '!packages/live-host/package.json',
+      '!packages/mobile-shell/package.json',
+      'packages/channels/*/package.json',
+      'integrations/*/package.json',
+      'patches/**',
+      'packages/audio-capture/install.js',
+      'packages/core/scripts/postinstall.js',
+      'packages/vscode-ide-companion/scripts/generate-notices.js',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'scripts/generate-git-commit-info.js',
+      'scripts/prepare.js',
+      'scripts/pnpm-package.js',
+      'scripts/setup-worktree.js',
+    ];
+
+    expect(workflow.on.pull_request.paths).toEqual(expectedPaths);
+    expect(workflow.on.push.paths).toEqual(expectedPaths);
+  });
+
+  it('includes the standalone qwen-live daemon in recursive root builds', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+
+    expect(buildScript).toContain('corepack pnpm -r');
+    expect(buildScript).not.toContain('!@qwen-code/qwen-live');
+    expect(readPackageJson().workspaces).toContain('packages/*');
+  });
+
+  it('detects an unapplied ink patch by a file the patch creates', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+    const sentinel = buildScript.match(
+      /'node_modules\/ink\/build\/([^']+)'/,
+    )?.[1];
+    expect(sentinel).toBeDefined();
+    expect(buildScript).toContain('npm run postinstall');
+
+    const inkPatch = readdirSync(path.join(root, 'patches')).find((name) =>
+      name.startsWith('ink+'),
+    );
+    expect(inkPatch).toBeDefined();
+    const created = readFileSync(path.join(root, 'patches', inkPatch), 'utf8')
+      .split(/^diff --git /m)
+      .find((file) =>
+        file.startsWith(`a/node_modules/ink/build/${sentinel} b/node_modules/`),
+      );
+    // The sentinel only proves the patch is missing if no published ink ships
+    // it, i.e. the patch must create the file rather than edit an existing one.
+    expect(created).toContain('new file mode');
+  });
+
+  it('keeps the root build above the heap ceiling that broke the CLI compile', () => {
+    const { build } = readPackageJson().scripts;
+    const cap = heapCap(build);
+    expect(cap).toBeDefined();
+    // The CLI's TypeScript compile crossed the previous 4 GiB ceiling on the
+    // shared pool and failed the Java daemon E2E leg before any test ran
+    // (#14835). Keep the build-time cap at or above the 6144 MB that fixed it.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
+  it('keeps the pnpm prepare build above the heap ceiling and the root build cap', () => {
+    const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
+    const pnpmCap = heapCap(nodeOptions);
+    const buildCap = heapCap(readPackageJson().scripts.build);
+    expect(pnpmCap).toBeDefined();
+    expect(buildCap).toBeDefined();
+    // The pnpm prepare path compiles the same CLI project that crossed the
+    // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
+    // root build script instead of leaving one half of the fix unguarded.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(6144);
+    // pnpm replaces NODE_OPTIONS for every package script, so this cap — not
+    // the root build script's — governs `tsc --build` on both the explicit
+    // and install-time paths. A raise on the root entry point intended for
+    // that compile must be mirrored here.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
+  });
+
+  it('selects the CLI dependency closure without selecting the same-named root', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+    const selector = buildScript.match(/\? '--filter "([^"]+)"/)?.[1];
+    expect(selector).toBeDefined();
+    const result = spawnSync(
+      'corepack',
+      ['pnpm', '--filter', selector, 'list', '--depth', '-1', '--json'],
+      { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const paths = JSON.parse(result.stdout).map((pkg) =>
+      path.relative(root, pkg.path).replaceAll('\\', '/'),
+    );
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'packages/cli',
+        'packages/core',
+        'packages/browser-use',
+        'packages/sdk-typescript',
+        'packages/web-shell',
+        'packages/web-templates',
+      ]),
+    );
+    expect(paths).not.toContain('');
+    expect(paths).not.toContain('packages/mobile-mcp');
+    expect(paths).not.toContain('packages/vscode-ide-companion');
+  });
+
+  it('keeps the Mem0 Extension manifest aligned with release versions', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain(
+      "'integrations/external-context-mem0/qwen-extension.json'",
+    );
+    expect(versionScript).toContain(
+      'const mem0Manifest = readJson(mem0ManifestPath);',
+    );
+    expect(versionScript).toContain('mem0Manifest.version = newVersion');
+    expect(versionScript).toContain(
+      'writeJson(mem0ManifestPath, mem0Manifest);',
+    );
+    expect(versionScript).toContain(
+      "'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json'",
+    );
+  });
+
+  it('lets the CI unit lane retry a contended attempt', () => {
+    // Identical work measures 6.7min or 36min on this fleet depending only on
+    // which host the job lands on, and the same commit run three times failed
+    // three disjoint test sets (#10490). A retry lets that pass; a real break
+    // still fails every attempt. The release lane already runs this way.
+    const packageJson = readPackageJson();
+    // `test:ci` ends in `&&`, so args appended to it would reach only
+    // `test:scripts`. The workspaces half is its own script, ending in `--`,
+    // so a flag appended to it reaches every workspace's vitest.
+    expect(packageJson.scripts['test:ci:workspaces']).toMatch(/--$/);
+    expect(packageJson.scripts['test:ci:workspaces']).toContain(
+      'npm run test:ci --workspaces --if-present',
+    );
+    expect(packageJson.scripts['test:ci']).toBe(
+      'npm run test:ci:workspaces && npm run test:scripts',
+    );
+    // test:scripts passes its args on to the scripts/tests Vitest run, which
+    // CI's side lane runs as its own script.
+    expect(packageJson.scripts['test:scripts']).toBe(
+      'npm run test:standalone:runtimes:ci && npm run test:scripts:unit --',
+    );
+    expect(packageJson.scripts['test:scripts:unit']).toBe(
+      'vitest run --config ./scripts/tests/vitest.config.ts',
+    );
+
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    expect(step).toContain(
+      'VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || \'2\' }}"',
+    );
+    // 'off' must omit the flag rather than pass --retry=0, which would
+    // outrank a workspace's own config-level retry (sdk-typescript).
+    expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
+    expect(step).toContain(
+      'retry_arg=(--shard="${UNIT_TEST_SHARD}" --passWithNoTests)',
+    );
+    expect(step).toContain('retry_arg+=(--retry="${VITEST_RETRY}")');
+    // The standalone runtime regression is the one suite that must run on
+    // exactly one shard. The lane script's own test injects the variable into
+    // its stub env, so it proves the script obeys it and nothing else proves
+    // CI sets it: flipping this to a constant, inverting it, or dropping it
+    // while resolving a conflict runs the regression on seven wrong shards or
+    // nowhere, and the only CI coverage of that suite goes with it.
+    expect(step).toContain(
+      "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 1 && '1' || '' }}\"",
+    );
+    // The step hands the shard and the retry to the lane script, which
+    // passes them to all three of its Vitest runs: the CLI and core suites in the main lane, and
+    // the other workspaces and scripts/tests in the side lane.
+    expect(step).toContain(
+      '.github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
+    );
+    const lanes = readWorkflow('.github/scripts/ci/run-unit-test-lanes.sh');
+    expect(lanes).toContain(
+      'npm run test:ci "${main_workspaces[@]/#/--workspace=}" -- "$@"',
+    );
+    expect(lanes).toContain('npm run test:ci "${side_workspaces[@]}" -- "$@"');
+    expect(lanes).toContain('npm run test:scripts:unit -- "$@"');
+  });
+
+  it('prints the side lane of a test step killed before its replay', () => {
+    // The lane script replays the side lane only after the main lane ends,
+    // so a timeout or a cancel would lose every suite but the CLI and core
+    // ones. The step names the log outside the TMPDIR it removes, and the
+    // next step prints whatever is left of it.
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
+    );
+    const log = '${{ runner.temp }}/side-lane-tests.log';
+    expect(getWorkflowStep(job, 'Run tests and generate reports')).toContain(
+      `SIDE_LANE_LOG: '${log}'`,
+    );
+    const print = getWorkflowStep(
+      job,
+      'Print the side lane of a killed test step',
+    );
+    expect(print).toContain("if: '${{ failure() || cancelled() }}'");
+    expect(print).toContain('side_log="${RUNNER_TEMP}/side-lane-tests.log"');
+    expect(print).toContain('cat "${side_log}"');
+    // The script removes the log after every replay it reaches, so on an
+    // ordinary red test job the guard is what keeps this step quiet.
+    expect(print).toContain('if [ -f "${side_log}" ]; then');
+    expect(
+      job.indexOf("- name: 'Run tests and generate reports'"),
+    ).toBeLessThan(
+      job.indexOf("- name: 'Print the side lane of a killed test step'"),
+    );
+  });
+
+  it('drops DAC capabilities for root unit tests on every CI command', () => {
+    // The permission-bit probes in the workspaces and scripts/tests ask the
+    // kernel, so on a root lane that keeps these capabilities every case
+    // they gate skips, without failing.
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    // The step's code, one command per entry: indentation, blank lines and
+    // comments do not change what runs, a commented-out line does.
+    const code = step
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    const setpriv =
+      "test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')";
+    const branch = code.indexOf('if [ "$(id -u)" -eq 0 ]; then');
+    expect(branch).toBeGreaterThan(0);
+    expect(code.slice(branch - 1, branch + 5)).toEqual([
+      'test_runner=()',
+      'if [ "$(id -u)" -eq 0 ]; then',
+      'chown -R 0 "$GITHUB_WORKSPACE" "$HOME"',
+      "echo 'Dropping DAC override capabilities for root unit tests'",
+      setpriv,
+      'fi',
+    ]);
+    // Nothing else touches it (no unset, read or reset), and the lane script
+    // runs under it, so every test command it starts inherits the dropped
+    // capabilities; no test command runs beside it unwrapped.
+    expect(code.filter((line) => /\btest_runner\b/.test(line))).toEqual([
+      'test_runner=()',
+      setpriv,
+      '"${test_runner[@]}" .github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
+    ]);
+    expect(code.filter((line) => /\bnpm run test:/.test(line))).toEqual([]);
+  });
+
+  // `tail --pid` is GNU; the script runs only in the Linux test job.
+  it.runIf(process.platform === 'linux')(
+    'runs every other suite beside the CLI and core suites',
+    () => {
+      // The CLI and core suites keep their workers busy for most of the
+      // step, while the other suites are small or wait on a few files and the
+      // standalone regression starts one runtime at a time, so the lane
+      // script runs all of those beside the CLI and core suites. Run it
+      // against a stub npm: each lane runs what it should, beside the other,
+      // every failure reaches the exit code, and the side lane's log comes
+      // out whole after the main lane's.
+      const lanes = path.join(
+        root,
+        '.github/scripts/ci/run-unit-test-lanes.sh',
+      );
+      const heap = heapCap(readPackageJson().scripts['test:ci:workspaces']);
+      expect(heap).toBe('3072');
+
+      const realNpm = spawnSync('sh', ['-c', 'command -v npm'], {
+        encoding: 'utf8',
+      }).stdout.trim();
+      expect(realNpm).not.toBe('');
+
+      const dir = mkdtempSync(path.join(tmpdir(), 'ci-side-lane-'));
+      try {
+        const bin = path.join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          path.join(bin, 'npm'),
+          [
+            '#!/bin/sh',
+            'if [ "$1 $2" = "pkg get" ]; then',
+            '  if [ -n "$STUB_REAL_NPM" ]; then exec "$STUB_REAL_NPM" "$@"; fi',
+            '  printf "%s" "$STUB_WORKSPACES"; exit "$STUB_PKG_GET_RC"',
+            'fi',
+            'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
+            // The main lane's suites and the side lane's workspaces each wait
+            // for the other to start, so a side lane run before or after the
+            // main lane, rather than beside it, fails here.
+            'meet() {',
+            '  touch "$STUB_CALLS.$1"; i=0',
+            '  while [ ! -e "$STUB_CALLS.$2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done',
+            '  [ -e "$STUB_CALLS.$2" ] || { echo "$1 lane ran alone"; exit 9; }',
+            '}',
+            'case "$*" in',
+            '  *--workspace=@qwen-code/qwen-code-core*) meet main side ;;',
+            '  *--workspace=@qwen-code/web-shell*) meet side main ;;',
+            'esac',
+            'echo "output of npm $*"',
+            'if [ -n "$STUB_FAIL" ] && echo "$*" | grep -qF -- "$STUB_FAIL"; then exit 7; fi',
+            'if [ -n "$STUB_HANG" ] && echo "$*" | grep -qF -- "$STUB_HANG"; then sleep 30; fi',
+            // scripts/tests runs `npm run test:scripts:unit`, the lane script
+            // again, one level deep. Its args mark its output, so a test can
+            // tell the nested lane's lines from the outer one's.
+            'if [ -n "$STUB_NESTED" ] && [ -z "${STUB_NESTED_DONE:-}" ] && echo "$*" | grep -qF "test:scripts:unit"; then',
+            '  printf "%s" "${SIDE_LANE_LOG-<unset>}" > "$STUB_NESTED_SAW"',
+            '  STUB_NESTED_DONE=1 bash "$LANES" --nested',
+            'fi',
+            '',
+          ].join('\n'),
+        );
+        chmodSync(path.join(bin, 'npm'), 0o755);
+        const allWorkspaces = {
+          '@qwen-code/acp-bridge': 'vitest run',
+          '@qwen-code/qwen-code': 'vitest run',
+          '@qwen-code/qwen-code-core': 'vitest run',
+          '@qwen-code/web-shell': 'vitest run --config vitest.config.ts',
+          '@qwen-code/web-templates': {},
+          '@qwen-code/sdk': 'vitest run',
+        };
+        // Kills the script's process group once the side lane has run its
+        // last suite, while the main lane still hangs: a step timeout or
+        // cancel that lands before the replay.
+        const killBeforeReplay = [
+          'setsid bash "$LANES" --retry=2 &',
+          'pid=$!',
+          'i=0',
+          'until grep -q "output of npm run test:scripts:unit" "$SIDE_LANE_LOG" 2>/dev/null || [ "$i" -ge 100 ]; do sleep 0.1; i=$((i + 1)); done',
+          'kill -KILL -- "-$pid"',
+          'wait "$pid"',
+        ].join('\n');
+        const run = (
+          name,
+          {
+            workspaces = allWorkspaces,
+            pkgGet = JSON.stringify(workspaces),
+            pkgGetRc = 0,
+            realListing = false,
+            fail = '',
+            tmp = dir,
+            // ci.yml sets both to the same cap; apart, they show which is which.
+            forks = '4',
+            threads = '6',
+            sideLog = '',
+            killed = false,
+            nested = false,
+            skipStandalone = '',
+          } = {},
+        ) => {
+          const calls = path.join(dir, `${name}.calls`);
+          const args = killed ? ['-c', killBeforeReplay] : [lanes, '--retry=2'];
+          const result = spawnSync('bash', args, {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+              TMPDIR: tmp,
+              // The script sets the heap cap itself where it wants one; the
+              // other commands run with no NODE_OPTIONS, not the caller's.
+              NODE_OPTIONS: '',
+              VITEST_MAX_FORKS: forks,
+              VITEST_MAX_THREADS: threads,
+              // In CI this suite runs inside the side lane, whose own log
+              // ci.yml names here: never write to it.
+              SIDE_LANE_LOG: sideLog,
+              // ci.yml sets it on every shard but the first, this suite's
+              // own run included: the passing case needs it unset.
+              QWEN_CI_SKIP_STANDALONE_RUNTIMES: skipStandalone,
+              LANES: lanes,
+              STUB_CALLS: calls,
+              STUB_WORKSPACES: pkgGet,
+              STUB_PKG_GET_RC: String(pkgGetRc),
+              STUB_REAL_NPM: realListing ? realNpm : '',
+              STUB_FAIL: fail,
+              STUB_HANG: killed ? '--workspace=@qwen-code/qwen-code-core' : '',
+              STUB_NESTED: nested ? '1' : '',
+              STUB_NESTED_SAW: path.join(dir, `${name}.nested-saw`),
+            },
+          });
+          // The replayed side log is removed once printed.
+          expect(
+            readdirSync(dir).filter((f) => f.startsWith('side-lane-tests.')),
+          ).toEqual([]);
+          return {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            rc: String(result.status),
+            calls: existsSync(calls)
+              ? readFileSync(calls, 'utf8').trim().split('\n')
+              : [],
+          };
+        };
+        const mainSuites = `npm run test:ci --workspace=@qwen-code/qwen-code --workspace=@qwen-code/qwen-code-core -- --retry=2 heap=--max-old-space-size=${heap} workers=4/6`;
+        const sideWorkspaces = `npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2 heap=--max-old-space-size=${heap} workers=2/3`;
+        const standalone =
+          'npm run test:standalone:runtimes:ci heap= workers=4/6';
+        const scriptsUnit =
+          'npm run test:scripts:unit -- --retry=2 heap= workers=2/3';
+
+        // The two lanes run at once, so only the side lane's order is fixed.
+        const passing = run('passing');
+        expect(passing.rc).toBe('0');
+        expect([...passing.calls].sort()).toEqual(
+          [mainSuites, sideWorkspaces, standalone, scriptsUnit].sort(),
+        );
+        const order = (calls, line) => calls.indexOf(line);
+        expect(order(passing.calls, sideWorkspaces)).toBeLessThan(
+          order(passing.calls, standalone),
+        );
+
+        // Every shard but one leaves the standalone regression out.
+        const otherShard = run('other-shard', { skipStandalone: '1' });
+        expect(otherShard.rc).toBe('0');
+        expect([...otherShard.calls].sort()).toEqual(
+          [mainSuites, sideWorkspaces, scriptsUnit].sort(),
+        );
+        expect(order(passing.calls, standalone)).toBeLessThan(
+          order(passing.calls, scriptsUnit),
+        );
+        const replay = passing.stdout.indexOf('Side lane output');
+        const mainOutput = passing.stdout.indexOf(
+          'output of npm run test:ci --workspace=@qwen-code/qwen-code ',
+        );
+        expect(mainOutput).toBeGreaterThanOrEqual(0);
+        expect(mainOutput).toBeLessThan(replay);
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(replay).toBeLessThan(passing.stdout.indexOf(side));
+        }
+
+        // Each Vitest run applies the worker cap on its own, so the side
+        // lane's runs take half of it, at least 1, beside the main lane's
+        // full cap. With no cap set, as on the hosted runners, they take 2
+        // rather than Vitest's default of all CPUs but one.
+        for (const [cap, side] of [
+          ['', '2'],
+          ['1', '1'],
+        ]) {
+          const capped = run(`cap-${cap || 'unset'}`, {
+            forks: cap,
+            threads: cap,
+          });
+          expect(capped.rc).toBe('0');
+          expect([...capped.calls].sort()).toEqual(
+            [
+              mainSuites.replace('workers=4/6', `workers=${cap}/${cap}`),
+              sideWorkspaces.replace('workers=2/3', `workers=${side}/${side}`),
+              standalone.replace('workers=4/6', `workers=${cap}/${cap}`),
+              scriptsUnit.replace('workers=2/3', `workers=${side}/${side}`),
+            ].sort(),
+          );
+        }
+
+        // Against npm's real listing, the two lanes split every workspace the
+        // release pins select (scripts/workspaces.js) between them, each one
+        // in one lane.
+        const real = run('real-listing', { realListing: true });
+        expect(real.rc, real.stdout).toBe('0');
+        const names = (call) =>
+          call
+            .split(' ')
+            .filter((arg) => arg.startsWith('--workspace='))
+            .map((arg) => arg.slice('--workspace='.length));
+        const realWorkspaces = real.calls.filter((call) =>
+          call.startsWith('npm run test:ci --workspace='),
+        );
+        expect(realWorkspaces).toContain(mainSuites);
+        expect(realWorkspaces).toHaveLength(2);
+        expect(realWorkspaces.flatMap(names).sort()).toEqual(
+          getTestCiWorkspacePackageJsonPaths(root)
+            .map(
+              (packageJsonPath) =>
+                JSON.parse(
+                  readFileSync(path.join(root, packageJsonPath), 'utf8'),
+                ).name,
+            )
+            .sort(),
+        );
+
+        // A failure in one side-lane suite still lets the others run, and a
+        // main-lane failure still waits for the side lane and prints it.
+        for (const [failing, fail] of [
+          ['side-workspace', '--workspace=@qwen-code/web-shell'],
+          ['standalone', 'test:standalone'],
+          ['scripts', 'test:scripts:unit'],
+          ['main', '--workspace=@qwen-code/qwen-code-core'],
+        ]) {
+          const failed = run(`${failing}-fails`, { fail });
+          expect(failed.rc, failing).toBe('7');
+          expect([...failed.calls].sort(), failing).toEqual(
+            [...passing.calls].sort(),
+          );
+          expect(failed.stdout, failing).toContain('Side lane exited with');
+          expect(failed.stdout, failing).toContain(
+            'output of npm run test:scripts:unit',
+          );
+        }
+
+        // With nothing left beside the CLI and core suites, the step fails
+        // rather than fall back to the root's test:ci, which reruns every
+        // suite.
+        const nothingElse = run('nothing-else', {
+          workspaces: {
+            '@qwen-code/qwen-code': 'vitest run',
+            '@qwen-code/qwen-code-core': 'vitest run',
+            '@qwen-code/web-templates': {},
+          },
+        });
+        expect(nothingElse.rc).toBe('1');
+        expect(nothingElse.stdout).toContain(
+          '::error::Found no workspaces to test beside the CLI and core suites.',
+        );
+        expect(nothingElse.calls).toEqual([]);
+
+        // A failed listing says so instead of claiming there is nothing to
+        // test, and runs no suites. A failing `npm pkg get --json` prints an
+        // error object, which parses as a listing with no workspaces in it.
+        const unlisted =
+          '::error::Could not list the workspaces that define test:ci; the error is above.';
+        for (const [name, options] of [
+          [
+            'pkg-get-fails',
+            {
+              pkgGet: JSON.stringify({ error: { code: 'EJSONPARSE' } }),
+              pkgGetRc: 1,
+            },
+          ],
+          ['pkg-get-garbled', { pkgGet: 'not json' }],
+        ]) {
+          const listingFails = run(name, options);
+          expect(listingFails.rc).toBe('1');
+          expect(listingFails.stdout).toContain(unlisted);
+          expect(listingFails.stdout).not.toContain('Found no workspaces');
+          expect(listingFails.calls).toEqual([]);
+        }
+
+        // The side lane's arguments are read one per line, so a workspace
+        // name with a line break in it would split into other arguments,
+        // flags among them.
+        const splitName = run('name-with-newline', {
+          workspaces: {
+            ...allWorkspaces,
+            '@qwen-code/evil\n--workspaces': 'vitest run',
+          },
+        });
+        expect(splitName.rc).toBe('1');
+        expect(splitName.stdout).toContain(unlisted);
+        expect(splitName.stderr).toContain(
+          'A workspace name holds whitespace: "@qwen-code/evil\\n--workspaces"',
+        );
+        expect(splitName.calls).toEqual([]);
+
+        // A log the caller names is removed once replayed, like a temp one.
+        const namedLog = path.join(dir, 'named.log');
+        const named = run('named-log', { sideLog: namedLog });
+        expect(named.rc).toBe('0');
+        expect([...named.calls].sort()).toEqual([...passing.calls].sort());
+        expect(named.stdout).toContain(
+          'output of npm run test:scripts:unit -- --retry=2',
+        );
+        expect(existsSync(namedLog)).toBe(false);
+
+        // scripts/tests runs `npm run test:scripts:unit`, which runs this
+        // script again. A nested run must not inherit the caller's log: it
+        // would truncate the outer side lane's log, replay it and remove it,
+        // leaving the outer replay nothing to print.
+        const nestedLog = path.join(dir, 'nested.log');
+        const nested = run('nested-log', { sideLog: nestedLog, nested: true });
+        expect(nested.rc).toBe('0');
+        expect(
+          nested.calls.filter((call) =>
+            call.startsWith('npm run test:scripts:unit'),
+          ),
+        ).toHaveLength(2);
+        // The nested run does not see the caller's log, so it cannot truncate,
+        // replay or remove it.
+        expect(
+          readFileSync(path.join(dir, 'nested-log.nested-saw'), 'utf8'),
+        ).toBe('<unset>');
+        // The outer side lane's own lines still reached its replay. The
+        // nested run's carry `--nested`, so its identical-looking output
+        // cannot satisfy these.
+        const nestedReplay = nested.stdout.indexOf('Side lane output');
+        expect(nestedReplay).toBeGreaterThanOrEqual(0);
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2',
+          'output of npm run test:scripts:unit -- --retry=2',
+        ]) {
+          expect(nestedReplay).toBeLessThan(nested.stdout.indexOf(side));
+        }
+        expect(existsSync(nestedLog)).toBe(false);
+
+        // A step killed before the replay leaves the named log behind with
+        // everything the side lane ran, for ci.yml's next step to print.
+        const killedLog = path.join(dir, 'killed.log');
+        const killed = run('killed', { sideLog: killedLog, killed: true });
+        expect(killed.stdout).not.toContain('Side lane output');
+        expect(killed.calls).toContain(mainSuites);
+        const leftover = readFileSync(killedLog, 'utf8');
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(leftover).toContain(side);
+        }
+
+        // Without a log file for the side lane, nothing runs.
+        const noLog = run('named-log-missing', {
+          sideLog: path.join(dir, 'missing', 'named.log'),
+        });
+        expect(noLog.rc).toBe('1');
+        expect(noLog.stdout).toContain(
+          `::error::Could not create the side lane's log file ${path.join(dir, 'missing', 'named.log')}; running no suites.`,
+        );
+        expect(noLog.calls).toEqual([]);
+        const noTmp = run('no-tmpdir', { tmp: path.join(dir, 'missing') });
+        expect(noTmp.rc).toBe('1');
+        expect(noTmp.stdout).toContain(
+          `::error::Could not create the side lane's log file under ${path.join(dir, 'missing')}; running no suites.`,
+        );
+        expect(noTmp.calls).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps every copy of the permission-bit probe identical', () => {
+    // The probe is copied, not shared: each package that uses it keeps its
+    // own copy, and cli, core and browser-use also keep its tests (wecom
+    // inlines a smaller probe for its one case). A fix to one copy has to
+    // reach the others, or the packages measure differently.
+    const copies = {
+      'permission-bits.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+        'packages/sdk-typescript/test/test-utils',
+        'integrations/test-failure-explorer/src/test-utils',
+      ],
+      'permission-bits.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+      'permission-bits.mocked-fs.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+    };
+    for (const [file, dirs] of Object.entries(copies)) {
+      const [reference, ...others] = dirs.map((dir) =>
+        readFileSync(path.join(root, dir, file), 'utf8'),
+      );
+      others.forEach((text, i) => {
+        expect(text, `${file}: ${dirs[i + 1]} vs ${dirs[0]}`).toBe(reference);
+      });
+    }
+  });
+
+  it('keeps both copies of the slow-test-host predicate identical', () => {
+    // The predicate is copied, not shared, and each copy's header says to keep
+    // them in sync. The files are not byte-identical (only the cli copy also
+    // exports slowHostBudgetMs), so compare the shared function itself. A
+    // threshold tweak that reaches one copy and not the other silently splits
+    // the suites the two packages put on the raised budgets.
+    const copies = [
+      'packages/cli/src/test-utils/slow-test-host.ts',
+      'packages/core/src/test-utils/slow-test-host.ts',
+    ];
+    const bodies = copies.map((file) => {
+      const text = readFileSync(path.join(root, file), 'utf8');
+      const body = text.match(
+        /export function isSlowTestHost\(\): boolean \{[\s\S]*?\n\}\n/,
+      );
+      expect(body, `${file}: isSlowTestHost not found`).not.toBeNull();
+      return body[0];
+    });
+    const [reference, ...others] = bodies;
+    others.forEach((body, i) => {
+      expect(body, `${copies[i + 1]} vs ${copies[0]}`).toBe(reference);
+    });
+  });
+
+  it('bounds the CI unit step so a hang fails instead of stalling', () => {
+    // #10490's run 3 was cancelled at ~60 minutes, leaving behind
+    // orphaned test processes; a stall reads as a timeout, not a failure.
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
+    );
+    const step = getWorkflowStep(job, 'Run tests and generate reports');
+    expect(step).toContain('timeout-minutes: 45');
+    // The step cap is the one that must fire: it fails the step and leaves
+    // the job alive for the diagnostic steps below it, while a job timeout
+    // cancels the job and skips them.
+    const stepCap = Number(step.match(/timeout-minutes: (\d+)/)?.[1]);
+    const jobCap = Number(job.match(/\n {4}timeout-minutes: (\d+)/)?.[1]);
+    expect(stepCap).toBeLessThan(jobCap);
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
@@ -73,20 +1820,37 @@ describe('package scripts', () => {
     const packageJson = readPackageJson();
 
     expect(packageJson.scripts['test:release']).toBe(
+      'npm run test:release:workspaces && npm run test:scripts',
+    );
+    expect(packageJson.scripts['test:release:workspaces']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
-        'npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false',
-        '&& npm run test:scripts',
+        'npm run test:ci --workspaces --if-present -- --coverage.enabled=false',
       ].join(' '),
     );
 
-    const vscodePackageJson = JSON.parse(
-      readFileSync(
-        path.join(root, 'packages/vscode-ide-companion/package.json'),
+    // No workspace forces coverage from its test:ci script any more; the
+    // configs decide, and only a post-merge run flips their switch on. A
+    // reintroduced `--coverage` flag would override the switch on every
+    // pull-request run.
+    for (const workspace of [
+      'packages/vscode-ide-companion',
+      'packages/web-shell',
+    ]) {
+      const workspacePackageJson = JSON.parse(
+        readFileSync(path.join(root, workspace, 'package.json'), 'utf8'),
+      );
+      expect(workspacePackageJson.scripts['test:ci']).not.toContain(
+        '--coverage',
+      );
+      const vitestConfig = readFileSync(
+        path.join(root, workspace, 'vitest.config.ts'),
         'utf8',
-      ),
-    );
-    expect(vscodePackageJson.scripts['test:ci']).toContain('--coverage');
+      );
+      expect(vitestConfig).toContain(
+        "enabled: process.env['QWEN_CI_COVERAGE'] === '1'",
+      );
+    }
   });
 
   it('skips build/bundle/husky but still generates git-commit info when CI builds explicitly', () => {
@@ -380,100 +2144,355 @@ describe('package scripts', () => {
 
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
-    const qualityJob = getWorkflowJob(workflow, 'quality');
-    const buildStep = getWorkflowStep(qualityJob, 'Build Project');
+    const workspaceTestScript = readWorkflow(
+      '.github/scripts/run-release-workspace-tests.sh',
+    );
+    const buildJob = getWorkflowJob(workflow, 'quality_build');
+    const workspaceTestJob = getWorkflowJob(workflow, 'workspace_tests');
+    const buildStep = getWorkflowStep(buildJob, 'Build Project');
     const serveFastPathStep = getWorkflowStep(
-      qualityJob,
+      buildJob,
       'Check Serve Fast Path Bundle',
     );
+    const packStep = getWorkflowStep(buildJob, 'Pack Build Outputs');
+    const uploadStep = getWorkflowStep(buildJob, 'Upload Build Outputs');
+    const verifyPackageStep = getWorkflowStep(
+      buildJob,
+      'Verify Prepared Package',
+    );
     const workspaceTestStep = getWorkflowStep(
-      qualityJob,
+      workspaceTestJob,
       'Run Workspace Tests',
     );
-
-    expect(qualityJob).toContain("name: 'Check Serve Fast Path Bundle'");
-    expect(qualityJob).toContain('npm run check:serve-fast-path-bundle');
-    expect(qualityJob.indexOf(serveFastPathStep)).toBeLessThan(
-      qualityJob.indexOf(buildStep),
+    const scriptsTestStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'quality_scripts'),
+      'Run Script Tests',
     );
-    expect(workspaceTestStep).toContain('npm run test:release');
-    expect(workspaceTestStep).not.toContain('npm run test:ci');
+
+    expect(buildJob).toContain("name: 'Check Serve Fast Path Bundle'");
+    expect(buildJob).toContain('npm run check:serve-fast-path-bundle');
+    expect(buildJob.indexOf(serveFastPathStep)).toBeLessThan(
+      buildJob.indexOf(buildStep),
+    );
+    expect(buildJob.indexOf(uploadStep)).toBeGreaterThan(
+      buildJob.indexOf(packStep),
+    );
+    expect(buildJob.indexOf(verifyPackageStep)).toBeGreaterThan(
+      buildJob.indexOf(uploadStep),
+    );
+    expect(verifyPackageStep).toContain('run-release-step.sh verify-package');
+    expect(releaseStepScript).toContain('npm run bundle');
+    expect(releaseStepScript).toContain('dist/review-sources.sha256');
+    expect(releaseStepScript).toContain('npm run prepare:package');
+    expect(workspaceTestStep).toContain(
+      '.github/scripts/run-release-workspace-tests.sh',
+    );
+    expect(workspaceTestScript).toContain('npm run test:release:workspaces');
+    expect(workspaceTestScript).not.toContain('npm run test:ci');
+    expect(scriptsTestStep).toContain('npm run test:scripts');
+    for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {
+      for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+        );
+      }
+      for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+        );
+      }
+    }
   });
 
   it('skips release install-time prepare and builds before publish bundling', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
+    expect(workflow.slice(0, workflow.indexOf('jobs:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
     const installSteps =
       workflow.match(
-        / {6}- name: 'Install Dependencies'[\s\S]*? {10}npm ci --no-audit --progress=false/g,
+        / {6}- (?:&[^\n]+\n {8})?name: 'Install Dependencies'[\s\S]*?(?=\n {6}- (?:&[^\n]+\n {8})?name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
       ) || [];
 
-    expect(installSteps.length).toBeGreaterThanOrEqual(5);
+    // The validation jobs reuse the anchored install step; only the anchor
+    // definition plus prepare, build_release, and publish are textual copies.
+    expect(installSteps.length).toBe(4);
+    for (const installStep of installSteps.slice(0, 2)) {
+      expect(installStep).toContain('npm run generate');
+    }
     for (const installStep of installSteps) {
-      expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
+      expect(installStep).toContain(
+        'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
+      );
+      expect(installStep).toContain('npm run postinstall');
+      expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
+      expect(installStep).not.toContain('CI_BOT_PAT');
     }
 
     for (const jobName of ['integration_none', 'integration_docker']) {
       const integrationJob = getWorkflowJob(workflow, jobName);
       const buildStep = getWorkflowStep(integrationJob, 'Build Bundle');
-      expect(buildStep).toContain('npm run build\n          npm run bundle');
+      expect(buildStep).toContain('npm run build && npm run bundle');
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
-    const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
-    const commitStep = getWorkflowStep(
+    expect(getWorkflowStep(publishJob, 'Install Dependencies')).not.toContain(
+      'npm run generate',
+    );
+    expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
+    const checkoutStep = getWorkflowStep(publishJob, 'Checkout');
+    const releaseBranchStep = getWorkflowStep(
       publishJob,
-      'Commit and Conditionally Push package versions',
+      'Prepare release branch',
+    );
+    const pushReleaseBranchStep = getWorkflowStep(
+      publishJob,
+      'Conditionally push release branch',
     );
     const buildStep = getWorkflowStep(
       publishJob,
       'Build Bundle and Prepare Package',
     );
 
-    expect(gitConfigStep).toContain('git config core.hooksPath .husky');
-    expect(publishJob.indexOf(gitConfigStep)).toBeLessThan(
-      publishJob.indexOf(commitStep),
+    expect(checkoutStep).toContain('persist-credentials: false');
+    // The checkout only reads the release commit; a missing or rejected bot
+    // PAT must not abort the release before the push step that needs it.
+    expect(checkoutStep).not.toContain('CI_BOT_PAT');
+    expect(checkoutStep).toContain("token: '${{ github.token }}'");
+    expect(checkoutStep).not.toContain('secrets.');
+    // Nothing before the push step may reintroduce the bot PAT either: the
+    // job legitimately holds it later, so stop the slice at that step.
+    expect(
+      publishJob.slice(
+        0,
+        publishJob.indexOf("- name: 'Conditionally push release branch'"),
+      ),
+    ).not.toContain('CI_BOT_PAT');
+    expect(releaseBranchStep).not.toContain('CI_BOT_PAT');
+    expect(pushReleaseBranchStep).toContain(
+      "CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'",
     );
-    expect(buildStep).toContain('npm run build\n          npm run bundle');
+    expect(releaseStepScript).toContain('git config core.hooksPath .husky');
+    expect(releaseStepScript).toContain('export GH_TOKEN="${CI_BOT_PAT}"');
+    expect(releaseStepScript).toContain('gh auth setup-git');
+    const exportTokenIdx = releaseStepScript.indexOf(
+      'export GH_TOKEN="${CI_BOT_PAT}"',
+    );
+    const setupGitIdx = releaseStepScript.indexOf(
+      'gh auth setup-git',
+      exportTokenIdx,
+    );
+    expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
+    expect(setupGitIdx).toBeLessThan(
+      releaseStepScript.indexOf('git push --force --set-upstream'),
+    );
+    expect(buildStep).toContain('run-release-step.sh build-package');
   });
 
   it('skips npm packages whose release version is already published', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
     const publishJob = getWorkflowJob(workflow, 'publish');
+    const publishStep = getWorkflowStep(publishJob, 'Publish npm packages');
+    expect(publishStep).toContain(
+      "RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'",
+    );
+    expect(releaseStepScript).toContain(
+      'package_name="$(node -p "require(\'./package.json\').name")"',
+    );
+    expect(releaseStepScript).toContain('publish_args+=(--dry-run)');
+    expect(releaseStepScript).toContain(
+      'npm view "${package_name}@${RELEASE_VERSION}" version',
+    );
+    expect(releaseStepScript).toContain('already published; skipping');
+    expect(releaseStepScript).toContain('exit 0');
+    expect(releaseStepScript).toContain(
+      'npm publish --provenance "${publish_args[@]}"',
+    );
+    expect(releaseStepScript).toContain(
+      'corepack pnpm -r publish "${publish_args[@]}"',
+    );
+  });
 
-    for (const stepName of [
-      'Publish @qwen-code/audio-capture',
-      'Publish @qwen-code/qwen-code',
-      'Publish @qwen-code/channel-base',
-      'Publish remaining channel packages',
+  it('publishes the generated CLI with a packer that keeps the ripgrep exec bit', () => {
+    // #12668: pnpm's packer writes 0644 for every entry outside `bin`, so a CLI
+    // published with it ships a vendored ripgrep that nobody can spawn. The
+    // generated CLI is the only package carrying vendored binaries and the only
+    // one `publish_package` is called for, so it alone goes back to npm.
+    expect(releaseStepScript).toContain("publish_package 'dist'");
+    expect(releaseStepScript).not.toContain('corepack pnpm publish');
+    expect(releaseStepScript).toContain(
+      'npm publish --provenance "${publish_args[@]}"',
+    );
+
+    // The gate runs in the arm that produces `dist`, before the publish step
+    // consumes it, so no release can publish a tarball it never checked. It
+    // runs from the workflow-pinned scripts: a release ref that predates it
+    // would have no `scripts/check-release-tarball-exec-bits.mjs` of its own.
+    const buildPackageArm = releaseStepScript.slice(
+      releaseStepScript.indexOf('build-package)'),
+      releaseStepScript.indexOf('build-archives)'),
+    );
+    expect(buildPackageArm).toContain(
+      'node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist',
+    );
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'npm pack keeps the exec bit on every spawned vendored binary in the CLI tarball',
+    () => {
+      // The archive is where the bit is lost (#12668), so assert on its
+      // recorded modes rather than on the staged tree. A `-win32` directory
+      // ships a 0644 `rg.exe` by design and the gate excludes it structurally.
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-exec-bit-'));
+      try {
+        writeVendoredBinaryFixture(
+          fixture,
+          {
+            'x64-linux': 0o755,
+            'arm64-darwin': 0o755,
+            'x64-win32': 0o644,
+          },
+          { 'x64-linux': 0o755 },
+        );
+        const { entries } = checkReleaseTarballExecBits(fixture);
+        expect(entries.map(([name]) => name)).toEqual([
+          'package/vendor/landlock-run/x64-linux/qwen-landlock-run',
+          'package/vendor/ripgrep/arm64-darwin/rg',
+          'package/vendor/ripgrep/x64-linux/rg',
+        ]);
+        for (const [name, mode] of entries) {
+          expect(mode & 0o111, name).toBe(0o111);
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'release tarball gate rejects a spawned vendored binary without an exec bit',
+    () => {
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-gate-'));
+      try {
+        writeVendoredBinaryFixture(
+          fixture,
+          { 'x64-linux': 0o755 },
+          { 'x64-linux': 0o644 },
+        );
+        expect(() => checkReleaseTarballExecBits(fixture)).toThrow(
+          /package\/vendor\/landlock-run\/x64-linux\/qwen-landlock-run: 0644 lacks an exec bit/,
+        );
+
+        // A platform directory whose binary was dropped during staging must
+        // fail, not silently shrink the expected set.
+        const shrunk = mkdtempSync(path.join(tmpdir(), 'cli-rg-missing-'));
+        try {
+          writeVendoredBinaryFixture(
+            shrunk,
+            { 'arm64-linux': 0o755 },
+            { 'x64-linux': 0o755 },
+          );
+          mkdirSync(path.join(shrunk, 'vendor', 'ripgrep', 'x64-linux'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(shrunk)).toThrow(
+            /package\/vendor\/ripgrep\/x64-linux\/rg: missing from the packed tarball/,
+          );
+        } finally {
+          rmSync(shrunk, { force: true, recursive: true });
+        }
+
+        // A package whose vendor trees ship no spawned binary must not pass
+        // vacuously: the gate refuses before it ever packs.
+        const empty = mkdtempSync(path.join(tmpdir(), 'cli-rg-none-'));
+        try {
+          mkdirSync(path.join(empty, 'vendor', 'ripgrep'), {
+            recursive: true,
+          });
+          mkdirSync(path.join(empty, 'vendor', 'landlock-run'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(empty)).toThrow(
+            /no spawned vendored executables under/,
+          );
+        } finally {
+          rmSync(empty, { force: true, recursive: true });
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it('meets npm trusted publishing requirements', () => {
+    for (const [workflowPath, jobName, publishStepName] of [
+      ['.github/workflows/release.yml', 'publish', 'Publish npm packages'],
+      [
+        '.github/workflows/release-sdk.yml',
+        'release-sdk',
+        'Publish @qwen-code/sdk',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-browser',
+        'Publish immutable Browser SDK tarball',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-sdk',
+        'Publish immutable SDK tarball',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-node-repl',
+        'Publish immutable Node REPL tarball',
+      ],
+      ['.github/workflows/cd-mobile-mcp.yml', 'build-and-publish', 'Publish'],
     ]) {
-      const publishStep = getWorkflowStep(publishJob, stepName);
-      expect(publishStep).toContain(
-        "RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'",
+      const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
+      const installStep = getWorkflowStep(publishJob, 'Install npm 11');
+      const publishStep = getWorkflowStep(publishJob, publishStepName);
+      const publishImplementation =
+        workflowPath === '.github/workflows/release.yml'
+          ? releaseStepScript
+          : publishStep;
+      expect(installStep).toContain('npm install --global npm@11.19.0');
+      expect(publishJob).toContain("id-token: 'write'");
+      expect(publishImplementation).toContain('--provenance');
+      expect(publishJob).toContain("name: 'production-release'");
+      expect(publishJob.indexOf(installStep)).toBeLessThan(
+        publishJob.indexOf(publishStep),
       );
-      expect(publishStep).toContain(
-        'PACKAGE_NAME="$(node -p "require(\'./package.json\').name")"',
-      );
-      expect(publishStep).toContain('PUBLISH_ARGS+=(--dry-run)');
-      expect(publishStep).toContain(
-        'npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version',
-      );
-      expect(publishStep).toContain('already published; skipping');
-      expect(publishStep).toContain('exit 0');
-      expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
     }
 
-    // The channel loop must wrap each iteration in a subshell so that
-    // `exit 0` skips only the current channel, not the entire step.
-    const channelStep = getWorkflowStep(
-      publishJob,
-      'Publish remaining channel packages',
-    );
-    expect(channelStep).toContain('(\n');
-    expect(channelStep).toContain(')');
-    // A fully-skipped publish must be visible, not silently green.
-    expect(channelStep).toContain(
-      'Every channel package was already published; nothing shipped',
-    );
+    for (const packageDirectory of [
+      'integrations/external-context-mem0',
+      'packages/audio-capture',
+      'packages/cli',
+      'packages/channels/base',
+      'packages/channels/dingtalk',
+      'packages/channels/dws',
+      'packages/channels/feishu',
+      'packages/channels/github',
+      'packages/channels/qqbot',
+      'packages/channels/telegram',
+      'packages/channels/wecom',
+      'packages/channels/weixin',
+      'packages/cua-driver/typescript',
+      'packages/mobile-mcp',
+      'packages/node-repl',
+      'packages/sdk-typescript',
+      'packages/web-shell',
+    ]) {
+      const packageJson = JSON.parse(
+        readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),
+      );
+      expect(packageJson.repository?.url?.replace(/^git\+/, '')).toBe(
+        'https://github.com/QwenLM/qwen-code.git',
+      );
+    }
   });
 
   it('fast-tracks trusted autofix issue triggers before LLM assessment', () => {
@@ -519,7 +2538,7 @@ describe('package scripts', () => {
 
       expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
       expect(installStep).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
       if (armsHooks) {
         expect(installStep).toContain('git config core.hooksPath .husky');
@@ -556,7 +2575,7 @@ describe('package scripts', () => {
     }
 
     expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     );
   });
 });

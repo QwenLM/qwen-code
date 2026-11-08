@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { QWENCLOUD_MAAS_HOSTS } from '../core/dashscope-source-config.js';
+
 export type GenAiOperationName = 'chat' | 'generate_content';
 export type GenAiOutputType = 'text' | 'json' | 'image' | 'speech';
 export type GenAiAuthType =
   | 'openai'
+  | 'openai-responses'
   | 'qwen-oauth'
+  | 'qwen-subscription'
   | 'gemini'
   | 'vertex-ai'
   | 'anthropic';
@@ -30,8 +34,11 @@ const PROVIDER_BY_ENV_KEY: Readonly<Record<string, string>> = {
   MIMO_API_KEY: 'mimo',
   MISTRAL_API_KEY: 'mistral_ai',
   MODELSCOPE_API_KEY: 'modelscope',
+  MOONSHOT_API_KEY: 'moonshot',
   OPENAI_API_KEY: 'openai',
   OPENROUTER_API_KEY: 'openrouter',
+  QWENCLOUD_API_KEY: 'dashscope',
+  QWENCLOUD_TOKEN_PLAN_API_KEY: 'dashscope',
   REQUESTY_API_KEY: 'requesty',
   XAI_API_KEY: 'x_ai',
   XIAOMI_MIMO_API_KEY: 'mimo',
@@ -49,6 +56,13 @@ function providerFromHostname(hostname: string): string | undefined {
     isHostOrSubdomain(hostname, 'dashscope-us.aliyuncs.com') ||
     (hostname.startsWith('token-plan.') &&
       isHostOrSubdomain(hostname, 'maas.aliyuncs.com')) ||
+    // QwenCloud MaaS hosts; the subdomain match also covers their
+    // `token-plan.` subscription endpoints. Imported from the attribution leaf
+    // rather than repeated here: that leaf has no imports of its own, so it
+    // cannot close a cycle back through the provider layer (#15107).
+    QWENCLOUD_MAAS_HOSTS.some((domain) =>
+      isHostOrSubdomain(hostname, domain),
+    ) ||
     hostname.endsWith('.alibaba-inc.com') ||
     hostname.endsWith('.aliyun-inc.com')
   ) {
@@ -63,6 +77,12 @@ function providerFromHostname(hostname: string): string | undefined {
   if (isHostOrSubdomain(hostname, 'deepseek.com')) return 'deepseek';
   if (isHostOrSubdomain(hostname, 'x.ai')) return 'x_ai';
   if (isHostOrSubdomain(hostname, 'mistral.ai')) return 'mistral_ai';
+  if (
+    isHostOrSubdomain(hostname, 'moonshot.ai') ||
+    isHostOrSubdomain(hostname, 'moonshot.cn')
+  ) {
+    return 'moonshot';
+  }
   if (
     isHostOrSubdomain(hostname, 'minimax.io') ||
     isHostOrSubdomain(hostname, 'minimaxi.com')

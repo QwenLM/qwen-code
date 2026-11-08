@@ -16,13 +16,32 @@
  * Precedence: when the same `<name>.js` exists in both scopes, the
  * project-level file wins (matches `FileCommandLoader`'s project-over-user
  * precedence for custom commands).
+ *
+ * Active extensions add a third tier: the `.js` files an extension ships
+ * (`workflow-extension.ts` discovers them at extension load). They are always
+ * addressed as `<extension name>:<meta.name>`, which a project or user name
+ * can never spell, so the tiers never shadow each other. Their files are
+ * readable by exact path only — the extension directories are deliberately
+ * not workflow script roots (see {@link getWorkflowScriptRoots}).
+ *
+ * A generated-scripts root, `<projectDir>/workflows/generated`
+ * (`Storage.getGeneratedWorkflowsDir`), is trusted for `{scriptPath}` loads
+ * only. Scripts a tool generates for a single run go there: they are neither
+ * listed as slash commands nor resolvable by name, so emitting one never
+ * hands the user a command for a run that is already over.
  */
 
-import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { promises as fs, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
+import { isSubpath } from '../../utils/paths.js';
+import { openNoFollow } from '../../utils/no-follow-open.js';
+import { getTrustedWorkflowAncestors } from './workflow-ancestors.js';
+import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { ExtensionWorkflowDefinition } from './workflow-extension.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SAVED');
 
@@ -34,16 +53,34 @@ const debugLogger = createDebugLogger('WORKFLOW_SAVED');
  */
 export const WORKFLOW_NAME_PATTERN = /^[a-z][a-z0-9-]{0,40}$/;
 
-export type SavedWorkflowSource = 'project' | 'user';
+/** The scopes a saved workflow can be written to. */
+export type SavedWorkflowScope = 'project' | 'user';
+
+/** Where a discovered saved workflow comes from. Extensions are read-only. */
+export type SavedWorkflowSource = SavedWorkflowScope | 'extension';
 
 /** One discovered saved-workflow script (metadata only — no source read). */
 export interface SavedWorkflowEntry {
-  /** Filename stem, e.g. `deep-research`. Doubles as the slash command name. */
+  /**
+   * Filename stem, e.g. `deep-research`, or `<extension>:<meta.name>` for an
+   * extension workflow. Doubles as the slash command name.
+   */
   name: string;
   /** Absolute path to the `.js` file. */
   scriptPath: string;
-  /** Which scope the file was found in. */
+  /** Which tier the file was found in. */
   source: SavedWorkflowSource;
+  /** Owning extension's manifest name; extension workflows only. */
+  extensionName?: string;
+  /** Owning extension's display name, when it declares one. */
+  extensionDisplayName?: string;
+  /** `meta.description`, parsed when the extension loaded; extension workflows only. */
+  description?: string;
+  /**
+   * `meta.whenToUse`, parsed when the extension loaded; extension workflows
+   * only. When present, the workflow's command is listed for the model.
+   */
+  whenToUse?: string;
 }
 
 /** A resolved saved workflow with its script source loaded. */
@@ -51,12 +88,14 @@ export interface ResolvedSavedWorkflow {
   name: string;
   scriptPath: string;
   script: string;
+  savedWorkflowName?: string;
+  source?: SavedWorkflowSource;
 }
 
 /** Result of a {@link saveWorkflowScript} attempt. */
 export type WorkflowSaveResult =
-  | { status: 'saved'; name: string; scope: SavedWorkflowSource; path: string }
-  | { status: 'exists'; name: string; scope: SavedWorkflowSource; path: string }
+  | { status: 'saved'; name: string; scope: SavedWorkflowScope; path: string }
+  | { status: 'exists'; name: string; scope: SavedWorkflowScope; path: string }
   | { status: 'invalid-name'; error: string }
   | { status: 'empty-script'; error: string };
 
@@ -76,131 +115,550 @@ export function validateWorkflowName(name: string): string | null {
   return null;
 }
 
-/** Both scope directories, project first (higher precedence). */
+/**
+ * Extension-name part of a qualified workflow name. Mirrors the extension
+ * manifest's `validateName` so every installable extension can prefix one.
+ */
+const EXTENSION_NAME_SOURCE = '[A-Za-z0-9._-]+';
+
+/** `<extension name>:<meta.name>` — how an extension workflow is addressed. */
+export const EXTENSION_WORKFLOW_NAME_PATTERN = new RegExp(
+  `^(${EXTENSION_NAME_SOURCE}):(${WORKFLOW_NAME_PATTERN.source.slice(1, -1)})$`,
+);
+
+const EXTENSION_NAME_PATTERN = new RegExp(`^${EXTENSION_NAME_SOURCE}$`);
+
+/** Whether an extension name can prefix its workflows' names. */
+export function isValidWorkflowExtensionName(extensionName: string): boolean {
+  return EXTENSION_NAME_PATTERN.test(extensionName);
+}
+
+/** `gcp` + `deep-research` → `gcp:deep-research`. */
+export function qualifyExtensionWorkflowName(
+  extensionName: string,
+  workflowName: string,
+): string {
+  return `${extensionName}:${workflowName}`;
+}
+
+/** Split `<extension>:<meta.name>`; `null` when the name does not have that shape. */
+export function parseExtensionWorkflowName(
+  name: string,
+): { extensionName: string; workflowName: string } | null {
+  const match = EXTENSION_WORKFLOW_NAME_PATTERN.exec(name);
+  return match ? { extensionName: match[1], workflowName: match[2] } : null;
+}
+
+/**
+ * Workflow definitions of the active extensions. The single place this tier
+ * reads extension state from, so listing, name resolution, and the file
+ * allowlist cannot disagree. Tolerates configs without extension support.
+ */
+export function getActiveExtensionWorkflows(
+  config: Config,
+): ExtensionWorkflowDefinition[] {
+  try {
+    return (config.getActiveExtensions?.() ?? []).flatMap(
+      (extension) => extension.workflows ?? [],
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The active extension workflow a `scriptPath` names, for synchronous labels;
+ * the approval dialog uses {@link findActiveExtensionWorkflowByPathCanonical}.
+ * Picks a label only — the security check is the loader's allowlist.
+ *
+ * Discovered paths are real paths, so a spelling through a symlinked ancestor
+ * (macOS `/var` → `/private/var`) misses the lexical comparison and is retried
+ * against its real path. The disk is touched only when an active extension
+ * workflow exists and the lexical spelling did not match.
+ */
+export function findActiveExtensionWorkflowByPath(
+  config: Config,
+  scriptPath: string,
+): ExtensionWorkflowDefinition | undefined {
+  const workflows = getActiveExtensionWorkflows(config);
+  if (workflows.length === 0) return undefined;
+  const resolved = path.resolve(scriptPath);
+  const lexical = workflows.find(
+    (workflow) => path.resolve(workflow.scriptPath) === resolved,
+  );
+  if (lexical) return lexical;
+  let real: string;
+  try {
+    real = realpathSync(scriptPath);
+  } catch {
+    return undefined;
+  }
+  return workflows.find((workflow) => workflow.scriptPath === real);
+}
+
+/** Like {@link findActiveExtensionWorkflowByPath}, comparing real paths. */
+export async function findActiveExtensionWorkflowByPathCanonical(
+  config: Config,
+  scriptPath: string,
+): Promise<ExtensionWorkflowDefinition | undefined> {
+  const workflows = getActiveExtensionWorkflows(config);
+  if (workflows.length === 0) return undefined;
+  let real: string;
+  try {
+    real = await fs.realpath(scriptPath);
+  } catch {
+    return undefined;
+  }
+  return workflows.find((workflow) => workflow.scriptPath === real);
+}
+
+function getProjectWorkflowsDir(config: Config): string {
+  const target = config.getTargetDir?.();
+  return target
+    ? path.join(target, '.qwen', 'workflows')
+    : config.storage.getProjectWorkflowsDir();
+}
+
+/** Base scope directories only, project first. Ancestors require host trust. */
 export function getSavedWorkflowDirs(config: Config): Array<{
   dir: string;
-  source: SavedWorkflowSource;
+  source: SavedWorkflowScope;
 }> {
   return [
-    { dir: config.storage.getProjectWorkflowsDir(), source: 'project' },
+    { dir: getProjectWorkflowsDir(config), source: 'project' },
     { dir: Storage.getUserWorkflowsDir(), source: 'user' },
   ];
 }
 
-/**
- * True when a saved-workflow root dir is itself a symlink. `readWorkflowFileSecurely`
- * realpaths the root so it can tolerate symlinked *ancestors* (e.g. a project under
- * macOS `/tmp -> /private/tmp`); but that same laundering turns a checked-in
- * `.qwen/workflows -> /outside` link into the allowed boundary — letting discovery
- * list, `workflow('<name>')` read, and the save dialog write external files. The
- * per-entry symlink check in {@link listJsFiles} can't catch this because the link
- * is the dir, not the files it exposes. So we refuse a symlinked root outright for
- * all three operations. A missing dir (the common case) is not a symlink, so this
- * is transparent until someone actually links the dir.
- */
-async function isSymlinkedRoot(dir: string): Promise<boolean> {
+/** Base path roots only; ancestor admission is limited to exact saved files. */
+export function getWorkflowScriptRoots(config: Config): string[] {
+  return [
+    ...getSavedWorkflowDirs(config).map(({ dir }) => dir),
+    config.storage.getGeneratedWorkflowsDir(),
+  ];
+}
+
+export async function isSymlinkedRoot(dir: string): Promise<boolean> {
   return fs
     .lstat(dir)
     .then((st) => st.isSymbolicLink())
     .catch(() => false);
 }
 
-async function listJsFiles(dir: string): Promise<string[]> {
-  // Refuse a symlinked root dir: `readdir` would otherwise enumerate the
-  // external target's `*.js` files as project workflows, and the per-entry
-  // symlink check below can't see it (the link is the dir, not the entries).
-  if (await isSymlinkedRoot(dir)) {
-    debugLogger.warn(`refusing symlinked saved-workflow dir: ${dir}`);
-    return [];
-  }
-  try {
-    const names = await fs.readdir(dir);
-    const out: string[] = [];
-    for (const n of names) {
-      if (!n.endsWith('.js')) continue;
-      // Skip symlinks. A malicious repo could ship `<name>.js` as a symlink to
-      // an arbitrary file (e.g. `~/.aws/credentials`); discovering and later
-      // reading it would leak the target through the snapshot `script` field,
-      // sandbox parse-error messages, and telemetry.
-      const st = await fs.lstat(path.join(dir, n)).catch(() => null);
-      if (!st || st.isSymbolicLink()) continue;
-      out.push(n);
-    }
-    return out;
-  } catch (e) {
-    // Missing directory is the common case (user never saved a workflow).
-    const code = (e as NodeJS.ErrnoException)?.code;
-    if (code !== 'ENOENT') {
-      debugLogger.warn(`listJsFiles failed for ${dir}: ${e}`);
-    }
-    return [];
-  }
+interface WorkflowRoot {
+  dir: string;
+  source?: SavedWorkflowScope;
+  ancestor?: boolean;
+  targetBoundary?: string | null;
+  checked?: Promise<WorkflowRootCheck>;
 }
 
-/**
- * Read a candidate workflow file, but only after proving its canonical real
- * path stays inside one of the saved-workflow directories. `fs.realpath`
- * resolves both `..` and symlinks, so this single check defeats path
- * traversal (a `name`/`scriptPath` containing `..`) AND symlink escape (a
- * file inside the dir that links out). Throws otherwise.
- */
-async function readWorkflowFileSecurely(
-  filePath: string,
-  config: Config,
-): Promise<string> {
-  const real = await fs.realpath(filePath); // throws ENOENT if absent
-  const dirs = (
-    await Promise.all(
-      getSavedWorkflowDirs(config).map(async ({ dir }) => {
-        // Exclude a symlinked root: realpath(dir) would launder a
-        // `.qwen/workflows -> /outside` link into the allowed boundary, so a
-        // file resolving under the link's target would pass the check below.
-        if (await isSymlinkedRoot(dir)) return null;
-        try {
-          return await fs.realpath(dir);
-        } catch {
-          return path.resolve(dir);
-        }
-      }),
-    )
-  ).filter((d): d is string => d !== null);
-  const inside = dirs.some((d) => real === d || real.startsWith(d + path.sep));
-  if (!inside) {
-    throw new Error(
-      `refusing to load a workflow file outside the saved-workflow directories: '${filePath}'.`,
+interface WorkflowRootCheck {
+  real?: string;
+  symlink?: boolean;
+  refused?: string;
+}
+
+interface WorkflowSnapshot {
+  saved: WorkflowRoot[];
+  roots: WorkflowRoot[];
+  extensions: ExtensionWorkflowDefinition[];
+}
+
+function isMissing(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+async function workflowSnapshot(config: Config): Promise<WorkflowSnapshot> {
+  const [projectDir, userDir, generated] = getWorkflowScriptRoots(config);
+  const project = { dir: projectDir, source: 'project' as const };
+  const user: WorkflowRoot = { dir: userDir, source: 'user' };
+  const extensions = getActiveExtensionWorkflows(config);
+  const target = path.resolve(project.dir, '..', '..');
+  const canonicalTarget = await fs.realpath(target).catch(() => undefined);
+  const ancestors = canonicalTarget
+    ? await getTrustedWorkflowAncestors(
+        canonicalTarget,
+        config.getWorkflowAncestorTrustProvider?.(),
+      )
+    : [];
+  const userReal = ancestors.length
+    ? (await checkedRoot(user).catch(() => undefined))?.real
+    : undefined;
+  const saved: WorkflowRoot[] = [
+    { ...project, targetBoundary: canonicalTarget ?? null },
+    ...ancestors
+      .map((dir) => path.join(dir, '.qwen', 'workflows'))
+      .filter(
+        (dir) => dir !== project.dir && dir !== user.dir && dir !== userReal,
+      )
+      .map((dir) => ({
+        dir,
+        source: 'project' as const,
+        ancestor: true,
+      })),
+    user,
+  ];
+  return {
+    saved,
+    roots: [...saved, { dir: generated }],
+    extensions,
+  };
+}
+
+async function checkRoot(root: WorkflowRoot): Promise<WorkflowRootCheck> {
+  const refuse = (reason: string, symlink = false): WorkflowRootCheck => {
+    debugLogger.warn(
+      `refusing saved-workflow directory '${root.dir}': ${reason}`,
     );
+    return { refused: reason, ...(symlink ? { symlink: true } : {}) };
+  };
+  if (root.targetBoundary === null)
+    return refuse('unverifiable project target');
+  try {
+    if (root.ancestor) {
+      const qwen = await fs.lstat(path.dirname(root.dir));
+      if (qwen.isSymbolicLink())
+        return refuse('symlinked .qwen directory', true);
+      if (!qwen.isDirectory()) return {};
+    }
+    const stat = await fs.lstat(root.dir);
+    if (stat.isSymbolicLink())
+      return refuse('symlinked workflows directory', true);
+    if (!stat.isDirectory()) return {};
+    const real = await fs.realpath(root.dir);
+    if (root.targetBoundary && !isSubpath(root.targetBoundary, real)) {
+      return refuse('outside project target');
+    }
+    if (root.ancestor && real !== root.dir)
+      return refuse('non-canonical ancestor directory');
+    return { real };
+  } catch (error) {
+    if (isMissing(error)) return {};
+    throw new Error(`workflow directory '${root.dir}': ${String(error)}`);
   }
-  return fs.readFile(real, 'utf8');
 }
 
-/**
- * Enumerate all saved workflows across both scopes. Project entries shadow
- * same-named user entries (project wins). Sorted by name for stable
- * slash-command ordering.
- */
+const checkedRoot = (root: WorkflowRoot) => (root.checked ??= checkRoot(root));
+
+async function savedCandidate(
+  root: WorkflowRoot,
+  name: string,
+): Promise<string | undefined> {
+  if (!WORKFLOW_NAME_PATTERN.test(name) || !(await checkedRoot(root)).real) {
+    return undefined;
+  }
+  const file = path.join(root.dir, `${name}.js`);
+  let stat;
+  try {
+    stat = await fs.lstat(file);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw new Error(`workflow file '${file}': ${String(error)}`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+  const real = await fs.realpath(file);
+  return path.basename(real) === `${name}.js` ? file : undefined;
+}
+
+async function listSnapshot(
+  snapshot: WorkflowSnapshot,
+): Promise<{ entries: SavedWorkflowEntry[]; unavailable: string[] }> {
+  const byName = new Map<string, SavedWorkflowEntry>();
+  const unavailable: string[] = [];
+  for (const workflow of snapshot.extensions) {
+    byName.set(workflow.name, {
+      name: workflow.name,
+      scriptPath: workflow.scriptPath,
+      source: 'extension',
+      extensionName: workflow.extensionName,
+      ...(workflow.extensionDisplayName
+        ? { extensionDisplayName: workflow.extensionDisplayName }
+        : {}),
+      description: workflow.description,
+      ...(workflow.whenToUse ? { whenToUse: workflow.whenToUse } : {}),
+    });
+  }
+  for (const root of snapshot.saved) {
+    try {
+      if (!(await checkedRoot(root)).real) continue;
+      let files: string[];
+      try {
+        files = await fs.readdir(root.dir);
+      } catch (error) {
+        if (isMissing(error)) continue;
+        throw error;
+      }
+      for (const file of files) {
+        if (!file.endsWith('.js')) continue;
+        const name = file.slice(0, -3);
+        const candidate = await savedCandidate(root, name);
+        if (candidate && !byName.has(name)) {
+          byName.set(name, {
+            name,
+            scriptPath: candidate,
+            source: root.source!,
+          });
+        }
+      }
+    } catch (error) {
+      const diagnostic = `workflow directory '${root.dir}': ${String(error)}`;
+      unavailable.push(diagnostic);
+      debugLogger.warn(`Could not list ${diagnostic}`);
+      // Commands may execute listed paths directly. Do not expose farther
+      // namesakes when this root's contents could not be determined.
+      break;
+    }
+  }
+  return {
+    entries: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    unavailable,
+  };
+}
+
+async function outsideRoots(
+  file: string,
+  snapshot: WorkflowSnapshot,
+): Promise<Error> {
+  const checked = await Promise.all(
+    snapshot.roots.map(async (root) => ({
+      root,
+      ...(await checkedRoot(root).catch(
+        (error: unknown): WorkflowRootCheck => ({
+          refused: String(error),
+        }),
+      )),
+    })),
+  );
+  const dirs = checked.flatMap(({ root, real, refused }) =>
+    refused ? [] : [real ?? path.resolve(root.dir)],
+  );
+  const refused = checked.flatMap(({ root, symlink }) =>
+    symlink ? [root.dir] : [],
+  );
+  const refusedNote = refused.length
+    ? `; refused symlinked ${refused.length === 1 ? 'root' : 'roots'}: ${refused.join(', ')}`
+    : '';
+  const refusedOther = checked.flatMap(({ root, refused, symlink }) =>
+    refused && !symlink ? [`${root.dir} (${refused})`] : [],
+  );
+  const refusedOtherNote = refusedOther.length
+    ? `; refused roots: ${refusedOther.join(', ')}`
+    : '';
+  const extensionNote = snapshot.extensions.length
+    ? `; active extension workflow files: ${snapshot.extensions.length}`
+    : '';
+  return new Error(
+    `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}${refusedOtherNote}${extensionNote}): '${file}'.`,
+  );
+}
+
+async function readWorkflowFile(
+  file: string,
+  snapshot: WorkflowSnapshot,
+  selectedRoot?: WorkflowRoot,
+): Promise<{
+  script: string;
+  savedWorkflowName?: string;
+  source?: SavedWorkflowSource;
+}> {
+  const real = await fs.realpath(file);
+  const parent = await fs.realpath(path.dirname(file));
+  const lexical = path.resolve(file);
+  const extension = snapshot.extensions.find(
+    (entry) => entry.scriptPath === real,
+  );
+  let root = selectedRoot;
+  if (!root) {
+    let owningRootError: unknown;
+    const pathRoot = async (
+      candidate: WorkflowRoot,
+    ): Promise<WorkflowRootCheck> => {
+      try {
+        return await checkedRoot(candidate);
+      } catch (error) {
+        if (
+          !extension &&
+          (isSubpath(path.resolve(candidate.dir), lexical) ||
+            isSubpath(candidate.dir, parent))
+        )
+          owningRootError ??= error;
+        return {};
+      }
+    };
+    let spelling = lexical;
+    if (snapshot.saved.some((candidate) => candidate.ancestor)) {
+      const marker = `${path.sep}.qwen${path.sep}workflows${path.sep}`;
+      const match =
+        process.platform === 'win32'
+          ? /[\\/]\.qwen[\\/]workflows[\\/]/i.exec(lexical)
+          : undefined;
+      const index =
+        process.platform === 'win32'
+          ? (match?.index ?? -1)
+          : lexical.indexOf(marker);
+      if (index !== -1) {
+        // Preserve workflow-directory links while resolving aliases of their owner.
+        const owner = lexical.slice(0, index + 1);
+        spelling = path.join(
+          await fs.realpath(owner),
+          '.qwen',
+          'workflows',
+          lexical.slice(index + (match?.[0].length ?? marker.length)),
+        );
+      }
+    }
+    const baseRoots = snapshot.roots.filter((candidate) => !candidate.ancestor);
+    let baseOwnsSpelling = false;
+    for (const candidate of baseRoots) {
+      const checked = await pathRoot(candidate);
+      if (
+        checked.real &&
+        isSubpath(checked.real, parent) &&
+        (isSubpath(path.resolve(candidate.dir), spelling) ||
+          isSubpath(checked.real, spelling))
+      )
+        baseOwnsSpelling = true;
+      if (
+        checked.real &&
+        isSubpath(checked.real, real) &&
+        isSubpath(checked.real, parent)
+      ) {
+        root = candidate;
+        break;
+      }
+    }
+    const ownsExtension =
+      extension &&
+      path.join(parent, path.basename(file)) === extension.scriptPath;
+    if (!root && !ownsExtension) {
+      for (const candidate of snapshot.saved.filter(
+        (entry) => entry.ancestor,
+      )) {
+        const checked = await pathRoot(candidate);
+        if (
+          checked.real === parent &&
+          path.dirname(real) === parent &&
+          path.extname(file) === '.js' &&
+          (await savedCandidate(candidate, path.basename(file, '.js')))
+        ) {
+          root = candidate;
+          break;
+        }
+      }
+    }
+    const claimedAncestors = snapshot.saved.filter(
+      (candidate) =>
+        candidate.ancestor &&
+        (isSubpath(candidate.dir, spelling) ||
+          isSubpath(candidate.dir, parent)),
+    );
+    if (!root && !ownsExtension && owningRootError) throw owningRootError;
+    if (
+      !root &&
+      !ownsExtension &&
+      !baseOwnsSpelling &&
+      claimedAncestors.length
+    ) {
+      throw await outsideRoots(file, snapshot);
+    }
+    for (const ancestor of claimedAncestors) {
+      const ownsLexicalPath = root
+        ? isSubpath(path.resolve(root.dir), spelling) ||
+          isSubpath((await checkedRoot(root)).real!, spelling)
+        : baseOwnsSpelling || spelling === extension?.scriptPath;
+      if (
+        isSubpath(ancestor.dir, spelling) &&
+        !ownsLexicalPath &&
+        !(await checkedRoot(ancestor)).real
+      ) {
+        throw await outsideRoots(file, snapshot);
+      }
+    }
+    if (!root && !ownsExtension) {
+      for (const candidate of baseRoots) {
+        const checked = await pathRoot(candidate);
+        if (checked.real && isSubpath(checked.real, real)) {
+          root = candidate;
+          break;
+        }
+      }
+    }
+  }
+  const rootReal = root && (await checkedRoot(root)).real;
+  if ((!rootReal || !isSubpath(rootReal, real)) && !extension) {
+    throw await outsideRoots(file, snapshot);
+  }
+  const stat = await fs.lstat(file);
+  if (!stat.isFile() && !stat.isSymbolicLink()) {
+    throw new Error(`workflow file is not an ordinary file: '${file}'.`);
+  }
+  if ((selectedRoot || root?.ancestor) && stat.isSymbolicLink()) {
+    throw new Error(`refusing symlinked workflow file: '${file}'.`);
+  }
+  const handle = await openNoFollow(
+    selectedRoot || root?.ancestor ? file : real,
+  );
+  try {
+    const opened = await handle.stat();
+    const currentReal = await fs.realpath(file);
+    if (
+      !opened.isFile() ||
+      (!stat.isSymbolicLink() &&
+        (opened.ino !== stat.ino || opened.dev !== stat.dev)) ||
+      currentReal !== real ||
+      (root && (await checkRoot(root)).real !== rootReal)
+    ) {
+      throw new Error(`workflow file changed while reading: '${file}'.`);
+    }
+    const name = path.basename(real, '.js');
+    const savedWorkflowName =
+      root?.source && WORKFLOW_NAME_PATTERN.test(name) ? name : extension?.name;
+    return {
+      script: await handle.readFile('utf8'),
+      ...(savedWorkflowName ? { savedWorkflowName } : {}),
+      ...(root?.source
+        ? { source: root.source }
+        : extension
+          ? { source: 'extension' as const }
+          : {}),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Target, trusted ancestors, user, and namespaced active extensions. */
 export async function listSavedWorkflows(
   config: Config,
 ): Promise<SavedWorkflowEntry[]> {
-  const byName = new Map<string, SavedWorkflowEntry>();
-  // Iterate user FIRST then project so project entries overwrite (win).
-  for (const { dir, source } of [...getSavedWorkflowDirs(config)].reverse()) {
-    for (const file of await listJsFiles(dir)) {
-      const name = file.slice(0, -'.js'.length);
-      // Skip files whose stem isn't a legal workflow/command name — they
-      // can't be a slash command and `workflow('<name>')` can't address them.
-      if (!WORKFLOW_NAME_PATTERN.test(name)) continue;
-      byName.set(name, { name, scriptPath: path.join(dir, file), source });
-    }
-  }
-  return Array.from(byName.values()).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
+  const { entries } = await listSnapshot(await workflowSnapshot(config));
+  return entries;
+}
+
+/** Hex characters of the SHA-256 kept by {@link computeWorkflowScriptDigest}. */
+export const WORKFLOW_SCRIPT_DIGEST_CHARS = 16;
+
+/**
+ * Short content digest of a workflow script: the first
+ * {@link WORKFLOW_SCRIPT_DIGEST_CHARS} hex characters of its SHA-256. An
+ * "always allow" grant for a saved or extension workflow and an extension's
+ * install consent both record it, so a change to the script's code asks again.
+ */
+export function computeWorkflowScriptDigest(script: string): string {
+  return createHash('sha256')
+    .update(script, 'utf8')
+    .digest('hex')
+    .slice(0, WORKFLOW_SCRIPT_DIGEST_CHARS);
 }
 
 /**
  * Resolve `workflow('<name>')` or `workflow({scriptPath})` to a loaded
- * script. The string form looks up `<name>.js` in project then user scope;
- * the `{scriptPath}` form reads the file at the given path directly.
+ * script. The string form looks up `<name>.js` in project then user scope,
+ * or an active extension's workflow when the name is `<extension>:<meta.name>`;
+ * the `{scriptPath}` form reads the file at the given path directly, which
+ * may sit in either saved scope or under the generated-scripts root.
  *
  * Throws with an actionable, available-names message on a miss — the
  * message text mirrors upstream so scripts written against either runtime
@@ -217,48 +675,70 @@ export async function resolveSavedWorkflowScript(
         'workflow() expects a workflow name (string) or {scriptPath: string}.',
       );
     }
-    let script: string;
     try {
-      script = await readWorkflowFileSecurely(scriptPath, config);
-    } catch (e) {
+      const loaded = await readWorkflowFile(
+        scriptPath,
+        await workflowSnapshot(config),
+      );
+      return {
+        name: path.basename(scriptPath).replace(/\.js$/, ''),
+        scriptPath,
+        ...loaded,
+      };
+    } catch (error) {
       throw new Error(
-        `workflow({scriptPath: '${scriptPath}'}): ` +
-          `${e instanceof Error ? e.message : String(e)}`,
+        `workflow({scriptPath: '${scriptPath}'}): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    const name = path.basename(scriptPath).replace(/\.js$/, '');
-    return { name, scriptPath, script };
   }
-
   if (typeof nameOrRef !== 'string') {
     throw new Error(
       'workflow() expects a workflow name (string) or {scriptPath: string}.',
     );
   }
-
   const name = nameOrRef;
-  // Reject names that aren't legal workflow stems before joining them into a
-  // directory path, so `workflow('../../outside')` can't escape the saved-
-  // workflow dirs. The realpath boundary check in `readWorkflowFileSecurely`
-  // is a second line of defence, but a clear name error is the better signal.
-  const nameError = validateWorkflowName(name);
-  if (nameError) {
-    throw new Error(`workflow('${name}'): ${nameError}`);
+  const qualified = parseExtensionWorkflowName(name);
+  if (!qualified) {
+    const error = validateWorkflowName(name);
+    if (error) throw new Error(`workflow('${name}'): ${error}`);
   }
-  for (const { dir } of getSavedWorkflowDirs(config)) {
-    const scriptPath = path.join(dir, `${name}.js`);
-    try {
-      const script = await readWorkflowFileSecurely(scriptPath, config);
-      return { name, scriptPath, script };
-    } catch {
-      // Not in this scope (absent or rejected) — try the next.
+  const snapshot = await workflowSnapshot(config);
+  if (qualified) {
+    const workflow = snapshot.extensions.find((entry) => entry.name === name);
+    if (workflow) {
+      try {
+        return {
+          name,
+          scriptPath: workflow.scriptPath,
+          ...(await readWorkflowFile(workflow.scriptPath, snapshot)),
+          savedWorkflowName: name,
+          source: 'extension',
+        };
+      } catch (error) {
+        throw new Error(
+          `workflow('${name}'): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } else {
+    for (const root of snapshot.saved) {
+      const scriptPath = await savedCandidate(root, name);
+      if (scriptPath) {
+        return {
+          name,
+          scriptPath,
+          ...(await readWorkflowFile(scriptPath, snapshot, root)),
+        };
+      }
     }
   }
-
-  const available = (await listSavedWorkflows(config)).map((e) => e.name);
+  const { entries, unavailable } = await listSnapshot(snapshot);
+  const available = entries.map((entry) => entry.name);
+  const diagnostic = unavailable.length
+    ? ` Listing incomplete: ${unavailable.join('; ')}.`
+    : '';
   throw new Error(
-    `workflow('${name}'): no workflow with that name. Available: ` +
-      `${available.length > 0 ? available.join(', ') : '(none)'}.`,
+    `workflow('${name}'): no workflow with that name. Available: ${available.length ? available.join(', ') : '(none)'}.${diagnostic}`,
   );
 }
 
@@ -270,14 +750,14 @@ export async function resolveSavedWorkflowScript(
  * `overwrite` is set (the dialog uses the `exists` result to prompt for
  * confirmation, then retries with `overwrite: true`). Returns a discriminated
  * result rather than throwing on the expected user-facing failures
- * (invalid name, empty script, name collision); only a genuine I/O failure
- * (mkdir / writeFile) rejects.
+ * (invalid name, empty script, name collision). Unverifiable or unsafe roots
+ * and genuine I/O failures reject.
  */
 export async function saveWorkflowScript(
   config: Config,
   opts: {
     name: string;
-    scope: SavedWorkflowSource;
+    scope: SavedWorkflowScope;
     script: string;
     overwrite?: boolean;
   },
@@ -293,26 +773,164 @@ export async function saveWorkflowScript(
   }
   const dir =
     scope === 'project'
-      ? config.storage.getProjectWorkflowsDir()
+      ? getProjectWorkflowsDir(config)
       : Storage.getUserWorkflowsDir();
-  // Refuse to write through a symlinked root (e.g. `.qwen/workflows -> /outside`):
-  // it would persist the script outside the project/user workflow dir. The save
-  // overlay's try/catch surfaces this message as a user-facing error.
-  if (await isSymlinkedRoot(dir)) {
+  const target = path.resolve(dir, '..', '..');
+  const canonicalTarget =
+    scope === 'project'
+      ? await fs.realpath(target).catch(() => {
+          throw new Error(
+            `refusing to save into an unverifiable project target: '${target}'.`,
+          );
+        })
+      : undefined;
+  const root: WorkflowRoot = {
+    dir,
+    source: scope,
+    targetBoundary: canonicalTarget,
+  };
+  const assertSaveRoot = async () => {
+    if (await isSymlinkedRoot(dir)) {
+      throw new Error(
+        `refusing to save into a symlinked saved-workflow directory: '${dir}'.`,
+      );
+    }
+    if (canonicalTarget) {
+      const qwen = path.dirname(dir);
+      let cursor = qwen;
+      while (true) {
+        try {
+          const real = await fs.realpath(cursor);
+          if (!isSubpath(canonicalTarget, real)) {
+            throw new Error(
+              `refusing to save outside the project target: '${dir}'.`,
+            );
+          }
+          break;
+        } catch (error) {
+          if (!isMissing(error)) throw error;
+          const parent = path.dirname(cursor);
+          if (parent === cursor) throw error;
+          cursor = parent;
+        }
+      }
+    }
+  };
+  await assertSaveRoot();
+  await fs.mkdir(dir, { recursive: true });
+  await assertSaveRoot();
+  if (!(await checkRoot(root)).real) {
     throw new Error(
-      `refusing to save into a symlinked saved-workflow directory: '${dir}'.`,
+      `refusing to save into an invalid saved-workflow directory: '${dir}'.`,
     );
   }
   const filePath = path.join(dir, `${name}.js`);
-  if (!overwrite) {
-    try {
-      await fs.access(filePath);
-      return { status: 'exists', name, scope, path: filePath };
-    } catch {
-      // Doesn't exist — fall through and write.
+  try {
+    const existing = await fs.lstat(filePath);
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error(
+        `refusing to overwrite a symlink or non-file workflow: '${filePath}'.`,
+      );
     }
+    if (!overwrite) return { status: 'exists', name, scope, path: filePath };
+  } catch (error) {
+    if (!isMissing(error)) throw error;
   }
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(filePath, script, 'utf8');
+  if (overwrite) {
+    await atomicWriteFile(filePath, script, {
+      encoding: 'utf8',
+      noFollow: true,
+    });
+  } else {
+    await fs.writeFile(filePath, script, { encoding: 'utf8', flag: 'wx' });
+  }
   return { status: 'saved', name, scope, path: filePath };
+}
+
+/**
+ * Whether `value` has the shape of a generated run id, `wf_<hex>`. A run id
+ * becomes a path segment under the runs and inline-script directories, so an
+ * id from outside — a client's `taskId`, a directory name — is checked with
+ * this before it is joined into a path.
+ */
+export function isWorkflowRunId(value: string): boolean {
+  return /^wf_[0-9a-f]+$/.test(value);
+}
+
+/**
+ * Persist the source of an inline `Workflow({script})` run to
+ * `<generated>/inline/<runId>.js` and return that path.
+ *
+ * The run is what matters, not the copy: this never throws and never blocks
+ * a launch. A missing `storage`, a symlinked root, a full disk — each degrades
+ * to `null`, which the caller reports by simply omitting the script path from
+ * the result. Writing it is what lets a model resume a run (and edit the
+ * script first) without re-sending the whole source, and lets a user read
+ * what actually ran.
+ *
+ * `atomicWriteFile` does the write: temp-and-rename with `renameWithRetry`
+ * (a transient Windows EPERM must not silently cost the result its script
+ * path), `forceMode` so a resume heals a copy some earlier state left more
+ * permissive than 0600, and `noFollow` so a symlink planted at the target is
+ * replaced rather than written through.
+ */
+export async function persistInlineWorkflowScript(
+  config: Config,
+  runId: string,
+  script: string,
+): Promise<string | null> {
+  if (!isWorkflowRunId(runId)) {
+    debugLogger.warn(`refusing to persist a script for run id: ${runId}`);
+    return null;
+  }
+  const storage = config.storage;
+  if (!storage) return null;
+  try {
+    const filePath = storage.getInlineWorkflowScriptPath(runId);
+    const dir = path.dirname(filePath);
+    // Same refusal the loader makes: a symlinked generated root (or a
+    // symlinked `inline/` inside it) would carry the write outside the
+    // trusted root, and the loader would refuse to read back what we wrote.
+    if (
+      (await isSymlinkedRoot(storage.getGeneratedWorkflowsDir())) ||
+      (await isSymlinkedRoot(dir))
+    ) {
+      debugLogger.warn(
+        `refusing to persist an inline workflow script into a symlinked root: '${dir}'.`,
+      );
+      return null;
+    }
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteFile(filePath, script, {
+      encoding: 'utf8',
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+    return filePath;
+  } catch (error) {
+    debugLogger.warn(
+      `failed to persist inline workflow script for ${runId}: ${error}`,
+    );
+    return null;
+  }
+}
+
+/** Best-effort cleanup for a persisted inline workflow script. */
+export async function deleteInlineWorkflowScript(
+  config: Config,
+  runId: string,
+): Promise<boolean> {
+  if (!isWorkflowRunId(runId)) return false;
+  const storage = config.storage;
+  if (!storage) return false;
+  try {
+    await fs.rm(storage.getInlineWorkflowScriptPath(runId), { force: true });
+    return true;
+  } catch (error) {
+    debugLogger.warn(
+      `failed to delete inline workflow script for ${runId}: ${error}`,
+    );
+    return false;
+  }
 }

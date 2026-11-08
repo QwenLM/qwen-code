@@ -105,6 +105,10 @@ describe('tasksCommand', () => {
     } as unknown as Parameters<typeof createMockCommandContext>[0]);
   });
 
+  it('opts in to running during streaming', () => {
+    expect(tasksCommand.canRunDuringStreaming).toBe(true);
+  });
+
   it('reports an empty registry', async () => {
     const result = await tasksCommand.action!(context, '');
     expect(result).toEqual({

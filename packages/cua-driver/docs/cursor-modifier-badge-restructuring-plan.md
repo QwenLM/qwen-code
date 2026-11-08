@@ -1,5 +1,10 @@
 # Cursor modifier badge restructuring plan
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 **Status:** Implemented in [PR #2677](https://github.com/trycua/cua/pull/2677); validation complete
 **Base:** `main` at `b249df857994ebaebf9f02248e8312b3bd2a5dd2`
 **Scope:** Move delivery and target modifiers from around the agent pointer into the session badge while preserving action animations beside the pointer.
@@ -13,7 +18,7 @@ Cua Driver should present two kinds of cursor information in two clear places:
   - delivery: background or foreground
   - target: AX, pixel, browser, or desktop
 
-The badge remains lightweight. The session name fades using the existing two-second hold and 400-millisecond fade. Modifier chips appear only while their action is active, followed by a 400-millisecond trailing fade. When the name is hidden, the badge contracts to a compact session orb and active modifier chips. Hovering the pointer restores the full session name where hover observation is supported.
+The badge remains lightweight. The session name fades using the existing two-second hold and 400-millisecond fade. Modifier chips appear only while their action is active, followed by a 400-millisecond trailing fade. When the name is hidden, the badge contracts to a compact session-colored capsule and active modifier chips. Hovering the pointer restores the full session name where hover observation is supported.
 
 This is visual feedback only. It is not an authorization indicator, a security boundary, or evidence that an action succeeded.
 
@@ -40,13 +45,13 @@ Use one pill rather than adding a second persistent status capsule.
 
 | Badge content             | Visibility                                                                              |
 | ------------------------- | --------------------------------------------------------------------------------------- |
-| Session orb and name      | Existing reveal, two-second hold, 400-millisecond fade; hover restores full opacity     |
+| Session name              | Existing reveal, two-second hold, 400-millisecond fade; hover restores full opacity     |
 | Delivery and target chips | Full opacity while modifiers are active; 400-millisecond trailing fade after they clear |
 | Badge chrome              | Visible while either the name or modifier chips are visible                             |
 
 Starting an action must not restart the session-name timer. Otherwise a long session name would flash on every tool call. Modifier changes reveal or update the chips only.
 
-When the name has faded, the pill contracts to the session orb and active chips. If no public session label exists, modifier-bearing actions still get this compact session-colored capsule. This preserves context without requiring a display name.
+When the name has faded, the pill contracts to the session-colored capsule and active chips. If no public session label exists, modifier-bearing actions still get this compact session-colored capsule. This preserves context without requiring a display name.
 
 ### Host-owned modifier glyphs
 
@@ -127,7 +132,6 @@ pub struct SessionBadgeInput<'a> {
 
 pub struct SessionBadgeLayout {
     pub rect: Rect,
-    pub orb: Rect,
     pub label: Option<BadgeLabelLayout>,
     pub delivery_chip: Option<BadgeChip>,
     pub target_chip: Option<BadgeChip>,
@@ -284,8 +288,8 @@ Keep the D-Bus action payload unchanged. Bump the bundled helper version and its
 3. Add:
    - full label with one chip
    - full label with two chips
-   - contracted orb with one chip
-   - contracted orb with two chips
+   - contracted capsule with one chip
+   - contracted capsule with two chips
    - no-label modifier capsule
 4. Regenerate the public delivery and target GIF.
 5. Update cursor personalization documentation and theme author instructions.

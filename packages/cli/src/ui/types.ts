@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { RestoreToolResponseBinding } from './utils/restore-tool-response.js';
 import type {
   CompactionThresholds,
   CompressionStatus,
+  FindingsResultDisplay,
   MCPServerConfig,
   ThoughtSummary,
   ToolCallConfirmationDetails,
@@ -39,7 +41,7 @@ export enum StreamingState {
 }
 
 // Copied from server/src/core/turn.ts for CLI usage
-export enum GeminiEventType {
+export enum LlmEventType {
   Content = 'content',
   ToolCallRequest = 'tool_call_request',
   // Add other event types if the UI hook needs to handle them
@@ -73,6 +75,18 @@ export interface IndividualToolCallDisplay {
   callId: string;
   name: string;
   description: string;
+  /**
+   * Raw tool-call arguments, rendered inline under the header when
+   * `ui.showToolCallArgs` is on. `description` is only ever a human summary
+   * (`invocation.getDescription()`) — for most built-in tools it drops the
+   * actual parameters (Edit shows just the filename), which is what the
+   * setting exists to recover.
+   *
+   * Holds the same object reference as the scheduler's `request.args` — no
+   * copy, so it costs nothing in memory. Undefined on the daemon path, which
+   * never carries args across the boundary; the args row is then skipped.
+   */
+  args?: Record<string, unknown>;
   resultDisplay: ToolResultDisplay | string | undefined;
   visionBridgeNotice?: string;
   /**
@@ -84,6 +98,12 @@ export interface IndividualToolCallDisplay {
    * is only a count. Undefined → fall back to the summary.
    */
   detailedDisplay?: string;
+  /**
+   * The findings display a later report_findings call replaced. Kept so a
+   * rewind past the replacing call can restore this report's checklist;
+   * dropped by history compaction together with resultDisplay.
+   */
+  supersededFindingsDisplay?: FindingsResultDisplay;
   /** Inline images carried by this tool's persisted response parts. */
   images?: InlineImageData[];
   /** Images hidden after the per-row rendering limit. */
@@ -102,6 +122,66 @@ export interface CompressionProps {
   originalTokenCount: number | null;
   newTokenCount: number | null;
   compressionStatus: CompressionStatus | null;
+  /**
+   * Which compression path produced this item. 'summarize' replaces the
+   * pre-marker history with a synthetic summary prefix; 'fast' (rule-based,
+   * no LLM summary) removes no user prompts from the API history, so its
+   * marker must not be treated as a rewind boundary. Absent on items from
+   * older sessions, which are treated as 'summarize'.
+   */
+  compressionKind?: 'summarize' | 'fast';
+  /**
+   * Token-count provenance (#9309). The compression paths measure on
+   * different scales, so estimated numbers are rendered with a '~' prefix
+   * to keep consecutive banners from reading as lost context.
+   */
+  originalTokenCountIsEstimated?: boolean;
+  newTokenCountIsEstimated?: boolean;
+}
+
+/**
+ * Structured companion to the `/compress` sentences a command streams over ACP.
+ *
+ * The English sentence stays on the wire so text-only ACP hosts keep rendering
+ * something, but a host that owns its own UI language renders the outcome from
+ * this instead. Token counts travel as numbers (never preformatted) so the
+ * consumer picks its own grouping and estimated marker.
+ */
+export type ContextCompressionMeta =
+  | {
+      phase: 'progress';
+    }
+  | {
+      /**
+       * Terminal, like `done`: the fast path had nothing to strip. The session
+       * merges it into the progress block so the pending row is replaced in
+       * place, which is why it carries no counts.
+       */
+      phase: 'noop';
+    }
+  | {
+      phase: 'done';
+      originalTokenCount: number;
+      newTokenCount: number;
+      originalTokenCountIsEstimated?: boolean;
+      newTokenCountIsEstimated?: boolean;
+      /** Server-authored advisory; free-form text, not a translation key. */
+      warning?: string;
+    };
+
+/**
+ * A note about the invocation itself, emitted before the compression starts.
+ *
+ * It rides on its own `_meta` key rather than on `contextCompression`: the
+ * reducer folds a turn's text frames into one block and spreads `_meta` key by
+ * key, so a note sharing that key would be overwritten by the result frame that
+ * follows. A host that reads this key renders the note as its own row beside
+ * the compression it belongs to.
+ */
+export interface ContextCompressionNotice {
+  phase: 'notice';
+  /** Instruction budget the caller was clipped to. */
+  instructionsLimit: number;
 }
 
 export interface SummaryProps {
@@ -131,7 +211,10 @@ export interface HistoryItemBase {
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  recallText?: string;
   promptId?: string;
+  /** Source-record link for conversation rewind, never for file restore. */
+  rewindId?: string;
   /**
    * Whether this UI history item represents a user turn that reached the model.
    *
@@ -144,7 +227,7 @@ export type HistoryItemUser = HistoryItemBase & {
   sentToModel?: boolean;
 };
 
-export type HistoryItemGemini = HistoryItemBase & {
+export type HistoryItemLlm = HistoryItemBase & {
   type: 'gemini';
   text: string;
   images?: InlineImageData[];
@@ -152,27 +235,32 @@ export type HistoryItemGemini = HistoryItemBase & {
   timestamp?: number;
 };
 
-export type HistoryItemGeminiContent = HistoryItemBase & {
+export type HistoryItemLlmContent = HistoryItemBase & {
   type: 'gemini_content';
   text: string;
   images?: InlineImageData[];
   omittedImageCount?: number;
 };
 
-export type HistoryItemGeminiThought = HistoryItemBase & {
+export type HistoryItemLlmThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
   durationMs?: number;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
-export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
+export type HistoryItemLlmThoughtContent = HistoryItemBase & {
   type: 'gemini_thought_content';
   text: string;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
+  presentation?: 'subscription-success';
   linkUrl?: string;
   linkText?: string;
 };
@@ -311,6 +399,16 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Identity of the scheduler batch that produced this group (#9420).
+   * Minted when the batch is scheduled and stamped on both the live
+   * pending copy and the committed copy, so the transient double render
+   * of one batch collapses by identity — never by callIds, which collide
+   * across unrelated batches. Unique per mount, so ids persisted in
+   * checkpoints can never match newly minted ones; adapter-built groups
+   * carry no id. Neither is ever collapsed.
+   */
+  batchId?: string;
 };
 
 /**
@@ -354,6 +452,15 @@ export interface ToolDefinition {
   name: string;
   displayName: string;
   description?: string;
+  /** Omni media-policy tool that only runs via fixed policies: it is hidden
+   * from the model's declarations, so /tools annotates it for the human. */
+  fixedOnly?: boolean;
+  /**
+   * Registered, but its schema is not in the eager model request — the tool
+   * is reached on demand via `tool_search`. Set for `shouldDefer` tools and
+   * for tools the `tools.eager` allowlist omits (#9827, #10075).
+   */
+  deferred?: boolean;
 }
 
 export interface SkillDefinition {
@@ -421,13 +528,31 @@ export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
  */
 export type ContextThresholds = CompactionThresholds;
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
+  /** Skill tool definition + the `<available_skills>` listing as sent + loaded bodies. */
   skills: number;
+  /** Startup prelude outside the skill listing: environment context, MCP server instructions, deferred-tools reminder. */
+  startupContext?: number;
+  /**
+   * Independent content estimate of the conversation after the startup prelude.
+   * It is never derived from or capped by totalTokens. With no
+   * provider total (`totalTokens` 0, e.g. after `/model`, `/restore` or a
+   * resume) it is nonzero, and it is only *part* of the local estimate that
+   * drives the tier: the tier then keys on the request overhead plus this
+   * value, not on this value or on `totalTokens` alone.
+   */
   messages: number;
+  /** @deprecated Legacy residual; accepted in old history but no longer emitted or displayed. */
+  unattributed?: number;
+  /** Provider-reported cached prefix. An annotation, not a category: the cached prefix spans several categories. */
+  cachedTokens?: number;
   freeSpace: number;
   /**
    * Distance from the auto-compaction threshold to the window edge.
@@ -453,11 +578,18 @@ export interface ContextToolDetail {
 export interface ContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and for instruction files outside that readable
+   * scope (parent-directory or extension files), which stay non-interactive.
+   */
+  absolutePath?: string;
 }
 
 export interface ContextSkillDetail {
   name: string;
-  /** Token cost of the skill listing (name+description) in the tool definition */
+  /** Token cost of this skill's entry in the `<available_skills>` listing as sent (after budget trimming) */
   tokens: number;
   /** Whether this skill has been invoked and its full body loaded into context */
   loaded?: boolean;
@@ -473,6 +605,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   breakdown: ContextCategoryBreakdown;
   builtinTools: ContextToolDetail[];
   mcpTools: ContextToolDetail[];
+  instructionFiles?: ContextMemoryDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
   /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */
@@ -532,6 +665,20 @@ export interface BtwProps {
 export type HistoryItemBtw = HistoryItemBase & {
   type: 'btw';
   btw: BtwProps;
+};
+
+/**
+ * Independent second-opinion review rendered by `/advisor`. `text` is the
+ * reviewer's markdown; `model` is the resolved model id that produced it,
+ * shown in the header. An unknown `advisorModel` is passed to the provider
+ * as-is and surfaces as an error if rejected; only unresolvable alias
+ * selectors fall back to the main model. Configured model fallbacks are not
+ * used for advisor requests.
+ */
+export type HistoryItemAdvisor = HistoryItemBase & {
+  type: 'advisor';
+  text: string;
+  model: string;
 };
 
 /**
@@ -659,10 +806,10 @@ export type HistoryItemWithoutId =
   | HistoryItemUser
   | HistoryItemNotification
   | HistoryItemUserShell
-  | HistoryItemGemini
-  | HistoryItemGeminiContent
-  | HistoryItemGeminiThought
-  | HistoryItemGeminiThoughtContent
+  | HistoryItemLlm
+  | HistoryItemLlmContent
+  | HistoryItemLlmThought
+  | HistoryItemLlmThoughtContent
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
@@ -690,6 +837,7 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
   | HistoryItemBtw
+  | HistoryItemAdvisor
   | HistoryItemMemorySaved
   | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
@@ -740,6 +888,7 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  ADVISOR = 'advisor',
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
@@ -844,7 +993,7 @@ export interface ConsoleMessageItem {
 
 /**
  * Result type for a slash command that should immediately result in a prompt
- * being submitted to the Gemini model.
+ * being submitted to the model.
  */
 export interface SubmitPromptResult {
   type: 'submit_prompt';
@@ -861,13 +1010,14 @@ export interface SubmitPromptResult {
 }
 
 /**
- * Defines the result of the slash command processor for its consumer (useGeminiStream).
+ * Defines the result of the slash command processor for its consumer (useLlmStream).
  */
 export type SlashCommandProcessorResult =
   | {
       type: 'schedule_tool';
       toolName: string;
       toolArgs: Record<string, unknown>;
+      restoreResponseBinding?: RestoreToolResponseBinding;
     }
   | {
       type: 'handled'; // Indicates the command was processed and no further action is needed.
@@ -883,11 +1033,14 @@ export interface ShellConfirmationRequest {
 }
 
 export interface ConfirmationRequest {
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
   prompt: ReactNode;
   onConfirm: (confirm: boolean) => void;
 }
 
 export interface LoopDetectionConfirmationRequest {
+  cause?: string;
   onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
 }
 

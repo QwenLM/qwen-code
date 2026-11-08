@@ -45,6 +45,31 @@ fn standalone_fixture_html() -> String {
     )
 }
 
+/// Synthetic control that records event delivery but deliberately rejects the
+/// application action unless the browser marks the click as trusted.
+fn standalone_trust_gated_click_html() -> String {
+    standalone_fixture_html().replace(
+        "</body>",
+        r#"<fieldset>
+  <legend>trust-gated click</legend>
+  <button id="standalone-trust-gated" data-cua-id="standalone-trust-gated">
+    Activate trust-gated control
+  </button>
+  <span id="standalone-trust-gated-state" data-cua-id="standalone-trust-gated-state">
+    activation=idle
+  </span>
+</fieldset>
+<script>
+  document.getElementById('standalone-trust-gated').addEventListener('click', event => {
+    document.getElementById('standalone-trust-gated-state').textContent = event.isTrusted
+      ? 'activation=accepted-trusted'
+      : 'activation=ignored-untrusted';
+  });
+</script>
+</body>"#,
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn standalone_generic_type_text_html() -> String {
     standalone_fixture_html().replace(
@@ -731,26 +756,13 @@ fn spawn_driver(label: &str) -> McpDriver {
     #[cfg(target_os = "macos")]
     let driver = McpDriver::spawn_macos_daemon_proxy_named(label);
     #[cfg(target_os = "linux")]
-    let driver = if std::env::var("CUA_E2E_WAYLAND_SESSION").as_deref() == Ok("generic") {
-        // Keep Sway IPC available to the out-of-band test oracle while the
-        // product under test sees only standard/generic Wayland capabilities.
-        McpDriver::spawn_named_with_env(
-            label,
-            &[
-                ("SWAYSOCK", "/dev/null/cua-e2e-withheld"),
-                ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
-                ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
-            ],
-        )
-    } else {
-        McpDriver::spawn_named_with_env(
-            label,
-            &[
-                ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
-                ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
-            ],
-        )
-    };
+    let driver = McpDriver::spawn_named_with_env(
+        label,
+        &[
+            ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
+            ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
+        ],
+    );
     #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     let driver = McpDriver::spawn_named_with_env(
         label,
@@ -777,12 +789,7 @@ fn spawn_standard_driver(label: &str) -> McpDriver {
 #[cfg(target_os = "linux")]
 fn configure_linux_browser_command(command: &mut Command) {
     command.arg("--password-store=basic");
-    let native_wayland = std::env::var("XDG_SESSION_TYPE")
-        .is_ok_and(|session| session.eq_ignore_ascii_case("wayland"))
-        && std::env::var_os("WAYLAND_DISPLAY").is_some();
-    if native_wayland {
-        command.arg("--ozone-platform=wayland");
-    }
+    command.arg("--ozone-platform=x11");
 }
 
 fn configure_test_browser_sandbox(command: &mut Command) {
@@ -1407,11 +1414,7 @@ fn case(browser: &str, action: &str) -> CaseSpec {
         OracleKind::ZOrder,
         OracleKind::NoLeakedInput,
     ];
-    if cua_driver_testkit::e2e::DisplayServer::current()
-        != cua_driver_testkit::e2e::DisplayServer::Wayland
-    {
-        oracles.push(OracleKind::Cursor);
-    }
+    oracles.push(OracleKind::Cursor);
     CaseSpec::delivered(
         format!("{}-{browser}-standalone-{action}", std::env::consts::OS),
         browser,
@@ -1573,6 +1576,68 @@ fn run_roundtrip(spec: &BrowserSpec) {
             );
             assert_eq!(typed.action_effect(), Some("unverifiable"), "{}", typed.raw);
             wait_for_value(&fixture.server, "txt-input", "standalone-browser");
+
+            Observation::delivered(vec![OracleKind::FixtureState], Evidence::default())
+        })
+    });
+}
+
+fn run_trust_gated_dom_click(spec: &BrowserSpec) {
+    let scenario = format!(
+        "{}-{}-standalone-trust-gated-dom-click",
+        std::env::consts::OS,
+        spec.name
+    );
+    execute_case(case(&spec.name, "trust_gated_dom_click"), |evidence| {
+        let mut fixture =
+            launch_browser_with_html(spec, &scenario, standalone_trust_gated_click_html());
+        *evidence = recording_evidence(fixture.driver.recording_dir());
+        run_with_background_oracles(&mut fixture, |fixture| {
+            let session = format!("standalone-trust-gated-dom-click-{}", fixture.pid);
+            let (target, tab, snapshot) = bind(fixture, &session);
+            let click_ref = ref_by_label(&snapshot, "id=standalone-trust-gated");
+            let click = fixture.driver.call(
+                "browser_click",
+                serde_json::json!({
+                    "target_id": target,
+                    "tab_id": tab,
+                    "ref": click_ref,
+                    "input_route": "dom_event",
+                    "session": session,
+                }),
+            );
+
+            assert_eq!(click.action_effect(), Some("unverifiable"), "{}", click.raw);
+            assert_eq!(click.action_route(), Some("dom"), "{}", click.raw);
+            assert_eq!(
+                click.action_delivery_mode(),
+                Some("background"),
+                "{}",
+                click.raw
+            );
+            assert_eq!(
+                click.structured()["escalation"]["target"],
+                "page",
+                "{}",
+                click.raw
+            );
+            assert_eq!(
+                click.structured()["escalation"]["reason"],
+                "effect_unconfirmed",
+                "{}",
+                click.raw
+            );
+            assert!(
+                click.text().contains("application effect not verified")
+                    && click.text().contains("trust-gated controls"),
+                "{}",
+                click.raw
+            );
+            wait_for_text(
+                &fixture.server,
+                "standalone-trust-gated-state",
+                "activation=ignored-untrusted",
+            );
 
             Observation::delivered(vec![OracleKind::FixtureState], Evidence::default())
         })
@@ -2173,11 +2238,6 @@ fn run_prepare_isolated_launch(spec: &BrowserSpec) {
                 "browser_prepare disclosed its private profile path: {}",
                 prepared.raw
             );
-            assert!(
-                !prepared_json.contains("approval_token"),
-                "{}",
-                prepared.raw
-            );
 
             let prepared_pid = prepared.structured()["prepared_pid"]
                 .as_u64()
@@ -2416,11 +2476,6 @@ fn run_existing_profile_attach(spec: &BrowserSpec) {
                     prepared.raw
                 );
                 assert!(
-                    !public_result.contains("approval_token"),
-                    "{}",
-                    prepared.raw
-                );
-                assert!(
                     !public_result.contains(&fixture._profile.path().display().to_string()),
                     "{}",
                     prepared.raw
@@ -2569,11 +2624,6 @@ fn run_existing_profile_setup(spec: &BrowserSpec) {
             let public_result = prepared.raw.to_string();
             assert!(!public_result.contains("ws://"), "{}", prepared.raw);
             assert!(
-                !public_result.contains("approval_token"),
-                "{}",
-                prepared.raw
-            );
-            assert!(
                 !public_result.contains(&fixture._profile.path().display().to_string()),
                 "{}",
                 prepared.raw
@@ -2660,111 +2710,6 @@ fn run_existing_profile_setup(spec: &BrowserSpec) {
                 );
                 Observation::delivered(vec![OracleKind::FixtureState], Evidence::default())
             })
-        },
-    );
-}
-
-#[cfg(target_os = "linux")]
-fn run_generic_wayland_existing_profile_refusal(spec: &BrowserSpec) {
-    assert!(
-        std::env::var_os("WAYLAND_DISPLAY").is_some()
-            && std::env::var("CUA_E2E_WAYLAND_SESSION").as_deref() == Ok("generic"),
-        "the generic-Wayland refusal row requires its explicit native-Wayland lane"
-    );
-    assert!(
-        platform_linux::wayland::shell_helper::trusted_window_ids_for_pid(std::process::id())
-            .is_none(),
-        "the generic-Wayland refusal row requires the attested GNOME helper to be unavailable"
-    );
-    let scenario = format!(
-        "{}-{}-standalone-generic-wayland-existing-profile-refusal",
-        std::env::consts::OS,
-        spec.name
-    );
-    execute_case(
-        refusal_case(
-            &spec.name,
-            "browser_prepare_existing_profile_generic_wayland",
-            RefusalCode::BrowserRouteUnavailable,
-        ),
-        |evidence| {
-            let mut driver = spawn_driver(&scenario);
-            let server = BrowserFixtureServer::start(&standalone_fixture_html());
-            let profile = tempfile::Builder::new()
-                .prefix("cua-e2e-generic-wayland-browser-")
-                .tempdir()
-                .expect("create generic Wayland browser profile");
-            let mut command = command_for_unprepared_browser(
-                spec,
-                profile.path(),
-                server.page_url(),
-                TEST_BROWSER_INITIAL_POSITION,
-            );
-            let child = spawn_in_job(&mut command).expect("launch generic Wayland browser");
-            let pid = child.id();
-            driver.reaper().push(child);
-            driver.reaper().track_pid(pid);
-            wait_for_observed(&server, "WEB_HARNESS_MARKER_v1");
-
-            let windows = driver.call("list_windows", serde_json::json!({"pid": pid}));
-            let opaque_window = windows.structured()["windows"]
-                .as_array()
-                .and_then(|windows| windows.iter().find(|window| window["pid"] == pid))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "generic Wayland did not expose the browser's opaque native window: {}",
-                        windows.raw
-                    )
-                });
-            let opaque_unattested_window_id = opaque_window["window_id"]
-                .as_u64()
-                .expect("opaque generic Wayland window id");
-            assert!(
-                opaque_window["z_index"].is_null(),
-                "generic Wayland must not treat an AT-SPI window as compositor-attested: {}",
-                windows.raw
-            );
-
-            let sentinel = ForegroundSentinel::launch(&mut driver);
-            *evidence = recording_evidence(driver.recording_dir());
-            driver.start_behavior_recording();
-            let (mut observation, passed) = sentinel
-                .observe_desktop(|| {
-                    let session = format!("generic-wayland-refusal-{pid}");
-                    let started =
-                        driver.call("start_session", serde_json::json!({ "session": session }));
-                    assert!(!started.is_error(), "start_session failed: {}", started.raw);
-                    let refused = driver.call(
-                        "browser_prepare",
-                        serde_json::json!({
-                            "pid": pid as i64,
-                            "window_id": opaque_unattested_window_id,
-                            "session": session,
-                            "strategy": {"kind": "existing_profile"},
-                        }),
-                    );
-                    assert_eq!(
-                        refused.structured()["refusal"]["code"],
-                        "browser_route_unavailable",
-                        "{}",
-                        refused.raw
-                    );
-                    assert!(
-                        refused.structured()["refusal"]["detail"]["setup_side_effects"].is_null(),
-                        "generic Wayland must refuse before setup mutation: {}",
-                        refused.raw
-                    );
-                    wait_for_text(&server, "lbl-counter", "counter=0");
-                    Observation::refused(
-                        RefusalCode::BrowserRouteUnavailable,
-                        vec![OracleKind::FixtureState],
-                        refused.text(),
-                        Evidence::default(),
-                    )
-                })
-                .expect("observe generic Wayland refusal desktop effects");
-            observation.passed_oracles.extend(passed);
-            observation
         },
     );
 }
@@ -3554,6 +3499,13 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 "Linux window capture already includes the browser-owned prompt surface: {}",
                 before.raw
             );
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(
+                before.structured()["capture_coverage"]["browser_chrome"]["status"],
+                "may_be_incomplete_in_window_scope",
+                "{}",
+                before.raw
+            );
         } else {
             assert_eq!(
                 before.structured()["capture_coverage"]["browser_chrome"]["status"],
@@ -3561,6 +3513,8 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 "{}",
                 before.raw
             );
+        }
+        if !cfg!(target_os = "linux") {
             assert_eq!(
                 before.structured()["capture_coverage"]["recovery"]["when"],
                 "verified_window_action_ineffective",
@@ -3568,34 +3522,22 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 before.raw
             );
             assert_eq!(
-                before.structured()["capture_coverage"]["recovery"]["escalate"],
+                before.structured()["capture_coverage"]["recovery"]["act_target"],
                 serde_json::json!({
-                    "tool": "escalate_session",
-                    "reason": "foreground_ineffective",
+                    "kind": "desktop",
+                    "display_id": "primary",
                 }),
                 "{}",
                 before.raw
             );
+            assert!(
+                before.structured()["capture_coverage"]["recovery"]
+                    .get("escalate")
+                    .is_none(),
+                "{}",
+                before.raw
+            );
         }
-        let escalated = fixture.driver.call(
-            "escalate_session",
-            serde_json::json!({
-                "session": window_session,
-                "reason": "foreground_ineffective",
-                "detail": "browser chrome may be outside window capture",
-            }),
-        );
-        assert!(
-            !escalated.is_error(),
-            "desktop inspection escalation failed: {}",
-            escalated.raw
-        );
-        assert_eq!(
-            escalated.structured()["effective_scope"],
-            "desktop",
-            "{}",
-            escalated.raw
-        );
         let desktop_before = fixture.driver.call(
             "get_desktop_state",
             serde_json::json!({
@@ -3654,6 +3596,13 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
             assert!(
                 window.structured()["capture_coverage"]["browser_chrome"].is_null(),
                 "Linux window capture already includes the browser-owned prompt surface: {}",
+                window.raw
+            );
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(
+                window.structured()["capture_coverage"]["browser_chrome"]["status"],
+                "may_be_incomplete_in_window_scope",
+                "{}",
                 window.raw
             );
         } else {
@@ -3725,7 +3674,7 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 "click",
                 serde_json::json!({
                     "session": window_session,
-                    "scope": "desktop",
+                    "target": {"kind": "desktop", "display_id": "primary"},
                     "x": x,
                     "y": y,
                 }),
@@ -3836,6 +3785,11 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
             assert!(
                 !desktop_has_materially_more_prompt_pixels,
                 "Linux desktop capture unexpectedly contained materially more permission UI than window capture: {metrics}"
+            );
+        } else if cfg!(target_os = "macos") {
+            assert!(
+                window_changed_pixels >= minimum_prompt_pixels,
+                "macOS window capture omitted the tested notification permission surface: {metrics}"
             );
         } else {
             assert!(
@@ -4544,6 +4498,10 @@ macro_rules! standalone_browser_test {
 }
 
 standalone_browser_test!(standalone_browser_roundtrip, run_roundtrip);
+standalone_browser_test!(
+    standalone_browser_trust_gated_dom_click,
+    run_trust_gated_dom_click
+);
 standalone_browser_test!(standalone_browser_semantic_state, run_semantic_state);
 standalone_browser_test!(standalone_browser_background_type, run_background_type);
 standalone_browser_test!(standalone_browser_type_replace, run_type_replace);
@@ -4579,11 +4537,6 @@ standalone_browser_test!(
 standalone_browser_test!(
     standalone_browser_existing_profile_setup,
     run_existing_profile_setup
-);
-#[cfg(target_os = "linux")]
-standalone_browser_test!(
-    standalone_browser_generic_wayland_existing_profile_refusal,
-    run_generic_wayland_existing_profile_refusal
 );
 standalone_browser_test!(standalone_browser_stale_ref, run_stale_ref);
 standalone_browser_test!(standalone_browser_frames, run_frame_roundtrip);

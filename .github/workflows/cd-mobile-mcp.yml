@@ -22,16 +22,19 @@ jobs:
       name: 'production-release'
     permissions:
       contents: 'read'
+      id-token: 'write'
     steps:
       - uses: 'actions/checkout@v4'
 
       - uses: 'actions/setup-node@v5'
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
+
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
 
       - name: 'Determine version'
         id: 'version'
@@ -43,13 +46,14 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # mobile-mcp is a root workspace package, so it installs from the root
+      # pnpm lockfile, as `npm ci` in this directory used the root npm one.
       - name: 'Install dependencies'
-        working-directory: 'packages/mobile-mcp'
-        run: 'npm ci --ignore-scripts'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --reporter=append-only'
 
       - name: 'Set version'
         working-directory: 'packages/mobile-mcp'
-        run: 'npm version "${{ steps.version.outputs.version }}" --no-git-tag-version'
+        run: 'npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --no-workspaces-update'
 
       - name: 'Build'
         working-directory: 'packages/mobile-mcp'
@@ -67,6 +71,4 @@ jobs:
       - name: 'Publish'
         if: '${{ !inputs.dry_run }}'
         working-directory: 'packages/mobile-mcp'
-        run: 'npm publish --access public'
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+        run: 'npm publish --provenance --access public'

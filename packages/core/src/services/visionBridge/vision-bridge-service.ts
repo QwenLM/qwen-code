@@ -16,7 +16,7 @@ import {
   replaceImagesWithText,
   splitImageParts,
 } from './image-part-utils.js';
-import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
+import { VISION_BRIDGE_MAX_IMAGES } from '../../utils/vision-bridge-constants.js';
 
 const debugLogger = createDebugLogger('VISION_BRIDGE');
 // Tool calls in one turn share an AbortSignal. Reserve synchronously before

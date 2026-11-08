@@ -4,28 +4,50 @@ Qwen Code's vendored distribution of the cross-platform Cua Driver runtime.
 It provides native desktop and browser automation over MCP, a one-shot CLI,
 and in-process Python and TypeScript SDKs.
 
-This tree is based on upstream `cua-driver-rs-v0.17.0`. The upstream snapshot
+This tree is based on upstream `cua-driver-rs-v0.20.0`. The upstream snapshot
 is recorded in [`.vendored-from`](.vendored-from); Qwen-owned differences are
 documented in [`.vendored-patches.md`](.vendored-patches.md) and
 [`docs/relative-coordinates-design.md`](docs/relative-coordinates-design.md).
 
 ## Install
 
+The commands below target release **0.27.0** and require its GitHub Release
+(`cua-driver-rs-v0.27.0`) to be published. The native driver does not require
+Node.js or npm. Install the MCP client you want to use separately.
+
 macOS and Linux:
 
 ```bash
-CUA_DRIVER_RS_VERSION=0.17.0 \
+CUA_DRIVER_RS_VERSION=0.27.0 \
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:CUA_DRIVER_RS_VERSION = "0.17.0"
+$env:CUA_DRIVER_RS_VERSION = "0.27.0"
 irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
-Expected: qwen-cua-driver 0.17.0.
+The default executable is `~/.local/bin/qwen-cua-driver` on macOS/Linux and
+`%LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin\qwen-cua-driver.exe` on
+Windows. Check the installation:
+
+```bash
+# macOS / Linux
+"$HOME/.local/bin/qwen-cua-driver" --version
+```
+
+```powershell
+# Windows PowerShell
+$driver = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin\qwen-cua-driver.exe"
+& $driver --version
+```
+
+Expected: qwen-cua-driver 0.27.0.
+
+If you chose a custom install directory, use its absolute executable path in
+the client commands below.
 
 The released product uses Qwen-owned identities throughout:
 
@@ -44,31 +66,130 @@ that state directory.
 
 ## Agent integration
 
-Run the MCP server directly:
+Choose an interface for your agent:
+
+| Interface                                                    | Install and configure                                                                                                                                                          |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Direct native MCP tools                                      | Install this driver, then follow the client instructions below.                                                                                                                |
+| Persistent JavaScript with preloaded `cua` (Node REPL + SDK) | Follow the [Node REPL README](../node-repl/README.md#usage). It installs the matching SDK dependencies automatically and does not require this standalone driver installation. |
+
+Both interfaces work with Qwen Code, Claude Code, and Codex over stdio MCP.
+Claude Code and Codex can use them independently of Qwen Code. The version
+`0.27.0` here belongs to the CUA components; it does not require a Qwen Code
+CLI or Web Shell release with that version.
+
+### Qwen Code
+
+On macOS/Linux, register the installed executable at user scope:
 
 ```bash
-qwen-cua-driver mcp
+qwen mcp add --scope user cua-driver "$HOME/.local/bin/qwen-cua-driver" mcp
 ```
 
-Register it with Qwen Code:
+This writes `mcpServers.cua-driver` in `~/.qwen/settings.json`. Use
+`--scope project` for the current project's `.qwen/settings.json` instead.
+
+### Claude Code
+
+On macOS/Linux:
 
 ```bash
-qwen mcp add cua-driver qwen-cua-driver mcp
+claude mcp add --scope user --transport stdio cua-driver -- "$HOME/.local/bin/qwen-cua-driver" mcp
 ```
 
-Other MCP clients can use the same executable and arguments. Shell-oriented
-automation can call tools through `qwen-cua-driver call`.
+User scope is stored in `~/.claude.json`. Use `--scope project` to write the
+current project's `.mcp.json` instead. See the
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
 
-## 0.17 runtime and SDK surface
+### Codex
 
-The 0.17 base includes the SDK-owned runtime and versioned C ABI, generated
+On macOS/Linux:
+
+```bash
+codex mcp add cua-driver -- "$HOME/.local/bin/qwen-cua-driver" mcp
+```
+
+Alternatively, add this table to `~/.codex/config.toml`, replacing the path
+with your actual installed executable. TOML command strings are literal paths;
+do not use `$HOME` or `~` in place of the absolute path.
+
+```toml
+[mcp_servers.cua-driver]
+command = "/absolute/path/to/.local/bin/qwen-cua-driver"
+args = ["mcp"]
+```
+
+See the [official OpenAI MCP documentation](https://learn.chatgpt.com/docs/extend/mcp).
+
+### Windows client commands
+
+In PowerShell, use the installed executable's absolute path. Run the command
+for your chosen client:
+
+```powershell
+$driver = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin\qwen-cua-driver.exe"
+
+# Qwen Code
+qwen mcp add --scope user cua-driver $driver mcp
+
+# Claude Code
+claude mcp add --scope user --transport stdio cua-driver -- $driver mcp
+
+# Codex
+codex mcp add cua-driver -- $driver mcp
+```
+
+### Permissions and connection check
+
+Restart the client after registration. Check its server list with
+`qwen mcp list`, `claude mcp list`, or `codex mcp list`, and use `/mcp` inside
+the session to inspect the connection and available tools. The default native
+MCP interface exposes 19 Computer Use tools; advanced tools require the
+explicit `CUA_DRIVER_EXTRA_TOOLS=1` opt-in.
+
+On macOS, grant Accessibility and Screen Recording to
+`/Applications/QwenCuaDriver.app`; normal `mcp` uses its app-owned daemon.
+On Windows, run the installer in the logged-in desktop user's session and
+allow its UAC prompt. On Linux, use an X11 desktop (including X11 apps under
+XWayland); native Wayland apps are unsupported. Launch the client with that
+desktop session's environment. Codex needs the matching environment allowlist
+shown in [Linux desktop sessions](../node-repl/README.md#linux-desktop-sessions),
+applied to its `mcp_servers.cua-driver` table.
+
+Clients start `qwen-cua-driver mcp` themselves; a separately started MCP
+process is unnecessary. Shell-oriented automation can instead call tools
+through `qwen-cua-driver call`.
+
+The native agent cursor is enabled by default. On macOS, a local PiP also
+updates the two most recently observed, authorized windows in each session,
+including while the agent is idle. Drag a card or its Move preview handle to move the borderless window.
+Hover to reveal its floating controls, or close it to stop that preview; a later authorized observation can recreate it. It does not forward input to the target app. Use
+`--no-overlay` and `--no-pip` when starting the owning host to disable them;
+`experimental_pip: false` in `~/.cua-driver/config.json` also disables PiP.
+Restart the owning host after changing flags or editing the file, preserving its other keys.
+For the installed app's default MCP proxy, restart the app-owned daemon.
+Restarting only the MCP client or proxy does not reconfigure an existing daemon.
+CLI flags take precedence: remove an explicit `--pip` or `--experimental-pip`
+if the file should control the setting. Disable PiP and restart its owning
+host before sharing or recording the desktop if its mirrored windows should
+not be visible. Closing the panel alone is temporary; screen sharing is not
+detected automatically.
+Windows and X11 retain cursor support; PiP is macOS-only.
+
+## 0.20 runtime and SDK surface
+
+The 0.20 base includes the SDK-owned runtime and versioned C ABI, generated
 Python and TypeScript UniFFI bindings, typed browser automation, permission
-modes, runtime-owned consent adapters, per-session capture scope,
-snapshot-bound element tokens, closed action results, `verify_state`, native
-menu invocation, clipboard tools, window framing, and semantic cursor themes.
+modes, runtime-owned consent adapters, transport-owned implicit lifecycle
+sessions, per-action target selection, capability manifests across permission
+profiles, snapshot-bound element tokens, closed action results, `verify_state`,
+foreground-focus verification, native menu and clipboard operations, window
+framing, and semantic cursor themes. Browser approval tokens are retired;
+existing-profile access now requires a trusted launch grant, bounded manifest,
+or embedding-host authorization.
 
-Python applications import `cua_driver`. TypeScript applications retain the
-upstream-compatible `@trycua/cua-driver` package name. Both use the same
+Python applications import `cua_driver`. TypeScript applications import the
+Qwen-owned `@qwen-code/cua-sdk` package. Both use the same
 in-process native runtime; MCP remains the agent-facing boundary implemented by
 `qwen-cua-driver`.
 
@@ -81,6 +202,13 @@ and generated bindings are documented in [`contract/README.md`](contract/README.
 `standard` is the promptless default for ordinary automation. `bounded`
 admits only reviewed tools and resources. `unrestricted` requires
 `--dangerously-bypass-approvals`.
+
+The mode belongs to the process that owns the runtime and is fixed at launch:
+`qwen-cua-driver serve` takes the flags, while `qwen-cua-driver mcp` and embedding hosts
+use the matching `CUA_DRIVER_PERMISSION_MODE`,
+`CUA_DRIVER_CAPABILITY_MANIFEST_FILE`, and
+`CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED` variables. Choose it before starting
+the daemon; a running daemon must be restarted to change it.
 
 Attaching to an existing logged-in Chromium profile remains explicit:
 
@@ -145,15 +273,15 @@ release workflow.
 
 ## Repository layout
 
-| Path | Purpose |
-| --- | --- |
-| `rust/` | Cargo workspace for the CLI, daemon, SDK, platform crates, and tests |
-| `python/` | Python SDK and bundled-runtime wrapper |
-| `typescript/` | TypeScript SDK and native runtime loader |
-| `contract/` | Generated portable contract and fixtures |
-| `tests/fixtures/` | Cross-platform GUI harness applications |
-| `scripts/` | Release/local install, uninstall, generation, and sync helpers |
-| `docs/` | Package-local architecture and behavior notes |
+| Path              | Purpose                                                              |
+| ----------------- | -------------------------------------------------------------------- |
+| `rust/`           | Cargo workspace for the CLI, daemon, SDK, platform crates, and tests |
+| `python/`         | Python SDK and bundled-runtime wrapper                               |
+| `typescript/`     | TypeScript SDK and native runtime loader                             |
+| `contract/`       | Generated portable contract and fixtures                             |
+| `tests/fixtures/` | Cross-platform GUI harness applications                              |
+| `scripts/`        | Release/local install, uninstall, generation, and sync helpers       |
+| `docs/`           | Package-local architecture and behavior notes                        |
 
 Start with [`rust/README.md`](rust/README.md),
 [`docs/test-matrix.md`](docs/test-matrix.md), and
@@ -170,5 +298,4 @@ cargo test -p cua-driver-core
 ```
 
 Generated contract and language bindings must be checked with the package-local
-scripts before release. Signed/notarized macOS, Windows UIAccess, Linux X11 and
-Wayland, and real MCP/model verification remain platform release gates.
+scripts before release. Signed/notarized macOS, Windows UIAccess, Linux X11, and real MCP/model verification remain platform release gates.

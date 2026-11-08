@@ -25,7 +25,9 @@ const serveOptionNames = new Set([
   '--max-connections',
   '--require-auth',
   '--event-ring-size',
+  '--event-ring-max-bytes',
   '--compacted-replay-max-bytes',
+  '--initialize-timeout-ms',
 ]);
 
 function readOption(name) {

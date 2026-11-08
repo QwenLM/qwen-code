@@ -31,10 +31,14 @@ export function createShowMemoryAction(
 
     const contextMemory = config.getUserMemory();
     const autoMemoryPrompt = config.getAutoMemoryPrompt();
-    const currentMemory = [contextMemory, autoMemoryPrompt]
+    const currentMemory = [
+      contextMemory,
+      autoMemoryPrompt,
+      config.getAutoMemoryContext?.() ?? '',
+    ]
       .filter((section) => section.trim().length > 0)
       .join('\n\n---\n\n');
-    const fileCount = config.getGeminiMdFileCount();
+    const fileCount = config.getMemoryFileCount();
     const contextFileName = settings.merged.context?.fileName;
     const contextFileNames = Array.isArray(contextFileName)
       ? contextFileName

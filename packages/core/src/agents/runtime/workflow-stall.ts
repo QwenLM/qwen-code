@@ -8,8 +8,8 @@
  * @fileoverview Stall watchdog + retry for workflow agent dispatches. A
  * workflow `agent()` can hang indefinitely if the model loops, the provider
  * stalls mid-stream, or a tool never returns. The subagent's own
- * `max_time_minutes` (10 min) is a coarse backstop; the stall watchdog is
- * finer-grained: it aborts a dispatch after `stallMs` (default 60s) of NO
+ * `max_time_minutes` (10 min, per attempt) is a coarse backstop; the stall
+ * watchdog is finer-grained: it aborts a dispatch after `stallMs` (default 3 min) of NO
  * observable progress, and the resilient wrapper retries up to
  * `MAX_STALL_ATTEMPTS` times before abandoning.
  *
@@ -18,7 +18,9 @@
  * SUSPENDED while a tool is in flight: a legitimately long-running tool
  * (a 90s shell build, a slow MCP call) must not be flagged as a stall. The
  * timer only counts wall-clock during which the subagent is producing
- * nothing AND has no tool executing.
+ * nothing AND has no tool executing. A retry-owned backoff sleep the request
+ * announces (`RETRY_WAIT`) likewise holds the timer, but only until its declared
+ * delay elapses.
  *
  * Design (low-invasiveness): the resilient wrapper owns the per-attempt
  * `AbortController` and `AgentEventEmitter`. It chains the caller's parent
@@ -36,12 +38,37 @@
  * wrapper sees a success and never retries.
  */
 
-import { AgentEventEmitter, AgentEventType } from './agent-events.js';
+import {
+  AgentEventEmitter,
+  AgentEventType,
+  type AgentRetryWaitEvent,
+} from './agent-events.js';
+import {
+  WORKFLOW_ABORT_REASON_STALLED,
+  WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 
-/** Default stall timeout: 60s of no progress (with no tool in flight). */
-export const DEFAULT_STALL_MS = 60_000;
+/**
+ * Default stall timeout: no progress (with no tool in flight) for this long
+ * ends the attempt.
+ *
+ * Repository-managed backoff sleeps — the `retryWithBackoff` ladder, stream-side
+ * rate-limit sleeps (`RATE_LIMIT_RETRY_OPTIONS` in llm-chat.ts —
+ * 60s/120s/240s/300s), an unclamped provider `Retry-After`, and unattended-mode
+ * persistent backoff (a `Retry-After` there is capped only at 6h) — are
+ * announced as retry waits and extend the window themselves (see
+ * `attachStallWatchdog`). Retries inside a provider SDK sleep without any
+ * announcement, so the window stays sized against the `retryWithBackoff`
+ * ladder — 1.5s, 3s, 6s, 12s, 24s then 30s between attempts
+ * (`DEFAULT_RETRY_OPTIONS` in utils/retry.ts), 76.5s nominal — as the
+ * silent stretch a healthy request may show.
+ */
+export const DEFAULT_STALL_MS = 180_000;
+
+/** Largest delay `setTimeout` accepts without overflowing to ~immediate. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /** Total attempts (initial + retries) for a single `agent()` dispatch. */
 export const MAX_STALL_ATTEMPTS = 3;
@@ -89,13 +116,28 @@ export interface StallWatchdogHandle {
  * flight the timer is held (a long tool call is not a stall). When the
  * timer elapses with no in-flight tool, it fires `controller.abort('stalled')`.
  *
- * The watchdog arms on the FIRST progress event, not at attach time. The
- * time-to-first-response window — connection setup, server-side queueing, and
- * a reasoning model's pre-first-token thinking — emits no events (`ROUND_START`
- * fires only AFTER `await sendMessageStream` resolves), so counting it would
- * false-trip on a healthy-but-slow first response and waste 3× tokens on the
- * retry loop. That window is instead bounded by the subagent's own
- * `max_time_minutes`; the watchdog's job is post-first-response streaming stalls.
+ * The watchdog arms on the first progress event rather than at attach time, but
+ * that excludes far less than it appears to. `ROUND_START` is emitted as soon as
+ * `await sendMessageStream(...)` resolves — and that call returns a lazily
+ * iterated async generator, so it resolves BEFORE the request reaches the wire;
+ * the generator body issues it on first iteration. The deferred arm therefore
+ * only skips round 1's pre-generator work (the send-lock drain, route
+ * resolution, and any auto-compaction), not the request itself. Connection
+ * setup, server-side queueing, and a reasoning model's pre-first-token thinking
+ * all elapse with the timer already running.
+ *
+ * So `stallMs` must be wide enough to cover a healthy first response, not just a
+ * mid-stream gap. The binding case this window is sized against is the
+ * `retryWithBackoff` silent retry ladder — see `DEFAULT_STALL_MS`. Once the
+ * provider streams anything at all, including thought deltas, `STREAM_TEXT`
+ * resets the timer.
+ *
+ * A `RETRY_WAIT` start registers a finite wait: while it is active the
+ * deadline is its declared end plus `stallMs`, and its `end` restarts the full
+ * window from the moment the request actually resumed. A wait whose end never
+ * arrives stops shielding once its delay elapses, and repeated or unknown
+ * notifications cannot extend anything. A wait also arms the watchdog, so a
+ * request that starts waiting before `ROUND_START` is still bounded.
  *
  * A `stallMs` of 0 means "no watchdog" — this returns an inert handle.
  */
@@ -112,6 +154,13 @@ export function attachStallWatchdog(
   let fired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
+  // Monotonic time of the last progress, or of when the last retry wait
+  // ended. Undefined until the first progress event or retry wait.
+  let lastActivity: number | undefined;
+  // Active retry waits → monotonic time their declared delay elapses.
+  const waits = new Map<string, number>();
+  // Every waitId this attempt has started, so a repeated start cannot renew it.
+  const startedWaitIds = new Set<string>();
 
   const clear = (): void => {
     if (timer) {
@@ -120,37 +169,74 @@ export function attachStallWatchdog(
     }
   };
 
+  const markActivity = (): void => {
+    lastActivity = Math.max(lastActivity ?? 0, performance.now());
+  };
+
   const arm = (): void => {
     clear();
     if (disposed || fired) return;
     // Suspend the timer while any tool is executing — a slow tool is not a
     // stall. The TOOL_RESULT handler re-arms once the tool count returns to 0.
     if (inFlightTools > 0) return;
-    timer = setTimeout(() => {
-      if (disposed || fired) return;
-      fired = true;
-      debugLogger.warn(
-        `[Workflow] agent dispatch stalled — no progress for ${stallMs}ms; aborting.`,
-      );
-      try {
-        controller.abort('stalled');
-      } catch (e) {
-        debugLogger.warn('stall watchdog abort threw:', e);
+    if (lastActivity === undefined && waits.size === 0) return;
+    const now = performance.now();
+    let base = lastActivity ?? now;
+    for (const [waitId, until] of waits) {
+      // A wait whose end never arrived stops shielding once its declared
+      // delay elapses; that moment then counts as when it ended.
+      if (until <= now) {
+        waits.delete(waitId);
+        lastActivity = Math.max(lastActivity ?? until, until);
       }
-    }, stallMs);
-    // Don't keep the event loop alive solely for the watchdog timer.
-    if (typeof (timer as { unref?: () => void }).unref === 'function') {
-      (timer as { unref: () => void }).unref();
+      base = Math.max(base, until);
+    }
+    const due = base + stallMs;
+    if (due > now) {
+      // Re-evaluated on wake, so an over-long delay is split into chunks
+      // rather than overflowing setTimeout.
+      timer = setTimeout(arm, Math.min(due - now, MAX_TIMER_DELAY_MS));
+      // Don't keep the event loop alive solely for the watchdog timer.
+      timer.unref?.();
+      return;
+    }
+    fired = true;
+    debugLogger.warn(
+      `[Workflow] agent dispatch stalled — no progress for ${stallMs}ms; aborting.`,
+    );
+    try {
+      controller.abort(WORKFLOW_ABORT_REASON_STALLED);
+    } catch (e) {
+      debugLogger.warn('stall watchdog abort threw:', e);
     }
   };
 
-  const onActivity = (): void => arm();
+  const onActivity = (): void => {
+    markActivity();
+    arm();
+  };
   const onToolCall = (): void => {
     inFlightTools += 1;
     clear(); // hold the timer while the tool runs
   };
   const onToolResult = (): void => {
     inFlightTools = Math.max(0, inFlightTools - 1);
+    markActivity();
+    arm();
+  };
+  const onRetryWait = (event: AgentRetryWaitEvent): void => {
+    if (event.phase === 'start') {
+      if (startedWaitIds.has(event.waitId)) return;
+      if (!Number.isFinite(event.delayMs) || event.delayMs <= 0) return;
+      startedWaitIds.add(event.waitId);
+      const now = performance.now();
+      waits.set(event.waitId, now + event.delayMs);
+      lastActivity ??= now;
+    } else {
+      if (!waits.delete(event.waitId)) return;
+      // The resumed request gets a full window from when it actually resumed.
+      markActivity();
+    }
     arm();
   };
 
@@ -160,11 +246,15 @@ export function attachStallWatchdog(
   emitter.on(AgentEventType.USAGE_METADATA, onActivity);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
   emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  emitter.on(AgentEventType.RETRY_WAIT, onRetryWait);
 
-  // Intentionally NOT armed here. The first `onActivity` (the first response
-  // event of round 1) arms it, so time-to-first-response is not counted as a
-  // stall (see the doc comment); first-response hangs are bounded by the
-  // subagent's `max_time_minutes`.
+  // Intentionally NOT armed here — the first `onActivity` (or retry wait) arms
+  // it. Note this defers arming only past round 1's pre-request work, NOT past
+  // the request: `ROUND_START` fires before the call is on the wire (see the
+  // doc comment).
+  // A first-response hang is therefore caught by this watchdog, not left to
+  // the subagent's `max_time_minutes` (which is per attempt and resets on
+  // every stall retry, so it never bounds the sequence).
 
   return {
     stalled: () => fired,
@@ -172,12 +262,14 @@ export function attachStallWatchdog(
       if (disposed) return;
       disposed = true;
       clear();
+      waits.clear();
       emitter.off(AgentEventType.ROUND_START, onActivity);
       emitter.off(AgentEventType.ROUND_END, onActivity);
       emitter.off(AgentEventType.STREAM_TEXT, onActivity);
       emitter.off(AgentEventType.USAGE_METADATA, onActivity);
       emitter.off(AgentEventType.TOOL_CALL, onToolCall);
       emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+      emitter.off(AgentEventType.RETRY_WAIT, onRetryWait);
     },
   };
 }
@@ -256,9 +348,10 @@ export async function runStallResilient<T>(
         continue;
       }
       if (watchdog.stalled()) {
-        throw new Error(
+        throw new WorkflowAgentFailedError(
           `agent "${label ?? 'workflow-agent'}" stalled on all ` +
             `${MAX_STALL_ATTEMPTS} attempts (no progress for ${stallMs}ms each).`,
+          'stalled',
         );
       }
       throw err;

@@ -48,6 +48,8 @@ use cua_driver_testkit::e2e::{
 use cua_driver_testkit::observer::TargetWindow;
 use cua_driver_testkit::sentinel::{run_with_background_oracles, ForegroundSentinel};
 use cua_driver_testkit::{ax, harness_app, spawn_in_job, Driver, McpDriver, ToolResponse};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindow, SW_MINIMIZE};
 
 // ── harness launcher ─────────────────────────────────────────────────────────
 
@@ -551,6 +553,95 @@ fn harness_wpf_counter_invoke() {
 
 #[test]
 #[ignore]
+fn harness_wpf_minimized_element_click_refuses_without_side_effects() {
+    let case = CaseSpec::delivered(
+        "windows-wpf-minimized-element-click-refusal",
+        "wpf",
+        "wpf",
+        "left_click",
+        Targeting::Ax,
+        Delivery::Background,
+        Scope::Window,
+        DriverRoute::Composite,
+        vec![
+            OracleKind::FixtureState,
+            OracleKind::Focus,
+            OracleKind::ZOrder,
+            OracleKind::Cursor,
+            OracleKind::NoLeakedInput,
+            OracleKind::Protocol,
+        ],
+    )
+    .expecting_refusal(vec![RefusalCode::WindowMinimized]);
+
+    execute_case(case, |evidence| {
+        let mut driver = McpDriver::spawn_named("windows-wpf-minimized-element-click-refusal")
+            .expect("required source-built driver did not start");
+        *evidence = recording_evidence(driver.recording_dir());
+        let state_dir = tempfile::tempdir().expect("create WPF fixture state directory");
+        let state_path = state_dir.path().join("state.json");
+        let pid = launch_harness_with_state_file(&mut driver, Some(&state_path))
+            .expect("required WPF harness did not launch");
+        let (wid, _) = driver
+            .find_window(pid as i64, "CuaTestHarness WPF")
+            .expect("main window");
+        wait_for_fixture_file_text(&state_path, "lbl-counter", "counter=0");
+        let ready = snapshot(&mut driver, pid, wid);
+        let idx = ax::element_index_by_id(ready.text(), "btn-increment")
+            .expect("btn-increment not in pre-minimize snapshot");
+
+        let sentinel = ForegroundSentinel::launch(&mut driver);
+        let hwnd = HWND(wid as *mut _);
+        let _ = unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !unsafe { IsIconic(hwnd) }.as_bool() {
+            assert!(Instant::now() < deadline, "WPF target did not minimize");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        driver.start_behavior_recording();
+
+        let (response, mut passed) = sentinel
+            .observe_desktop(|| {
+                driver.call(
+                    "click",
+                    serde_json::json!({
+                        "pid": pid as i64,
+                        "window_id": wid,
+                        "element_index": idx,
+                        "snapshot_id": ready.snapshot_id(),
+                        "delivery_mode": "background"
+                    }),
+                )
+            })
+            .unwrap_or_else(|error| panic!("minimized refusal leaked desktop state: {error}"));
+        assert!(
+            response.is_error(),
+            "minimized click reported success: {}",
+            response.text()
+        );
+        assert_eq!(response.structured()["status"], "refused");
+        assert_eq!(response.structured()["refusal"]["code"], "window_minimized");
+        assert!(
+            unsafe { IsIconic(hwnd) }.as_bool(),
+            "refused click restored or otherwise changed the minimized target"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        wait_for_fixture_file_text(&state_path, "lbl-counter", "counter=0");
+
+        passed.extend([OracleKind::FixtureState, OracleKind::Protocol]);
+        passed.sort();
+        passed.dedup();
+        Observation::refused(
+            RefusalCode::WindowMinimized,
+            passed,
+            response.text(),
+            Evidence::default(),
+        )
+    });
+}
+
+#[test]
+#[ignore]
 fn harness_wpf_left_click_px_background() {
     let case = native_background_case("wpf", "left_click", Targeting::Px, DriverRoute::UiaInvoke);
     execute_case(case, |evidence| {
@@ -627,53 +718,24 @@ fn harness_wpf_type_text() {
             let snap = snapshot(driver, pid, wid);
             let idx = ax::element_index_by_id(snap.text(), "txt-input")
                 .expect("txt-input not in snapshot");
-
-            // WPF's TextBox needs *keyboard focus* for WM_CHAR delivery — and
-            // PostMessage(WM_LBUTTONDOWN) doesn't reliably transfer keyboard
-            // focus (WPF's input system treats posted events differently from
-            // real ones). Use delivery_mode:"foreground" → SendInput synthesizes
-            // an OS-level click that WPF treats identically to a user mouse,
-            // landing actual keyboard focus on the TextBox.
-            let _ = driver.call(
-                "bring_to_front",
-                serde_json::json!({
-                    "pid": pid as i64, "window_id": wid
-                }),
-            );
-            std::thread::sleep(Duration::from_millis(300));
             driver.start_behavior_recording();
 
-            let _ = driver.call(
-                "click",
-                serde_json::json!({
-                    "pid": pid as i64, "window_id": wid, "element_index": idx,
-                    "snapshot_id": snap.snapshot_id(),
-                    "delivery_mode": "foreground"
-                }),
-            );
-            std::thread::sleep(Duration::from_millis(400));
-
-            // SendInput's restore_foreground_polling_best_effort may yank
-            // foreground back from the harness window between click and
-            // type_text. Re-assert foreground so PostMessage WM_CHAR finds
-            // the TextBox with keyboard focus.
-            let _ = driver.call(
-                "bring_to_front",
-                serde_json::json!({
-                    "pid": pid as i64, "window_id": wid
-                }),
-            );
-            std::thread::sleep(Duration::from_millis(300));
-
+            // The fixture deliberately starts with txt-deferred-input focused.
+            // A single indexed type_text call must atomically activate the WPF
+            // window, focus txt-input, confirm that focus, and only then inject.
             let resp = driver.call(
                 "type_text",
                 serde_json::json!({
                     "pid": pid as i64,
+                    "window_id": wid,
+                    "element_index": idx,
+                    "snapshot_id": snap.snapshot_id(),
                     "text": "harness-typed",
                     "delivery_mode": "foreground"
                 }),
             );
             println!("type_text: {}", resp.text());
+            assert!(!resp.is_error(), "type_text failed: {}", resp.text());
             std::thread::sleep(Duration::from_millis(700));
 
             let post = snapshot(driver, pid, wid);
@@ -686,6 +748,20 @@ fn harness_wpf_type_text() {
                 text.contains("mirror=harness-typed"),
                 "TextBox mirror did not reflect typed text. Mirror/input lines: {:?}",
                 mirror_lines
+            );
+            let decoy_idx = ax::element_index_by_id(text, "txt-deferred-input")
+                .expect("txt-deferred-input not in post-action snapshot");
+            let decoy = post.structured()["elements"]
+                .as_array()
+                .and_then(|elements| {
+                    elements
+                        .iter()
+                        .find(|element| element["element_index"].as_u64() == Some(decoy_idx))
+                })
+                .expect("txt-deferred-input missing from structured elements");
+            assert!(
+                decoy["value"].as_str().unwrap_or_default().is_empty(),
+                "foreground type_text leaked into the pre-focused decoy: {decoy}"
             );
             println!("✅ harness_wpf_type_text: TextBox mirror advanced to 'harness-typed'");
             Vec::new()
@@ -728,6 +804,60 @@ fn harness_wpf_set_value() {
                 );
                 delivered_with_fixture_state(passed)
             })
+            .expect("required WPF session did not start")
+        },
+    );
+}
+
+#[test]
+#[ignore]
+fn harness_wpf_deferred_type_text_requires_fresh_snapshot_before_retry() {
+    execute_case(
+        background_case("deferred-type-text", DriverRoute::UiaValue),
+        |evidence| {
+            with_named_session(
+                "windows-wpf-deferred-type-text-ax-background",
+                |pid, wid, driver| {
+                    *evidence = recording_evidence(driver.recording_dir());
+                    let snap = snapshot(driver, pid, wid);
+                    let idx = ax::element_index_by_id(snap.text(), "txt-deferred-input")
+                        .expect("txt-deferred-input not in snapshot");
+                    let (response, passed) = observe_background(driver, pid, wid, |driver| {
+                        driver.call(
+                            "type_text",
+                            serde_json::json!({
+                                "pid": pid as i64,
+                                "window_id": wid,
+                                "element_index": idx,
+                                "snapshot_id": snap.snapshot_id(),
+                                "text": "deferred-once",
+                                "delivery_mode": "background"
+                            }),
+                        )
+                    });
+                    assert!(
+                        !response.is_error(),
+                        "type_text failed: {}",
+                        response.text()
+                    );
+                    assert_eq!(response.action_effect(), Some("unverifiable"));
+                    assert_eq!(response.action_route(), Some("accessibility"));
+                    assert!(
+                        response.structured().get("escalation").is_none(),
+                        "deferred publication must not recommend an immediate retry: {}",
+                        response.structured()
+                    );
+
+                    std::thread::sleep(Duration::from_millis(700));
+                    let post = snapshot(driver, pid, wid);
+                    assert!(
+                        post.text().contains("deferred_mirror=deferred-once"),
+                        "fresh snapshot did not observe exactly one deferred write: {}",
+                        post.text().chars().take(700).collect::<String>()
+                    );
+                    delivered_with_fixture_state(passed)
+                },
+            )
             .expect("required WPF session did not start")
         },
     );

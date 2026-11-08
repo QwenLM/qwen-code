@@ -24,9 +24,11 @@ import type {
 import {
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
+  requireValidWorkerToken,
 } from './supervisor-process.js';
 import type { AgentViewSupervisorHibernationPolicy } from './supervisor-process.js';
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
+import type { AgentViewSidebandAuthorizer } from './supervisor-server.js';
 import {
   getAgentViewStorePaths,
   readAgentViewSupervisor,
@@ -41,6 +43,7 @@ const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
 const SUPERVISOR_MAINTENANCE_INTERVAL_MS = 5000;
 const LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS = 30_000;
+const AGENT_VIEW_SHUTDOWN_TIMEOUT_MS = 60_000;
 
 export interface AgentViewSupervisorClientHandle {
   socketPath: string;
@@ -138,6 +141,7 @@ export async function runAgentViewSupervisor(
   const authToken = randomUUID();
   const startedAt = new Date().toISOString();
   let closeRequested = false;
+  let closeServer = (): Promise<void> => Promise.resolve();
   const handler = createAgentViewSupervisorHandler({
     ...(options.globalDir ? { globalDir: options.globalDir } : {}),
     ...(options.hibernationPolicy
@@ -146,14 +150,34 @@ export async function runAgentViewSupervisor(
     onShutdown: () => {
       closeRequested = true;
       setImmediate(() => {
-        void Promise.resolve(server.close()).catch(() => {});
+        void closeServer().catch(() => {});
       });
     },
   });
+  const authorizeSideband: AgentViewSidebandAuthorizer = async (
+    _op,
+    params,
+  ) => {
+    const sessionId = params?.['sessionId'];
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+    try {
+      await requireValidWorkerToken(
+        sessionId,
+        params,
+        options.globalDir ? { globalDir: options.globalDir } : {},
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const server = createAgentViewSupervisorServer(handler, {
     socketPath,
     authToken,
+    authorizeSideband,
   });
+  let serverClosePromise: Promise<void> | undefined;
+  closeServer = () => (serverClosePromise ??= server.close());
 
   await server.listen();
   await writeAgentViewSupervisor(
@@ -175,16 +199,14 @@ export async function runAgentViewSupervisor(
     const onSigterm = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void closeServer()
         .catch(() => {})
         .finally(resolve);
     };
     const onSigint = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void closeServer()
         .catch(() => {})
         .finally(resolve);
     };
@@ -200,13 +222,7 @@ export async function runAgentViewSupervisor(
     process.once('SIGTERM', onSigterm);
     process.once('SIGINT', onSigint);
   });
-  await fs
-    .unlink(
-      getAgentViewStorePaths({
-        ...(options.globalDir ? { globalDir: options.globalDir } : {}),
-      }).supervisorPath,
-    )
-    .catch(() => {});
+  await closeServer().catch(() => {});
 }
 
 function createSupervisorHandle(
@@ -256,14 +272,20 @@ function createSupervisorHandle(
         socketPath,
         'send',
         { sessionId, text },
-        authOptions,
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
       ),
     answer: (sessionId: string, text: string) =>
       callAgentViewSupervisor(
         socketPath,
         'answer',
         { sessionId, text },
-        authOptions,
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
       ),
     logs: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'logs', { sessionId }, authOptions),
@@ -305,7 +327,10 @@ function createSupervisorHandle(
         socketPath,
         'shutdown',
         keepWorkers === undefined ? undefined : { keepWorkers },
-        authOptions,
+        {
+          ...authOptions,
+          timeoutMs: AGENT_VIEW_SHUTDOWN_TIMEOUT_MS,
+        },
       ),
   };
 }

@@ -66,6 +66,10 @@ describe('buildLearnSkillPrompt', () => {
   it('includes source: learned in the template', async () => {
     const prompt = await buildLearnSkillPrompt('some text', projectRoot);
     expect(prompt).toContain('source: learned');
+    // list_directory is disabled by default; the tool guidance must steer to
+    // always-registered tools instead.
+    expect(prompt).toContain('read_file / glob');
+    expect(prompt).not.toContain('list_directory');
   });
 
   it('includes the project skills directory path', async () => {

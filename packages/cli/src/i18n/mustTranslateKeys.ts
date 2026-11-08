@@ -11,6 +11,8 @@
  * unchanged across locales.
  */
 export const MUST_TRANSLATE_KEYS = [
+  'Instruction files',
+  'Auto memory',
   'View or change the language setting',
   'List background tasks (text dump — interactive dialog opens via the footer pill)',
   'Delete a previous session',
@@ -45,6 +47,14 @@ export const MUST_TRANSLATE_KEYS = [
   'prompts',
   'tools',
   'Ask a quick side question without affecting the main conversation',
+  'Get a second opinion on the current conversation from a reviewer model',
+  'Consulting advisor...',
+  'Advisor review failed: {{error}}',
+  'No conversation context available for /advisor',
+  'Focus too long (max {{max}} chars)',
+  'Another operation is in progress, wait for it to complete before running /advisor',
+  'No response received.',
+  'No model configured.',
   'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task',
   'Stop the current Arena session',
@@ -123,4 +133,7 @@ export const MUST_TRANSLATE_KEYS = [
   'best',
   'Token Trend',
   'In/Out',
+  'Unset',
+  'Update requires sudo. Please run:',
+  'Standalone install detected. Please rerun the standalone installer to update:',
 ] as const;

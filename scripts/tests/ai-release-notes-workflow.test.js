@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
@@ -14,6 +17,10 @@ const finalizeWorkflow = readFileSync(
 );
 const releaseNotesScript = readFileSync(
   'scripts/generate-release-notes.js',
+  'utf8',
+);
+const releaseStepScript = readFileSync(
+  '.github/scripts/run-release-step.sh',
   'utf8',
 );
 
@@ -29,28 +36,40 @@ function getStep(workflow, name) {
 
 describe('stable release notes workflow', () => {
   it('publishes immediately with GitHub-generated notes', () => {
-    const step = getStep(releaseWorkflow, 'Create GitHub Release and Tag');
-
-    expect(step).toContain(
+    expect(releaseStepScript).toContain(
       'repos/${GITHUB_REPOSITORY}/releases/generate-notes',
     );
-    expect(step).toContain('-f "previous_tag_name=${PREVIOUS_RELEASE_TAG}"');
-    expect(step).toContain('"${NOTES_ARGS[@]}"');
-    expect(step).toContain('--notes-file "${NOTES_FILE}"');
+    expect(releaseStepScript).toContain(
+      '-f "previous_tag_name=${PREVIOUS_RELEASE_TAG}"',
+    );
+    expect(releaseStepScript).toContain('"${notes_args[@]}"');
+    expect(releaseStepScript).toContain('--notes-file "${notes_file}"');
     // Stable tags live on their own release/* branch and are merged back to
     // main only afterwards, so the previous tag is never an ancestor of the
     // branch being released. Anchoring on ancestry dropped the anchor on every
     // stable release, and unanchored notes span the whole branch history and
     // overrun the 125000 character body limit.
-    expect(step).not.toContain('git merge-base --is-ancestor');
-    expect(step).toContain('node .github/scripts/cap-release-notes.mjs');
-    expect(step).toContain('--file "${NOTES_FILE}"');
+    expect(releaseStepScript).not.toContain('git merge-base --is-ancestor');
+    expect(releaseStepScript).toContain(
+      'node .release-workflow/.github/scripts/cap-release-notes.mjs',
+    );
+    expect(releaseStepScript).toContain('--file "${notes_file}"');
     // gh prints the API error payload on stdout, so a failed attempt's output
     // must not survive into the release body.
-    expect(step).toContain(
-      'generate_notes > "${NOTES_FILE}" || : > "${NOTES_FILE}"',
+    expect(releaseStepScript).toContain(
+      'generate_notes > "${notes_file}" || : > "${notes_file}"',
     );
-    expect(step).toContain("GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
+    // Step-scoped on purpose: release.yml sets this exact token on two steps,
+    // 'Create GitHub Release and Tag' and 'Trigger ECS runner qwen update', so
+    // a workflow-wide toContain is satisfied by the other step's occurrence and
+    // can never fail on the step it was written to protect.
+    const createReleaseStep = getStep(
+      releaseWorkflow,
+      'Create GitHub Release and Tag',
+    );
+    expect(createReleaseStep).toContain(
+      "GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'",
+    );
     expect(releaseWorkflow).not.toContain(
       "name: 'Generate AI-assisted stable release notes'",
     );
@@ -62,12 +81,19 @@ describe('stable release notes workflow', () => {
 
   it('finalizes stable releases asynchronously', () => {
     const validate = getStep(finalizeWorkflow, 'Validate stable release tag');
+    const checkout = getStep(finalizeWorkflow, 'Checkout release branch');
+    const install = getStep(finalizeWorkflow, 'Install Dependencies');
     const generate = getStep(
       finalizeWorkflow,
       'Generate AI-assisted release notes',
     );
     const update = getStep(finalizeWorkflow, 'Update GitHub Release notes');
     const changelog = getStep(finalizeWorkflow, 'Regenerate CHANGELOG.md');
+
+    expect(
+      finalizeWorkflow.slice(0, finalizeWorkflow.indexOf('jobs:')),
+    ).not.toContain('CI_BOT_PAT');
+    expect(install).not.toContain('CI_BOT_PAT');
 
     expect(finalizeWorkflow).toContain("types: ['published']");
     expect(finalizeWorkflow).toContain(
@@ -79,6 +105,17 @@ describe('stable release notes workflow', () => {
     );
     expect(validate).toContain('is not a stable release tag');
     expect(validate).toContain('exit 1');
+    expect(checkout).toContain('persist-credentials: false');
+    expect(install).toContain(
+      'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
+    );
+    expect(install).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(install).toContain(
+      'npm ci --ignore-scripts --no-audit --progress=false',
+    );
+    expect(install).toContain('npm run postinstall');
+    expect(install).toContain('npm run generate');
+    expect(install).not.toContain('QWEN_SKIP_PREPARE');
     expect(generate).toContain('timeout-minutes: 35');
     expect(generate).toContain('continue-on-error: true');
 
@@ -101,6 +138,11 @@ describe('stable release notes workflow', () => {
       'gh release edit "${RELEASE_TAG}" --notes-file "${RELEASE_NOTES_FILE}"',
     );
     expect(changelog).not.toContain('continue-on-error: true');
+    expect(changelog).toContain("GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
+    expect(changelog).toContain('gh auth setup-git');
+    expect(changelog.indexOf('gh auth setup-git')).toBeLessThan(
+      changelog.indexOf('git push origin "${BRANCH_NAME}"'),
+    );
   });
 
   it('updates the changelog before opening the release PR', () => {
@@ -134,6 +176,81 @@ describe('stable release notes workflow', () => {
     expect(step).toContain('grep -qF "${marker}" <<<"${existing}"');
     expect(step).toContain('gh pr comment "${num}" --body "${body}"');
   });
+
+  it.each([
+    ['new', '', 0, ['list', 'create', 'update-branch']],
+    ['open', 'OPEN', 0, ['list', 'update-branch']],
+    ['merged retry', 'MERGED', 0, ['list']],
+    ['update conflict', 'OPEN', 1, ['list', 'update-branch']],
+  ])(
+    'refreshes the release PR safely: %s',
+    (_name, state, updateStatus, calls) => {
+      const dir = mkdtempSync(join(tmpdir(), 'finalize-release-'));
+      const output = join(dir, 'output');
+      const log = join(dir, 'calls');
+      const url = 'https://github.com/QwenLM/qwen-code/pull/15468';
+      const step = getStep(
+        finalizeWorkflow,
+        'Create PR to merge release branch into main',
+      );
+      const script = step.split('        run: |-\n')[1].replace(/^ {10}/gm, '');
+      try {
+        writeFileSync(output, '');
+        writeFileSync(log, '');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+set -euo pipefail
+[[ "$1" == pr ]]
+printf '%s\\n' "$2" >> "$CALL_LOG"
+case "$2" in
+  list)
+    if [[ -n "$PR_STATE" ]]; then
+      printf '%s\\t%s\\n' "$PR_URL" "$PR_STATE"
+    fi
+    ;;
+  create) printf '%s\\n' "$PR_URL" ;;
+  update-branch)
+    [[ "$#" == 3 && "$3" == "$PR_URL" ]]
+    [[ ! -s "$GITHUB_OUTPUT" ]]
+    exit "$UPDATE_STATUS"
+    ;;
+  *) exit 99 ;;
+esac
+`,
+          { mode: 0o755 },
+        );
+        writeFileSync(join(dir, 'sleep'), '#!/bin/bash\nexit 0\n', {
+          mode: 0o755,
+        });
+        const result = spawnSync('bash', ['-e', '-c', script], {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: 5000,
+          env: {
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_OUTPUT: output,
+            CALL_LOG: log,
+            PR_URL: url,
+            PR_STATE: state,
+            UPDATE_STATUS: String(updateStatus),
+            RELEASE_BRANCH: 'release/v0.26.1',
+            RELEASE_TAG: 'v0.26.1',
+          },
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(updateStatus);
+        expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(calls);
+        expect(readFileSync(output, 'utf8')).toBe(
+          updateStatus === 0
+            ? `PR_URL=${url}\nSHOULD_MERGE=${state !== 'MERGED'}\n`
+            : '',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not recreate an already merged release PR during retries', () => {
     const pr = getStep(

@@ -6,7 +6,7 @@
 
 import type { Application } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { WorkspaceEventPublisher } from '../acp-session-bridge.js';
 import {
   DeviceFlowRegistry,
   setDeviceFlowRegistry,
@@ -18,10 +18,10 @@ import { QwenOAuthDeviceFlowProvider } from '../auth/qwen-device-flow-provider.j
 
 interface SetupDeviceFlowRegistryDeps {
   app: Application;
-  bridge: AcpSessionBridge;
+  bridge: WorkspaceEventPublisher;
   registry?: DeviceFlowRegistry;
   providers?: DeviceFlowProvider[];
-  resolveEventBridges?: () => AcpSessionBridge[];
+  resolveEventBridges?: () => WorkspaceEventPublisher[];
 }
 
 export interface ServeDeviceFlowRuntime {
@@ -30,7 +30,7 @@ export interface ServeDeviceFlowRuntime {
 }
 
 export function createDeviceFlowRegistry(deps: {
-  bridge: AcpSessionBridge;
+  bridge: WorkspaceEventPublisher;
   registry?: DeviceFlowRegistry;
   providers?: DeviceFlowProvider[];
   /**
@@ -38,7 +38,7 @@ export function createDeviceFlowRegistry(deps: {
    * (primary + trusted secondary runtimes), resolved lazily on every publish.
    * Defaults to the single `bridge` when omitted, preserving prior behavior.
    */
-  resolveEventBridges?: () => AcpSessionBridge[];
+  resolveEventBridges?: () => WorkspaceEventPublisher[];
 }): ServeDeviceFlowRuntime {
   const deviceFlowProviderMap = new Map<
     DeviceFlowProviderId,

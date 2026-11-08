@@ -23,6 +23,7 @@ export const voiceCommand: SlashCommand = {
   argumentHint: '[hold|tap|off|status]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
   action: (context, args) => {
     const settings = context.services.settings;
     const command = args.trim().toLowerCase();

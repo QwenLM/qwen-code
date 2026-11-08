@@ -240,6 +240,86 @@ fn run_case(case: CaseSpec, test: impl FnOnce(u32, u64, &mut McpDriver) -> Obser
 
 #[test]
 #[ignore]
+fn harness_gtk3_rejects_exited_target_and_recovers_with_fresh_app() {
+    let case: CaseSpec = native_readonly_case(
+        "gtk3",
+        "stale_target_recovery",
+        Targeting::Ax,
+        DriverRoute::AxRead,
+        vec![OracleKind::AxState],
+    );
+    let cell_id = case.cell_id.clone();
+    execute_case(case, |evidence| {
+        let mut driver = McpDriver::spawn_named(&cell_id).expect("start source-built Linux driver");
+        *evidence = recording_evidence(driver.recording_dir());
+        let (stale_pid, stale_window_id) = launch(&mut driver);
+        assert!(
+            !snapshot(&mut driver, stale_pid, stale_window_id).is_error(),
+            "initial GTK3 snapshot failed"
+        );
+
+        let killed = driver.call("kill_app", serde_json::json!({ "pid": stale_pid as i64 }));
+        assert!(!killed.is_error(), "kill_app failed: {}", killed.text());
+
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < exit_deadline {
+            let windows = driver.call(
+                "list_windows",
+                serde_json::json!({ "pid": stale_pid as i64 }),
+            );
+            let still_listed = windows.structured()["windows"]
+                .as_array()
+                .is_some_and(|windows| !windows.is_empty());
+            if !still_listed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let started = Instant::now();
+        let stale = driver.call(
+            "get_window_state",
+            serde_json::json!({
+                "pid": stale_pid as i64,
+                "window_id": stale_window_id,
+                "include_screenshot": false
+            }),
+        );
+        assert!(
+            stale.is_error(),
+            "exited target unexpectedly snapshot: {}",
+            stale.text()
+        );
+        assert!(
+            stale.text().contains("stale or no longer running"),
+            "unexpected stale-target error: {}",
+            stale.text()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stale target did not fail fast: {:?}",
+            started.elapsed()
+        );
+
+        let (fresh_pid, fresh_window_id) = launch(&mut driver);
+        driver.start_behavior_recording();
+        let fresh = snapshot(&mut driver, fresh_pid, fresh_window_id);
+        assert!(
+            !fresh.is_error(),
+            "fresh GTK3 snapshot failed: {}",
+            fresh.text()
+        );
+        assert!(
+            fresh.tree_text().contains("btn-increment"),
+            "fresh GTK3 accessibility tree did not recover:\n{}",
+            fresh.tree_text()
+        );
+        Observation::delivered(vec![OracleKind::AxState], Evidence::default())
+    });
+}
+
+#[test]
+#[ignore]
 fn harness_gtk3_query_projects_structured_elements() {
     run_case(
         native_readonly_case(
@@ -287,16 +367,7 @@ fn harness_gtk3_query_projects_structured_elements() {
 #[test]
 #[ignore]
 fn harness_gtk3_modified_click_preserves_selection() {
-    let wayland_refusal = DisplayServer::current() == DisplayServer::Wayland;
-    let case = if wayland_refusal {
-        native_background_case(
-            "gtk3",
-            "modified_click_selection",
-            Targeting::Ax,
-            DriverRoute::LinuxWaylandVirtualPointer,
-        )
-        .expecting_refusal(vec![RefusalCode::BackgroundUnavailable])
-    } else {
+    let case = {
         native_foreground_case(
             "gtk3",
             "modified_click_selection",
@@ -306,55 +377,7 @@ fn harness_gtk3_modified_click_preserves_selection() {
     };
     run_case(case, |pid, window_id, driver| {
         let first = snapshot(driver, pid, window_id);
-        if wayland_refusal {
-            let beta = element_token(&first, "selection-beta");
-            let (add_beta, mut passed) = run_with_background_oracles(
-                driver,
-                TargetWindow {
-                    pid,
-                    native_id: window_id,
-                },
-                |driver| {
-                    driver.call(
-                        "click",
-                        serde_json::json!({
-                            "pid": pid as i64,
-                            "window_id": window_id,
-                            "element_token": beta,
-                            "delivery_mode": "background",
-                            "modifier": ["ctrl"]
-                        }),
-                    )
-                },
-            )
-            .unwrap_or_else(|error| panic!("Wayland background contract failed: {error}"));
-            assert!(
-                add_beta.is_error(),
-                "native Wayland unexpectedly accepted a modified pointer click: {}",
-                add_beta.text()
-            );
-            assert!(
-                add_beta
-                    .text()
-                    .contains("modified element clicks are unavailable on native Wayland"),
-                "native Wayland returned the wrong refusal: {}",
-                add_beta.text()
-            );
-            std::thread::sleep(Duration::from_millis(250));
-            let post = snapshot(driver, pid, window_id);
-            assert!(
-                post.tree_text().contains("selection=none"),
-                "refused modified click mutated the selection:\n{}",
-                post.tree_text()
-            );
-            passed.push(OracleKind::FixtureState);
-            return Observation::refused(
-                RefusalCode::BackgroundUnavailable,
-                passed,
-                "native Wayland cannot pair virtual-pointer delivery with modifier state",
-                Evidence::default(),
-            );
-        }
+        {}
 
         let alpha = element_token(&first, "selection-alpha");
         let select_alpha = driver.call(
@@ -800,13 +823,10 @@ fn row_expects_refusal(row: CatalogRow) -> bool {
     ) {
         return false;
     }
-    let inject_mode = std::env::var_os("CUA_INJECT_SOCKET").is_some();
-    if !inject_mode
-        && matches!(
-            row.operation,
-            Operation::PressKey { .. } | Operation::Hotkey { .. }
-        )
-    {
+    if matches!(
+        row.operation,
+        Operation::PressKey { .. } | Operation::Hotkey { .. }
+    ) {
         return true;
     }
     let focus_bound_pointer = matches!(
@@ -819,37 +839,12 @@ fn row_expects_refusal(row: CatalogRow) -> bool {
     {
         return true;
     }
-    DisplayServer::current() == DisplayServer::Wayland
-        && !inject_mode
-        && (focus_bound_pointer || matches!(row.operation, Operation::PxTypeText { .. }))
+    false
 }
 
 fn run_catalog_row(row: CatalogRow) {
     let expect_refusal = row_expects_refusal(row);
-    let route = if DisplayServer::current() == DisplayServer::Wayland
-        && (row.targeting == Targeting::Px
-            || matches!(
-                row.operation,
-                Operation::PressKey { .. } | Operation::Hotkey { .. }
-            )) {
-        if matches!(
-            row.operation,
-            Operation::PxClick {
-                button: "left",
-                count: 1,
-                ..
-            }
-        ) && row.delivery == Delivery::Background
-        {
-            DriverRoute::LinuxAtSpiAction
-        } else if std::env::var_os("CUA_INJECT_SOCKET").is_some() {
-            DriverRoute::LinuxCuaCompositorInject
-        } else {
-            DriverRoute::LinuxWaylandVirtualPointer
-        }
-    } else {
-        row.route
-    };
+    let route = row.route;
     let case = match row.delivery {
         Delivery::Background => native_background_case("gtk3", row.action, row.targeting, route),
         Delivery::Foreground => native_foreground_case("gtk3", row.action, row.targeting, route),

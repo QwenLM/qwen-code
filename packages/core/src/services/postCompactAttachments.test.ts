@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import { extractRecentFilePaths } from './postCompactAttachments.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 
 function fileReadCall(path: string): Content {
   return {
@@ -202,6 +204,82 @@ describe('extractRecentFilePaths', () => {
     expect(paths).toContain('/ws/ok.ts');
     expect(paths).not.toContain('/ws/.env');
   });
+
+  it.each(['read_file', 'write_file', 'edit', 'replace', 'Read_File'])(
+    'restores a successful bridged %s path using the outer call id',
+    (name) => {
+      const history: Content[] = [
+        fileReadCall('/older.ts'),
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                args: { name, arguments: { file_path: '/bridged.ts' } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      ];
+      expect(extractRecentFilePaths(history, 5)).toEqual([
+        '/bridged.ts',
+        '/older.ts',
+      ]);
+      expect(extractRecentFilePaths(history, 1)).toEqual(['/bridged.ts']);
+    },
+  );
+
+  it.each(['Permission denied', 'Cancelled', 'Execution failed', undefined])(
+    'does not restore an unsuccessful or unfinished bridge (%s)',
+    (error) => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  name: 'read_file',
+                  arguments: { file_path: '/private.ts' },
+                },
+              },
+            },
+          ],
+        },
+      ];
+      if (error !== undefined) {
+        history.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                response: { error },
+              },
+            },
+          ],
+        });
+      }
+      expect(extractRecentFilePaths(history, 5)).toEqual([]);
+    },
+  );
 });
 
 import {
@@ -215,7 +293,7 @@ function modelCallScreenshot(app: string): Content {
     parts: [
       {
         functionCall: {
-          name: 'computer_use__get_app_state',
+          name: 'mcp__node-repl__node_repl',
           args: { app },
         },
       },
@@ -234,7 +312,7 @@ function userToolResultWithImage(mimeType: string, data: string): Content {
     parts: [
       {
         functionResponse: {
-          name: 'computer_use__get_app_state',
+          name: 'mcp__node-repl__node_repl',
           response: { output: 'screenshot returned' },
           parts: [{ inlineData: { mimeType, data } }],
         } as unknown as NonNullable<
@@ -284,7 +362,7 @@ describe('extractRecentImages', () => {
     ];
     const result = extractRecentImages(history, 3);
     expect(result).toHaveLength(1);
-    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+    expect(result[0].sourceToolName).toBe('mcp__node-repl__node_repl');
     expect(result[0].sourceToolArgs).toEqual({ app: 'Safari' });
     expect(result[0].turnIndex).toBe(1); // user+fr is at index 1
   });
@@ -328,7 +406,7 @@ describe('extractRecentImages', () => {
     const result = extractRecentImages(history, 3);
     expect(result).toHaveLength(1);
     expect(result[0].part.inlineData?.data).toBe('nestedshot');
-    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+    expect(result[0].sourceToolName).toBe('mcp__node-repl__node_repl');
   });
 
   it('collects both nested tool images and top-level user pastes', () => {
@@ -379,7 +457,7 @@ describe('countToolResponseImages', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [
                 { inlineData: { mimeType: 'image/png', data: 'x' } },
@@ -513,6 +591,13 @@ describe('buildFileRestorationBlocks', () => {
     expect(text).toContain('reference only');
     // Must instruct the model on how to view the actual content.
     expect(text).toMatch(/use.*read_file|call.*read_file/i);
+    const compacted = await composePostCompactHistory(
+      [fileReadCall(big1), fileReadCall(big2)],
+      'SUMMARY',
+    );
+    expect(
+      getStartupContextLength(compacted, { includeCompressed: true }),
+    ).toBe(4);
   });
 
   it('produces one extra user message per embedded small file with its full content', async () => {
@@ -657,13 +742,13 @@ describe('buildImageRestorationBlock', () => {
       {
         part: { inlineData: { mimeType: 'image/png', data: 'aaaa' } },
         turnIndex: 5,
-        sourceToolName: 'computer_use__get_app_state',
+        sourceToolName: 'mcp__node-repl__node_repl',
         sourceToolArgs: { app: 'Safari' },
       },
       {
         part: { inlineData: { mimeType: 'image/png', data: 'bbbb' } },
         turnIndex: 11,
-        sourceToolName: 'computer_use__get_app_state',
+        sourceToolName: 'mcp__node-repl__node_repl',
         sourceToolArgs: { app: 'Mail' },
       },
     ];
@@ -675,7 +760,7 @@ describe('buildImageRestorationBlock', () => {
     const header = (block!.parts![0] as { text: string }).text;
     expect(header).toContain('Recent visual snapshots');
     expect(header).toContain('turn 5');
-    expect(header).toContain('computer_use__get_app_state');
+    expect(header).toContain('mcp__node-repl__node_repl');
     expect(header).toContain('"app":"Safari"');
     expect(header).toContain('turn 11');
     expect(header).toContain('"app":"Mail"');
@@ -710,6 +795,28 @@ describe('composePostCompactHistory', () => {
   });
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps restored file and image context in a completed summary turn', async () => {
+    const path = join(tmpDir, 'context.txt');
+    writeFileSync(path, 'Restored file contents.');
+    const image = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+    const result = await composePostCompactHistory(
+      [fileReadCall(path), { role: 'user', parts: [image] }],
+      'Summary.',
+    );
+    expect(result.map((entry) => entry.role)).toEqual([
+      'user',
+      'model',
+      'user',
+    ]);
+    expect(result[2]?.parts).toContainEqual(image);
+    expect(
+      result[2]?.parts?.some((part) =>
+        part.text?.includes('Restored file contents.'),
+      ),
+    ).toBe(true);
+    expect(detectTurnInterruption(result)).toEqual({ kind: 'none' });
   });
 
   it('returns summary + ack only when history has no files or images', async () => {
@@ -750,7 +857,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionCall: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               args: { app: 'Safari' },
             },
           },
@@ -761,7 +868,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: 'screenshot' },
             },
           },
@@ -803,7 +910,7 @@ describe('composePostCompactHistory', () => {
   it('emits role-alternating history with multiple file/image attachments merged into a single user Content (Finding 2)', async () => {
     // Regression: prior implementation pushed each file restoration block
     // as its own user Content, producing consecutive user roles which
-    // violates geminiChat.test.ts:6289 strict-alternation assertion and
+    // violates llm-chat.test.ts:6289 strict-alternation assertion and
     // is rejected by Gemini API with "consecutive same-role content".
     const small = join(tmpDir, 'a.ts');
     writeFileSync(small, 'export const a = 1;');
@@ -1072,7 +1179,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [
                 { inlineData: { mimeType: 'image/png', data: 'img1' } },
@@ -1124,7 +1231,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [{ inlineData: { mimeType: 'image/png', data: 'i' } }],
             } as unknown as NonNullable<
@@ -1288,6 +1395,9 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     expect(flat).toContain('<background-tasks>');
     expect(flat).toContain('agent-1');
     expect(flat).toContain('Run the bookmark-app E2E');
+    expect(getStartupContextLength(result, { includeCompressed: true })).toBe(
+      3,
+    );
     expect(flat).toContain('agent-2');
     expect(flat).toContain('Refactor session manager');
     expect(flat).toMatch(/running/);

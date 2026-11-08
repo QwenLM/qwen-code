@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
+import { startRequestLifecycle } from '../../telemetry/request-lifecycle.js';
 import {
   GenerateContentResponse,
   type Content,
-  type CountTokensParameters,
-  type CountTokensResponse,
   type EmbedContentParameters,
   type EmbedContentResponse,
   type GenerateContentParameters,
@@ -33,7 +33,10 @@ import {
   logApiResponse,
 } from '../../telemetry/loggers.js';
 import { isInternalPromptId } from '../../utils/internalPromptIds.js';
-import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  subagentIdentityContext,
+  subagentNameContext,
+} from '../../utils/subagentNameContext.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -54,8 +57,11 @@ import {
 import {
   endLLMRequestSpan,
   areSensitiveSpanAttributesEnabled,
+  isTelemetrySdkInitialized,
 } from '../../telemetry/index.js';
 import { startLLMRequestSpanWithContext } from '../../telemetry/session-tracing.js';
+import type { ContextUsageV1 } from '../../telemetry/context-usage.js';
+import { createContextUsageSnapshot } from './context-usage-snapshot.js';
 import { getSessionIdFromContext } from '../../telemetry/session-context.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
@@ -76,6 +82,7 @@ import {
   createGenAiExchange,
   type GenAiExchangeController,
 } from '../../telemetry/gen-ai-request.js';
+import { DEFAULT_TOKEN_LIMIT } from '../tokenLimits.js';
 
 /**
  * Phase 4b — read the active retry context once, default attempt to 1 when
@@ -176,7 +183,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   constructor(
     private readonly wrapped: ContentGenerator,
     private readonly config: Config,
-    generatorConfig: ContentGeneratorConfig,
+    private readonly generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
     this.splitToolMedia = generatorConfig.splitToolMedia;
@@ -205,13 +212,35 @@ export class LoggingContentGenerator implements ContentGenerator {
     return this.wrapped;
   }
 
+  private snapshotContextUsage(
+    request: GenerateContentParameters,
+    isInternal: boolean,
+  ): ContextUsageV1 | undefined {
+    if (isInternal || !isTelemetrySdkInitialized()) return undefined;
+    try {
+      return createContextUsageSnapshot(
+        request,
+        this.config,
+        this.generatorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT,
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to snapshot context usage: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
   private logApiRequest(
+    executionId: string,
     contents: Content[],
     model: string,
     promptId: string,
     sessionId: string,
   ): void {
-    const requestText = JSON.stringify(contents);
+    const requestText = this.config.getTelemetryLogPromptsEnabled()
+      ? JSON.stringify(contents)
+      : undefined;
     logApiRequest(
       this.config,
       new ApiRequestEvent(
@@ -219,12 +248,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         promptId,
         requestText,
         subagentNameContext.getStore(),
+        executionId,
       ),
       sessionId,
     );
   }
 
   private _logApiResponse(
+    executionId: string,
     responseId: string,
     durationMs: number,
     model: string,
@@ -233,7 +264,9 @@ export class LoggingContentGenerator implements ContentGenerator {
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
     ttftMs?: number,
+    generationMs?: number,
   ): void {
+    const identity = subagentIdentityContext.getStore();
     logApiResponse(
       this.config,
       new ApiResponseEvent(
@@ -243,15 +276,25 @@ export class LoggingContentGenerator implements ContentGenerator {
         prompt_id,
         this.generatorAuthType,
         usageMetadata,
-        responseText,
+        this.config.getTelemetryLogPromptsEnabled() ? responseText : undefined,
         subagentNameContext.getStore(),
         ttftMs,
+        executionId,
+        generationMs,
       ),
       sessionId,
+      identity
+        ? {
+            id: identity.id,
+            type: identity.type,
+            taskName: identity.taskName,
+          }
+        : undefined,
     );
   }
 
   private _logApiError(
+    executionId: string,
     responseId: string | undefined,
     durationMs: number,
     error: unknown,
@@ -267,9 +310,11 @@ export class LoggingContentGenerator implements ContentGenerator {
       responseId;
     const errorStatus = getErrorStatus(error);
 
+    const identity = subagentIdentityContext.getStore();
     logApiError(
       this.config,
       new ApiErrorEvent({
+        executionId,
         responseId: errorResponseId,
         model,
         durationMs,
@@ -281,10 +326,18 @@ export class LoggingContentGenerator implements ContentGenerator {
         subagentName: subagentNameContext.getStore(),
       }),
       sessionId,
+      identity
+        ? {
+            id: identity.id,
+            type: identity.type,
+            taskName: identity.taskName,
+          }
+        : undefined,
     );
   }
 
   private safelyLogApiError(
+    executionId: string,
     responseId: string | undefined,
     durationMs: number,
     error: unknown,
@@ -304,6 +357,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
     try {
       this._logApiError(
+        executionId,
         responseId,
         durationMs,
         error,
@@ -317,6 +371,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private safelyLogApiResponse(
+    executionId: string,
     responseId: string,
     durationMs: number,
     model: string,
@@ -325,9 +380,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
     ttftMs?: number,
+    generationMs?: number,
   ): void {
     try {
       this._logApiResponse(
+        executionId,
         responseId,
         durationMs,
         model,
@@ -336,6 +393,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         usageMetadata,
         responseText,
         ttftMs,
+        generationMs,
       );
     } catch (loggingError) {
       debugLogger.warn('Failed to log API response:', loggingError);
@@ -348,7 +406,10 @@ export class LoggingContentGenerator implements ContentGenerator {
   ): Promise<GenerateContentResponse> {
     // Phase 4b — snapshot retry context in the synchronous prelude BEFORE any
     // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
+    const executionId = randomUUID();
     const retrySnapshot = snapshotRetryMetadata();
+    const isInternal = isInternalPromptId(userPromptId);
+    const contextUsage = this.snapshotContextUsage(req, isInternal);
 
     const ownerSessionId = this.config.getSessionId();
     const ownerUserId = this.config.getTelemetryUserId();
@@ -359,13 +420,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
         sessionId: ownerSessionId,
         userId: ownerUserId,
+        contextUsage,
       });
     const requestSessionId =
       getSessionIdFromContext(llmContext) ?? ownerSessionId;
     // Capture span context so the API call and logging activate it via
     // context.with(). Without this, nested OTel spans (HTTP instrumentation,
     // log-bridge spans) parent to session root instead of llm_request.
-    const isInternal = isInternalPromptId(userPromptId);
     const exchange = createGenAiExchange(llmContext, llmSpan, {
       captureContent:
         !isInternal && this.shouldCollectSensitiveSpanAttributes(),
@@ -376,6 +437,21 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     const startTime = Date.now();
     const session = this.startCaptureSession();
+    const lifecycle = startRequestLifecycle(
+      this.config,
+      executionId,
+      userPromptId,
+      req.model,
+    );
+    let responseCompleted = false;
+    let abortedBeforeResponseCompletion =
+      req.config?.abortSignal?.aborted ?? false;
+    const markResponseAborted = () => {
+      if (!responseCompleted) abortedBeforeResponseCompletion = true;
+    };
+    req.config?.abortSignal?.addEventListener('abort', markResponseAborted, {
+      once: true,
+    });
     try {
       runtimeDiagnostics.recordGenerateContentRequest(req, {
         stream: false,
@@ -384,6 +460,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const response = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
+            executionId,
             this.toContents(req.contents),
             req.model,
             userPromptId,
@@ -393,34 +470,43 @@ export class LoggingContentGenerator implements ContentGenerator {
         const result = await session.wrap(() =>
           this.wrapped.generateContent(req, userPromptId),
         );
+        responseCompleted = true;
+        lifecycle.finish(
+          abortedBeforeResponseCompletion ? 'cancelled' : 'success',
+        );
         const durationMs = Date.now() - startTime;
         const responseText = isInternal
           ? undefined
           : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
-        this.safelyLogApiResponse(
-          result.responseId ?? '',
-          durationMs,
-          result.modelVersion || req.model,
-          userPromptId,
-          requestSessionId,
-          result.usageMetadata,
-          responseText,
-        );
-        try {
-          await this.safelyLogOpenAIInteraction(
-            await session.resolve(req),
-            result,
-            undefined,
+        if (!abortedBeforeResponseCompletion) {
+          this.safelyLogApiResponse(
+            executionId,
+            result.responseId ?? '',
+            durationMs,
+            result.modelVersion || req.model,
             userPromptId,
+            requestSessionId,
+            result.usageMetadata,
+            responseText,
           );
-        } catch (loggingError) {
-          debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+          try {
+            await this.safelyLogOpenAIInteraction(
+              await session.resolve(req),
+              result,
+              undefined,
+              userPromptId,
+            );
+          } catch (loggingError) {
+            debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+          }
         }
         return result;
       });
-      const observedFinishReasons = exchange.controller.finalize(true);
+      const cancelled = abortedBeforeResponseCompletion;
+      const observedFinishReasons = exchange.controller.finalize(!cancelled);
       endLLMRequestSpan(llmSpan, {
-        success: true,
+        success: !cancelled,
+        cancelled,
         ...usageSpanMetadata(response.usageMetadata),
         durationMs: Date.now() - startTime,
         responseId: response.responseId || undefined,
@@ -428,6 +514,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         finishReasons: observedFinishReasons ?? orderedFinishReasons(response),
         thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
         subagentName: subagentNameContext.getStore() || undefined,
+        error: cancelled ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE : undefined,
         ...retrySnapshot,
         config: this.config,
       });
@@ -441,6 +528,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // a real upstream failure that merely races an abort remains an error.
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
+      lifecycle.finish(cancelled ? 'cancelled' : 'error');
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -457,6 +545,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError(
+          executionId,
           '',
           durationMs,
           error,
@@ -477,6 +566,11 @@ export class LoggingContentGenerator implements ContentGenerator {
         }
       });
       throw error;
+    } finally {
+      req.config?.abortSignal?.removeEventListener(
+        'abort',
+        markResponseAborted,
+      );
     }
   }
 
@@ -491,7 +585,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     // resolved and the frame has exited. Threaded as a parameter to
     // loggingStreamWrapper so its closure carries the snapshot to all later
     // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+    const executionId = randomUUID();
     const retrySnapshot = snapshotRetryMetadata();
+    const isInternal = isInternalPromptId(userPromptId);
+    const contextUsage = this.snapshotContextUsage(req, isInternal);
 
     const ownerSessionId = this.config.getSessionId();
     const ownerUserId = this.config.getTelemetryUserId();
@@ -502,6 +599,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
         sessionId: ownerSessionId,
         userId: ownerUserId,
+        contextUsage,
       });
     const requestSessionId =
       getSessionIdFromContext(llmContext) ?? ownerSessionId;
@@ -513,7 +611,6 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     // Capture the span context so the stream wrapper can activate it
     // during iteration — not just during generator creation.
-    const isInternal = isInternalPromptId(userPromptId);
     const exchange = createGenAiExchange(llmContext, llmSpan, {
       captureContent:
         !isInternal && this.shouldCollectSensitiveSpanAttributes(),
@@ -524,6 +621,12 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     const startTime = Date.now();
     const session = this.startCaptureSession();
+    const lifecycle = startRequestLifecycle(
+      this.config,
+      executionId,
+      userPromptId,
+      req.model,
+    );
 
     let streamRequest: {
       stream: AsyncGenerator<GenerateContentResponse>;
@@ -537,6 +640,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       streamRequest = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
+            executionId,
             this.toContents(req.contents),
             req.model,
             userPromptId,
@@ -557,6 +661,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const observedFinishReasons = exchange.controller.finalize(false);
       context.with(spanContext, () =>
         this.safelyLogApiError(
+          executionId,
           '',
           durationMs,
           error,
@@ -568,6 +673,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       );
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
+      lifecycle.finish(cancelled ? 'cancelled' : 'error');
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -603,8 +709,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         })
       : undefined;
 
-    return bindAsyncGeneratorToContext(
+    const wrapped = bindAsyncGeneratorToContext(
       this.loggingStreamWrapper(
+        executionId,
+        lifecycle,
         stream,
         startTime,
         requestIssuedAtMs,
@@ -619,6 +727,52 @@ export class LoggingContentGenerator implements ContentGenerator {
       ),
       spanContext,
     );
+    let iterated = false;
+    const result: AsyncGenerator<GenerateContentResponse> = {
+      next: (...args: [] | [unknown]) => {
+        iterated = true;
+        return wrapped.next(...args);
+      },
+      return: async (value) => {
+        try {
+          if (!iterated)
+            await context.with(spanContext, () => stream.return(value));
+          return await wrapped.return(value);
+        } catch (error) {
+          lifecycle.finish('error');
+          throw error;
+        } finally {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted ? 'cancelled' : 'interrupted',
+          );
+        }
+      },
+      throw: async (error) => {
+        try {
+          if (!iterated) {
+            await context.with(spanContext, () => stream.return(undefined));
+          }
+          return await wrapped.throw(error);
+        } catch (actualError) {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted && isAbortError(actualError)
+              ? 'cancelled'
+              : 'error',
+          );
+          throw actualError;
+        } finally {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted && isAbortError(error)
+              ? 'cancelled'
+              : 'error',
+          );
+        }
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+    return result;
   }
 
   private startCaptureSession(): {
@@ -644,6 +798,8 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private async *loggingStreamWrapper(
+    executionId: string,
+    lifecycle: ReturnType<typeof startRequestLifecycle>,
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
     requestIssuedAtMs: number,
@@ -701,6 +857,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
     // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
     let ttftMs: number | undefined;
+    // From the first to the latest user-visible chunk. Output speed is measured
+    // over this window rather than up to stream end, which also includes the
+    // time the consumer spends on the final chunk.
+    let generationMs: number | undefined;
     let firstChunkObserved = false;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
@@ -720,6 +880,9 @@ export class LoggingContentGenerator implements ContentGenerator {
           if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
           spanEndTimeout = setTimeout(() => {
             refreshLateUsageMetadata();
+            const cancelled =
+              abortedBeforeStreamCompletion &&
+              (lastError === undefined || isAbortError(lastError));
             try {
               span.setAttribute('stream.timed_out', true);
             } catch {
@@ -728,9 +891,22 @@ export class LoggingContentGenerator implements ContentGenerator {
             const observedFinishReasons = exchangeController?.finalize(false);
             endLLMRequestSpan(span, {
               success: false,
+              cancelled,
               ...usageSpanMetadata(lastUsageMetadata),
               durationMs: Date.now() - startTime,
-              error: 'Stream span timed out (idle)',
+              error: cancelled
+                ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+                : lastError !== undefined
+                  ? API_CALL_FAILED_SPAN_STATUS_MESSAGE
+                  : 'Stream span timed out (idle)',
+              errorType:
+                lastError !== undefined && !cancelled
+                  ? getErrorType(lastError)
+                  : undefined,
+              errorStatusCode:
+                lastError !== undefined && !cancelled
+                  ? getErrorStatus(lastError)
+                  : undefined,
               responseId: firstResponseId || undefined,
               responseModel: firstModelVersion || undefined,
               finishReasons:
@@ -745,6 +921,7 @@ export class LoggingContentGenerator implements ContentGenerator {
               config: this.config,
             });
             spanEndedByTimeout = true;
+            abortSignal?.removeEventListener('abort', markStreamAborted);
           }, STREAM_IDLE_TIMEOUT_MS);
           spanEndTimeout.unref();
         }
@@ -802,13 +979,17 @@ export class LoggingContentGenerator implements ContentGenerator {
         // content. hasUserVisibleContent skips role-only / usageMetadata-only
         // chunks, so TTFT reflects "model produced something the operator can
         // attribute to user-perceived latency."
-        if (ttftMs === undefined && hasUserVisibleContent(response)) {
-          ttftMs = Date.now() - startTime;
+        if (hasUserVisibleContent(response)) {
+          const elapsedMs = Date.now() - startTime;
+          ttftMs ??= elapsedMs;
+          generationMs = elapsedMs - ttftMs;
         }
         resetSpanTimeout?.();
         yield response;
       }
+      abortedBeforeStreamCompletion ||= abortSignal?.aborted === true;
       streamCompleted = true;
+      lifecycle.finish(abortedBeforeStreamCompletion ? 'cancelled' : 'success');
       refreshLateUsageMetadata();
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
@@ -823,7 +1004,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         responses.push(lastResponseForLogging);
       }
       const consolidatedResponse = shouldCollectResponses
-        ? this.consolidateGeminiResponsesForLogging(responses)
+        ? this.consolidateLlmResponsesForLogging(responses)
         : undefined;
       if (consolidatedResponse) {
         consolidatedResponse.usageMetadata = lastUsageMetadata;
@@ -839,8 +1020,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       // The OpenAI interaction log is also skipped — telemetry already carries
       // the timeout signal and a parallel "success" record would be confusing
       // during incident response.
-      if (!spanEndedByTimeout) {
+      if (!spanEndedByTimeout && !abortedBeforeStreamCompletion) {
         this.safelyLogApiResponse(
+          executionId,
           firstResponseId,
           durationMs,
           firstModelVersion || model,
@@ -849,6 +1031,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           lastUsageMetadata,
           streamResponseText,
           ttftMs,
+          generationMs,
         );
         const openaiRequest = await openaiRequestPromise;
         await this.safelyLogOpenAIInteraction(
@@ -861,6 +1044,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       errorOccurred = true;
       lastError = error;
+      abortedBeforeStreamCompletion ||=
+        !streamCompleted && abortSignal?.aborted === true;
+      lifecycle.finish(
+        abortedBeforeStreamCompletion && isAbortError(error)
+          ? 'cancelled'
+          : 'error',
+      );
       // Same gating as the success path above: if the idle timeout already
       // closed the span as failed, do not emit a parallel api_error log
       // (the span is the canonical signal). Otherwise we'd produce the
@@ -869,6 +1059,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (!spanEndedByTimeout) {
         const durationMs = Date.now() - startTime;
         this.safelyLogApiError(
+          executionId,
           firstResponseId,
           durationMs,
           error,
@@ -887,6 +1078,20 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
+      abortedBeforeStreamCompletion ||=
+        !streamCompleted && abortSignal?.aborted === true;
+      const cancelled =
+        abortedBeforeStreamCompletion &&
+        (lastError === undefined || isAbortError(lastError));
+      lifecycle.finish(
+        cancelled
+          ? 'cancelled'
+          : errorOccurred
+            ? 'error'
+            : streamCompleted
+              ? 'success'
+              : 'interrupted',
+      );
       abortSignal?.removeEventListener('abort', markStreamAborted);
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
@@ -897,9 +1102,6 @@ export class LoggingContentGenerator implements ContentGenerator {
       // own ended guard, but we want to avoid pretending the final token
       // counts were recorded — they weren't, the span is the timeout one.
       if (span && !spanEndedByTimeout) {
-        const cancelled =
-          abortedBeforeStreamCompletion &&
-          (lastError === undefined || isAbortError(lastError));
         const observedFinishReasons = exchangeController?.finalize(
           !errorOccurred && !cancelled && streamCompleted,
         );
@@ -944,7 +1146,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     const requestContext = this.createLoggingRequestContext(request.model);
-    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       requestContext,
       {
@@ -959,7 +1161,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     if (request.config?.tools) {
       openaiRequest.tools =
-        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
+        await OpenAIContentConverter.convertLlmToolsToOpenAI(
           request.config.tools,
           this.schemaCompliance ?? 'auto',
         );
@@ -1008,7 +1210,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     const openaiResponse = response
-      ? this.convertGeminiResponseToOpenAIForLogging(response, openaiRequest)
+      ? this.convertLlmResponseToOpenAIForLogging(response, openaiRequest)
       : undefined;
 
     await this.openaiLogger.logInteraction(
@@ -1036,17 +1238,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
   }
 
-  private convertGeminiResponseToOpenAIForLogging(
+  private convertLlmResponseToOpenAIForLogging(
     response: GenerateContentResponse,
     openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
   ): OpenAI.Chat.ChatCompletion {
-    return OpenAIContentConverter.convertGeminiResponseToOpenAI(
+    return OpenAIContentConverter.convertLlmResponseToOpenAI(
       response,
       this.createLoggingRequestContext(openaiRequest.model),
     );
   }
 
-  private consolidateGeminiResponsesForLogging(
+  private consolidateLlmResponsesForLogging(
     responses: GenerateContentResponse[],
   ): GenerateContentResponse | undefined {
     if (responses.length === 0) {
@@ -1208,18 +1410,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     return areSensitiveSpanAttributesEnabled(this.config);
   }
 
-  async countTokens(req: CountTokensParameters): Promise<CountTokensResponse> {
-    return this.wrapped.countTokens(req);
-  }
-
   async embedContent(
     req: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     return this.wrapped.embedContent(req);
-  }
-
-  useSummarizedThinking(): boolean {
-    return this.wrapped.useSummarizedThinking();
   }
 
   private toContents(contents: ContentListUnion): Content[] {

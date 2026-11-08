@@ -6,9 +6,9 @@
 
 import { writeStderrLine } from './stdioHelpers.js';
 
-// These helpers live in a leaf module (no import of cli.ts or gemini.tsx) so
-// both the entry point and the lazily-loaded gemini.tsx can share them. A
-// static import of cli.ts from gemini.tsx makes esbuild hoist the entry into a
+// These helpers live in a leaf module (no import of cli.ts or llm.tsx) so
+// both the entry point and the lazily-loaded llm.tsx can share them. A
+// static import of cli.ts from llm.tsx makes esbuild hoist the entry into a
 // shared chunk under `splitting: true`, which silently disables the bootstrap
 // guard at the bottom of cli.ts and leaves the bundled CLI dead.
 
@@ -28,9 +28,16 @@ export function isExpectedPtyRaceError(error: unknown): boolean {
   const message = error.message;
   const code = getErrnoCode(error);
 
+  // The direction of the failed I/O does not change the class of the race:
+  // `write EIO` is the same pty teardown as `read EIO`, only observed from the
+  // other side. It is what Ink's throttled log write raises once the terminal
+  // is closed or detached, and node delivers it asynchronously out of the
+  // stream write callback, so it lands here as an uncaughtException (#11783).
   if (
     (code === 'EIO' && message.includes('read')) ||
-    message.includes('read EIO')
+    message.includes('read EIO') ||
+    (code === 'EIO' && message.includes('write')) ||
+    message.includes('write EIO')
   ) {
     return true;
   }
@@ -53,7 +60,7 @@ export function isExpectedPtyRaceError(error: unknown): boolean {
  * before the session ID (and thus the debug-log path) is known. Benign PTY
  * teardown races are suppressed; anything else is reported to stderr and fatal.
  *
- * `setupUncaughtExceptionHandler` in gemini.tsx removes this handler and
+ * `setupUncaughtExceptionHandler` in llm.tsx removes this handler and
  * installs a session-aware replacement once interactive startup is far enough
  * along to leave the alternate screen and write the debug file. Exactly one
  * listener must be active: two would conflict (the first calls `process.exit`

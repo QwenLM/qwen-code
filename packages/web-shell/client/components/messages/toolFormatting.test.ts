@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
+  EXPANDED_TOOL_PAYLOAD_LENGTH,
+  extractRawOutputText,
+  formatJsonPayload,
   formatToolDisplayName,
   getAgentCurrentToolHint,
+  getSubagentDetailsUnavailableReason,
   getToolDescription,
   getToolResultSummary,
   getToolSummaryDescription,
@@ -77,6 +81,22 @@ describe('toolFormatting', () => {
     ).toBe('pwd');
   });
 
+  it('names Generated UI calls by their card title', () => {
+    const call = tool({
+      toolName: 'mcp__generated-ui__generated_ui_show',
+      title:
+        'mcp__generated-ui__generated_ui_show ToolCall: mcp__generated-ui__generated_ui_show',
+      args: { title: 'Bill splitter', summary: 'Each pays 154.' },
+    });
+    expect(getToolDescription(call)).toBe('Bill splitter');
+    expect(localizeToolDisplayName(call.toolName, getTranslator('en'))).toBe(
+      'Interactive view',
+    );
+    expect(localizeToolDisplayName(call.toolName, getTranslator('zh-CN'))).toBe(
+      '交互视图',
+    );
+  });
+
   it('uses the daemon title description when present', () => {
     expect(
       getToolDescription(
@@ -89,6 +109,90 @@ describe('toolFormatting', () => {
     ).toBe('README.md');
   });
 
+  it.each([
+    { name: 'bare empty-object title', title: '{}', args: {}, expected: '' },
+    {
+      name: 'trimmed empty-object title',
+      title: '  {}  ',
+      args: {},
+      expected: '',
+    },
+    {
+      name: 'MCP display-name prefix',
+      title: 'ping (sample MCP Server): {}',
+      args: {},
+      expected: 'ping (sample MCP Server)',
+    },
+    {
+      name: 'provider-normalized MCP server key',
+      title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
+      toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
+      args: {},
+      expected: 'ask_question (mcp.deepwiki.com MCP Server)',
+    },
+    {
+      name: 'mismatched MCP tool name',
+      title: 'ping (sample MCP Server): {}',
+      toolName: 'mcp__sample__ping_other',
+      args: {},
+      expected: 'ping (sample MCP Server): {}',
+    },
+    {
+      name: 'provider-normalized overlength MCP server key',
+      title:
+        'list_pull_request_review_comments (github-enterprise.internal.example.com MCP Server): {}',
+      toolName:
+        'mcp__github-enterprise_internal_example_com__list_pull__031yve4',
+      args: {},
+      expected:
+        'list_pull_request_review_comments (github-enterprise.internal.example.com MCP Server)',
+    },
+    {
+      name: 'meaningful title',
+      title: 'Check server health',
+      args: {},
+      expected: 'Check server health',
+    },
+    {
+      name: 'prose ending in an empty object',
+      title: 'Expected response: {}',
+      args: {},
+      expected: 'Expected response: {}',
+    },
+    {
+      name: 'nonempty input with a {} title',
+      title: '{}',
+      args: { target: 'health' },
+      expected: '{}',
+    },
+    {
+      name: 'prose containing an MCP display name',
+      title: 'Expected response from ping (sample MCP Server): {}',
+      args: {},
+      expected: 'Expected response from ping (sample MCP Server): {}',
+    },
+    {
+      name: 'missing input with a {} title',
+      title: '{}',
+      args: undefined,
+      expected: '{}',
+    },
+    {
+      name: 'non-MCP tool',
+      toolName: 'custom_tool',
+      title: '{}',
+      args: {},
+      expected: '{}',
+    },
+  ])(
+    'renders the expected transcript description: $name',
+    ({ toolName = 'mcp__sample__ping', title, args, expected }) => {
+      const call = tool({ toolName, title, args });
+      expect(getToolDescription(call)).toBe(expected);
+      expect(getToolSummaryDescription(call)).toBe(expected);
+    },
+  );
+
   it('normalizes absolute paths from daemon title descriptions', () => {
     expect(
       getToolDescription(
@@ -99,6 +203,37 @@ describe('toolFormatting', () => {
         '/workspace/project',
       ),
     ).toBe('README.md');
+  });
+
+  it.each([
+    'packages/web-shell/client/messageTypes.ts (lines 161-200)',
+    'packages/.../MessageList.dom.test.tsx (lines 277-298)',
+    './src/index.ts',
+    '../src/index.ts',
+    '~/project/src/index.ts',
+    'Writing to src/index.ts',
+    "'TODO' in path 'src/components' (filter: '**/*.ts')",
+    'https://example.com/docs/index.html',
+  ])('preserves separators in title description %s', (description) => {
+    const call = tool({ title: `ReadFile: ${description}` });
+    expect(getToolDescription(call, '/workspace/project')).toBe(description);
+    expect(getToolSummaryDescription(call, '/workspace/project')).toBe(
+      description,
+    );
+  });
+
+  it.each([
+    ["'/workspace/project/src/index.ts'", "'src/index.ts'"],
+    ['"/workspace/project/src/index.ts"', '"src/index.ts"'],
+    ['(/workspace/project/src/index.ts)', '(src/index.ts)'],
+    ['C:/workspace/project/src/index.ts', 'index.ts'],
+  ])('normalizes an embedded absolute path %s', (path, expected) => {
+    expect(
+      getToolDescription(
+        tool({ title: `Writing to ${path}` }),
+        '/workspace/project',
+      ),
+    ).toBe(`Writing to ${expected}`);
   });
 
   it('falls back to a workspace-relative file path', () => {
@@ -298,6 +433,19 @@ describe('toolFormatting', () => {
     ).toBe('cat ~/.qwen/settings.json (查看 ~/.qwen/settings.json 文件内容)');
   });
 
+  it('ignores blank or non-string file descriptions', () => {
+    for (const description of ['   ', 42, {}]) {
+      expect(
+        getToolDescription(
+          tool({
+            toolName: 'read_file',
+            args: { file_path: 'src/orders.ts', description },
+          }),
+        ),
+      ).toBe('src/orders.ts');
+    }
+  });
+
   it('uses semantic shell descriptions for summaries', () => {
     const shellTool = tool({
       toolName: 'run_shell_command',
@@ -354,6 +502,34 @@ describe('toolFormatting', () => {
     ).toBe('3 line(s)');
   });
 
+  it('extracts free-form Advisor advice without JSON wrappers', () => {
+    expect(
+      extractRawOutputText({
+        type: 'advisor_advice',
+        model: 'advisor-model',
+        text: 'Check the retry boundary.',
+      }),
+    ).toBe('Check the retry boundary.');
+  });
+
+  it('formats structured Advisor output as readable markdown', () => {
+    const advisor = tool({
+      toolName: 'advisor',
+      rawOutput: {
+        type: 'advisor_review',
+        verdict: 'Sound approach.',
+        risks: 'Retry handling is unclear.',
+        missingEvidence: 'No integration result.',
+        recommendation: 'Run the integration test.',
+      },
+    });
+
+    expect(extractRawOutputText(advisor.rawOutput)).toContain(
+      '## Verdict\nSound approach.',
+    );
+    expect(getToolResultSummary(advisor)).toBe('Sound approach.');
+  });
+
   it('keeps long shell commands in full instead of capping at one line', () => {
     const command = `echo ${'a'.repeat(200)}`;
     expect(
@@ -380,12 +556,11 @@ describe('toolFormatting', () => {
       expect(localizeToolDisplayName('todo_write', t)).toBe('任务清单');
       expect(localizeToolDisplayName('run_shell_command', t)).toBe('运行命令');
       expect(localizeToolDisplayName('read_file', t)).toBe('读取文件');
+      expect(localizeToolDisplayName('agent', t)).toBe('智能体');
     });
 
-    it('keeps proper tool names / acronyms in English', () => {
+    it('keeps acronyms in English', () => {
       const t = getTranslator('zh-CN');
-      expect(localizeToolDisplayName('agent', t)).toBe('Agent');
-      expect(localizeToolDisplayName('glob', t)).toBe('Glob');
       expect(localizeToolDisplayName('lsp', t)).toBe('LSP');
     });
 
@@ -394,6 +569,7 @@ describe('toolFormatting', () => {
       expect(localizeToolDisplayName('grep', t)).toBe('搜索内容');
       expect(localizeToolDisplayName('grep_search', t)).toBe('搜索内容');
       expect(localizeToolDisplayName('search', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('glob', t)).toBe('查找文件');
     });
 
     it('falls back to the English display name when the locale has no entry', () => {
@@ -410,11 +586,8 @@ describe('toolFormatting', () => {
 
     it('has a zh translation for every tool in the display-name map', () => {
       const tZh = getTranslator('zh-CN');
-      // Tools intentionally shown in English (proper names / acronyms).
-      const keepEnglish = new Set(['agent', 'glob']);
       const untranslated = Object.keys(TOOL_DISPLAY_NAMES).filter(
         (wire) =>
-          !keepEnglish.has(wire) &&
           localizeToolDisplayName(wire, tZh) === formatToolDisplayName(wire),
       );
       expect(untranslated).toEqual([]);
@@ -436,4 +609,158 @@ describe('toolFormatting', () => {
       );
     });
   });
+});
+
+describe('formatJsonPayload', () => {
+  it('pretty-prints a compact object', () => {
+    expect(formatJsonPayload('{"a":1,"b":[2]}')).toEqual({
+      text: '{\n  "a": 1,\n  "b": [\n    2\n  ]\n}',
+      json: true,
+    });
+  });
+
+  it('pretty-prints an array of objects', () => {
+    const formatted = formatJsonPayload('[{"id":1}]');
+    expect(formatted.json).toBe(true);
+    expect(formatted.text).toBe('[\n  {\n    "id": 1\n  }\n]');
+  });
+
+  it('keeps an already indented document as JSON', () => {
+    expect(formatJsonPayload('{\n  "a": 1\n}')).toEqual({
+      text: '{\n  "a": 1\n}',
+      json: true,
+    });
+  });
+
+  it('leaves JSON Lines exactly as recorded', () => {
+    const text = '{"a":1}\n{"b":2}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('leaves a mixed JSON-lines payload untouched', () => {
+    const text = '{"a":1}\nnot json';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it.each(['hello', '42', '"text"', 'null', '{"a":'])(
+    'leaves %s untouched',
+    (text) => {
+      expect(formatJsonPayload(text)).toEqual({ text, json: false });
+    },
+  );
+
+  it('leaves non-canonical number literals as recorded', () => {
+    const text =
+      '{"n":1.2345678901234567890,"id":12345678901234567890,"neg":-0,"exp":1e3,"amount":1.10,"tiny":1e-400,"huge":1e400}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('leaves duplicate keys and their order as recorded', () => {
+    const text = '{"a":1,"a":2,"500":"server error","200":"ok"}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('preserves escaped string contents', () => {
+    const text = '{"s":"a\\"b}{","n":1}';
+    expect(formatJsonPayload(text)).toEqual({
+      text: '{\n  "s": "a\\"b}{",\n  "n": 1\n}',
+      json: true,
+    });
+  });
+
+  it('leaves deeply nested small JSON unformatted', () => {
+    const text = '{"a":'.repeat(40) + '1' + '}'.repeat(40);
+    expect(JSON.stringify(JSON.parse(text), null, 2).length).toBeLessThan(
+      EXPANDED_TOOL_PAYLOAD_LENGTH,
+    );
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('falls back when formatted output exceeds the render cap', () => {
+    const text = '{"a":1}';
+    expect(formatJsonPayload(text, 5)).toEqual({ text, json: false });
+  });
+
+  it('leaves an oversized payload alone instead of parsing it', () => {
+    const text = JSON.stringify({
+      value: 'x'.repeat(EXPANDED_TOOL_PAYLOAD_LENGTH),
+    });
+    expect(text.length).toBeGreaterThan(EXPANDED_TOOL_PAYLOAD_LENGTH);
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+});
+
+describe('subagent detail availability', () => {
+  it.each([
+    [false, 'pending', false, 'subagent.creating'],
+    [false, 'in_progress', false, 'subagent.creating'],
+    [false, 'failed', false, 'subagent.failed'],
+    [false, 'failed', true, 'subagent.cancelled'],
+    [false, 'completed', true, 'subagent.cancelled'],
+    [false, 'completed', false, undefined],
+    [true, 'failed', false, undefined],
+    [true, 'in_progress', false, undefined],
+    [undefined, 'in_progress', false, undefined],
+  ] as const)(
+    'readiness=%s status=%s cancelled=%s gives %s',
+    (subagentSessionReady, status, wasCancelled, expected) => {
+      expect(
+        getSubagentDetailsUnavailableReason(
+          tool({
+            toolName: 'agent',
+            status,
+            subagentSessionReady,
+            wasCancelled,
+          }),
+        ),
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    [
+      'failed',
+      { reason: 'Cancel handler registration failed' },
+      'subagent.failed',
+    ],
+    [
+      'pending',
+      {
+        type: 'task_execution',
+        status: 'failed',
+        terminateReason: 'Cancelled during registration',
+      },
+      'subagent.failed',
+    ],
+    ['failed', { status: 'cancelled' }, 'subagent.cancelled'],
+    ['failed', { status: 'CANCELED' }, 'subagent.cancelled'],
+    ['completed', { reason: 'Cancelled by user' }, 'subagent.cancelled'],
+  ] as const)(
+    'resolves %s with output %j as %s',
+    (status, rawOutput, expected) => {
+      expect(
+        getSubagentDetailsUnavailableReason(
+          tool({
+            toolName: 'agent',
+            status,
+            subagentSessionReady: false,
+            rawOutput,
+          }),
+        ),
+      ).toBe(expected);
+    },
+  );
+});
+
+it('reports launch failure before the tool status catches up', () => {
+  expect(
+    getSubagentDetailsUnavailableReason(
+      tool({
+        toolName: 'agent',
+        status: 'pending',
+        subagentSessionReady: false,
+        rawOutput: { type: 'task_execution', status: 'failed' },
+      }),
+    ),
+  ).toBe('subagent.failed');
 });

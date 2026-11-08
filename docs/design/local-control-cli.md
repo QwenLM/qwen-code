@@ -8,30 +8,30 @@ Make phone access to an existing `qwen serve` session a single explicit command:
 qwen serve --local-control
 ```
 
-The command binds to the IPv4 LAN, generates a fresh 256-bit bearer token, prints a QR code for each usable LAN address, and inhibits system sleep until the process exits. The Tauri Desktop app exposes the same workflow from its Control menu without restarting the live Desktop daemon.
+The command keeps the primary daemon on loopback, starts one selected LAN listener, mints a revocable pairing token, prints its QR code, and inhibits system sleep until Local Control is disabled. Desktop exposes the same daemon-owned workflow from the Web Shell Settings card.
 
 ## Behavior
 
-`--local-control` is an opt-in shortcut over the existing daemon and Web Shell. It forces `0.0.0.0`, supplies a generated token directly to the daemon, allowlists each advertised LAN origin, and keeps the Web Shell enabled. It replaces the wildcard host with each non-loopback IPv4 interface address and puts the token in the URL fragment before rendering the QR code.
+`--local-control` is an opt-in shortcut over the existing daemon and Web Shell. It leaves the daemon's runtime token, configured origins, and resolved port intact, adds one LAN listener on a selected private IPv4 address, allowlists that advertised origin while the session is active, and puts the pairing token in the URL fragment before rendering the QR code.
 
-The terminal remains the visible enabled indicator. `Ctrl+C` turns Local Control off, closes the daemon, invalidates the generated token, and releases the existing cross-platform sleep inhibitor.
+The terminal remains the visible enabled indicator. `Ctrl+C` ends the whole daemon, not just Local Control: the graceful drain closes the LAN listener, invalidates the pairing token, and releases the existing cross-platform sleep inhibitor before the process exits. Turning Local Control off while the daemon keeps running is done from the Web Shell Settings card, which is also the only in-process re-enable path.
 
-The mode rejects a non-default `--hostname`, `--token`, `--allow-origin`, `--no-web`, and ephemeral port `0` instead of silently overriding settings or creating incomplete configurations. It also fails if the requested port is busy because retrying would make the printed pairing URLs and allowed origins incorrect. Existing explicit `qwen serve` deployments are unchanged.
+The mode rejects a non-default `--hostname` and `--no-web` instead of silently creating incomplete configurations. It composes with `--token`, `--allow-origin`, and ephemeral port `0`; `--local-control-address` selects the LAN address when several candidates exist. Existing explicit `qwen serve` deployments are unchanged.
 
 ## Security
 
-- LAN exposure requires the explicit flag.
-- Every invocation gets a new token from `crypto.randomBytes(32)`; environment tokens are not reused.
-- Only the advertised LAN origins and the daemon's loopback self-origin are admitted for browser REST and WebSocket requests, and every protected route still requires the generated bearer token.
+- LAN exposure requires an explicit operator action: `--local-control` at boot, or an enable request served only by the primary loopback listener; enable requests arriving over the LAN listener are rejected.
+- Every enable gets a new pairing token from `crypto.randomBytes(32)`; environment tokens are not reused on the LAN listener.
+- Local Control adds the advertised LAN origin to the daemon-wide origin allowlist (`--allow-origin` patterns remain in effect on both listeners while the session is active); every protected LAN route still requires the pairing token.
 - The token stays in the URL fragment, so browsers do not send it in HTTP requests, access logs, or referrers before the Web Shell stores it.
 - Existing bearer authentication, timing-safe comparison, and non-loopback boot checks remain the enforcement boundary.
-- Only non-internal IPv4 interface addresses are advertised. Multiple interfaces produce separate labelled QR codes rather than guessing which network is correct.
+- Only private/link-local IPv4 interface addresses are advertised. Multiple interfaces surface an explicit choice rather than guessing which network is correct.
 
 ## Desktop behavior
 
-Desktop keeps its bundled daemon bound to authenticated loopback. Choosing **Control → Local Control…** opens a native app window; enabling it starts a temporary LAN gateway to that same daemon, generates a separate pairing token and QR code, and acquires the platform sleep inhibitor. The gateway validates its public Host and Origin, translates the short-lived pairing credential to the private daemon credential, and forwards HTTP, SSE, and WebSocket traffic. The Desktop PID, daemon PID, loopback address, and live sessions do not change.
+Desktop keeps its bundled daemon bound to authenticated loopback. The Web Shell Settings card enables the same daemon-owned Local Control service, which starts the LAN listener, generates a separate pairing token and QR code, and acquires the platform sleep inhibitor. The listener validates its public Host and Origin and accepts only the pairing credential for LAN traffic. The Desktop PID, daemon PID, loopback address, and live sessions do not change.
 
-Closing the Local Control window or choosing **Turn off Local Control** closes the listener and active connections, releases sleep inhibition, and invalidates the pairing token. A later enable gets a new token. The LAN listener does not exist while the mode is off, so the normal Desktop runtime remains loopback-only.
+Turning Local Control off from Settings closes the listener and active connections, releases sleep inhibition, and invalidates the pairing token. A later enable gets a new token. The LAN listener does not exist while the mode is off, so the normal Desktop runtime remains loopback-only.
 
 This mode intentionally covers same-network access only. Internet remote control requires an account-authenticated outbound relay with reconnectable session state; it must not be implemented by exposing this LAN gateway through port forwarding or an unauthenticated tunnel.
 

@@ -6,12 +6,9 @@
 import type {
   ModelInfo,
   AvailableCommand,
-  RequestPermissionRequest,
+  SessionNotification,
 } from '@agentclientprotocol/sdk';
-import type {
-  AskUserQuestionRequest,
-  SlashCommandNotification,
-} from './acpTypes.js';
+import type { SlashCommandNotification } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
@@ -74,10 +71,6 @@ export interface QwenAgentCallbacks {
   onThoughtChunk?: (chunk: string) => void;
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
-  onPermissionRequest?: (request: RequestPermissionRequest) => Promise<string>;
-  onAskUserQuestion?: (
-    request: AskUserQuestionRequest,
-  ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
   onEndTurn?: (reason?: string, source?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;
@@ -96,6 +89,11 @@ export interface QwenAgentCallbacks {
   onAvailableModels?: (models: ModelInfo[]) => void;
   onDisconnected?: (code: number | null, signal: string | null) => void;
   onSlashCommandNotification?: (event: SlashCommandNotification) => void;
+  /**
+   * Raw ACP session/update notification, forwarded verbatim for consumers
+   * that reduce the transcript themselves (e.g. the WebShell transcript UI).
+   */
+  onTranscriptUpdate?: (notification: SessionNotification) => void;
 }
 
 export interface ToolCallUpdate {

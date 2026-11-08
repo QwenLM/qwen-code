@@ -12,9 +12,36 @@ Subagents are independent AI assistants that:
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
+## Claude Code and Codex subagents
+
+The built-in `claude-code` and `codex` agents delegate to separately installed native tools. Install and authenticate Claude Code with its `claude-agent-acp` adapter, or Codex with its `codex` executable, and make the executable available on `PATH`. These agents use their native model and authentication settings. Qwen Code does not fall back to its own model when the executable is missing.
+
+Both agents default to foreground execution; set `run_in_background: true` to receive a background completion notification. They require a trusted workspace and are unavailable in safe mode. Both executors support macOS/Linux (including WSL); native Windows launches are rejected before startup with platform guidance.
+
+Claude Code uses the ACP executor and supports continued input while its session is retained. Codex uses an ephemeral app-server thread for a single task and returns the final answer. Codex tasks cannot receive messages or resume; start a new task instead. Native tool progress, token counts, and cost are not reported for Codex. Native sessions cannot be restored after restarting Qwen Code.
+
+For a custom Codex agent, use the existing `executor` frontmatter:
+
+```markdown
+---
+name: codex-review
+description: Review code with Codex
+executor:
+  kind: codex
+  command: codex
+background: false
+---
+
+Review the changes and report verified defects.
+```
+
+Omitting `executor.args` starts `codex app-server --stdio`; supplied arguments replace that default. Use `kind: acp` and `command: claude-agent-acp` for a custom Claude Code agent. Qwen model overrides, tool lists, subagent hooks, `maxTurns`, fork history, teams, and workflows are not supported for external executors. Worktree launches use the existing Agent isolation lifecycle and run the native process in the selected worktree.
+
+Codex runs unattended. Without an agent override, default, plan, and auto sessions use a read-only sandbox; Qwen's AUTO classifier does not inspect native commands. Intermediate Qwen subagent modes do not grant native access during nested delegation. Explicitly select auto-edit in the session or Codex agent definition to allow workspace writes and unattended workspace commands, or yolo for full access. A session already in auto-edit or yolo takes precedence over a stricter agent definition. Other effective approval modes are rejected. Native requests for extra permission or user input are declined. A configured `runConfig.max_time_minutes` bounds execution. The executor waits for process cleanup on cancellation; the shared background cancellation notification can arrive earlier under its five-second fallback.
+
 ## Fork Subagent
 
-In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for a regular subagent's result inline.
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level regular subagents run in the background by default and deliver their results through completion notifications. Set `agents.defaultBackground: false` in settings to prefer foreground execution globally (requires restart), or `run_in_background: false` for an individual call. The explicit argument takes precedence over the definition's `background` field, which takes precedence over the setting.
 
 ## Fork Context with `fork_turns`
 
@@ -73,13 +100,13 @@ Like `fork_tools`, a fork profile is a caller-selected restriction rather than a
 
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                                                 | Fork Subagent                                                                                                                                                                                        |
-| ------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                              |
-| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                |
-| Tools         | Configured declaration set without interactive question tools  | Keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` can independently narrow it without changing that declaration |
-| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                                                                                        |
-| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                                                                                         |
+|               | Named Subagent                                                                                                                                                              | Fork Subagent                                                                                                                                                                                        |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Context       | Starts fresh with no parent conversation history                                                                                                                            | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                              |
+| System prompt | Uses its own configured prompt                                                                                                                                              | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                |
+| Tools         | Configured declaration set without interactive question tools                                                                                                               | Keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` can independently narrow it without changing that declaration |
+| Execution     | Background by default; explicit `run_in_background` overrides definition `background`, which overrides `agents.defaultBackground` (`true`: background; `false`: foreground) | Always detached; parent continues immediately                                                                                                                                                        |
+| Use case      | Specialized tasks (testing, docs)                                                                                                                                           | Parallel tasks that need the current context                                                                                                                                                         |
 
 ### When Fork is Used
 
@@ -121,7 +148,7 @@ Fork children cannot spawn any further sub-agent. This is enforced at runtime �
 
 ## Background Agent Continuation
 
-Top-level regular subagents run in the background by default. After a background agent finishes, Qwen Code keeps enough state to continue related work without launching a duplicate agent:
+Top-level regular subagents run in the background by default unless their definition or the `agents.defaultBackground` setting selects foreground execution; an explicit `run_in_background` argument overrides both. After a background agent finishes, Qwen Code keeps enough state to continue related work without launching a duplicate agent:
 
 - `list_agents` returns the addressable background agents in the current session, including compatible agents restored with a resumed session. Each entry includes a `task_id`, status, and whether it can receive a message.
 - `send_message` with that `task_id` queues a message for a running agent, resumes a paused agent, or continues a completed agent. Completed agents reuse their resident runtime when available and otherwise revive from their retained transcript.
@@ -131,11 +158,19 @@ When a session is restored, compatible background agents are added back to the s
 
 Use continuation for related follow-up work. Launch a new agent when the task is unrelated or the previous agent cannot be resumed.
 
+## Notification Queue
+
+In the interactive TUI and ACP session, completion notifications from background agents, shells, monitors and workflows share a queue that drains into a model turn once the session is idle. These queues hold at most 20 notifications so a noisy producer cannot accumulate an unbounded backlog. The headless CLI's local queue is not capped by this rule.
+
+When a 21st notification arrives, Qwen Code evicts an interim monitor pulse first — the monitor's next poll supersedes it — and otherwise the oldest queued notification. Agent results, workflow results and scheduled prompts are never evicted in the interactive TUI; a notification that would displace one is dropped instead, and so is an arriving pulse when only terminal results are queued.
+
+Discarded notifications are reported rather than dropped quietly. The summary appears before the next notification in the live transcript. ACP also prefixes it to that turn's model input; the TUI keeps it parked for the next Notification batch so cron prompts still pass unchanged through slash, shell and `@` preprocessing. A daemon notification is recorded before it is acknowledged, so after a reload its durable record can precede the later overflow summary. ACP can discard a pending summary if the session is cleared or switched, or if a client cancels or preempts the notification turn. Discarding a notification never stops or deletes its task, and completed tasks retain their results; the summary points at `/tasks` and task output files when there is a task to inspect. A discarded scheduled prompt was never delivered and is not retried. A daemon notification that was recorded but could not be delivered live remains available in the session transcript and is reported separately from lost notifications.
+
 ## Agent Working Directory
 
-For a named regular subagent, `working_dir` pins the agent to an existing git worktree in the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git and live inside the repository.
+For a named regular subagent, `working_dir` pins the agent to an existing git worktree of the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git as a linked worktree of this repository.
 
-A `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle. It cannot be combined with `subagent_type: "fork"` or background execution. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one.
+`working_dir` cannot be combined with `subagent_type: "fork"`. An unnamed caller-owned `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle: an explicit `run_in_background: true` request is rejected, while a configured background default (`background: true` in a subagent definition) is rejected at the top level and downgraded to the foreground when nested. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one. Workflow scripts are deliberately stricter: a workflow `agent()` call that receives both `workingDir` and `isolation` is rejected rather than run with `isolation` ignored.
 
 ## Getting Started
 
@@ -348,6 +383,8 @@ Use `tools` and `disallowedTools` to control which tools a subagent can access.
 
 **`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
 
+The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.codeModeOnly`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
+
 ```
 ---
 name: reader
@@ -356,7 +393,7 @@ tools:
   - read_file
   - grep_search
   - glob
-  - list_directory
+  - web_fetch
 ---
 ```
 
@@ -442,14 +479,16 @@ and land in follow-up PRs once the prerequisite infrastructure exists
 (`effort` needs a model-layer parameter; `memory` needs a scoped memory
 subsystem; `--agent` CLI flag enables `initialPrompt`; etc.).
 
-> **`hooks` v1 limitation.** While a subagent declaring `hooks` is running,
-> its hook entries fire for every matching event in the session, not only
-> for that subagent's own tool calls. If two subagents with different
-> per-agent hook sets run concurrently, both sets fire for both agents.
-> Per-agent scope filtering at hook-firing time is left to a follow-up;
-> for v1, prefer per-agent hooks that are safe to fire globally for the
-> duration of the agent's run (e.g. logging) over hooks that mutate
-> behavior.
+Agent frontmatter hooks run only for that agent invocation. They do not receive
+parent, sibling, or nested child agent events. Global settings hooks and
+session-wide skill/function hooks keep their existing inheritance. Hooks are
+removed when the invocation is disposed. Project-agent hooks are skipped in an
+untrusted workspace and recheck their source workspace's trust before each event.
+
+Use `SubagentStart` and `SubagentStop` for the agent's lifecycle. `Stop` is not an
+alias for `SubagentStop`; hooks that previously observed the parent's `Stop` or
+other agents through shared registration must move to settings to keep that
+session-wide behavior.
 
 #### Example Usage
 
@@ -834,6 +873,7 @@ Always follow these standards:
 
 - **Tool Restrictions**: Use `tools` to limit which tools a subagent can access, or `disallowedTools` to block specific tools while inheriting everything else
 - **Permission Mode**: Subagents inherit their parent's permission mode by default. Plan-mode sessions cannot escalate to auto-edit through delegated agents. Privileged modes (auto-edit, yolo) are blocked in untrusted folders.
+- **Project Hooks**: Project subagent frontmatter hooks require explicit folder trust: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant IDE workspace trust. Disabling folder trust does not authorize these hooks, even in YOLO mode. Subagent instructions remain available; user-level hooks keep their existing behavior.
 - **Provider Selection**: A subagent with `model: authType:modelId`, or
   `model: fast` where `fastModel` resolves to another auth type, sends that
   subagent's model requests to the selected provider. Make sure that provider is

@@ -1,115 +1,127 @@
 // @vitest-environment jsdom
-/**
- * @license
- * Copyright 2026 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
- */
+import { describe, expect, it } from 'vitest';
+import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
+import { getTranslator } from '../i18n';
+import { getTaskPillLabel } from './StatusBar';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
+const t = getTranslator('en');
 
-Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+const base = {
+  id: 'task-1',
+  label: 'task',
+  description: 'task',
+  startTime: 0,
+  runtimeMs: 0,
+};
 
-const { mockConnection } = vi.hoisted(() => ({
-  mockConnection: {
-    sessionId: 'session-1' as string | undefined,
-    currentModel: undefined as string | undefined,
-    contextWindow: 0,
-    tokenCount: 0,
-  },
-}));
-
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
-  useConnection: () => mockConnection,
-}));
-
-const { StatusBar } = await import('./StatusBar');
-const { I18nProvider } = await import('../i18n');
-
-let container: HTMLDivElement | null = null;
-let root: Root | null = null;
-
-afterEach(() => {
-  act(() => root?.unmount());
-  container?.remove();
-  root = null;
-  container = null;
-  vi.clearAllMocks();
-});
-
-function mount(
-  props: Partial<Parameters<typeof StatusBar>[0]> = {},
-): HTMLDivElement {
-  container = document.createElement('div');
-  document.body.appendChild(container);
-  root = createRoot(container);
-  act(() => {
-    root!.render(
-      <I18nProvider language="en">
-        <StatusBar
-          onSelectMode={vi.fn()}
-          onSelectModel={vi.fn()}
-          onShowContext={vi.fn()}
-          onOpenSettings={vi.fn()}
-          tasks={[]}
-          {...props}
-        />
-      </I18nProvider>,
-    );
-  });
-  return container;
+function agentTask(
+  status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled',
+  isBackgrounded: boolean,
+  id?: string,
+): DaemonSessionTaskWithWorkflowStatus {
+  return {
+    ...base,
+    id: id ?? `agent-${status}-${isBackgrounded ? 'bg' : 'fg'}`,
+    kind: 'agent',
+    status,
+    isBackgrounded,
+  } as DaemonSessionTaskWithWorkflowStatus;
 }
 
-const goalButton = () =>
-  document.querySelector<HTMLButtonElement>('button[aria-label^="Goals"]');
+function shellTask(
+  status: 'running' | 'paused' | 'completed',
+  id?: string,
+): DaemonSessionTaskWithWorkflowStatus {
+  return {
+    ...base,
+    id: id ?? `shell-${status}`,
+    kind: 'shell',
+    status,
+    command: 'npm test',
+    cwd: '/workspace',
+  } as DaemonSessionTaskWithWorkflowStatus;
+}
 
-describe('StatusBar goal pill', () => {
-  it('names the active goal in its accessible label', () => {
-    // The visible pill is only "◎ Goal (2m)" — the condition never appears in
-    // it, and `title` is a hover tooltip screen readers do not reliably
-    // announce. Without the condition here, a screen-reader user cannot tell
-    // which goal is running without opening the Goals page.
-    mount({
-      activeGoal: { condition: 'all tests pass', setAt: Date.now() - 5000 },
-      onOpenGoals: vi.fn(),
-    });
+describe('getTaskPillLabel', () => {
+  it('returns an empty label with no tasks', () => {
+    expect(getTaskPillLabel([], t)).toBe('');
+  });
 
-    expect(goalButton()?.getAttribute('aria-label')).toBe(
-      'Goals: all tests pass',
+  it('counts running background agents only', () => {
+    const tasks = [
+      agentTask('running', true, 'a1'),
+      agentTask('running', true, 'a2'),
+      agentTask('running', true, 'a3'),
+    ];
+    expect(getTaskPillLabel(tasks, t)).toBe('3 local agents');
+  });
+
+  it('uses the singular form for one running background agent', () => {
+    expect(getTaskPillLabel([agentTask('running', true)], t)).toBe(
+      '1 local agent',
     );
-    // The purpose stays in front of the condition: a bare condition string
-    // gives no hint that activating this opens anything.
-    expect(goalButton()?.getAttribute('aria-label')).toMatch(/^Goals: /);
   });
 
-  it('falls back to the plain label when no goal is active', () => {
-    mount({ onOpenGoals: vi.fn() });
-    expect(goalButton()).toBeNull();
+  it('joins agent count with the existing running task counts', () => {
+    const tasks = [
+      shellTask('running'),
+      agentTask('running', true, 'a1'),
+      agentTask('paused', true, 'a2'),
+    ];
+    expect(getTaskPillLabel(tasks, t)).toBe(
+      '1 shell, 1 local agent, 1 local agent paused',
+    );
   });
 
-  it('opens the Goals page when activated', () => {
-    const onOpenGoals = vi.fn();
-    mount({
-      activeGoal: { condition: 'ship it', setAt: Date.now() },
-      onOpenGoals,
-    });
-
-    act(() => {
-      goalButton()?.dispatchEvent(
-        new MouseEvent('click', { bubbles: true, cancelable: true }),
-      );
-    });
-
-    expect(onOpenGoals).toHaveBeenCalledTimes(1);
+  it('labels paused background agents as paused', () => {
+    expect(getTaskPillLabel([agentTask('paused', true)], t)).toBe(
+      '1 local agent paused',
+    );
   });
 
-  it('renders the goal as static text when there is nowhere to open', () => {
-    // No `onOpenGoals` (e.g. embedded without the Goals page): the pill must
-    // not pretend to be interactive.
-    mount({ activeGoal: { condition: 'ship it', setAt: Date.now() } });
+  it('joins running and paused agent counts', () => {
+    const tasks = [
+      agentTask('running', true, 'a1'),
+      agentTask('paused', true, 'a2'),
+      agentTask('paused', true, 'a3'),
+    ];
+    expect(getTaskPillLabel(tasks, t)).toBe(
+      '1 local agent, 2 local agents paused',
+    );
+  });
 
-    expect(goalButton()).toBeNull();
-    expect(document.body.textContent).toContain('/goal active');
+  it('lets a paused agent show instead of the done count', () => {
+    const tasks = [shellTask('completed'), agentTask('paused', true)];
+    expect(getTaskPillLabel(tasks, t)).toBe('1 local agent paused');
+  });
+
+  it('does not count foreground agents', () => {
+    expect(getTaskPillLabel([agentTask('running', false)], t)).toBe('');
+  });
+
+  it('does not count terminal background agents', () => {
+    const tasks = [
+      agentTask('completed', true, 'a1'),
+      agentTask('failed', true, 'a2'),
+      agentTask('cancelled', true, 'a3'),
+    ];
+    expect(getTaskPillLabel(tasks, t)).toBe('');
+  });
+
+  it('lets a running agent win over the done count', () => {
+    const tasks = [shellTask('completed'), agentTask('running', true)];
+    expect(getTaskPillLabel(tasks, t)).toBe('1 local agent');
+  });
+
+  it('keeps the done count free of terminal agents', () => {
+    const tasks = [shellTask('completed'), agentTask('completed', true)];
+    expect(getTaskPillLabel(tasks, t)).toBe('1 task done');
+  });
+
+  it('keeps the existing running and done labels unchanged', () => {
+    expect(getTaskPillLabel([shellTask('running')], t)).toBe('1 shell');
+    expect(
+      getTaskPillLabel([shellTask('completed'), shellTask('completed')], t),
+    ).toBe('2 tasks done');
   });
 });

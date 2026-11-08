@@ -127,6 +127,36 @@ afterEach(async () => {
 });
 
 describe('Web Shell markdown-chart integration', () => {
+  it('bounds parsing for a large stream and renders Markdown when it settles', async () => {
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => createFakeRuntime().runtime,
+      resizeObserver: false,
+    });
+    const content = `# Large answer\n\n${'streaming text '.repeat(3_000)}`;
+    const tree = (isStreaming: boolean) =>
+      chartTree({ content, registry, isStreaming });
+    const result = await mount(tree(true));
+
+    expect(
+      result.container.querySelector(
+        '[data-markdown-streaming-plain-text="true"]',
+      ),
+    ).not.toBeNull();
+    expect(result.container.querySelector('h1')).toBeNull();
+    expect(result.container.textContent).toContain('# Large answer');
+
+    await result.rerender(tree(false));
+
+    expect(
+      result.container.querySelector(
+        '[data-markdown-streaming-plain-text="true"]',
+      ),
+    ).toBeNull();
+    expect(result.container.querySelector('h1')?.textContent).toBe(
+      'Large answer',
+    );
+  });
+
   it('enables the built-in registry without host chart configuration', async () => {
     const chart = canonicalChart();
     const { container } = await mount(

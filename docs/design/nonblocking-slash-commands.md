@@ -32,6 +32,19 @@ stdout while Ink is rendering.
   existing settings hooks without replacing the active conversation turn.
 - `/help`: opens the static help dialog.
 
+## Extended Command Set
+
+The same criteria were later applied to eleven more builtins:
+
+- UI-preference commands whose saved changes apply through the existing
+  settings hooks without touching the active turn: `/theme`, `/editor`,
+  `/vim`, `/voice`, and `/terminal-setup` (writes only external IDE
+  keybinding files).
+- Read-only status commands that neither read state the active turn is
+  writing nor mutate anything: `/tools`, `/lsp`, `/tasks`, `/hooks`
+  (read-only browse dialog), `/docs`, and `/bug` (the latter two only
+  append an Ink item and open a browser).
+
 The following categories remain serialized:
 
 - Commands that submit or transform a model turn, such as skills, `/summary`,

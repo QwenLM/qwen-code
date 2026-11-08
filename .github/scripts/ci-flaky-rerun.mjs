@@ -12,6 +12,9 @@ const TARGET_WORKFLOW = 'Qwen Code CI';
 const MARKER = 'qwen-ci-flaky-rerun';
 const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
+// How many PR detail reads run at once. Five keeps a 66-PR scan near ten
+// seconds without turning the patrol into a burst against the API.
+const PR_DETAIL_CONCURRENCY = 5;
 const DEFAULT_MAX_CANDIDATES = 5;
 const MAX_ACTIONS = 3;
 const ACTIONS = new Set(['rerun', 'comment', 'no_action']);
@@ -425,12 +428,27 @@ export function eligibleAttemptJob(job, target, runAttempt, options = {}) {
 }
 
 function safeReason(reason) {
-  return reason
-    .trim()
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('@', '@\u200b');
+  return (
+    reason
+      .trim()
+      // A newline lets a reason open a block-level Markdown construct: a
+      // line-start fence swallows the folded Chinese block and renders the
+      // tracking marker as visible code. Keep the reason a single line.
+      .replace(/\s*\n\s*/g, ' ')
+      // Bidi overrides can visually rewrite a notice maintainers trust when
+      // deciding whether to update a branch; the reason is classifier output
+      // derived from untrusted logs, so drop them like the markup below.
+      // The class is the full Unicode Bidi_Control set.
+      .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('@', '@\u200b')
+  );
+}
+
+function bilingualComment(en, zh, marker) {
+  return `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>\n\n${marker}`;
 }
 
 export async function actOnDecision(client, target, decision) {
@@ -471,7 +489,17 @@ export async function actOnDecision(client, target, decision) {
   const marker = markerFor(target, decision.action, count);
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
-    await client.comment(target.prNumber, marker);
+    // The notice must be visible: a marker-only comment left maintainers
+    // unable to tell a patrolled flake from a deterministic failure, so they
+    // clicked Update Branch — advancing the head and dismissing approvals.
+    await client.comment(
+      target.prNumber,
+      bilingualComment(
+        `CI Failure Patrol: this failure looks transient, not a PR regression: ${safeReason(decision.reason_en)}\n\nFailed jobs were re-run on the same commit. No Update Branch is needed — if the rerun passes, the failure was a flake.`,
+        `CI 失败巡逻：此失败疑似瞬时问题，而非 PR 引入的回归：${safeReason(decision.reason_zh)}\n\n已在同一 commit 上重跑失败的 job，无需 Update Branch；重跑通过即为 flake。`,
+        marker,
+      ),
+    );
     // A flaky TEST (not infra) also gets a deflake issue so the autofix loop
     // can stabilize it. Best-effort: the rerun + marker already succeeded, so a
     // transient issue-creation failure must not propagate (it would surface as
@@ -487,10 +515,21 @@ export async function actOnDecision(client, target, decision) {
   } else if (decision.action === 'comment') {
     await client.comment(
       target.prNumber,
-      `CI is failing because: ${safeReason(decision.reason_en)}\n\n<details>\n<summary>中文说明</summary>\n\n${safeReason(decision.reason_zh)}\n\n</details>\n\n${marker}`,
+      bilingualComment(
+        `CI is failing because: ${safeReason(decision.reason_en)}`,
+        safeReason(decision.reason_zh),
+        marker,
+      ),
     );
   } else {
-    await client.comment(target.prNumber, marker);
+    await client.comment(
+      target.prNumber,
+      bilingualComment(
+        `CI Failure Patrol: this failure could not be confidently classified: ${safeReason(decision.reason_en)}\n\nNo automatic action was taken. Inspect the failed job before rerunning or updating the branch.`,
+        `CI 失败巡逻：无法确信归类此失败：${safeReason(decision.reason_zh)}\n\n未采取自动动作。请先人工查看失败 job，再决定重跑或更新分支。`,
+        marker,
+      ),
+    );
   }
 }
 
@@ -508,6 +547,7 @@ export async function actOnDecisions(client, targets, decisions) {
   if (!Array.isArray(targets) || !Array.isArray(decisions)) return;
   const byKey = new Map(targets.map((target) => [decisionKey(target), target]));
   const handled = new Set();
+  let matched = 0;
   for (const decision of decisions) {
     const key = decisionKey(decision);
     if (handled.has(key)) continue;
@@ -520,12 +560,37 @@ export async function actOnDecisions(client, targets, decisions) {
         );
         continue;
       }
+      // Schema BEFORE counting. actOnDecision opens with the same check and
+      // returns silently, so counting on key resolution alone would let a list
+      // that carries all five identity fields but fails validDecision (a
+      // 240-char reason, rerun at low confidence, string-typed ids) match every
+      // key, act on nothing, and still report success.
+      if (!validDecision(target, decision)) {
+        process.stderr.write(
+          `act: invalid decision for PR ${decision?.prNumber ?? 'unknown'}; it fails the action/confidence/reason schema.\n`,
+        );
+        continue;
+      }
+      matched += 1;
       await actOnDecision(client, target, decision);
     } catch (error) {
       process.stderr.write(
         `act: skipping PR ${decision?.prNumber ?? 'unknown'}: ${error.message}${error.stderr ? `\n${String(error.stderr).trim()}` : ''}\n`,
       );
     }
+  }
+  // A non-empty list that addressed nothing is the hollow-green shape: the
+  // round uploads, runs act, prints a per-entry diagnostic and exits 0, while
+  // the workflow's verdict step is skipped because has_decisions is true. Fail
+  // loudly instead. Per-decision failures stay swallowed above — a candidate
+  // superseded between scan and act, one already handled, or one at the action
+  // cap is a deliberate decline of a real target and still counts, as does a
+  // decision whose action threw after being attempted. `no_action` counts too:
+  // it posts the "could not be confidently classified" marker, so it is an act.
+  if (decisions.length > 0 && matched === 0) {
+    throw new Error(
+      `act: ${decisions.length} decision(s) addressed no actionable candidate; this round acted on nothing.`,
+    );
   }
 }
 
@@ -560,7 +625,11 @@ export class GhClient {
   }
 
   async gh(args) {
-    const { stdout } = await execFile('gh', args, {
+    // The caller pins an absolute, verified gh. Resolving the bare name here
+    // would search PATH inside this child process, which on the shared pool
+    // can contain a co-tenant's gh in a uid-writable directory — and this
+    // client runs with the bot PAT in its environment.
+    const { stdout } = await execFile(process.env.PATROL_GH || 'gh', args, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
       timeout: 60_000,
@@ -584,7 +653,7 @@ export class GhClient {
   }
 
   async prList(search) {
-    return JSON.parse(
+    const prs = JSON.parse(
       await this.gh([
         'pr',
         'list',
@@ -597,11 +666,52 @@ export class GhClient {
         '--search',
         search,
         '--json',
-        'number,isDraft,baseRefName,headRefOid,statusCheckRollup',
+        'number,isDraft,baseRefName,headRefOid',
         '--limit',
         '1000',
       ]),
     );
+    // The rollup is fetched one PR at a time. Asking for it inside the list
+    // query makes a single GraphQL call whose cost grows with matched PRs
+    // times their check runs, and this repo outgrew it: with the rollup the
+    // search returns HTTP 504 above ~30 matches and failed 100 consecutive
+    // scheduled scans, while the same search without it answers in a second.
+    // A PR whose rollup cannot be read is skipped rather than failing the
+    // scan — the next run picks it up.
+    // Bounded fan-out: one call per PR is fine, 66 of them in series is not.
+    // The patrol job has a ten-minute budget and this cost grows with the
+    // open-PR count — the same growth that broke the single bulk query.
+    const detailed = new Array(prs.length);
+    let next = 0;
+    const worker = async () => {
+      for (let i = next++; i < prs.length; i = next++) {
+        const pr = prs[i];
+        try {
+          const { statusCheckRollup } = JSON.parse(
+            await this.gh([
+              'pr',
+              'view',
+              String(pr.number),
+              '--repo',
+              this.repo,
+              '--json',
+              'statusCheckRollup',
+            ]),
+          );
+          detailed[i] = { ...pr, statusCheckRollup };
+        } catch (error) {
+          process.stderr.write(
+            `prList: skipping PR ${pr.number}: ${error.message}\n`,
+          );
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(PR_DETAIL_CONCURRENCY, prs.length) }, () =>
+        worker(),
+      ),
+    );
+    return detailed.filter(Boolean);
   }
 
   async comments(prNumber) {

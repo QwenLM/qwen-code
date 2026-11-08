@@ -29,11 +29,14 @@ describe('getVoiceUnavailableReason', () => {
     ).toMatch(/not supported/);
   });
 
-  it('flags WSL without PulseAudio', () => {
+  it.each([
+    ['WSL_DISTRO_NAME', 'Ubuntu'],
+    ['WSL_INTEROP', '/run/WSL/123_interop'],
+  ])('flags WSL without PulseAudio (%s)', (name, value) => {
     expect(
       getVoiceUnavailableReason({
         platform: 'linux',
-        env: { WSL_DISTRO_NAME: 'Ubuntu' },
+        env: { [name]: value },
       }),
     ).toMatch(/WSL/);
   });

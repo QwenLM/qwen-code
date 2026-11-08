@@ -17,6 +17,7 @@ import {
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
   ensureAgentViewSupervisor,
   runAgentViewSupervisor,
+  type RunAgentViewSupervisorOptions,
 } from './supervisor-runner.js';
 import type {
   AgentViewSupervisorHandler,
@@ -25,13 +26,16 @@ import type {
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
 import {
   readAgentViewSupervisor,
+  writeAgentViewSupervisor,
   writeAgentViewSessionState,
 } from './supervisor-store.js';
 
 const cleanupDirs: string[] = [];
 const cleanupServers: AgentViewSupervisorServerHandle[] = [];
+const cleanupSupervisors: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  await Promise.all(cleanupSupervisors.splice(0).map((cleanup) => cleanup()));
   await Promise.allSettled(
     cleanupServers.splice(0).map((server) => server.close()),
   );
@@ -325,14 +329,14 @@ describe('Agent View supervisor runner', () => {
     await expect(handle.shutdown(false)).resolves.toEqual({
       shuttingDown: true,
     });
-    expect(handler.shutdown).toHaveBeenCalledWith({ keepWorkers: false });
+    expect(handler.shutdown).toHaveBeenCalledOnce();
   });
 
   it('closes the supervisor server when shutdown is requested', async () => {
     const { globalDir, socketPath } = await makeSupervisorPath();
-    const supervisorPromise = runAgentViewSupervisor({ globalDir });
-
-    await waitForSupervisor(socketPath, globalDir);
+    const { supervisorPromise, authToken } = await runTestSupervisor({
+      globalDir,
+    });
     await expect(readAgentViewSupervisor({ globalDir })).resolves.toMatchObject(
       {
         pid: process.pid,
@@ -341,7 +345,6 @@ describe('Agent View supervisor runner', () => {
         protocolVersion: 1,
       },
     );
-    const authToken = await readAuthToken(globalDir);
     await expect(
       callAgentViewSupervisor(socketPath, 'shutdown', undefined, {
         authToken,
@@ -353,24 +356,90 @@ describe('Agent View supervisor runner', () => {
     await supervisorPromise;
 
     await expectSupervisorUnreachable(socketPath, authToken);
+    await expect(readAgentViewSupervisor({ globalDir })).resolves.toMatchObject(
+      {
+        pid: process.pid,
+        authToken,
+      },
+    );
+  });
+
+  it('does not remove metadata written by a replacement supervisor', async () => {
+    const { globalDir, socketPath } = await makeSupervisorPath();
+    const { supervisorPromise, authToken } = await runTestSupervisor({
+      globalDir,
+    });
+    const replacement = {
+      schemaVersion: 1 as const,
+      pid: process.pid + 1,
+      socketPath: `${socketPath}.replacement`,
+      authToken: 'replacement-token',
+      startedAt: '2026-08-20T00:00:00.000Z',
+      updatedAt: '2026-08-20T00:00:00.000Z',
+      protocolVersion: 1,
+    };
+    await writeAgentViewSupervisor(replacement, { globalDir });
+    await callAgentViewSupervisor(socketPath, 'shutdown', undefined, {
+      authToken,
+    });
+    await supervisorPromise;
+
+    await expect(readAgentViewSupervisor({ globalDir })).resolves.toEqual(
+      replacement,
+    );
   });
 
   it('auto-exits when maintenance sees only hibernated managed sessions', async () => {
     const { globalDir, socketPath } = await makeSupervisorPath();
-    const supervisorPromise = runAgentViewSupervisor({
+    const { supervisorPromise, authToken } = await runTestSupervisor({
       globalDir,
       maintenanceIntervalMs: 10,
       hibernationPolicy: { autoExitGraceMs: 0 },
     });
 
-    await waitForSupervisor(socketPath, globalDir);
-    const authToken = await readAuthToken(globalDir);
     await writeHibernatedSessionForTest(globalDir, 'session-1');
     await supervisorPromise;
 
     await expectSupervisorUnreachable(socketPath, authToken);
   });
 });
+
+async function runTestSupervisor(
+  options: RunAgentViewSupervisorOptions & { globalDir: string },
+): Promise<{
+  supervisorPromise: Promise<void>;
+  authToken: string | undefined;
+}> {
+  const socketPath = getAgentViewSupervisorSocketPath(options);
+  const supervisorPromise = runAgentViewSupervisor(options);
+  let settled = false;
+  let authToken: string | undefined = undefined;
+  // Observe startup failures immediately; cleanup still awaits the original
+  // promise so errors are reported before its directory can be removed.
+  void supervisorPromise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  cleanupSupervisors.push(async () => {
+    await vi.waitFor(
+      async () => {
+        if (settled) return;
+        await callAgentViewSupervisor(socketPath, 'shutdown', undefined, {
+          authToken: authToken ?? (await readAuthToken(options.globalDir)),
+          timeoutMs: 100,
+        });
+      },
+      { timeout: 10_000, interval: 25 },
+    );
+    await supervisorPromise;
+  });
+  authToken = await waitForSupervisor(socketPath, options.globalDir);
+  return { supervisorPromise, authToken };
+}
 
 function createFakeSupervisor(
   socketPath: string,
@@ -428,19 +497,18 @@ async function writeHibernatedSessionForTest(
 async function waitForSupervisor(
   socketPath: string,
   globalDir: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    try {
+): Promise<string | undefined> {
+  return vi.waitFor(
+    async () => {
+      const authToken = await readAuthToken(globalDir);
       await callAgentViewSupervisor(socketPath, 'status', undefined, {
-        authToken: await readAuthToken(globalDir),
+        authToken,
         timeoutMs: 100,
       });
-      return;
-    } catch {
-      await delay(25);
-    }
-  }
-  throw new Error('Timed out waiting for test supervisor.');
+      return authToken;
+    },
+    { timeout: 5_000, interval: 25 },
+  );
 }
 
 async function readAuthToken(globalDir: string): Promise<string | undefined> {

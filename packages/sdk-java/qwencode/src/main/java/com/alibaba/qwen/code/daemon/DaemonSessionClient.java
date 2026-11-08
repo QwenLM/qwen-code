@@ -34,9 +34,15 @@ public final class DaemonSessionClient implements AutoCloseable {
     private static final Set<String> SESSION_FAILURE_EVENTS = Set.of(
             "client_evicted", "session_closed", "session_died",
             "state_resync_required", "stream_error");
+    // No id is burned on these by design (see sse-events.ts in packages/cli):
+    // they are synthesized outside the replayable sequence. session_snapshot
+    // is the id-less synthetic frame the bridge's withSnapshot wrapper emits
+    // for a ?snapshot=1 subscription on the primary events route; the hosted
+    // events route never reads that query parameter and stamps every frame
+    // with an id.
     private static final Set<String> IDLESS_SYNTHETIC_EVENTS = Set.of(
             "client_evicted", "slow_client_warning", "stream_error",
-            "state_resync_required", "replay_complete");
+            "state_resync_required", "replay_complete", "session_snapshot");
     private static final Set<String> OBSERVABLE_STREAM_EVENTS = Set.of(
             "slow_client_warning", "replay_complete");
     private static final Set<Integer> RETRYABLE_SSE_STATUS = Set.of(
@@ -497,6 +503,8 @@ public final class DaemonSessionClient implements AutoCloseable {
         private volatile CompletableFuture<Void> streamClose =
                 CompletableFuture.completedFuture(null);
         private volatile boolean admissionStarted;
+        // The admission body failed to encode, so no request was ever sent.
+        private volatile boolean bodyRefusedBeforeSend;
         private volatile PromptTerminal terminalResult;
         private volatile Throwable terminalFailure;
         private volatile Thread runner;
@@ -570,8 +578,12 @@ public final class DaemonSessionClient implements AutoCloseable {
                             "Prompt observation failed", e, "");
                 }
             } catch (Throwable failure) {
+                // A determinate refusal, or a body that never left the
+                // client, admitted nothing: the slot is free again. An
+                // outcome-unknown admission keeps it.
                 if (!acceptance.isDone()
-                        && failure instanceof DaemonHttpException) {
+                        && (failure instanceof DaemonHttpException
+                                || bodyRefusedBeforeSend)) {
                     activePrompt.compareAndSet(this, null);
                 }
                 if (!acceptance.isDone()) {
@@ -614,11 +626,17 @@ public final class DaemonSessionClient implements AutoCloseable {
         }
 
         private PromptAcceptance admit() {
+            String body;
+            try {
+                body = JsonSupport.encode(request.toJson());
+            } catch (RuntimeException e) {
+                bodyRefusedBeforeSend = true;
+                throw e;
+            }
             HttpSupport.Response response;
             try {
-                response = client.sendMutation(sessionPath() + "/prompt",
-                        request.toJson(),
-                        session.getClientId());
+                response = client.sendEncodedMutation(sessionPath() + "/prompt",
+                        body, session.getClientId());
             } catch (IOException | InterruptedException e) {
                 restoreInterrupt(e);
                 throw new PromptAdmissionUnknownException(e);
@@ -689,9 +707,11 @@ public final class DaemonSessionClient implements AutoCloseable {
                     try {
                         body = readSseError(response, deadline);
                     } catch (DaemonProtocolException e) {
+                        awaitPriorStreamClose(deadline);
                         throw indeterminate("SSE error response was malformed", e);
                     } catch (DaemonTransportException e) {
                         if (!RETRYABLE_SSE_STATUS.contains(statusCode)) {
+                            awaitPriorStreamClose(deadline);
                             throw indeterminate("SSE failed with HTTP "
                                     + statusCode, e);
                         }
@@ -709,6 +729,10 @@ public final class DaemonSessionClient implements AutoCloseable {
                                         : new DaemonHttpException(
                                                 "GET /session/:id/events",
                                                 statusCode, body);
+                        // Finish tearing down the SSE stream before the
+                        // caller detaches. Java 11's HttpClient can reset
+                        // the next request if this close is still in flight.
+                        awaitPriorStreamClose(deadline);
                         throw indeterminate("SSE failed with HTTP "
                                 + statusCode, responseFailure);
                     }
@@ -1031,7 +1055,7 @@ public final class DaemonSessionClient implements AutoCloseable {
         }
     }
 
-    private static DaemonEvent parseEvent(SseReader.Frame frame) {
+    static DaemonEvent parseEvent(SseReader.Frame frame) {
         Map<String, Object> envelope = JsonSupport.parseObject(frame.getData(),
                 "SSE data");
         int version = JsonSupport.requiredInt(envelope, "v", "SSE envelope");
@@ -1062,7 +1086,7 @@ public final class DaemonSessionClient implements AutoCloseable {
                 metadata == null ? Collections.emptyMap() : metadata);
     }
 
-    private static void validateSseHeaders(HttpHeaders headers) {
+    static void validateSseHeaders(HttpHeaders headers) {
         String contentType = headers.firstValue("Content-Type").orElse("");
         String mediaType = contentType.split(";", 2)[0].trim();
         if (!"text/event-stream".equalsIgnoreCase(mediaType)) {

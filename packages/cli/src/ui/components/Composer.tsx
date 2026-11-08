@@ -18,6 +18,10 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { useModBand } from '../hooks/use-mod-band.js';
+import { ModBand } from './ModBand.js';
+import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import { t } from '../../i18n/index.js';
 
 interface ComposerProps {
@@ -28,8 +32,11 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const config = useConfig();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
+  const subscriptionActive =
+    config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const uiActions = useUIActions();
   const { vimEnabled } = useVimModeState();
+  const modBand = useModBand(config);
 
   const {
     showAutoAcceptIndicator,
@@ -116,8 +123,17 @@ export const Composer = ({ footerRef }: ComposerProps) => {
       {uiState.isFeedbackDialogOpen && <FeedbackDialog />}
 
       {uiState.isInputActive && (
+        <ModBand
+          band={modBand}
+          maxRows={modBandMaxRows(uiState.terminalHeight)}
+        />
+      )}
+
+      {uiState.isInputActive && (
         <InputPrompt
           buffer={uiState.buffer}
+          pendingPastes={uiState.pendingPastes}
+          onPendingPastesChange={uiActions.setPendingPastes}
           inputWidth={uiState.inputWidth}
           suggestionsWidth={uiState.suggestionsWidth}
           onSubmit={uiActions.handleFinalSubmit}
@@ -141,17 +157,27 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           placeholder={
             vimEnabled
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
-              : '  ' + t('Type your message or @path/to/file')
+              : '  ' +
+                t(
+                  subscriptionActive
+                    ? 'Type your request, or /usage'
+                    : 'Type your message or @path/to/file',
+                )
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
           clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+          voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
 
       {/* Exclusive area: only one component visible at a time */}
       {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}
-      {uiState.isInputActive &&
+      {/* The footer is the only production consumer of useConfigInitMessage,
+          which returns a message exactly while initialization is pending — so
+          it has to mount on that window too, or startup shows no progress at
+          all. InputPrompt stays gated on isInputActive alone. */}
+      {(uiState.isInputActive || !uiState.isConfigInitialized) &&
         !showSuggestions &&
         (showShortcuts ? (
           <KeyboardShortcuts />

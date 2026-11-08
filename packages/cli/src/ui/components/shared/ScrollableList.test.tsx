@@ -5,11 +5,12 @@
  */
 
 import type React from 'react';
+import { createRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { Text } from 'ink';
-import { ScrollableList } from './ScrollableList.js';
+import { ScrollableList, type ScrollableListRef } from './ScrollableList.js';
 import { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 
@@ -102,6 +103,38 @@ describe('<ScrollableList /> mouse scrolling', () => {
     });
     await flushScrollFrame();
     expect(lastFrame()).toContain('item-0');
+  });
+
+  it('preserves the full delta of a coalesced wheel burst', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(200)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    await act(async () => {
+      for (let i = 0; i < 30; i++) stdin.write(wheelUp(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(105);
   });
 
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {
@@ -288,6 +321,45 @@ describe('<ScrollableList /> mouse scrolling', () => {
     await flushScrollFrame();
 
     // The press pinned the top; the canceled wheel must not have scrolled away.
+    expect(lastFrame()).toContain('item-0');
+  });
+
+  it('a focus loss cancels a still-pending wheel flush', async () => {
+    // Regression: whoever takes focus may have just pulled the tail into view
+    // (a pending approval dialog at the end of the transcript). A burst armed
+    // before that flip must not land after it — with both subscribers now off,
+    // it scrolls the answering surface out of the render window and nothing on
+    // this list can bring it back.
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = ({ focused }: { focused: boolean }) => (
+      <ScrollableList<Item>
+        hasFocus={focused}
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(
+      withKeypress(<Wrapper focused />),
+    );
+    rerender(withKeypress(<Wrapper focused />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+
+    // Queue a burst, then take focus away inside the same coalescing window.
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelDown(5, 5));
+      rerender(withKeypress(<Wrapper focused={false} />));
+    });
+    await flushScrollFrame();
+
     expect(lastFrame()).toContain('item-0');
   });
 

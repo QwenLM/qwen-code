@@ -1,0 +1,1575 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Text-projection parity tests for the special ink history items (audit 01
+ * G-1/2/3/12/14/17): each builder must print what the ink component prints.
+ */
+
+import { describe, it, expect, vi } from 'vitest';
+import {
+  UiTelemetryService,
+  EVENT_API_RESPONSE,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  CompressionStatus,
+  ToolDisplayNames,
+  type Config,
+  type SessionMetrics,
+} from '@qwen-code/qwen-code-core';
+import {
+  extractPromptText,
+  projectAbout,
+  projectCompression,
+  projectContextUsage,
+  projectDoctor,
+  projectExtensionsList,
+  projectItemToStreamEvent,
+  projectHistoryToStreamEvents,
+  projectMcpStatus,
+  projectModelStats,
+  projectQuit,
+  projectSkillStats,
+  projectSpecialItemText,
+  projectStats,
+  projectSummary,
+  projectToolStats,
+  projectToolsList,
+  type ItemProjectionContext,
+} from './item-projection.js';
+import { ToolCallStatus, isHistoryItemVisibleAfterRestore } from '../types.js';
+import {
+  foldLiveEvent,
+  rewindBoundaryHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
+import {
+  applyCollapsePolicyAndSummary,
+  expandCollapsedHistory,
+} from '../utils/resumeHistoryUtils.js';
+import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
+import type {
+  ContextCategoryBreakdown,
+  HistoryItemWithoutId,
+  HistoryItem,
+} from '../types.js';
+
+// R1-93 tests the cached-items upgrade from the DISCONNECTED base state;
+// the real registry reports unknown servers as disconnected anyway, but the
+// mock makes that independent of core's global state.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    getMCPServerStatus: () => actual.MCPServerStatus.DISCONNECTED,
+  };
+});
+
+function makeMetrics(): SessionMetrics {
+  return {
+    models: {
+      'qwen3-max': {
+        api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 4000 },
+        tokens: {
+          prompt: 1000,
+          candidates: 500,
+          total: 1600,
+          cached: 100,
+          thoughts: 100,
+        },
+        bySource: Object.create(null),
+      },
+    },
+    tools: {
+      totalCalls: 3,
+      totalSuccess: 2,
+      totalFail: 1,
+      totalDurationMs: 3000,
+      totalDecisions: { accept: 1, reject: 1, modify: 0, auto_accept: 0 },
+      byName: {
+        read_file: {
+          count: 2,
+          success: 2,
+          fail: 0,
+          durationMs: 2000,
+          decisions: { accept: 1, reject: 0, modify: 0, auto_accept: 0 },
+        },
+        write_file: {
+          count: 1,
+          success: 0,
+          fail: 1,
+          durationMs: 1000,
+          decisions: { accept: 0, reject: 1, modify: 0, auto_accept: 0 },
+        },
+      },
+    },
+    files: { totalLinesAdded: 10, totalLinesRemoved: 2 },
+    skills: {
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        review: { count: 1, success: 1, fail: 0 },
+      },
+    },
+  } as unknown as SessionMetrics;
+}
+
+describe('projectModelStats', () => {
+  it('reports no calls when the session is empty', () => {
+    const metrics = makeMetrics();
+    metrics.models = {};
+    expect(projectModelStats(metrics)).toBe(
+      'No API calls have been made in this session.',
+    );
+  });
+
+  it('prints requests/errors/tokens for active models', () => {
+    const text = projectModelStats(makeMetrics());
+    expect(text).toContain('Model Stats For Nerds');
+    expect(text).toContain('Requests 2');
+    expect(text).toContain('Errors 0 (0.0%)');
+    expect(text).toContain('Total 1,600');
+    expect(text).toContain(' ↳ Prompt 1,000');
+    expect(text).toContain(' ↳ Cached 100 (10.0%)');
+    expect(text).toContain('qwen3-max');
+  });
+});
+
+describe('projectToolStats', () => {
+  it('reports no calls when nothing ran', () => {
+    const metrics = makeMetrics();
+    metrics.tools.byName = {};
+    expect(projectToolStats(metrics)).toBe(
+      'No tool calls have been made in this session.',
+    );
+  });
+
+  it('prints per-tool rows and the decision summary', () => {
+    const text = projectToolStats(makeMetrics());
+    expect(text).toContain('Tool Stats For Nerds');
+    expect(text).toContain('read_file 2 100.0% 1.0s');
+    expect(text).toContain('write_file 1 0.0% 1.0s');
+    expect(text).toContain('Total Reviewed Suggestions: 2');
+    expect(text).toContain(' » Accepted: 1');
+    expect(text).toContain(' » Rejected: 1');
+    expect(text).toContain(' Overall Agreement Rate: 50.0%');
+  });
+});
+
+describe('projectSkillStats', () => {
+  it('prints skill rows sorted by count', () => {
+    const text = projectSkillStats(makeMetrics());
+    expect(text).toContain('Skill Stats For Nerds');
+    expect(text).toContain('review 1 1 0 100.0%');
+  });
+});
+
+describe('projectSummary', () => {
+  it('shows stage-specific pending lines and the saved path', () => {
+    expect(projectSummary({ isPending: true, stage: 'generating' })).toBe(
+      'Generating project summary...',
+    );
+    expect(projectSummary({ isPending: true, stage: 'saving' })).toBe(
+      'Saving project summary...',
+    );
+    expect(projectSummary({ isPending: false, stage: 'completed' })).toContain(
+      'Project summary generated and saved successfully!',
+    );
+    expect(
+      projectSummary({
+        isPending: false,
+        stage: 'completed',
+        filePath: '/tmp/QWEN.md',
+      }),
+    ).toContain('Saved to: /tmp/QWEN.md');
+  });
+});
+
+/**
+ * Capacity uses the reported total when available and local category estimates
+ * otherwise. Legacy residuals and cached-prefix annotations are not categories.
+ */
+function expectCoherentBreakdown(item: {
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: Partial<ContextCategoryBreakdown>;
+}): void {
+  const { breakdown } = item;
+  const rows =
+    (breakdown.systemPrompt ?? 0) +
+    (breakdown.builtinTools ?? 0) +
+    (breakdown.mcpTools ?? 0) +
+    (breakdown.instructionFiles ?? 0) +
+    (breakdown.memoryFiles ?? 0) +
+    (breakdown.skills ?? 0) +
+    (breakdown.startupContext ?? 0) +
+    (breakdown.messages ?? 0);
+  const hasProviderTotal = item.totalTokens > 0;
+  // The producer clamps at 0, so an over-full window reports no free space.
+  expect(breakdown.freeSpace).toBe(
+    Math.max(
+      0,
+      item.contextWindowSize -
+        (hasProviderTotal ? item.totalTokens : rows) -
+        (breakdown.autocompactBuffer ?? 0),
+    ),
+  );
+}
+
+describe('projectContextUsage', () => {
+  it('shows a million-token context window in millions', () => {
+    const withWindow = (contextWindowSize: number) => {
+      const item = {
+        modelName: 'coder-model',
+        totalTokens: 5000,
+        contextWindowSize,
+        breakdown: {
+          systemPrompt: 1000,
+          builtinTools: 800,
+          mcpTools: 0,
+          memoryFiles: 200,
+          skills: 0,
+          messages: 3000,
+          freeSpace: contextWindowSize - 5000 - 1000,
+          autocompactBuffer: 1000,
+        },
+        isEstimated: false,
+        showDetails: false,
+      };
+      expectCoherentBreakdown(item);
+      return projectContextUsage(item);
+    };
+
+    expect(withWindow(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(withWindow(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_950)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_949)).toContain('Context window: 999.9k tokens');
+  });
+
+  it('prints the usage table with categories', () => {
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 3000,
+        freeSpace: 94000,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: false,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('Context Usage');
+    expect(text).toContain('Model: qwen3-max Context window: 100.0k tokens');
+    expect(text).toContain('█ Used 5.0k tokens (5.0%)');
+    expect(text).toContain('█ Messages 3.0k tokens (3.0%)');
+    expect(text).toContain('Run /context detail for per-item breakdown.');
+    // MCP tools row is skipped at zero.
+    expect(text).not.toContain('MCP tools');
+    // Optional startup and cached-prefix rows remain absent in legacy payloads.
+    expect(text).not.toContain('Cached prefix');
+    expect(text).not.toContain('Startup context');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('prints cached prefix and startup context while ignoring legacy residuals', () => {
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        // Category estimates do not need to add up to totalTokens.
+        messages: 900,
+        freeSpace: 94000,
+        autocompactBuffer: 1000,
+        startupContext: 1200,
+        unattributed: 900,
+        cachedTokens: 3000,
+      },
+      isEstimated: false,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Cached prefix 3.0k tokens (3.0%)');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('renders the pre-first-turn estimate: startup context shown, no messages yet (#12235)', () => {
+    // The producer's shape before any request: no provider total, a nonzero
+    // startup prelude, and no conversation. `Startup context` is the one
+    // optional row that is not total-gated.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 300,
+        startupContext: 1200,
+        messages: 0,
+        freeSpace: 95500,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('No API response yet.');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).not.toContain('Messages');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    // After `/model`, `/restore` or a resume the provider total is 0 while the
+    // history is intact; that estimate drives the tier, so it must be visible.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 40000,
+        freeSpace: 57000,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Messages 40.0k tokens (40.0%)');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('No API response yet.');
+    expect(text).not.toContain('pre-conversation');
+  });
+
+  it('heads the categories with "Usage by category" only when a provider total exists (#12606)', () => {
+    // Parity of views/ContextUsage and the text panel: without a provider
+    // total the estimate caption heads the rows, with or without a history.
+    const breakdown = {
+      systemPrompt: 1000,
+      builtinTools: 800,
+      mcpTools: 0,
+      memoryFiles: 200,
+      skills: 0,
+      freeSpace: 57000,
+      autocompactBuffer: 1000,
+    };
+    const project = (totalTokens: number, messages: number) =>
+      projectContextUsage({
+        modelName: 'qwen3-max',
+        totalTokens,
+        contextWindowSize: 100000,
+        breakdown: { ...breakdown, messages },
+        isEstimated: totalTokens <= 0,
+        showDetails: false,
+      });
+
+    expect(project(0, 0)).not.toContain('Usage by category');
+    expect(project(0, 40000)).not.toContain('Usage by category');
+    expect(project(42000, 40000)).toContain('Usage by category');
+  });
+
+  it('shows the no-API-response notice before the first turn', () => {
+    const text = projectContextUsage({
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {},
+    });
+    expect(text).toContain('No API response yet.');
+  });
+
+  it('renders the compaction-threshold ladder (ytahdn-3)', () => {
+    const text = projectContextUsage({
+      modelName: 'm',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        thresholds: {
+          effectiveWindow: 92000,
+          warn: 60000,
+          auto: 80000,
+          hard: 90000,
+        },
+        currentTier: 'warn',
+      },
+      isEstimated: false,
+      showDetails: false,
+    });
+    expect(text).toContain('Compaction thresholds');
+    expect(text).toContain('Effective window 92.0k tokens');
+    expect(text).toContain('▶ Warn threshold 60.0k tokens');
+    expect(text).toContain('  Auto threshold 80.0k tokens');
+    expect(text).toContain('Current tier warn');
+  });
+
+  it.each([false, true])(
+    'preserves the combined memory category in legacy OpenTUI snapshots (details: %s)',
+    (showDetails) => {
+      const item = {
+        modelName: 'legacy-model',
+        totalTokens: 200,
+        contextWindowSize: 1000,
+        breakdown: {
+          memoryFiles: 200,
+          freeSpace: 800,
+          autocompactBuffer: 0,
+        },
+        memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+        showDetails,
+      };
+      expectCoherentBreakdown(item);
+      const text = projectContextUsage(item);
+      expect(text).toContain('█ Memory files 200 tokens (20.0%)');
+      expect(text).not.toContain('Instruction files');
+      expect(text).not.toContain('Auto memory');
+      expect(text.includes('QWEN.md')).toBe(showDetails);
+    },
+  );
+
+  it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
+    const item = {
+      modelName: 'm',
+      totalTokens: 30,
+      contextWindowSize: 100,
+      breakdown: {
+        instructionFiles: 20,
+        memoryFiles: 10,
+        freeSpace: 70,
+        autocompactBuffer: 0,
+      },
+      showDetails: true,
+      instructionFiles: [{ path: 'QWEN.md', tokens: 20 }],
+      memoryFiles: [{ path: 'auto memory', tokens: 10 }],
+    };
+    expectCoherentBreakdown(item);
+    const split = projectContextUsage(item);
+    expect(split).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(split).toContain('█ Auto memory 10 tokens (10.0%)');
+    const summary = projectContextUsage({ ...item, showDetails: false });
+    expect(summary).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(summary).toContain('█ Auto memory 10 tokens (10.0%)');
+    expect(split).toContain('QWEN.md');
+    expect(split).not.toContain('Memory files');
+    const text = projectContextUsage({
+      modelName: 'm',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        thresholds: {
+          effectiveWindow: 92000,
+          warn: 60000,
+          auto: 80000,
+          hard: 90000,
+        },
+        currentTier: 'safe',
+      },
+      isEstimated: false,
+      showDetails: true,
+      builtinTools: [
+        { name: 'read-file', tokens: 300 },
+        { name: 'shell', tokens: 500 },
+      ],
+      mcpTools: [{ name: 'search', tokens: 100 }],
+      memoryFiles: [{ path: 'GEMINI.md', tokens: 200 }],
+      skills: [
+        { name: 'feat-dev', tokens: 10, loaded: false },
+        {
+          name: 'e2e-testing',
+          tokens: 20,
+          loaded: true,
+          bodyTokens: 400,
+        },
+      ],
+    });
+    // Sections appear, sorted by token count descending.
+    const shellIdx = text.indexOf('shell');
+    const readIdx = text.indexOf('read-file');
+    expect(shellIdx).toBeGreaterThan(-1);
+    expect(readIdx).toBeGreaterThan(shellIdx);
+    expect(text).toContain('MCP tools');
+    expect(text).toContain('Memory files');
+    expect(text).toContain('GEMINI.md');
+    // Loaded skill (with body cost) precedes the unloaded one.
+    const loadedIdx = text.indexOf('* e2e-testing');
+    const unloadedIdx = text.indexOf('feat-dev');
+    expect(loadedIdx).toBeGreaterThan(-1);
+    expect(unloadedIdx).toBeGreaterThan(loadedIdx);
+    expect(text).toContain('+400 body');
+    expect(text).not.toContain('Run /context detail');
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the wire type, so a payload from an
+    // older daemon omits it. Absent and `false` are the same state — not
+    // loaded — so the pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const text = projectContextUsage({
+        modelName: 'm',
+        totalTokens: 5000,
+        contextWindowSize: 100000,
+        breakdown: {},
+        isEstimated: false,
+        showDetails: true,
+        skills,
+      });
+      expect(text).toContain('big-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
+  });
+});
+
+describe('projectDoctor', () => {
+  it('groups checks by category and prints the summary', () => {
+    const text = projectDoctor(
+      [
+        {
+          category: 'Auth',
+          name: 'credentials',
+          status: 'pass',
+          message: 'ok',
+        },
+        {
+          category: 'Auth',
+          name: 'expiry',
+          status: 'warn',
+          message: 'soon',
+          detail: 'renew it',
+        },
+      ],
+      { pass: 1, warn: 1, fail: 0 },
+    );
+    expect(text).toContain('Doctor Report');
+    expect(text).toContain('Auth');
+    expect(text).toContain('✓ credentials: ok');
+    expect(text).toContain('⚠ expiry: soon');
+    expect(text).toContain('-> renew it');
+    expect(text).toContain('-- 1 passed, 1 warnings, 0 failures');
+  });
+});
+
+describe('projectMcpStatus', () => {
+  it('reports no servers when none are configured', () => {
+    expect(projectMcpStatus({ servers: {}, tools: [], prompts: [] })).toBe(
+      'No MCP servers configured.',
+    );
+  });
+
+  it('lists servers with cached tools as connected', () => {
+    const text = projectMcpStatus({
+      servers: { docs: {} },
+      tools: [{ serverName: 'docs', name: 'search' }],
+      prompts: [],
+      authStatus: {},
+      blockedServers: [],
+      discoveryInProgress: false,
+      connectingServers: [],
+      showDescriptions: false,
+    });
+    expect(text).toContain('Configured MCP servers:');
+    expect(text).toContain('● docs - Ready (1 tool)');
+    expect(text).toContain('Tools:');
+    expect(text).toContain('- search');
+  });
+
+  it('prints parameter schemas and tips when requested (ytahdn-4)', () => {
+    const text = projectMcpStatus({
+      servers: { docs: {} },
+      tools: [
+        {
+          serverName: 'docs',
+          name: 'search',
+          schema: {
+            parametersJsonSchema: {
+              type: 'object',
+              properties: { query: { type: 'string' } },
+            },
+          },
+        },
+      ],
+      prompts: [],
+      authStatus: {},
+      blockedServers: [],
+      discoveryInProgress: false,
+      connectingServers: [],
+      showDescriptions: false,
+      showSchema: true,
+      showTips: true,
+    });
+    expect(text).toContain('Parameters:');
+    expect(text).toContain('"query"');
+    expect(text).toContain('★ Tips:');
+    expect(text).toContain(
+      'Use /mcp desc to show server and tool descriptions',
+    );
+
+    const plain = projectMcpStatus({
+      servers: { docs: {} },
+      tools: [{ serverName: 'docs', name: 'search' }],
+      prompts: [],
+      authStatus: {},
+      blockedServers: [],
+      discoveryInProgress: false,
+      connectingServers: [],
+      showDescriptions: false,
+      showSchema: false,
+      showTips: false,
+    });
+    expect(plain).not.toContain('Parameters:');
+    expect(plain).not.toContain('★ Tips:');
+  });
+});
+
+describe('projectQuit', () => {
+  it('prints the session summary with the resume hint', () => {
+    const stats = {
+      sessionId: 'abc-123',
+      sessionStartTime: new Date(),
+      metrics: makeMetrics(),
+      lastPromptTokenCount: 0,
+      promptCount: 2,
+    } as unknown as SessionStatsState;
+    const config = {
+      getChatRecordingService: () => ({}),
+    } as never;
+    const text = projectQuit('5m 0s', stats, config);
+    expect(text).toContain('Agent powering down. Goodbye!');
+    expect(text).toContain('Session ID: abc-123');
+    expect(text).toContain('Wall Time: 5m 0s');
+    expect(text).toContain('qwen --resume abc-123');
+  });
+
+  it('falls back to the bare duration without stats', () => {
+    expect(projectQuit('1m', undefined, null)).toContain(
+      'Session duration: 1m',
+    );
+  });
+});
+
+describe('extractPromptText', () => {
+  it('passes strings through and walks React element children', () => {
+    expect(extractPromptText('plain')).toBe('plain');
+    // React.createElement(Text, null, '...') shape.
+    const element = {
+      $$typeof: Symbol.for('react.element'),
+      props: { children: 'Overwrite QWEN.md?' },
+    };
+    expect(extractPromptText(element)).toBe('Overwrite QWEN.md?');
+    const nested = {
+      props: { children: ['A ', { props: { children: 'B' } }] },
+    };
+    expect(extractPromptText(nested)).toBe('A B');
+    expect(extractPromptText(42)).toBe('42');
+  });
+});
+
+describe('projectToolsList (R1-90: tool descriptions)', () => {
+  it('renders each tool description under its name when showDescriptions', () => {
+    const text = projectToolsList(
+      [
+        {
+          name: 'read_file',
+          displayName: 'ReadFile',
+          description: 'Reads a file. ',
+        },
+        { name: 'run_shell', description: '  Runs a shell command.' },
+      ],
+      true,
+    );
+    expect(text).toContain('- ReadFile (read_file)');
+    expect(text).toContain('   Reads a file.');
+    expect(text).toContain('- run_shell (run_shell)');
+    expect(text).toContain('   Runs a shell command.');
+  });
+
+  it('omits descriptions when showDescriptions is off', () => {
+    const text = projectToolsList(
+      [{ name: 'read_file', description: 'Reads a file.' }],
+      false,
+    );
+    expect(text).toContain('- read_file');
+    expect(text).not.toContain('Reads a file.');
+  });
+});
+
+describe('model pricing (R1-91/R1-92)', () => {
+  const pricingMetrics = (): SessionMetrics =>
+    ({
+      models: {
+        'qwen3-max-001': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 1000,
+            candidates: 500,
+            total: 1500,
+            cached: 0,
+            thoughts: 0,
+          },
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('looks pricing up under the raw model name, not the normalized label', () => {
+    // The display label renders as "qwen3-max" (normalizeModelName strips
+    // -001) but the pricing table is keyed by the raw name, exactly like
+    // ink's getModelName(key) — a label-based lookup would miss.
+    const text = projectModelStats(pricingMetrics(), {
+      'qwen3-max-001': {
+        inputPerMillionTokens: 1,
+        outputPerMillionTokens: 2,
+      },
+    });
+    expect(text).toContain('Cost');
+    expect(text).toContain('Estimated $0.0020');
+  });
+
+  it('resolves pricing from settings.merged.modelPricing (R1-92)', () => {
+    const settings = {
+      merged: {
+        modelPricing: {
+          'qwen3-max-001': {
+            inputPerMillionTokens: 1,
+            outputPerMillionTokens: 2,
+          },
+        },
+      },
+    } as unknown as LoadedSettings;
+    const stats = {
+      sessionId: 's',
+      sessionStartTime: new Date(),
+      metrics: pricingMetrics(),
+      lastPromptTokenCount: 0,
+      promptCount: 1,
+    } as unknown as SessionStatsState;
+    const text = projectSpecialItemText(
+      { type: 'model_stats' },
+      {
+        stats,
+        settings,
+        // Decoy: the old code probed this nonexistent config method; the
+        // pricing entry only exists in settings, so a Cost row proves the
+        // settings channel is the one being read.
+        config: {
+          getModelPricing: () => ({ decoy: {} }),
+        } as unknown as Config,
+      },
+    );
+    expect(text).toContain('Cost');
+    expect(text).toContain('Estimated $0.0020');
+  });
+});
+
+describe('projectMcpStatus cached-items upgrade (R1-93)', () => {
+  it('upgrades DISCONNECTED servers with cached prompts, not just tools', () => {
+    const text = projectMcpStatus({
+      servers: { ghost: {}, 'tools-only': {}, 'prompts-only': {} },
+      tools: [{ serverName: 'tools-only', name: 't1' }],
+      prompts: [{ serverName: 'prompts-only', name: 'p1' }],
+    });
+    // cached tools OR cached prompts upgrade the row to Ready (ink
+    // hasCachedItems); a server with neither stays Disconnected.
+    expect(text).toMatch(/tools-only[^\n]*Ready/);
+    expect(text).toMatch(/prompts-only[^\n]*Ready/);
+    expect(text).toMatch(/ghost[^\n]*Disconnected/);
+  });
+});
+
+describe('projectMcpStatus line spellings (R1-86)', () => {
+  it('prints the disconnected line exactly like ink — no dots after the name', () => {
+    const text = projectMcpStatus({ servers: { off: {} } });
+    expect(text).toContain('● off - Disconnected');
+  });
+});
+
+describe('projectAbout authentication', () => {
+  it.each([
+    ['qwen-subscription', 'Qwen Subscription'],
+    ['qwen-oauth', 'Qwen OAuth'],
+    ['openai', 'API Key - openai'],
+  ])('displays %s as %s', (selectedAuthType, label) => {
+    const text = projectAbout({ selectedAuthType });
+    expect(text.split('\n')).toContain(`Auth: ${label}`);
+  });
+});
+
+describe('projectAbout proxy redaction (R1-6)', () => {
+  it('masks credentials in parseable proxy URLs', () => {
+    const text = projectAbout({
+      proxy: 'http://user:pass@example.com:3128',
+    });
+    expect(text).toContain('Proxy: http://***:***@example.com:3128/');
+    expect(text).not.toContain('user');
+    expect(text).not.toContain('pass');
+  });
+
+  it('falls back to regex redaction when URL parsing fails', () => {
+    // Realistic proxy-env typos (a space in the host) must not leak the
+    // raw credentials into the shareable transcript.
+    const text = projectAbout({ proxy: 'http://user:pass@inv alid' });
+    expect(text).toContain('Proxy: http://***@inv alid');
+    expect(text).not.toContain('user');
+  });
+});
+
+describe('projectExtensionsList resolved settings (R1-8)', () => {
+  it('lists resolved setting names and values from the array', () => {
+    const config = {
+      getExtensions: () => [
+        {
+          name: 'ext-a',
+          version: '1.0.0',
+          isActive: true,
+          resolvedSettings: [
+            {
+              name: 'API_KEY',
+              envVar: 'API_KEY',
+              value: 'v1',
+              sensitive: false,
+            },
+          ],
+        },
+      ],
+    } as unknown as Config;
+    const text = projectExtensionsList(config, new Map());
+    expect(text).toContain(' settings:');
+    expect(text).toContain(' - API_KEY: v1');
+  });
+});
+
+describe('projectCompression (CompressionMessage parity, R1-7/76)', () => {
+  it('covers pending/compressed/estimated/failed/error/noop states', () => {
+    expect(projectCompression({ isPending: true })).toBe(
+      'Compressing chat history',
+    );
+    expect(
+      projectCompression({
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 100,
+        newTokenCount: 40,
+      }),
+    ).toBe('Chat history compressed from 100 to 40 tokens.');
+    expect(
+      projectCompression({
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 100,
+        newTokenCount: 40,
+        originalTokenCountIsEstimated: true,
+        newTokenCountIsEstimated: true,
+      }),
+    ).toBe('Chat history compressed from ~100 to ~40 tokens.');
+    expect(
+      projectCompression({
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        originalTokenCount: 1000,
+      }),
+    ).toBe('Compression was not beneficial for this history size.');
+    expect(
+      projectCompression({
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        originalTokenCount: 60000,
+      }),
+    ).toContain('compression prompt');
+    expect(
+      projectCompression({
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+      }),
+    ).toBe('Could not compress chat history due to a token counting error.');
+    expect(
+      projectCompression({ compressionStatus: CompressionStatus.NOOP }),
+    ).toBe('Nothing to compress.');
+  });
+});
+
+describe('projectStats and the savings-tip placement (R1-86)', () => {
+  const stats = {
+    sessionId: 's1',
+    sessionStartTime: new Date(),
+    metrics: makeMetrics(),
+    lastPromptTokenCount: 0,
+    promptCount: 1,
+  } as unknown as SessionStatsState;
+
+  it('titles the /stats projection and renders the shared sections', () => {
+    const text = projectStats('9m', stats);
+    expect(text.startsWith('Session Stats')).toBe(true);
+    expect(text).toContain('Interaction Summary');
+    expect(text).toContain('Performance');
+    expect(text).toContain('Model Usage');
+  });
+
+  it('shows the /stats-model tip only inside the savings block', () => {
+    // cached=100/prompt=1000 in makeMetrics → 10% cache efficiency.
+    expect(projectStats('9m', stats)).toContain(
+      '» Tip: For a full token breakdown, run `/stats model`.',
+    );
+    const metrics = makeMetrics();
+    for (const model of Object.values(metrics.models)) {
+      model.tokens.cached = 0;
+    }
+    const zeroCache = { ...stats, metrics } as unknown as SessionStatsState;
+    const text = projectStats('9m', zeroCache);
+    expect(text).toContain('Model Usage');
+    expect(text).not.toContain('Tip:');
+  });
+});
+
+describe('dispatcher coverage for compression/stats items (R1-7)', () => {
+  it('projects compression and stats history items', () => {
+    expect(
+      projectSpecialItemText(
+        {
+          type: 'compression',
+          compression: {
+            isPending: false,
+            originalTokenCount: 100,
+            newTokenCount: 40,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        },
+        {},
+      ),
+    ).toBe('Chat history compressed from 100 to 40 tokens.');
+    const statsText = projectSpecialItemText(
+      { type: 'stats', duration: '9m' },
+      {},
+    );
+    expect(statsText).toContain('Session Stats');
+    expect(statsText).toContain('Session duration: 9m');
+  });
+});
+
+describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
+  const ctx: ItemProjectionContext = {};
+
+  it('projects the invocation echo as an unsent user row', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'user', text: '/stats', sentToModel: false },
+        ctx,
+      ),
+    ).toEqual({ type: 'user', text: '/stats', sentToModel: false });
+    expect(
+      projectItemToStreamEvent(
+        { type: 'user', text: 'x', sentToModel: false, promptId: 'p1' },
+        ctx,
+      ),
+    ).toEqual({ type: 'user', text: 'x', sentToModel: false, promptId: 'p1' });
+  });
+
+  it("keeps the info row's link footer (InfoMessage parity)", () => {
+    expect(
+      projectItemToStreamEvent({ type: 'info', text: 'Report filed.' }, ctx),
+    ).toEqual({ type: 'info', text: 'Report filed.' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'info',
+          text: 'Report filed.',
+          linkUrl: 'https://example.com/1',
+          linkText: 'issue',
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'info',
+      text: 'Report filed.\nissue: https://example.com/1',
+    });
+  });
+
+  it('maps warning/success/error onto their live kinds', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'warning', text: 'w' }, ctx),
+    ).toEqual({ type: 'warning', text: 'w' });
+    // Documented divergence: ink's green SuccessMessage renders as the info
+    // row — the live model has no success kind (arenaCommand is the producer).
+    expect(
+      projectItemToStreamEvent({ type: 'success', text: 's' }, ctx),
+    ).toEqual({ type: 'info', text: 's' });
+    expect(
+      projectItemToStreamEvent({ type: 'error', text: 'e', hint: 'h' }, ctx),
+    ).toEqual({ type: 'error', text: 'e', hint: 'h' });
+  });
+
+  it('maps the goal pair onto the live-model card kinds', () => {
+    const snapshot = { id: 'g1' } as never;
+    expect(
+      projectItemToStreamEvent(
+        { type: 'goal_state', snapshot, cause: 'create' },
+        ctx,
+      ),
+    ).toEqual({ type: 'goal', snapshot, cause: 'create' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'tests pass',
+          iterations: 2,
+          durationMs: 100,
+          lastReason: 'still failing',
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'goal-legacy',
+      kind: 'set',
+      condition: 'tests pass',
+      iterations: 2,
+      durationMs: 100,
+      lastReason: 'still failing',
+    });
+  });
+
+  it('maps the stop-hook pair and redacts the blocked prompt', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'stop_hook_system_message', message: 'Stop says: no' },
+        ctx,
+      ),
+    ).toEqual({ type: 'stop-hook-message', message: 'Stop says: no' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'stop_hook_loop',
+          iterationCount: 1,
+          stopHookCount: 2,
+          reasons: ['a', 'b'],
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'info',
+      text: 'Ran 2 stop hooks\n  ⎿  Stop hook error: b',
+    });
+    const blocked = projectItemToStreamEvent(
+      {
+        type: 'user_prompt_submit_blocked',
+        reason: 'denied',
+        originalPrompt: 'sk-abcdefghijklmnopqrstuvw run',
+      },
+      ctx,
+    );
+    expect(blocked?.type).toBe('warning');
+    const blockedText = (blocked as { text: string }).text;
+    expect(blockedText).toContain(
+      '✕ UserPromptSubmit operation blocked by hook:\ndenied',
+    );
+    expect(blockedText).not.toContain('sk-abcdefghijklmnopqrstuvw');
+  });
+
+  it('routes the special kinds through projectSpecialItemText as info rows', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'about', systemInfo: {} as never }, ctx),
+    ).toEqual({
+      type: 'info',
+      text: expect.stringContaining('Status'),
+      historyIsSynthetic: false,
+    });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'compression',
+          compression: {
+            isPending: true,
+            originalTokenCount: null,
+            newTokenCount: null,
+            compressionStatus: null,
+          },
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'info',
+      text: 'Compressing chat history',
+      historyIsSynthetic: false,
+    });
+    expect(
+      projectItemToStreamEvent({ type: 'stats', duration: '9m' }, ctx)?.type,
+    ).toBe('info');
+  });
+
+  it('no-ops stream-duplicated kinds and kinds with no row shape here', () => {
+    const noOps = [
+      { type: 'tool_group', tools: [] },
+      { type: 'retry_countdown', attempt: 1 },
+      { type: 'vision_notice', text: 'n' },
+      { type: 'gemini', text: 'g' },
+      { type: 'gemini_content', text: 'g' },
+      { type: 'gemini_thought', text: 'g' },
+      { type: 'gemini_thought_content', text: 'g' },
+      { type: 'help', timestamp: new Date() },
+      { type: 'notification', text: 'n' },
+      { type: 'tool_use_summary', text: 't' },
+      { type: 'diff_stats', text: 'd' },
+    ] as unknown as HistoryItemWithoutId[];
+    for (const item of noOps) {
+      expect(projectItemToStreamEvent(item, ctx)).toBeNull();
+    }
+  });
+
+  it('carries the user_shell command row structurally (U-33)', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'user_shell', text: 'ls -la' }, ctx),
+    ).toEqual({ type: 'user-shell', text: 'ls -la' });
+  });
+
+  it('carries the four dedicated-component kinds structurally (U-34)', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'away_recap', text: ' Recap body ' },
+        ctx,
+      ),
+    ).toEqual({ type: 'away-recap', text: ' Recap body ' });
+    expect(
+      projectItemToStreamEvent(
+        { type: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+        ctx,
+      ),
+    ).toEqual({ type: 'advisor', text: 'Looks good', model: 'qwen3-max' });
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    };
+    expect(
+      projectItemToStreamEvent(
+        { type: 'arena_agent_complete', agent } as never,
+        ctx,
+      ),
+    ).toEqual({ type: 'arena-agent', agent });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'arena_session_complete',
+          sessionStatus: 'completed',
+          task: 'do it',
+          totalDurationMs: 2000,
+          agents: [agent],
+        } as never,
+        ctx,
+      ),
+    ).toEqual({
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
+  });
+});
+
+describe('canonical resumed tool projection', () => {
+  it('preserves meaningful classification through replay and folding', () => {
+    const canonical: HistoryItem[] = [
+      { id: 7, type: 'about', systemInfo: {} as never },
+      {
+        id: 8,
+        type: 'info',
+        text: 'Preparing',
+        display: { suppressOnRestore: true },
+      },
+    ];
+    const events = projectHistoryToStreamEvents(canonical, {});
+    expect(events).toEqual([
+      {
+        type: 'info',
+        text: 'Status\nProxy: no proxy',
+        historyIsSynthetic: false,
+        historyId: 7,
+        canonicalHistoryItem: canonical[0],
+      },
+      {
+        type: 'info',
+        text: 'Preparing',
+        historyId: 8,
+        historyDisplay: { suppressOnRestore: true },
+        canonicalHistoryItem: canonical[1],
+      },
+      { type: 'done' },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items).toEqual([
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Status\nProxy: no proxy',
+        historyIsSynthetic: false,
+        historyId: 7,
+        canonicalHistoryItem: canonical[0],
+      },
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Preparing',
+        historyId: 8,
+        display: { suppressOnRestore: true },
+        canonicalHistoryItem: canonical[1],
+      },
+    ]);
+  });
+
+  it('replays one structured compression row without changing live notice projection', () => {
+    const compression = {
+      isPending: false,
+      originalTokenCount: 100,
+      newTokenCount: 40,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      compressionKind: 'summarize' as const,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: false,
+    };
+    const item: HistoryItem = {
+      id: 73,
+      type: 'compression',
+      compression,
+      display: { suppressOnRestore: true },
+    };
+    const events = projectHistoryToStreamEvents([item], {});
+    expect(events).toEqual([
+      {
+        type: 'compaction',
+        compression,
+        historyId: 73,
+        historyDisplay: { suppressOnRestore: true },
+        canonicalHistoryItem: item,
+      },
+      { type: 'done' },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'compaction',
+      compression,
+      historyId: 73,
+      display: { suppressOnRestore: true },
+    });
+    expect(isHistoryItemVisibleAfterRestore(items[0])).toBe(false);
+    expect(rewindBoundaryHistory(items)).toEqual([{ ...item, id: 0 }]);
+    expect(projectItemToStreamEvent(item, {})).toMatchObject({
+      type: 'info',
+      text: projectCompression(compression),
+      historyIsSynthetic: false,
+    });
+  });
+
+  it.each(['fast', 'summarize'] as const)(
+    'keeps collapsed %s boundaries and full-array turn identities available for rewind',
+    (compressionKind) => {
+      const compression = {
+        isPending: false,
+        originalTokenCount: 10,
+        newTokenCount: 5,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        compressionKind,
+        originalTokenCountIsEstimated: true,
+      };
+      const canonical: HistoryItem[] = [
+        {
+          id: 90,
+          type: 'user',
+          text: 'first',
+          promptId: 'p1',
+          sentToModel: true,
+        },
+        { id: 91, type: 'info', text: 'retained command output' },
+        { id: 92, type: 'compression', compression },
+        {
+          id: 93,
+          type: 'user',
+          text: 'second',
+          promptId: 'p2',
+          sentToModel: true,
+        },
+      ];
+      const collapsed = applyCollapsePolicyAndSummary(canonical, true);
+      const items = projectHistoryToStreamEvents(collapsed, {}).reduce<
+        readonly LiveHistoryItem[]
+      >(foldLiveEvent, []);
+      expect(items).toHaveLength(5);
+      expect(items.filter(isHistoryItemVisibleAfterRestore)).toEqual([
+        expect.objectContaining({ display: { kind: 'collapse-summary' } }),
+      ]);
+      expect(rewindBoundaryHistory(items)).toEqual([
+        { ...collapsed[0], id: 0 },
+        { ...collapsed[2], id: 2 },
+        { ...collapsed[3], id: 3 },
+      ]);
+      const expanded = projectHistoryToStreamEvents(
+        expandCollapsedHistory(collapsed),
+        {},
+      ).reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+      expect(expanded).toHaveLength(4);
+      expect(expanded.every(isHistoryItemVisibleAfterRestore)).toBe(true);
+      expect(expanded.find((item) => item.kind === 'compaction')).toMatchObject(
+        { compression },
+      );
+    },
+  );
+
+  it('keeps exact image bytes and detailed read text through projection and folding', () => {
+    const history: HistoryItem[] = [
+      {
+        id: 41,
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'read-1',
+            name: ToolDisplayNames.READ_FILE,
+            description: 'owned.txt',
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+            resultDisplay: 'Read 2 lines',
+            detailedDisplay: 'line one\nline two',
+            args: { absolute_path: '/owned.txt' },
+            images: [{ mimeType: 'image/png', data: 'exact-base64' }],
+            omittedImageCount: 2,
+          },
+        ],
+      },
+    ];
+    const events = projectHistoryToStreamEvents(history, {});
+    expect(events.filter((event) => event.type === 'image')).toEqual([
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        data: 'exact-base64',
+        historyId: 41,
+        canonicalHistoryItem: history[0],
+      },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items.find((item) => item.kind === 'tool')).toMatchObject({
+      id: 'read-1',
+      output: 'Read 2 lines',
+      detailedDisplay: 'line one\nline two',
+      historyId: 41,
+      done: true,
+    });
+    expect(items.find((item) => item.kind === 'image')).toMatchObject({
+      data: 'exact-base64',
+      mimeType: 'image/png',
+      historyId: 41,
+    });
+    expect(items.find((item) => item.kind === 'info')?.historyId).toBe(41);
+  });
+});
+
+describe('cost does not double-count included reasoning tokens (#15444)', () => {
+  // Priced so the rendered dollar figure isolates the OUTPUT term: input at
+  // $0/M and output at $1/M makes `$X` exactly outputTokens / 1_000_000.
+  const PRICING = {
+    'qwen3-max-001': { inputPerMillionTokens: 0, outputPerMillionTokens: 1 },
+  };
+
+  const metricsWith = (tokens: {
+    prompt: number;
+    candidates: number;
+    thoughts: number;
+    total: number;
+  }): SessionMetrics =>
+    ({
+      models: {
+        'qwen3-max-001': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: { ...tokens, cached: 0 },
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('renders accumulated event costs for mixed completeness and missing OpenAI totals', () => {
+    const telemetry = new UiTelemetryService();
+    const add = (
+      auth: string,
+      usage: ConstructorParameters<typeof ApiResponseEvent>[5],
+    ) =>
+      telemetry.addEvent({
+        ...new ApiResponseEvent('r', 'qwen3-max-001', 1, 'p', auth, usage),
+        'event.name': EVENT_API_RESPONSE,
+      } as UiEvent);
+    add('gemini', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 50_000,
+      thoughtsTokenCount: 120_000,
+      totalTokenCount: 270_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1700',
+    );
+    add('gemini', { promptTokenCount: 20_000, candidatesTokenCount: 10_000 });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1800',
+    );
+    // Legacy history cannot recover the missing total; its estimate stays unchanged.
+    const legacy = structuredClone(telemetry.getMetrics());
+    delete legacy.billableOutputTokens;
+    expect(projectModelStats(legacy, PRICING)).toContain('Estimated $0.1500');
+    telemetry.reset();
+    add('openai', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 150_000,
+      thoughtsTokenCount: 120_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1500',
+    );
+  });
+
+  it('honors an authoritative zero instead of falling back to raw thoughts', () => {
+    const metrics = metricsWith({
+      prompt: 100,
+      candidates: 0,
+      thoughts: 1000,
+      total: 0,
+    });
+    metrics.billableOutputTokens = {
+      'qwen3-max-001': { total: 0, bySource: {} },
+    };
+    expect(projectModelStats(metrics, PRICING)).toContain('Estimated $0.0000');
+  });
+
+  it('bills total − prompt when reasoning is already inside candidates', () => {
+    // OpenAI-style usage: the provider's `total` already counts the reasoning
+    // tokens that sit inside `candidates`, so `candidates + thoughts` bills
+    // the reasoning twice — 150000 + 120000 = 270000 ($0.2700) instead of the
+    // 150000 output the provider actually reported ($0.1500).
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 150_000,
+        thoughts: 120_000,
+        total: 250_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1500');
+    expect(text).not.toContain('$0.2700');
+  });
+
+  it('is unchanged when thoughts are disjoint from candidates', () => {
+    // Gemini-style usage: total = prompt + candidates + thoughts, so
+    // total − prompt (170000) already equals candidates + thoughts (170000).
+    // The fix must be a no-op here — without this leg an implementation that
+    // drops thinking entirely would still pass the OpenAI assertion above.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 270_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('falls back to candidates + thoughts when no usable total is reported', () => {
+    // Mirrors the cost-ledger guard: derive only when the subtraction is
+    // meaningful, so an absent total keeps today's behaviour instead of
+    // billing a negative output.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 0,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('does not bill a total-only record as output', () => {
+    // A provider that reports only `total_tokens` leaves prompt and candidates
+    // at 0. Deriving anyway would bill the entire total -- almost all input --
+    // at the output rate, where the old sum reported no cost at all.
+    const text = projectModelStats(
+      metricsWith({ prompt: 0, candidates: 0, thoughts: 0, total: 250_000 }),
+      PRICING,
+    );
+    expect(text).not.toContain('$0.2500');
+    expect(text).not.toContain('Estimated');
+  });
+
+  it('does not bill a cached-only prompt as output', () => {
+    // Cached input coerces prompt to 0 while total keeps the cache, so
+    // derived 52_000 sits far above the band [10_000, 12_000]; the over-bill
+    // would be exactly the cached count, i.e. input tokens at the output rate.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 0,
+        candidates: 10_000,
+        thoughts: 2_000,
+        total: 52_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.0120');
+    expect(text).not.toContain('$0.0520');
+  });
+
+  it('does not under-bill when a short total lands below candidates', () => {
+    // One total-less event among complete ones subtracts an unreported prompt
+    // from the other events' output: derived 180_000 < candidates 190_000.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 110_000,
+        candidates: 190_000,
+        thoughts: 0,
+        total: 290_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1900');
+    expect(text).not.toContain('$0.1800');
+  });
+});

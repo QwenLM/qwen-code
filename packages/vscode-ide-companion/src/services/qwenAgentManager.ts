@@ -9,15 +9,14 @@ import type {
   ModelInfo,
   AvailableCommand,
   ContentBlock,
-  RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type {
   AuthenticateUpdateNotification,
-  AskUserQuestionRequest,
   SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
+import type { PromptSubmissionOptions } from '../types/connectionTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
 import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
@@ -42,6 +41,7 @@ import {
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
 import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
 
@@ -127,6 +127,11 @@ export class QwenAgentManager {
 
     // Set ACP connection callbacks
     this.connection.onSessionUpdate = (data: SessionNotification) => {
+      // Forward the raw notification verbatim for consumers that reduce the
+      // transcript themselves (WebShell transcript UI). This runs before the
+      // rehydration branch so history replay and live streaming are both
+      // captured with the same shape the daemon SSE envelope would carry.
+      this.callbacks.onTranscriptUpdate?.(data);
       // If we are rehydrating a loaded session, map message chunks into
       // discrete messages for the UI instead of streaming behavior.
       // During rehydration the webview is NOT in streaming mode, so
@@ -222,31 +227,6 @@ export class QwenAgentManager {
       this.sessionUpdateHandler.handleSessionUpdate(data);
     };
 
-    this.connection.onPermissionRequest = async (
-      data: RequestPermissionRequest,
-    ) => {
-      if (this.callbacks.onPermissionRequest) {
-        const optionId = await this.callbacks.onPermissionRequest(data);
-        return {
-          optionId:
-            this.resolvePermissionOptionId(data, optionId) ||
-            this.resolvePermissionOptionId(data) ||
-            '',
-        };
-      }
-      return { optionId: this.resolvePermissionOptionId(data) || '' };
-    };
-
-    this.connection.onAskUserQuestion = async (
-      data: AskUserQuestionRequest,
-    ) => {
-      if (this.callbacks.onAskUserQuestion) {
-        const result = await this.callbacks.onAskUserQuestion(data);
-        return result;
-      }
-      return { optionId: 'cancel' };
-    };
-
     this.connection.onEndTurn = (reason?: string, source?: string) => {
       try {
         if (this.callbacks.onEndTurn) {
@@ -286,14 +266,9 @@ export class QwenAgentManager {
         const obj = (init || {}) as Record<string, unknown>;
         const modes = obj['modes'] as
           | {
-              currentModeId?:
-                | 'plan'
-                | 'default'
-                | 'auto-edit'
-                | 'auto'
-                | 'yolo';
+              currentModeId?: ApprovalModeValue;
               availableModes?: Array<{
-                id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+                id: ApprovalModeValue;
                 name: string;
                 description: string;
               }>;
@@ -394,8 +369,11 @@ export class QwenAgentManager {
    *
    * @param message - Message content
    */
-  async sendMessage(message: string | ContentBlock[]): Promise<void> {
-    await this.connection.sendPrompt(message);
+  async sendMessage(
+    message: string | ContentBlock[],
+    options?: PromptSubmissionOptions,
+  ): Promise<void> {
+    await this.connection.sendPrompt(message, options);
   }
 
   async rewindSession(
@@ -581,11 +559,11 @@ export class QwenAgentManager {
    * Falls back to file system scan with equivalent pagination semantics.
    */
   async getSessionListPaged(params?: {
-    cursor?: number;
+    cursor?: number | string;
     size?: number;
   }): Promise<{
     sessions: Array<Record<string, unknown>>;
-    nextCursor?: number;
+    nextCursor?: number | string;
     hasMore: boolean;
   }> {
     const size = params?.size ?? 20;
@@ -612,22 +590,21 @@ export class QwenAgentManager {
         cwd: item.cwd,
       }));
 
-      // SDK returns nextCursor as string; convert to numeric cursor for paging
-      let nextCursorNum: number | undefined;
+      // Keep the daemon's cursor verbatim: the composite "<mtime>|<name>" form
+      // would become NaN under Number() and read as "no more pages".
+      let nextCursorValue: number | string | undefined;
       if (typeof res === 'object' && res !== null && 'nextCursor' in res) {
         const raw = (res as { nextCursor?: unknown }).nextCursor;
         if (typeof raw === 'number') {
-          nextCursorNum = raw;
-        } else if (typeof raw === 'string') {
+          nextCursorValue = raw;
+        } else if (typeof raw === 'string' && raw !== '') {
           const parsed = Number(raw);
-          if (!Number.isNaN(parsed)) {
-            nextCursorNum = parsed;
-          }
+          nextCursorValue = Number.isNaN(parsed) ? raw : parsed;
         }
       }
-      const hasMore = nextCursorNum !== undefined;
+      const hasMore = nextCursorValue !== undefined;
 
-      return { sessions: mapped, nextCursor: nextCursorNum, hasMore };
+      return { sessions: mapped, nextCursor: nextCursorValue, hasMore };
     } catch (error) {
       logger.warn('[QwenAgentManager] Paged ACP session list failed:', error);
       // fall through to file system
@@ -644,10 +621,13 @@ export class QwenAgentManager {
         raw: s,
         mtime: new Date(s.lastUpdated).getTime(),
       }));
-      const filtered =
-        cursor !== undefined
-          ? allWithMtime.filter((x) => x.mtime < cursor)
-          : allWithMtime;
+      // A cursor may arrive in the composite "<mtime>|<name>" form the daemon
+      // emits; only its mtime prefix can filter this file-system listing.
+      const cursorMtime =
+        typeof cursor === 'number' ? cursor : Number(cursor?.split('|')[0]);
+      const filtered = Number.isFinite(cursorMtime)
+        ? allWithMtime.filter((x) => x.mtime < cursorMtime)
+        : allWithMtime;
       const page = filtered.slice(0, size);
       const sessions = page.map((x) => ({
         id: x.raw.sessionId,
@@ -834,9 +814,12 @@ export class QwenAgentManager {
             });
           }
         }
-        // Handle tool result records
+        // Handle tool result records. Internal Code Mode results have no
+        // model-emitted call partner, so rendering them adds rows for calls
+        // the model never made.
         else if (
           r.type === 'tool_result' &&
+          !isInternalCodeModeToolResult(r) &&
           r.toolCallResult &&
           typeof r.toolCallResult === 'object'
         ) {
@@ -867,6 +850,12 @@ export class QwenAgentManager {
               uiEvent?: Record<string, unknown>;
             }
           ).uiEvent as Record<string, unknown>;
+          if (
+            uiEvent['event.name'] === 'request_lifecycle' ||
+            uiEvent['event.name'] === 'tool_lifecycle'
+          ) {
+            continue;
+          }
           let telemetryText = '';
 
           if (
@@ -1364,32 +1353,6 @@ export class QwenAgentManager {
   }
 
   /**
-   * Register permission request callback
-   *
-   * @param callback - Permission request callback function
-   */
-  onPermissionRequest(
-    callback: (request: RequestPermissionRequest) => Promise<string>,
-  ): void {
-    this.callbacks.onPermissionRequest = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
-  /**
-   * Register ask user question callback
-   *
-   * @param callback - Ask user question callback function
-   */
-  onAskUserQuestion(
-    callback: (
-      request: AskUserQuestionRequest,
-    ) => Promise<{ optionId: string; answers?: Record<string, string> }>,
-  ): void {
-    this.callbacks.onAskUserQuestion = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
-  /**
    * Register end-of-turn callback
    *
    * @param callback - Called when ACP stopReason is reported
@@ -1404,9 +1367,9 @@ export class QwenAgentManager {
    */
   onModeInfo(
     callback: (info: {
-      currentModeId?: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+      currentModeId?: ApprovalModeValue;
       availableModes?: Array<{
-        id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+        id: ApprovalModeValue;
         name: string;
         description: string;
       }>;
@@ -1419,11 +1382,7 @@ export class QwenAgentManager {
   /**
    * Register mode changed callback
    */
-  onModeChanged(
-    callback: (
-      modeId: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo',
-    ) => void,
-  ): void {
+  onModeChanged(callback: (modeId: ApprovalModeValue) => void): void {
     this.callbacks.onModeChanged = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
@@ -1481,6 +1440,19 @@ export class QwenAgentManager {
   ): void {
     this.callbacks.onSlashCommandNotification = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register a handler for raw ACP session/update notifications. Unlike the
+   * dedicated callbacks (onStreamChunk, onToolCall, ...) this is emitted
+   * verbatim from {@link onSessionUpdate} before any rehydration/streaming
+   * shaping, so transcript-reducing consumers see the same shape the daemon
+   * SSE envelope would carry.
+   */
+  onTranscriptUpdate(
+    callback: (notification: SessionNotification) => void,
+  ): void {
+    this.callbacks.onTranscriptUpdate = callback;
   }
 
   /**
@@ -1563,34 +1535,5 @@ export class QwenAgentManager {
         this.callbacks.onAvailableModels?.(this.baselineAvailableModels);
       }
     }
-  }
-
-  private resolvePermissionOptionId(
-    request: RequestPermissionRequest,
-    preferredOptionId?: string,
-  ): string | undefined {
-    // Keep this mapping aligned with AcpConnection.resolvePermissionOptionId:
-    // Webview callbacks may provide a semantic choice (allow/reject) while the
-    // CLI requires a concrete ToolConfirmationOutcome optionId.
-    // Always normalize to an optionId that exists in request.options.
-    const options = Array.isArray(request.options) ? request.options : [];
-    if (options.length === 0) {
-      return undefined;
-    }
-
-    if (
-      preferredOptionId &&
-      options.some((option) => option.optionId === preferredOptionId)
-    ) {
-      return preferredOptionId;
-    }
-
-    return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ||
-      options.find((option) => option.optionId === 'proceed_once')?.optionId ||
-      options.find((option) => option.optionId.includes('proceed_once'))
-        ?.optionId ||
-      options[0]?.optionId
-    );
   }
 }

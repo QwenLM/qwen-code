@@ -7,12 +7,44 @@ import { describe, expect, it } from 'vitest';
 import { AlertDialogContent, AlertDialogOverlay } from './alert-dialog';
 import { Button } from './button';
 import { Checkbox } from './checkbox';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from './collapsible';
 import { DialogContent, DialogOverlay } from './dialog';
 import { DrawerContent, DrawerOverlay } from './drawer';
 import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
 import { Input } from './input';
-import { PopoverAnchor, PopoverContent, PopoverTrigger } from './popover';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from './popover';
 import { SelectTrigger } from './select';
+import {
+  ResizablePanelGroup,
+  ResizablePanel,
+  ResizableHandle,
+} from './resizable';
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from './table';
+import { TabsList } from './tabs';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './tooltip';
 
 const FORWARD_REF_TYPE = Symbol.for('react.forward_ref');
 
@@ -24,6 +56,9 @@ describe('React 18 ref compatibility', () => {
     ['AlertDialogOverlay', AlertDialogOverlay],
     ['Button', Button],
     ['Checkbox', Checkbox],
+    ['Collapsible', Collapsible],
+    ['CollapsibleContent', CollapsibleContent],
+    ['CollapsibleTrigger', CollapsibleTrigger],
     ['DialogContent', DialogContent],
     ['DialogOverlay', DialogOverlay],
     ['DrawerContent', DrawerContent],
@@ -35,6 +70,20 @@ describe('React 18 ref compatibility', () => {
     ['DropdownMenuTrigger', DropdownMenuTrigger],
     ['DropdownMenuSubTrigger', DropdownMenuSubTrigger],
     ['SelectTrigger', SelectTrigger],
+    ['ResizablePanelGroup', ResizablePanelGroup],
+    ['ResizablePanel', ResizablePanel],
+    ['ResizableHandle', ResizableHandle],
+    ['Table', Table],
+    ['TableHeader', TableHeader],
+    ['TableBody', TableBody],
+    ['TableFooter', TableFooter],
+    ['TableRow', TableRow],
+    ['TableHead', TableHead],
+    ['TableCell', TableCell],
+    ['TableCaption', TableCaption],
+    ['TabsList', TabsList],
+    ['TooltipTrigger', TooltipTrigger],
+    ['TooltipContent', TooltipContent],
   ])('%s forwards refs', (_name, Component) => {
     expect(Component).toHaveProperty('$$typeof', FORWARD_REF_TYPE);
   });
@@ -61,6 +110,141 @@ describe('React 18 ref compatibility', () => {
     act(() => root.render(<Checkbox ref={ref} />));
     expect(ref.current).toBeInstanceOf(HTMLButtonElement);
 
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards Collapsible, trigger, and content refs to their DOM elements', () => {
+    const rootRef = React.createRef<HTMLDivElement>();
+    const triggerRef = React.createRef<HTMLButtonElement>();
+    const contentRef = React.createRef<HTMLDivElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    // Content only mounts while open, so pin the open state explicitly.
+    act(() =>
+      root.render(
+        <Collapsible ref={rootRef} open>
+          <CollapsibleTrigger ref={triggerRef}>Toggle</CollapsibleTrigger>
+          <CollapsibleContent ref={contentRef}>Content</CollapsibleContent>
+        </Collapsible>,
+      ),
+    );
+    expect(rootRef.current).toBeInstanceOf(HTMLDivElement);
+    expect(triggerRef.current).toBeInstanceOf(HTMLButtonElement);
+    expect(contentRef.current).toBeInstanceOf(HTMLDivElement);
+    expect(contentRef.current?.textContent).toBe('Content');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards a Table ref to its DOM element', () => {
+    const ref = React.createRef<HTMLTableElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => root.render(<Table ref={ref} />));
+    expect(ref.current).toBeInstanceOf(HTMLTableElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards an asChild TooltipTrigger ref to its DOM element', () => {
+    const ref = React.createRef<HTMLButtonElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() =>
+      root.render(
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger ref={ref} asChild>
+              <button type="button">Trigger</button>
+            </TooltipTrigger>
+          </Tooltip>
+        </TooltipProvider>,
+      ),
+    );
+    expect(ref.current).toBeInstanceOf(HTMLButtonElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it.each([undefined, 'black'] as const)(
+    'forwards a TooltipContent ref with variant=%s',
+    (variant) => {
+      const ref = React.createRef<HTMLDivElement>();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      act(() =>
+        root.render(
+          <TooltipProvider>
+            <Tooltip open>
+              <TooltipTrigger>Trigger</TooltipTrigger>
+              <TooltipContent ref={ref} variant={variant}>
+                Content
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>,
+        ),
+      );
+      expect(ref.current).toBeInstanceOf(HTMLDivElement);
+      expect(ref.current?.hasAttribute('variant')).toBe(false);
+      expect(ref.current?.classList.contains('[--popover:#000]')).toBe(
+        variant === 'black',
+      );
+      expect(ref.current?.classList.contains('ring-border')).toBe(
+        variant === 'black',
+      );
+      expect(
+        ref.current?.querySelectorAll('[data-slot="tooltip-arrow"] path'),
+      ).toHaveLength(2);
+
+      act(() => root.unmount());
+      container.remove();
+    },
+  );
+
+  it('forwards slotted PopoverAnchor and portaled content refs to their DOM elements', () => {
+    const anchorRef =
+      React.createRef<React.ComponentRef<typeof PopoverAnchor>>();
+    const contentRef = React.createRef<HTMLDivElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() =>
+      root.render(
+        <Popover open>
+          <PopoverAnchor asChild ref={anchorRef}>
+            <Button>Context ring</Button>
+          </PopoverAnchor>
+          <PopoverContent ref={contentRef} showArrow>
+            Content
+          </PopoverContent>
+        </Popover>,
+      ),
+    );
+    expect(anchorRef.current).toBe(container.querySelector('button'));
+    expect(contentRef.current).toBe(
+      document.body.querySelector('[data-slot="popover-content"]'),
+    );
+    expect(contentRef.current).toBeInstanceOf(HTMLDivElement);
+    const arrow = contentRef.current!.querySelector('svg')!;
+    expect(arrow.querySelectorAll('path')).toHaveLength(2);
+    expect(arrow.style.transform).toBe(
+      'translateY(var(--floating-arrow-offset))',
+    );
+    expect(contentRef.current!.className).toContain(
+      '[--floating-arrow-offset:-1px]',
+    );
     act(() => root.unmount());
     container.remove();
   });

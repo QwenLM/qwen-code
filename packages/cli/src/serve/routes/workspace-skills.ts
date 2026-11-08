@@ -5,30 +5,76 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
+import {
+  evaluateDaemonWorkspaceTrust,
+  type DaemonTrustPolicySnapshot,
+} from '../../config/daemon-trust-policy.js';
+import {
+  type SkillInstallAttemptStore,
+  validateSkillInstallAttemptId,
+} from '../skill-install-attempts.js';
+import {
+  parseSkillArchiveRequest,
+  runSkillArchiveInstall,
+  sendSkillArchiveError,
+} from './skill-archive-install.js';
 import type { SendBridgeError } from '../server/error-response.js';
+import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
+  parseRefreshSessionIds,
 } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
+  WorkspaceEntry,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
+import {
+  WorkspaceSkillNotFoundError,
+  type PersistUserSkillsActivationResult,
+} from '../workspace-service/types.js';
+import type { UserSkillActivation } from '../../config/skill-settings.js';
 import {
   MAX_WORKSPACE_SKILL_NAME_LENGTH,
   WorkspaceSkillManagementError,
+  WorkspaceSkillRecoveryError,
   validateWorkspaceSkillName,
+  workspaceSkillBaseDir,
   type WorkspaceSkillInstallRequest,
+  type WorkspaceSkillInstallOptions,
+  type WorkspaceSkillMutationResult,
   type WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
 const MAX_WORKSPACE_SKILL_BATCH_SIZE = 100;
+const skillConfigMutationLocks = new PathMutexRegistry();
+
+// Keying on the resolved base directory serializes aliased scopes
+// (QWEN_HOME inside the workspace) that mutate the same skills directory.
+function skillMutationLockKey(
+  workspace: string,
+  scope: WorkspaceSkillScope,
+  name: string,
+): string {
+  return `${workspaceSkillBaseDir(workspace, scope)}\0${name.trim().toLowerCase()}`;
+}
 
 interface RegisterWorkspaceSkillsRoutesDeps {
+  archiveInstalls: SkillInstallAttemptStore;
+  getWorkspaceTrustPolicySnapshot?: () =>
+    | DaemonTrustPolicySnapshot
+    | Promise<DaemonTrustPolicySnapshot>;
   workspaceRuntime: WorkspaceRuntime;
+  workspaceRegistry?: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   sendBridgeError: SendBridgeError;
@@ -36,6 +82,184 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  getSkillsSnapshot?: (workspaceCwd: string) => Promise<unknown>;
+  getSkillsConfigStatus: (
+    workspaceCwd: string,
+    trusted: boolean,
+  ) => Promise<ServeWorkspaceSkillsStatus>;
+  invalidateSkillsConfigStatus: (workspaceCwd: string) => void;
+  installSkillConfig: (
+    workspaceCwd: string,
+    request: WorkspaceSkillInstallRequest,
+    options?: WorkspaceSkillInstallOptions,
+  ) => Promise<WorkspaceSkillMutationResult>;
+  deleteSkillConfig: (
+    workspaceCwd: string,
+    scope: WorkspaceSkillScope,
+    skillName: string,
+    installedPath: string,
+  ) => Promise<WorkspaceSkillMutationResult>;
+  persistUserSkillsActivation?: (
+    skillNames: readonly string[],
+    activation: UserSkillActivation,
+  ) => Promise<PersistUserSkillsActivationResult>;
+}
+
+function isZipFileRequest(body: Record<string, unknown>): boolean {
+  const source = body['source'];
+  return (
+    !!source &&
+    typeof source === 'object' &&
+    'type' in source &&
+    source.type === 'zip-file'
+  );
+}
+
+function bindArchiveGeneration(
+  registry: WorkspaceRegistry | undefined,
+  entry: WorkspaceEntry | undefined,
+  runtime: WorkspaceRuntime,
+) {
+  const guard = entry?.current?.guard;
+  return () => {
+    guard?.assertOpen();
+    if (
+      !runtime.trusted ||
+      (registry &&
+        (!entry ||
+          registry.getEntryByWorkspaceId(entry.workspaceId) !== entry ||
+          entry.state !== 'active' ||
+          entry.current?.guard !== guard))
+    ) {
+      throw new WorkspaceSkillManagementError(
+        'workspace_generation_closed',
+        'The selected workspace is no longer active and trusted',
+        409,
+      );
+    }
+  };
+}
+
+async function sendArchiveAttempt(
+  req: Request,
+  res: Response,
+  scope: WorkspaceSkillScope,
+  deps: Pick<
+    RegisterWorkspaceSkillsRoutesDeps,
+    'archiveInstalls' | 'getWorkspaceTrustPolicySnapshot' | 'workspaceRegistry'
+  >,
+  entry: WorkspaceEntry | undefined,
+  runtime: WorkspaceRuntime | undefined,
+): Promise<void> {
+  try {
+    if (!entry && deps.workspaceRegistry) {
+      throw new WorkspaceSkillManagementError(
+        'workspace_mismatch',
+        'Workspace owner is no longer available',
+        404,
+      );
+    }
+    const identity = entry ?? runtime;
+    if (!identity)
+      throw new WorkspaceSkillManagementError(
+        'workspace_mismatch',
+        'Workspace owner is unavailable',
+        404,
+      );
+    const current = entry ? entry.current?.runtime : runtime;
+    const trusted =
+      current?.provenance === 'managed-scratch' && current.trusted
+        ? true
+        : deps.getWorkspaceTrustPolicySnapshot
+          ? evaluateDaemonWorkspaceTrust(
+              await deps.getWorkspaceTrustPolicySnapshot(),
+              identity.workspaceCwd,
+            ).targetTrusted
+          : current?.trusted === true;
+    if (
+      entry &&
+      deps.workspaceRegistry?.getEntryByWorkspaceId(entry.workspaceId) !== entry
+    ) {
+      throw new WorkspaceSkillManagementError(
+        'workspace_mismatch',
+        'Workspace owner is no longer available',
+        404,
+      );
+    }
+    if (!trusted) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
+    const id = validateSkillInstallAttemptId(req.params['attemptId']);
+    const receipt = deps.archiveInstalls.get(
+      deps.archiveInstalls.owner(scope, identity),
+      id,
+    );
+    res.setHeader('Cache-Control', 'no-store');
+    if (!receipt) {
+      res.status(404).json({
+        code: 'skill_install_attempt_unknown',
+        error:
+          'No receipt is available; the installation result cannot be confirmed',
+      });
+      return;
+    }
+    res.status(200).json(receipt);
+  } catch (error) {
+    sendSkillArchiveError(res, error);
+  }
+}
+
+type WorkspaceSkillActivation = 'deferred' | 'reconciling';
+
+function reconcileSkills(
+  runtimes: readonly WorkspaceRuntime[],
+): WorkspaceSkillActivation {
+  let reconciling = false;
+  for (const runtime of runtimes) {
+    runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+    if (!runtime.trusted) continue;
+    const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+    if (coordinator?.reconcileSkillsConfiguration() === 'reconciling') {
+      reconciling = true;
+    }
+  }
+  return reconciling ? 'reconciling' : 'deferred';
+}
+
+function rejectQualifiedGlobalScope(
+  scope: WorkspaceSkillScope,
+  res: Response,
+): boolean {
+  if (scope !== 'global') return false;
+  res.status(400).json({
+    error: 'Global Skill scope must use /workspace/config/skills',
+    code: 'global_scope_requires_singular_owner',
+  });
+  return true;
+}
+
+function rejectSingularWorkspaceScope(
+  scope: WorkspaceSkillScope,
+  res: Response,
+): boolean {
+  if (scope !== 'workspace') return false;
+  res.status(400).json({
+    error:
+      'Workspace Skill scope must use /workspaces/:workspace/config/skills',
+    code: 'workspace_scope_requires_qualified_workspace',
+  });
+  return true;
+}
+
+function requireRuntimeCoordinator(runtime: WorkspaceRuntime, res: Response) {
+  const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+  if (coordinator) return coordinator;
+  res.status(501).json({
+    error: 'Workspace runtime lifecycle is not supported',
+    code: 'workspace_runtime_not_supported',
+  });
+  return null;
 }
 
 function rejectSkillNameTooLong(skillName: string, res: Response): boolean {
@@ -92,6 +316,16 @@ function parseSkillBatchToggleRequest(
   safeBody: (req: Request) => Record<string, unknown>,
 ): { skillNames: string[]; enabled: boolean } | undefined {
   const body = safeBody(req);
+  const skillNames = parseSkillNames(body, res);
+  if (!skillNames) return undefined;
+  const flag = parseEnabledFlag(body, res);
+  return flag ? { skillNames, enabled: flag.enabled } : undefined;
+}
+
+function parseSkillNames(
+  body: Record<string, unknown>,
+  res: Response,
+): string[] | undefined {
   const rawSkillNames = body['skillNames'];
   if (
     !Array.isArray(rawSkillNames) ||
@@ -124,8 +358,7 @@ function parseSkillBatchToggleRequest(
     skillNames.push(skillName);
   }
 
-  const flag = parseEnabledFlag(body, res);
-  return flag ? { skillNames, enabled: flag.enabled } : undefined;
+  return skillNames;
 }
 
 function parseSkillScope(
@@ -166,6 +399,13 @@ function parseSkillInstallRequest(
     return undefined;
   }
   const source = rawSource as Record<string, unknown>;
+  if (source['type'] === 'zip-file') {
+    res.status(400).json({
+      error: 'zip-file must use the modern config installation routes',
+      code: 'skill_source_requires_config_route',
+    });
+    return undefined;
+  }
   if (source['type'] === 'github' && typeof source['url'] === 'string') {
     return { name, scope, source: { type: 'github', url: source['url'] } };
   }
@@ -195,12 +435,79 @@ function parseDeleteScope(req: Request, res: Response) {
 }
 
 function sendSkillManagementError(res: Response, error: unknown): boolean {
+  if (error instanceof WorkspaceSkillNotFoundError) {
+    res.status(404).json({ error: error.message, code: 'skill_not_found' });
+    return true;
+  }
   if (!(error instanceof WorkspaceSkillManagementError)) return false;
   res.status(error.statusCode).json({
     error: error.message,
     code: error.code,
+    ...(error instanceof WorkspaceSkillRecoveryError
+      ? { retainedPaths: error.retainedPaths }
+      : {}),
   });
   return true;
+}
+
+async function deleteConfiguredSkill(
+  deps: RegisterWorkspaceSkillsRoutesDeps,
+  workspaceCwd: string,
+  trusted: boolean,
+  skillName: string,
+  scope: WorkspaceSkillScope,
+): Promise<WorkspaceSkillMutationResult> {
+  deps.invalidateSkillsConfigStatus(workspaceCwd);
+  const status = await deps.getSkillsConfigStatus(workspaceCwd, trusted);
+  if (!status.initialized || status.errors?.length) {
+    throw new WorkspaceSkillManagementError(
+      'skills_config_unavailable',
+      'Skills configuration could not be enumerated',
+      503,
+    );
+  }
+  const normalizedName = skillName.trim().toLowerCase();
+  const matches = status.skills.filter(
+    (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
+  );
+  if (matches.length === 0) {
+    throw new WorkspaceSkillManagementError(
+      'skill_not_found',
+      `Skill not found: ${skillName}`,
+      404,
+    );
+  }
+  const expectedLevel = scope === 'workspace' ? 'project' : 'user';
+  const scopedMatches = matches.filter(
+    (candidate) => candidate.level === expectedLevel,
+  );
+  const skill =
+    scopedMatches.find((candidate) => candidate.name === skillName.trim()) ??
+    (scopedMatches.length === 1 ? scopedMatches[0] : undefined);
+  if (!skill?.installedPath) {
+    throw new WorkspaceSkillManagementError(
+      'skill_not_managed',
+      'Skill is not managed in the requested scope',
+      409,
+    );
+  }
+  try {
+    return await deps.deleteSkillConfig(
+      workspaceCwd,
+      scope,
+      skill.name,
+      skill.installedPath,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new WorkspaceSkillManagementError(
+        'skill_not_found',
+        `Skill not found: ${skillName}`,
+        404,
+      );
+    }
+    throw error;
+  }
 }
 
 export function registerWorkspaceSkillsRoutes(
@@ -210,8 +517,318 @@ export function registerWorkspaceSkillsRoutes(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(
     deps.workspaceRuntime.workspaceCwd,
   );
+  const globalConfigOwner = () => {
+    const entry = deps.workspaceRegistry?.primaryEntry;
+    return {
+      workspaceCwd: entry?.workspaceCwd ?? deps.workspaceRuntime.workspaceCwd,
+      trusted: entry
+        ? entry.state === 'active' && entry.current?.runtime.trusted === true
+        : deps.workspaceRuntime.trusted,
+    };
+  };
+  const invalidateGlobalConfigStatus = (ownerWorkspaceCwd: string) => {
+    const entries = deps.workspaceRegistry?.listAllEntries();
+    if (!entries) {
+      deps.invalidateSkillsConfigStatus(ownerWorkspaceCwd);
+      return;
+    }
+    for (const entry of entries) {
+      deps.invalidateSkillsConfigStatus(entry.workspaceCwd);
+    }
+  };
+  app.get(
+    '/workspace/config/skills/install-attempts/:attemptId',
+    async (req, res) => {
+      await sendArchiveAttempt(
+        req,
+        res,
+        'global',
+        deps,
+        deps.workspaceRegistry?.primaryEntry,
+        deps.workspaceRegistry ? undefined : deps.workspaceRuntime,
+      );
+    },
+  );
+  app.put(
+    '/skills/activation',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      if (!deps.persistUserSkillsActivation) {
+        res.status(501).json({
+          error: 'User Skill settings persistence is not available',
+          code: 'user_skill_activation_unsupported',
+        });
+        return;
+      }
+      const body = deps.safeBody(req);
+      const skillNames = parseSkillNames(body, res);
+      if (!skillNames) return;
+      const state = body['state'];
+      const mode = body['mode'];
+      if (state !== 'enabled' && state !== 'disabled') {
+        res.status(400).json({
+          error: '`state` must be enabled or disabled',
+          code: 'invalid_skill_activation_state',
+        });
+        return;
+      }
+      if (
+        mode !== undefined &&
+        (state !== 'disabled' || (mode !== 'hard' && mode !== 'default'))
+      ) {
+        res.status(400).json({
+          error: '`mode` must be hard or default and only applies to disabled',
+          code: 'invalid_skill_activation_mode',
+        });
+        return;
+      }
+      const activation: UserSkillActivation =
+        state === 'enabled' ? { state } : { state, mode: mode ?? 'hard' };
+      const managedRuntimes = () =>
+        deps.workspaceRegistry?.listManaged() ?? [deps.workspaceRuntime];
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        managedRuntimes().map((runtime) => runtime.bridge),
+      );
+      if (clientId === null) return;
+      try {
+        const persisted = await deps.persistUserSkillsActivation(
+          skillNames,
+          activation,
+        );
+        let propagation: 'queued' | 'deferred' | 'not_required' =
+          'not_required';
+        if (persisted.settingsChanges.length) {
+          invalidateGlobalConfigStatus(globalConfigOwner().workspaceCwd);
+          propagation = 'deferred';
+          for (const runtime of managedRuntimes()) {
+            runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+            const coordinator =
+              getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+            if (
+              coordinator?.reconcileSkillsConfiguration({
+                userSettings: true,
+              }) === 'reconciling'
+            ) {
+              propagation = 'queued';
+            }
+            for (const change of persisted.settingsChanges) {
+              try {
+                runtime.bridge.publishWorkspaceEvent({
+                  type: 'settings_changed',
+                  data: { ...change, scope: 'user' },
+                  ...(clientId ? { originatorClientId: clientId } : {}),
+                });
+              } catch {
+                // A disconnected event consumer cannot undo a durable write.
+              }
+            }
+          }
+        }
+        res.status(200).json({
+          scope: 'user',
+          ...activation,
+          results: persisted.outcomes,
+          propagation,
+        });
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
+        deps.sendBridgeError(res, error, { route: 'PUT /skills/activation' });
+      }
+    },
+  );
+  app.get('/workspace/config/skills', async (_req, res) => {
+    const configRoute = 'GET /workspace/config/skills';
+    try {
+      const owner = globalConfigOwner();
+      res
+        .status(200)
+        .json(
+          await deps.getSkillsConfigStatus(owner.workspaceCwd, owner.trusted),
+        );
+    } catch (error) {
+      deps.sendBridgeError(res, error, { route: configRoute });
+    }
+  });
+  app.get('/workspace/runtime/skills', async (_req, res) => {
+    if (!requireTrustedWorkspaceRuntime(deps.workspaceRuntime, res)) return;
+    const runtimeRoute = 'GET /workspace/runtime/skills';
+    try {
+      res
+        .status(200)
+        .json(
+          await deps.workspaceRuntime.workspaceService.getWorkspaceSkillsRuntimeStatus(
+            buildWorkspaceCtx(runtimeRoute),
+          ),
+        );
+    } catch (error) {
+      deps.sendBridgeError(res, error, { route: runtimeRoute });
+    }
+  });
+  app.post(
+    [
+      '/workspace/config/skills/install',
+      '/workspace/config/skills/install-archive',
+    ],
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const owner = globalConfigOwner();
+      if (!owner.trusted) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      const rawArchive = /\/install-archive\/?$/.test(req.path);
+      const body = deps.safeBody(req);
+      if (rawArchive || isZipFileRequest(body)) {
+        try {
+          const entry = deps.workspaceRegistry?.primaryEntry;
+          const runtime = deps.workspaceRegistry
+            ? entry?.current?.runtime
+            : deps.workspaceRuntime;
+          if (!runtime)
+            throw new WorkspaceSkillManagementError(
+              'workspace_runtime_unavailable',
+              'The global config owner is unavailable',
+              503,
+            );
+          const input = parseSkillArchiveRequest(
+            req,
+            body,
+            'global',
+            rawArchive,
+          );
+          await runSkillArchiveInstall(req, res, input, {
+            store: deps.archiveInstalls,
+            owner: deps.archiveInstalls.owner('global', entry ?? runtime),
+            workspaceId: runtime.workspaceId,
+            generationId: entry?.current?.generationId,
+            locks: skillConfigMutationLocks,
+            lockKey: skillMutationLockKey(
+              owner.workspaceCwd,
+              'global',
+              input.name,
+            ),
+            assertActive: bindArchiveGeneration(
+              deps.workspaceRegistry,
+              entry,
+              runtime,
+            ),
+            install: async (request, options) => {
+              try {
+                return await deps.installSkillConfig(
+                  owner.workspaceCwd,
+                  request,
+                  options,
+                );
+              } finally {
+                invalidateGlobalConfigStatus(owner.workspaceCwd);
+              }
+            },
+            reconcile: () =>
+              reconcileSkills(
+                deps.workspaceRegistry?.listManaged() ?? [runtime],
+              ),
+          });
+        } catch (error) {
+          sendSkillArchiveError(res, error);
+        }
+        return;
+      }
+      const input = parseSkillInstallRequest(req, res, deps.safeBody);
+      if (!input || rejectSingularWorkspaceScope(input.scope, res)) return;
+      const configRoute = 'POST /workspace/config/skills/install';
+      try {
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(owner.workspaceCwd, 'global', input.name),
+          () => deps.installSkillConfig(owner.workspaceCwd, input),
+        );
+        invalidateGlobalConfigStatus(owner.workspaceCwd);
+        const runtimes = deps.workspaceRegistry?.listManaged() ?? [
+          deps.workspaceRuntime,
+        ];
+        res.status(200).json({
+          ...result,
+          activation: reconcileSkills(runtimes),
+        });
+      } catch (error) {
+        invalidateGlobalConfigStatus(owner.workspaceCwd);
+        if (!sendSkillManagementError(res, error)) {
+          deps.sendBridgeError(res, error, { route: configRoute });
+        }
+      }
+    },
+  );
+  app.delete(
+    '/workspace/config/skills/:name',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const owner = globalConfigOwner();
+      if (!owner.trusted) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      const scope = parseDeleteScope(req, res);
+      const rawSkillName = req.params['name'];
+      if (!rawSkillName || !scope || rejectSingularWorkspaceScope(scope, res)) {
+        return;
+      }
+      const configRoute = 'DELETE /workspace/config/skills/:name';
+      try {
+        const skillName = validateWorkspaceSkillName(rawSkillName);
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(owner.workspaceCwd, scope, skillName),
+          () =>
+            deleteConfiguredSkill(
+              deps,
+              owner.workspaceCwd,
+              owner.trusted,
+              skillName,
+              scope,
+            ),
+        );
+        invalidateGlobalConfigStatus(owner.workspaceCwd);
+        const runtimes = deps.workspaceRegistry?.listManaged() ?? [
+          deps.workspaceRuntime,
+        ];
+        res.status(200).json({
+          ...result,
+          activation: reconcileSkills(runtimes),
+        });
+      } catch (error) {
+        invalidateGlobalConfigStatus(owner.workspaceCwd);
+        if (!sendSkillManagementError(res, error)) {
+          deps.sendBridgeError(res, error, { route: configRoute });
+        }
+      }
+    },
+  );
   const route = 'POST /workspace/skills/:name/enable';
   const batchRoute = 'POST /workspace/skills/enable';
+  app.post(
+    '/workspace/skills/refresh',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = deps.workspaceRuntime;
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const clientId = deps.parseAndValidateClientId(req, res);
+      if (clientId === null) return;
+      const refreshRoute = 'POST /workspace/skills/refresh';
+      try {
+        const input = parseRefreshSessionIds(req.body, res, runtime.bridge);
+        if (!input) return;
+        const result = await runtime.workspaceService.refreshWorkspaceSkills(
+          buildWorkspaceCtx(refreshRoute, clientId),
+          input.sessionIds,
+        );
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        res.status(200).json(result);
+      } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        deps.sendBridgeError(res, error, { route: refreshRoute });
+      }
+    },
+  );
   app.post(
     '/workspace/skills/install',
     deps.mutate({ strict: true }),
@@ -223,13 +840,22 @@ export function registerWorkspaceSkillsRoutes(
       if (clientId === null) return;
       const installRoute = 'POST /workspace/skills/install';
       try {
-        const result =
-          await deps.workspaceRuntime.workspaceService.installWorkspaceSkill(
-            buildWorkspaceCtx(installRoute, clientId),
-            input,
-          );
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(
+            deps.workspaceRuntime.workspaceCwd,
+            input.scope,
+            input.name,
+          ),
+          () =>
+            deps.workspaceRuntime.workspaceService.installWorkspaceSkill(
+              buildWorkspaceCtx(installRoute, clientId),
+              input,
+            ),
+        );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: installRoute });
       }
@@ -254,14 +880,23 @@ export function registerWorkspaceSkillsRoutes(
       if (clientId === null) return;
       const deleteRoute = 'DELETE /workspace/skills/:name';
       try {
-        const result =
-          await deps.workspaceRuntime.workspaceService.deleteWorkspaceSkill(
-            buildWorkspaceCtx(deleteRoute, clientId),
-            skillName,
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(
+            deps.workspaceRuntime.workspaceCwd,
             scope,
-          );
+            skillName,
+          ),
+          () =>
+            deps.workspaceRuntime.workspaceService.deleteWorkspaceSkill(
+              buildWorkspaceCtx(deleteRoute, clientId),
+              skillName,
+              scope,
+            ),
+        );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: deleteRoute });
       }
@@ -283,8 +918,10 @@ export function registerWorkspaceSkillsRoutes(
             input.skillNames,
             input.enabled,
           );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         deps.sendBridgeError(res, err, { route: batchRoute });
       }
     },
@@ -305,8 +942,10 @@ export function registerWorkspaceSkillsRoutes(
             input.skillName,
             input.enabled,
           );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         deps.sendBridgeError(res, err, { route });
       }
     },
@@ -317,9 +956,338 @@ export function registerWorkspaceQualifiedSkillsRoutes(
   app: Application,
   deps: Pick<
     RegisterWorkspaceSkillsRoutesDeps,
-    'mutate' | 'safeBody' | 'sendBridgeError'
+    | 'mutate'
+    | 'safeBody'
+    | 'sendBridgeError'
+    | 'getSkillsConfigStatus'
+    | 'getSkillsSnapshot'
+    | 'invalidateSkillsConfigStatus'
+    | 'archiveInstalls'
+    | 'getWorkspaceTrustPolicySnapshot'
   > & { workspaceRegistry: WorkspaceRegistry },
 ): void {
+  app.get(
+    '/workspaces/:workspace/config/skills/install-attempts/:attemptId',
+    async (req, res) => {
+      const entry = resolveWorkspaceEntryFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!entry) return;
+      await sendArchiveAttempt(req, res, 'workspace', deps, entry, undefined);
+    },
+  );
+  const invalidateConfigStatus = (
+    runtime: WorkspaceRuntime,
+    scope: WorkspaceSkillScope = 'workspace',
+  ) => {
+    if (scope === 'workspace') {
+      deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+      return;
+    }
+    for (const entry of deps.workspaceRegistry.listAllEntries()) {
+      deps.invalidateSkillsConfigStatus(entry.workspaceCwd);
+    }
+  };
+  app.post(
+    '/workspaces/:workspace/skills/refresh',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const refreshRoute = 'POST /workspaces/:workspace/skills/refresh';
+      try {
+        const input = parseRefreshSessionIds(req.body, res, runtime.bridge);
+        if (!input) return;
+        const result = await runtime.workspaceService.refreshWorkspaceSkills(
+          createBuildWorkspaceCtx(runtime.workspaceCwd)(refreshRoute, clientId),
+          input.sessionIds,
+        );
+        invalidateConfigStatus(runtime);
+        res.status(200).json(result);
+      } catch (error) {
+        invalidateConfigStatus(runtime);
+        deps.sendBridgeError(res, error, { route: refreshRoute });
+      }
+    },
+  );
+  app.get('/workspaces/:workspace/config/skills/snapshot', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    const entry = resolveWorkspaceEntryFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!entry) return;
+    const generation = entry.current;
+    if (!deps.getSkillsSnapshot) {
+      res.status(501).json({ code: 'skills_snapshot_unavailable' });
+      return;
+    }
+    try {
+      const snapshot = await deps.getSkillsSnapshot(runtime.workspaceCwd);
+      generation?.guard.assertOpen();
+      if (
+        entry.state !== 'active' ||
+        entry.current !== generation ||
+        !runtime.trusted
+      ) {
+        res.status(409).json({ code: 'workspace_generation_closed' });
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json(snapshot);
+    } catch (error) {
+      deps.sendBridgeError(res, error, {
+        route: 'GET /workspaces/:workspace/config/skills/snapshot',
+      });
+    }
+  });
+  app.get('/workspaces/:workspace/config/skills', async (req, res) => {
+    const entry = resolveWorkspaceEntryFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!entry) return;
+    const configRoute = 'GET /workspaces/:workspace/config/skills';
+    try {
+      res
+        .status(200)
+        .json(
+          await deps.getSkillsConfigStatus(
+            entry.workspaceCwd,
+            entry.state === 'active' && entry.current?.runtime.trusted === true,
+          ),
+        );
+    } catch (error) {
+      deps.sendBridgeError(res, error, { route: configRoute });
+    }
+  });
+  app.get('/workspaces/:workspace/runtime/skills', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    const runtimeRoute = 'GET /workspaces/:workspace/runtime/skills';
+    try {
+      res
+        .status(200)
+        .json(
+          await runtime.workspaceService.getWorkspaceSkillsRuntimeStatus(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(runtimeRoute),
+          ),
+        );
+    } catch (error) {
+      deps.sendBridgeError(res, error, { route: runtimeRoute });
+    }
+  });
+  app.post(
+    [
+      '/workspaces/:workspace/config/skills/install',
+      '/workspaces/:workspace/config/skills/install-archive',
+    ],
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const rawArchive = /\/install-archive\/?$/.test(req.path);
+      const body = deps.safeBody(req);
+      if (rawArchive || isZipFileRequest(body)) {
+        try {
+          const coordinator = requireRuntimeCoordinator(runtime, res);
+          if (!coordinator) return;
+          const entry = deps.workspaceRegistry.getEntryByWorkspaceId(
+            runtime.workspaceId,
+          );
+          const input = parseSkillArchiveRequest(
+            req,
+            body,
+            'workspace',
+            rawArchive,
+          );
+          await runSkillArchiveInstall(req, res, input, {
+            store: deps.archiveInstalls,
+            owner: deps.archiveInstalls.owner('workspace', entry ?? runtime),
+            workspaceId: runtime.workspaceId,
+            generationId: entry?.current?.generationId,
+            locks: skillConfigMutationLocks,
+            lockKey: skillMutationLockKey(
+              runtime.workspaceCwd,
+              'workspace',
+              input.name,
+            ),
+            assertActive: bindArchiveGeneration(
+              deps.workspaceRegistry,
+              entry,
+              runtime,
+            ),
+            install: async (request, options) => {
+              try {
+                return await coordinator.runManagementOperation(() =>
+                  runtime.workspaceService.installWorkspaceSkill(
+                    createBuildWorkspaceCtx(runtime.workspaceCwd)(
+                      'POST /workspaces/:workspace/config/skills/install-archive',
+                    ),
+                    request,
+                    { ...options, refreshRuntime: false },
+                  ),
+                );
+              } finally {
+                deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+              }
+            },
+            reconcile: () => reconcileSkills([runtime]),
+          });
+        } catch (error) {
+          sendSkillArchiveError(res, error);
+        }
+        return;
+      }
+      const input = parseSkillInstallRequest(req, res, deps.safeBody);
+      if (!input || rejectQualifiedGlobalScope(input.scope, res)) return;
+      const coordinator = requireRuntimeCoordinator(runtime, res);
+      if (!coordinator) return;
+      const configRoute = 'POST /workspaces/:workspace/config/skills/install';
+      try {
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(runtime.workspaceCwd, 'workspace', input.name),
+          () =>
+            coordinator.runManagementOperation(() =>
+              runtime.workspaceService.installWorkspaceSkill(
+                createBuildWorkspaceCtx(runtime.workspaceCwd)(configRoute),
+                input,
+                { refreshRuntime: false },
+              ),
+            ),
+        );
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        res.status(200).json({
+          ...result,
+          activation: reconcileSkills([runtime]),
+        });
+      } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        if (!sendSkillManagementError(res, error)) {
+          deps.sendBridgeError(res, error, { route: configRoute });
+        }
+      }
+    },
+  );
+  app.delete(
+    '/workspaces/:workspace/config/skills/:name',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const scope = parseDeleteScope(req, res);
+      const rawSkillName = req.params['name'];
+      if (!rawSkillName || !scope || rejectQualifiedGlobalScope(scope, res)) {
+        return;
+      }
+      const coordinator = requireRuntimeCoordinator(runtime, res);
+      if (!coordinator) return;
+      const configRoute = 'DELETE /workspaces/:workspace/config/skills/:name';
+      try {
+        const skillName = validateWorkspaceSkillName(rawSkillName);
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(runtime.workspaceCwd, 'workspace', skillName),
+          () =>
+            coordinator.runManagementOperation(() =>
+              runtime.workspaceService.deleteWorkspaceSkill(
+                createBuildWorkspaceCtx(runtime.workspaceCwd)(configRoute),
+                skillName,
+                scope,
+                { refreshRuntime: false },
+              ),
+            ),
+        );
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        res.status(200).json({
+          ...result,
+          activation: reconcileSkills([runtime]),
+        });
+      } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        if (!sendSkillManagementError(res, error)) {
+          deps.sendBridgeError(res, error, { route: configRoute });
+        }
+      }
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/config/skills/:name/enable',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const input = parseSkillToggleRequest(req, res, deps.safeBody);
+      if (!input) return;
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const coordinator = requireRuntimeCoordinator(runtime, res);
+      if (!coordinator) return;
+      const configRoute =
+        'POST /workspaces/:workspace/config/skills/:name/enable';
+      try {
+        const result = await coordinator.runManagementOperation(() =>
+          runtime.workspaceService.setWorkspaceSkillEnabled(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(
+              configRoute,
+              clientId,
+            ),
+            input.skillName,
+            input.enabled,
+            { refreshRuntime: false },
+          ),
+        );
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        res.status(200).json({
+          ...result,
+          activation: result.changed
+            ? reconcileSkills([runtime])
+            : result.activation,
+        });
+      } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        deps.sendBridgeError(res, error, { route: configRoute });
+      }
+    },
+  );
   const route = 'POST /workspaces/:workspace/skills/:name/enable';
   const batchRoute = 'POST /workspaces/:workspace/skills/enable';
   app.post(
@@ -342,12 +1310,21 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       if (clientId === null) return;
       const installRoute = 'POST /workspaces/:workspace/skills/install';
       try {
-        const result = await runtime.workspaceService.installWorkspaceSkill(
-          createBuildWorkspaceCtx(runtime.workspaceCwd)(installRoute, clientId),
-          input,
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(runtime.workspaceCwd, input.scope, input.name),
+          () =>
+            runtime.workspaceService.installWorkspaceSkill(
+              createBuildWorkspaceCtx(runtime.workspaceCwd)(
+                installRoute,
+                clientId,
+              ),
+              input,
+            ),
         );
+        invalidateConfigStatus(runtime, input.scope);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime, input.scope);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: installRoute });
       }
@@ -381,13 +1358,22 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       if (clientId === null) return;
       const deleteRoute = 'DELETE /workspaces/:workspace/skills/:name';
       try {
-        const result = await runtime.workspaceService.deleteWorkspaceSkill(
-          createBuildWorkspaceCtx(runtime.workspaceCwd)(deleteRoute, clientId),
-          skillName,
-          scope,
+        const result = await skillConfigMutationLocks.runExclusive(
+          skillMutationLockKey(runtime.workspaceCwd, scope, skillName),
+          () =>
+            runtime.workspaceService.deleteWorkspaceSkill(
+              createBuildWorkspaceCtx(runtime.workspaceCwd)(
+                deleteRoute,
+                clientId,
+              ),
+              skillName,
+              scope,
+            ),
         );
+        invalidateConfigStatus(runtime, scope);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime, scope);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: deleteRoute });
       }
@@ -417,8 +1403,10 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           input.skillNames,
           input.enabled,
         );
+        invalidateConfigStatus(runtime);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime);
         deps.sendBridgeError(res, err, { route: batchRoute });
       }
     },
@@ -447,8 +1435,10 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           input.skillName,
           input.enabled,
         );
+        invalidateConfigStatus(runtime);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime);
         deps.sendBridgeError(res, err, { route });
       }
     },

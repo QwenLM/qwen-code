@@ -112,6 +112,7 @@ interface Harness {
   abandon: ReturnType<typeof vi.fn>;
   monitorCancel: ReturnType<typeof vi.fn>;
   dreamCancelTask: ReturnType<typeof vi.fn>;
+  backgroundResolvePendingApproval: ReturnType<typeof vi.fn>;
   workflowResolvePendingApproval: ReturnType<typeof vi.fn>;
   workflowPause: ReturnType<typeof vi.fn>;
   workflowResume: ReturnType<typeof vi.fn>;
@@ -143,6 +144,7 @@ function setup(
   const abandon = vi.fn();
   const monitorCancel = vi.fn();
   const dreamCancelTask = vi.fn();
+  const backgroundResolvePendingApproval = vi.fn();
   const workflowResolvePendingApproval = vi.fn();
   const workflowPause = vi.fn();
   const workflowResume = vi.fn();
@@ -154,7 +156,7 @@ function setup(
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
-      resolvePendingApproval: vi.fn(),
+      resolvePendingApproval: backgroundResolvePendingApproval,
       setActivityChangeCallback: vi.fn(),
       get: (id: string) => {
         const match = currentEntries.find(
@@ -240,6 +242,7 @@ function setup(
     abandon,
     monitorCancel,
     dreamCancelTask,
+    backgroundResolvePendingApproval,
     workflowResolvePendingApproval,
     workflowPause,
     workflowResume,
@@ -871,6 +874,120 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogOpen).toBe(true);
   });
 
+  it('names the nested agent a bridged approval came from', () => {
+    // Approvals bridged from a NESTED agent onto a backgrounded ancestor's
+    // entry are stamped with the nested runtime id (subagentId); the detail
+    // view must name it so the user can tell which descendant is blocked.
+    const bridgedApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'nested-1',
+      name: 'Shell',
+      description: 'run nested-1',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Allow execution',
+        command: 'echo nested',
+        rootCommand: 'echo',
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+      subagentId: 'review-agent-abc123',
+    };
+    const bg = entry({
+      agentId: 'bg-bridged',
+      pendingApprovals: [bridgedApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.lastFrame()).toContain('from nested agent: review-agent-abc123');
+  });
+
+  it('omits the nested-agent line for an unstamped approval', () => {
+    // The entry's OWN parked approvals carry no subagentId — the line must
+    // not render for them.
+    const ownApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'own-1',
+      name: 'Shell',
+      description: 'run own-1',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Allow execution',
+        command: 'echo own',
+        rootCommand: 'echo',
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+    };
+    const bg = entry({
+      agentId: 'bg-own',
+      pendingApprovals: [ownApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.lastFrame()).toContain('Background agent needs approval');
+    expect(h.lastFrame()).not.toContain('from nested agent');
+  });
+
+  it('routes an agent approval response with the nested subagentId key part', () => {
+    // Parked-approval identity is (subagentId, callId): approvals bridged
+    // from nested runtimes can share a generated callId (`call_qwen_N`
+    // restarts per conversation), so the resolve must carry the nested
+    // runtime's id — otherwise one answer could resolve another runtime's
+    // parked prompt.
+    const bridgedApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'call_qwen_1',
+      name: 'Shell',
+      description: 'run call_qwen_1',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Allow execution',
+        command: 'echo nested',
+        rootCommand: 'echo',
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+      subagentId: 'search-agent-aaa111',
+    };
+    const bg = entry({
+      agentId: 'bg-route-nested',
+      pendingApprovals: [bridgedApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    h.pressKeyBroadcast({ name: 'escape' });
+
+    expect(h.backgroundResolvePendingApproval).toHaveBeenCalledTimes(1);
+    expect(h.backgroundResolvePendingApproval).toHaveBeenCalledWith(
+      'bg-route-nested',
+      'call_qwen_1',
+      ToolConfirmationOutcome.Cancel,
+      undefined,
+      'search-agent-aaa111',
+    );
+  });
+
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {
     const fg = entry({
       agentId: 'fg-1',
@@ -1356,7 +1473,7 @@ describe('BackgroundTasksDialog', () => {
     it('renders the Error block on failed status with a "+ Stopped because" verb', () => {
       // Dream failures need to surface — they are the user's only signal
       // that consolidation didn't happen as expected (success path
-      // already produces a memory_saved toast in useGeminiStream).
+      // already produces a memory_saved toast in useLlmStream).
       const h = setup([
         dreamEntry({
           status: 'failed',
@@ -1447,6 +1564,26 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('3.5k/10k tokens');
       expect(f).toContain('Plan');
       expect(f).toContain('3.5kt');
+    });
+
+    it('explains the large-workflow flag in the detail view', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        sizeWarning: {
+          axis: 'agents' as const,
+          scheduledAgents: 40,
+          totalTokens: 0,
+          projectedTokens: 2_800_000,
+          agentCap: 15,
+          tokenCap: 1_500_000,
+          capFromGuideline: true,
+          at: 0,
+        },
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = (h.lastFrame() ?? '').replace(/\s+/g, ' ');
+      expect(f).toContain('Large workflow:');
+      expect(f).toContain('40 agents scheduled');
     });
 
     it('renders plain spent (no cap) when uncapped and zero per-phase chips suppressed', () => {
@@ -1634,6 +1771,193 @@ describe('BackgroundTasksDialog', () => {
       ToolConfirmationOutcome.Cancel,
       undefined,
     );
+  });
+
+  describe('auto-opened dialog disarm (#16432 Critical 1)', () => {
+    // The auto-open lands mid-keystroke and keypress dispatch is a
+    // broadcast: a letter still aimed at the unmounted composer must not
+    // cancel/pause the run, and a stray Enter must not arm the approval.
+    // The first explicit navigation key acknowledges the auto-open.
+    function parkedApproval(approvalId: string): WorkflowApproval {
+      return {
+        approvalId,
+        subagentId: 'sub-1',
+        callId: `call-${approvalId}`,
+        name: 'Shell',
+        description: 'run',
+        confirmationDetails: {
+          type: 'exec',
+        } as WorkflowApproval['confirmationDetails'],
+        at: Date.now(),
+      };
+    }
+
+    async function autoSurfacedWorkflow() {
+      const wf = workflowEntry({
+        status: 'running',
+        pendingApprovals: [parkedApproval('wfap-1')],
+      });
+      const h = setup([wf]);
+      // ink flushes mount effects on its own scheduler, outside act —
+      // wait for the provider's auto-open instead of asserting on the
+      // pre-effect frame.
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.dialogMode).toBe('list');
+      });
+      // The provider auto-opens in list mode — no explicit openDialog.
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+      return h;
+    }
+
+    it('ignores bare x until a navigation key, then cancels', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      // The acknowledge re-registers the keypress closure in a passive
+      // effect; wait for it to flush so the next key sees autoOpened=false.
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('ignores bare p until a navigation key, then pauses', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'p' });
+      expect(h.workflowPause).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'p' });
+      expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
+    });
+
+    it('ignores bare r until a navigation key, then resumes the selection', async () => {
+      // R4-2: bare k/j still move the selection (the R2-1 rule above), so
+      // prose typed at the unmounted composer can park the selection on a
+      // paused run. `r` was outside the deny-list, so the next `r` of the
+      // same sentence resumed a run the user deliberately paused.
+      const paused = entry({ id: 'a', agentId: 'a', status: 'paused' });
+      const wf = workflowEntry({
+        status: 'running',
+        pendingApprovals: [parkedApproval('wfap-1')],
+      });
+      const h = setup([paused, wf]);
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.dialogMode).toBe('list');
+      });
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'k' });
+      expect(h.probe.current!.state.selectedIndex).toBe(0);
+      h.pressKey({ sequence: 'r' });
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'r' });
+      expect(h.resume).toHaveBeenCalledWith('a');
+    });
+
+    it('ignores Enter until a navigation key, then enters detail', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ name: 'return' });
+      expect(h.probe.current!.state.dialogMode).toBe('list');
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ name: 'return' });
+      expect(h.probe.current!.state.dialogMode).toBe('detail');
+    });
+
+    it('keeps immediate x behavior for a user-initiated open', async () => {
+      const h = await autoSurfacedWorkflow();
+      // Close the auto-open, then reopen deliberately: the disarm tag
+      // must not survive into a user-initiated open.
+      h.call(() => h.probe.current!.actions.acknowledgeAutoOpen());
+      h.call(() => h.probe.current!.actions.closeDialog());
+      h.call(() => h.probe.current!.actions.openDialog());
+      expect(h.probe.current!.state.autoOpened).toBe(false);
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('does not treat a typed k or j as the acknowledgment', async () => {
+      // The selection matchers also carry bare k/j, and prose typed at the
+      // composer the dialog just unmounted satisfies them. Acknowledging on
+      // those let the next `x`/`p` of the same sentence reach the run
+      // (#16432 R2-1).
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'k' });
+      h.pressKey({ sequence: 'j' });
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('swallows Escape until the auto-open is acknowledged', async () => {
+      // A dismissal before the acknowledgment would burn the approval latch
+      // with the prompt never seen — the badge-only hang this PR removes
+      // (#16432 R3-1).
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ name: 'escape' });
+      expect(h.probe.current!.state.dialogMode).toBe('list');
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'down' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ name: 'escape' });
+      expect(h.probe.current!.state.dialogMode).toBe('closed');
+    });
+
+    it('advertises only the activation hint while auto-opened', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      expect(h.lastFrame()).not.toContain('Enter view');
+      expect(h.lastFrame()).not.toContain('x stop');
+      expect(h.lastFrame()).toContain('activate');
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      expect(h.lastFrame()).toContain('Enter view');
+    });
   });
 
   describe('nested sub-agent display', () => {

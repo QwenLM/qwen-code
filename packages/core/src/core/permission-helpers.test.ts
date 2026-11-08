@@ -5,8 +5,12 @@
  */
 
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { buildPermissionCheckContext } from './permission-helpers.js';
+import { ToolConfirmationOutcome } from '../tools/tools.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  buildPermissionCheckContext,
+  persistPermissionOutcome,
+} from './permission-helpers.js';
 
 describe('buildPermissionCheckContext', () => {
   it('uses an absolute directory as the permission cwd', () => {
@@ -103,5 +107,87 @@ describe('buildPermissionCheckContext', () => {
       toolName: 'read_mcp_resource',
       specifier: 'asys-mcp',
     });
+  });
+});
+
+describe('persistPermissionOutcome', () => {
+  it('never treats edit always-allow as a persistent project rule', async () => {
+    const persist = vi.fn();
+    const addPersistentRule = vi.fn();
+
+    await persistPermissionOutcome(
+      ToolConfirmationOutcome.ProceedAlways,
+      {
+        type: 'edit',
+        title: 'Confirm edit',
+        fileName: 'example.ts',
+        filePath: '/project/example.ts',
+        fileDiff: '',
+        originalContent: null,
+        newContent: 'updated',
+        onConfirm: async () => undefined,
+      },
+      persist,
+      { addPersistentRule } as never,
+      { permissionRules: ['Write(**)'] },
+    );
+
+    expect(persist).not.toHaveBeenCalled();
+    expect(addPersistentRule).not.toHaveBeenCalled();
+  });
+
+  it('stops permission updates after cancellation while a rule is being persisted', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const persist = vi.fn(() => barrier);
+    const addPersistentRule = vi.fn();
+    const controller = new AbortController();
+    const saving = persistPermissionOutcome(
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+      {
+        type: 'exec',
+        title: 'Confirm shell',
+        command: 'echo one',
+        rootCommand: 'echo',
+        permissionRules: ['Bash(echo one)', 'Bash(echo two)'],
+        onConfirm: async () => undefined,
+      },
+      persist,
+      { addPersistentRule } as never,
+      undefined,
+      () => !controller.signal.aborted,
+    );
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledOnce());
+    controller.abort();
+    release();
+    await saving;
+    expect(persist).toHaveBeenCalledOnce();
+    expect(addPersistentRule).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy exec always-allow project persistence', async () => {
+    const persist = vi.fn();
+
+    await persistPermissionOutcome(
+      ToolConfirmationOutcome.ProceedAlways,
+      {
+        type: 'exec',
+        title: 'Confirm shell',
+        command: 'git status',
+        rootCommand: 'git',
+        permissionRules: ['Bash(git status)'],
+        onConfirm: async () => undefined,
+      },
+      persist,
+      undefined,
+    );
+
+    expect(persist).toHaveBeenCalledWith(
+      'project',
+      'allow',
+      'Bash(git status)',
+    );
   });
 });

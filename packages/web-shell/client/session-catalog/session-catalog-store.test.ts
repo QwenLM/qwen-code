@@ -9,6 +9,8 @@ import {
   SESSION_CATALOG_RETENTION_MS,
   SessionCatalogStore,
   getSessionCatalogQueryKey,
+  loadSessionCatalogOnce,
+  peekSessionCatalogDisplayName,
   type SessionCatalogQuery,
 } from './session-catalog-store';
 
@@ -82,6 +84,66 @@ describe('SessionCatalogStore', () => {
     });
   });
 
+  it('preserves the catalog while paused and refreshes subscribers after recovery', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const target = query('/work');
+    const unsubscribe = store.subscribe(target, vi.fn(), {
+      autoLoad: true,
+      pollIntervalMs: 10_000,
+    });
+    await flushMicrotasks();
+    expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe(
+      'cached',
+    );
+    store.setPaused(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe(
+      'cached',
+    );
+    await expect(store.refresh(target)).rejects.toMatchObject({
+      name: 'DaemonUnavailableError',
+    });
+    legacy.mockResolvedValue(page('fresh'));
+    store.setPaused(false);
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe('fresh');
+    unsubscribe();
+  });
+
+  it.each(['success', 'failure'])(
+    'queues a recovery read behind an old in-flight %s without polling',
+    async (completion) => {
+      const old = deferred<DaemonSessionListPage>();
+      legacy.mockReturnValueOnce(old.promise).mockResolvedValue(page('fresh'));
+      const target = query('/work');
+      const unsubscribe = store.subscribe(target, vi.fn(), {
+        autoLoad: true,
+        maxAgeMs: 1_000,
+      });
+      await flushMicrotasks();
+      expect(legacy).toHaveBeenCalledOnce();
+      store.setPaused(true);
+      store.setPaused(false);
+      expect(legacy).toHaveBeenCalledOnce();
+
+      if (completion === 'success') old.resolve(page('old'));
+      else old.reject(new TypeError('offline'));
+      await flushMicrotasks();
+      expect(legacy).toHaveBeenCalledTimes(2);
+      expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe(
+        'fresh',
+      );
+      expect(store.getSnapshot(target).stale).toBe(false);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(legacy).toHaveBeenCalledTimes(2);
+      unsubscribe();
+    },
+  );
+
   it('keys every wire-affecting option and route kind', () => {
     const base = query('/work');
     expect(getSessionCatalogQueryKey(base)).toBe(
@@ -108,6 +170,7 @@ describe('SessionCatalogStore', () => {
       { parentSessionId: 'parent' },
       { sourceType: 'side-task' },
       { sourceId: 'source' },
+      { liveOnly: true },
     ]) {
       expect(getSessionCatalogQueryKey(base)).not.toBe(
         getSessionCatalogQueryKey({
@@ -116,6 +179,239 @@ describe('SessionCatalogStore', () => {
         }),
       );
     }
+  });
+
+  it('updates and clears turn errors from live state', async () => {
+    const target = query('/work');
+    legacy.mockResolvedValue({
+      sessions: [{ sessionId: 'one', workspaceCwd: '/work' }],
+    });
+    await store.loadOnce(target);
+    const live = {
+      sessionId: 'one',
+      clientCount: 1,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    store.applyLiveState('/work', [{ ...live, hasTurnError: true }]);
+    expect(store.getSnapshot(target).page?.sessions[0]).toMatchObject({
+      hasTurnError: true,
+    });
+    store.applyLiveState('/work', [{ ...live, hasTurnError: false }]);
+    expect(store.getSnapshot(target).page?.sessions[0]).toMatchObject({
+      hasTurnError: false,
+    });
+  });
+
+  it('keeps a pending prompt title on every catalog read until a custom title lands', async () => {
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Fix login');
+
+    legacy.mockResolvedValueOnce({
+      ...page('session-1'),
+      sessions: [
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/work',
+          displayName: 'a long first prompt',
+        },
+      ],
+    });
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Fix login');
+
+    legacy.mockResolvedValueOnce({
+      ...page('session-1'),
+      sessions: [
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/work',
+          displayName: 'Server title',
+          titleSource: 'manual',
+        },
+      ],
+    });
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Server title');
+
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBeUndefined();
+  });
+
+  it('drops a pending title when a real rename clears it', async () => {
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    store.clearPendingSessionTitle('/work', 'session-1');
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBeUndefined();
+  });
+
+  it('does not let a cleared pending title overwrite a manual rename', async () => {
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    store.clearPendingSessionTitle('/work', 'session-1');
+    store.patchSession('/work', 'session-1', { displayName: 'Bug hunt' });
+    store.invalidateWorkspace('/work');
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Bug hunt');
+  });
+
+  it('peeks a cached display name without scheduling a request', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValue(response.promise);
+    const target = query('/work');
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+    response.resolve({
+      ...page('s1'),
+      sessions: [
+        {
+          sessionId: 's1',
+          workspaceCwd: '/work',
+          displayName: 'Fix the header',
+        },
+      ],
+    });
+    await vi.runAllTimersAsync();
+    unsubscribe();
+
+    legacy.mockClear();
+    const timersBefore = vi.getTimerCount();
+    expect(store.peekSessionDisplayName('s1', '/work')).toBe('Fix the header');
+    // "Without scheduling a request" means no request AND no timer: a trailing
+    // refresh would only fire on a later tick, so check both before and after
+    // letting the timers run.
+    expect(vi.getTimerCount()).toBe(timersBefore);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'peeks the most recently refreshed title regardless of query insertion order (reversed: %s)',
+    async (reversed) => {
+      const legacyQuery = query('/work');
+      const qualifiedQuery = query('/work', 'qualified');
+      for (const target of reversed
+        ? [qualifiedQuery, legacyQuery]
+        : [legacyQuery, qualifiedQuery]) {
+        store.getSnapshot(target);
+      }
+      legacy.mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'Old' },
+        ],
+      });
+      await store.loadOnce(legacyQuery);
+      await vi.advanceTimersByTimeAsync(1);
+      qualified.mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'New' },
+        ],
+      });
+      await store.loadOnce(qualifiedQuery);
+      expect(store.peekSessionDisplayName('s1', '/work')).toBe('New');
+
+      await vi.advanceTimersByTimeAsync(1);
+      legacy.mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'Newest' },
+        ],
+      });
+      await store.loadOnce(legacyQuery, { fresh: true });
+      expect(store.peekSessionDisplayName('s1', '/work')).toBe('Newest');
+    },
+  );
+
+  it('peeks by workspace and ignores blank or unknown names', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValue(response.promise);
+    const unsubscribe = store.subscribe(query('/work'), vi.fn(), {
+      autoLoad: true,
+    });
+    response.resolve({
+      ...page('s1'),
+      sessions: [
+        { sessionId: 's1', workspaceCwd: '/work', displayName: 'Named' },
+        { sessionId: 's2', workspaceCwd: '/work', displayName: '   ' },
+      ],
+    });
+    await vi.runAllTimersAsync();
+    unsubscribe();
+
+    expect(store.peekSessionDisplayName('s1', '/work')).toBe('Named');
+    expect(store.peekSessionDisplayName('s2', '/work')).toBeUndefined();
+    expect(store.peekSessionDisplayName('missing', '/work')).toBeUndefined();
+    // A same-id session in another workspace must not answer.
+    expect(store.peekSessionDisplayName('s1', '/other')).toBeUndefined();
+    expect(store.peekSessionDisplayName('s1', undefined)).toBeUndefined();
+  });
+
+  it('does not answer with a row from another workspace', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValue(response.promise);
+    const unsubscribe = store.subscribe(query('/work'), vi.fn(), {
+      autoLoad: true,
+    });
+    response.resolve({
+      ...page('foreign'),
+      sessions: [
+        {
+          sessionId: 'foreign',
+          workspaceCwd: '/elsewhere',
+          displayName: 'Foreign title',
+        },
+        { sessionId: 'bare', displayName: 'Row without a workspace' },
+      ],
+    });
+    await vi.runAllTimersAsync();
+    unsubscribe();
+
+    // A page for one workspace can carry rows from another (the daemon merges
+    // live runtime state); they must not name a session here.
+    expect(store.peekSessionDisplayName('foreign', '/work')).toBeUndefined();
+    expect(store.peekSessionDisplayName('bare', '/work')).toBe(
+      'Row without a workspace',
+    );
+  });
+
+  it('delegates the exported peek to the client store', async () => {
+    const client = {
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'Named' },
+        ],
+      }),
+      workspaceByCwd: vi.fn(),
+    } as unknown as DaemonClient;
+    const loaded = loadSessionCatalogOnce(client, query('/work'));
+    // Only the zero-delay load schedule may run: `runAllTimersAsync` would
+    // also fire the retention cleanup and drop the entry this peeks at.
+    await vi.advanceTimersByTimeAsync(0);
+    await loaded;
+
+    expect(peekSessionCatalogDisplayName(client, 's1', '/work')).toBe('Named');
+    expect(
+      peekSessionCatalogDisplayName(client, undefined, '/work'),
+    ).toBeUndefined();
   });
 
   it('shares an automatic request and preserves page metadata', async () => {
@@ -496,6 +792,937 @@ describe('SessionCatalogStore', () => {
     );
   });
 
+  describe('applySessionPinToggle', () => {
+    const pinnedView = (workspaceCwd: string): SessionCatalogQuery => ({
+      routeKind: 'legacy',
+      workspaceCwd,
+      options: {
+        pageSize: 1000,
+        archiveState: 'active',
+        view: 'organized',
+        group: 'pinned',
+      },
+    });
+
+    it('pins across loaded pages and leaves unloaded or foreign pages alone', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const existingPin = {
+        sessionId: 'other',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(async (cwd: string) => ({
+        sessions:
+          cwd === '/work'
+            ? [row]
+            : [{ sessionId: 'foreign', workspaceCwd: cwd }],
+      }));
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(query('/other'), { fresh: true });
+      // The pinned-view page stays unloaded for /work: no entry may be
+      // invented for it.
+      await store.loadOnce(pinnedView('/other'), { fresh: true });
+      legacy.mockImplementation(async () => ({ sessions: [existingPin] }));
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+
+      expect(store.getSnapshot(query('/work')).page?.sessions[0]).toMatchObject(
+        {
+          isPinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+      expect(
+        store.getSnapshot(query('/other')).page?.sessions[0],
+      ).toMatchObject({ sessionId: 'foreign' });
+      expect(store.getSnapshot(pinnedView('/work')).page).toBeUndefined();
+    });
+
+    it('inserts the row into a loaded pinned-view page and patches it in place when already present', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const existingPin = {
+        sessionId: 'other',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [existingPin] }
+            : { sessions: [row] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+
+      expect(store.getSnapshot(pinnedView('/work')).page?.sessions).toEqual([
+        existingPin,
+        {
+          ...row,
+          isPinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      ]);
+
+      // Re-pin patches the existing row instead of duplicating it.
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-03-03T00:00:00.000Z',
+        },
+      );
+      expect(
+        store.getSnapshot(pinnedView('/work')).page?.sessions,
+      ).toHaveLength(2);
+    });
+
+    it('unpins by removing the row from the pinned page and clearing pinnedAt elsewhere', async () => {
+      const row = {
+        sessionId: 'plain',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [row] }
+            : { sessions: [row] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle('/work', { ...row }, { pinned: false });
+
+      expect(store.getSnapshot(pinnedView('/work')).page?.sessions).toEqual([]);
+      const patched = store.getSnapshot(query('/work')).page?.sessions[0];
+      expect(patched?.isPinned).toBe(false);
+      expect(patched?.pinnedAt).toBeUndefined();
+    });
+
+    it('survives unrelated patchSession churn after the toggle (R5-1)', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const sibling = {
+        sessionId: 'sibling',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [sibling] }
+            : { sessions: [row, sibling] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+      // Churn that never touches pin state: a rename of another session and
+      // a live-state tick both mint fresh page references.
+      store.patchSession('/work', 'sibling', { displayName: 'Renamed' });
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sibling',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          updatedAt: '2026-02-03T00:00:00.000Z',
+        },
+      ]);
+
+      expect(
+        store
+          .getSnapshot(pinnedView('/work'))
+          .page?.sessions.map((session) => session.sessionId),
+      ).toEqual(['sibling', 'plain']);
+      // The all-sessions page keeps activity order; the toggled row must
+      // still carry the pin state after the churn.
+      expect(
+        store
+          .getSnapshot(query('/work'))
+          .page?.sessions.find((session) => session.sessionId === 'plain'),
+      ).toMatchObject({
+        isPinned: true,
+        pinnedAt: '2026-02-02T00:00:00.000Z',
+      });
+    });
+  });
+
+  it('overlays live state and clears volatile fields for persisted-only sessions', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'live',
+          workspaceCwd: '/work',
+          displayName: 'Live session',
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'persisted',
+          workspaceCwd: '/work',
+          displayName: 'Persisted session',
+          clientCount: 2,
+          hasActivePrompt: true,
+          isWaitingForPermission: true,
+          isWaitingForUserQuestion: true,
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'live',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: false,
+      },
+    ]);
+
+    expect(store.getSnapshot(target).page?.sessions).toEqual([
+      expect.objectContaining({
+        sessionId: 'live',
+        displayName: 'Live session',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: false,
+      }),
+      expect.objectContaining({
+        sessionId: 'persisted',
+        displayName: 'Persisted session',
+        clientCount: 0,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      }),
+    ]);
+  });
+
+  it('stamps a fresher live watermark and reorders the active page', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'b',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-08-17T00:00:03.000Z',
+      },
+    ]);
+
+    expect(
+      store.getSnapshot(target).page?.sessions.map((session) => ({
+        sessionId: session.sessionId,
+        updatedAt: session.updatedAt,
+      })),
+    ).toEqual([
+      { sessionId: 'a', updatedAt: '2026-08-17T00:00:03.000Z' },
+      { sessionId: 'b', updatedAt: '2026-08-17T00:00:02.000Z' },
+    ]);
+  });
+
+  it('ignores stale, invalid, or archived-row watermarks', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          sessionId: 'gone',
+          workspaceCwd: '/work',
+          isArchived: true,
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    const volatileState = {
+      clientCount: 0,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    // Each case applies separately — live-state rows are indexed by session
+    // id, so batching duplicate ids would drop all but the last entry.
+    // Stale and unparsable stamps must not regress or corrupt the row.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:01.000Z',
+      },
+    ]);
+    store.applyLiveState('/work', [
+      { sessionId: 'a', ...volatileState, updatedAt: 'not-a-timestamp' },
+    ]);
+    // An archived row never accepts a live activity stamp.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'gone',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:09.000Z',
+      },
+    ]);
+
+    expect(
+      store.getSnapshot(target).page?.sessions.map((session) => ({
+        sessionId: session.sessionId,
+        updatedAt: session.updatedAt,
+      })),
+    ).toEqual([
+      { sessionId: 'a', updatedAt: '2026-08-17T00:00:02.000Z' },
+      { sessionId: 'gone', updatedAt: '2026-08-17T00:00:01.000Z' },
+    ]);
+  });
+
+  it('never stamps archived or cursored pages', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const archived = {
+      ...query('/work'),
+      options: { pageSize: 1000, archiveState: 'archived' as const },
+    };
+    const cursored = {
+      ...query('/work'),
+      options: { ...query('/work').options, cursor: 'cursor-1' },
+    };
+    await store.loadOnce(archived, { fresh: true });
+    await store.loadOnce(cursored, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        clientCount: 3,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-08-17T00:00:09.000Z',
+      },
+    ]);
+
+    for (const target of [archived, cursored]) {
+      const row = store.getSnapshot(target).page?.sessions[0];
+      // The volatile overlay still applies; only the activity stamp is
+      // rejected outside reorder-owning pages.
+      expect(row).toMatchObject({
+        sessionId: 'a',
+        clientCount: 3,
+        updatedAt: '2026-08-17T00:00:01.000Z',
+      });
+    }
+  });
+
+  it('keeps pinned rows ahead when reordering an organized page', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'pinned',
+          workspaceCwd: '/work',
+          isPinned: true,
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+        {
+          sessionId: 'b',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:03.000Z',
+        },
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:02.000Z',
+        },
+      ],
+    });
+    const organized = {
+      ...query('/work'),
+      options: {
+        ...query('/work').options,
+        view: 'organized' as const,
+        group: 'all',
+      },
+    };
+    await store.loadOnce(organized, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        clientCount: 0,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-08-17T00:00:04.000Z',
+      },
+    ]);
+
+    expect(
+      store
+        .getSnapshot(organized)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['pinned', 'a', 'b']);
+  });
+
+  it('records, snapshots, and resolves pending session activity', async () => {
+    const wake = vi.fn();
+    const stopWake = store.onLiveStateWake(wake);
+
+    // Without live-state ownership the record is a no-op.
+    store.recordSessionActivity('/work', 'a');
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    expect(wake).not.toHaveBeenCalled();
+
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+    store.recordSessionActivity('/work', 'a');
+    expect(wake).toHaveBeenCalledWith('/work');
+    const first = store.snapshotSessionActivity('/work');
+    const firstSequence = first?.get('a');
+    expect(firstSequence).toBeDefined();
+
+    // A completion recorded mid-flight bumps the sequence; settling with
+    // the stale sequence must keep the newer pending entry.
+    store.recordSessionActivity('/work', 'a');
+    store.resolveSessionActivity('/work', 'a', firstSequence!);
+    const second = store.snapshotSessionActivity('/work');
+    expect(second?.get('a')).toBeGreaterThan(firstSequence!);
+
+    store.resolveSessionActivity('/work', 'a', second!.get('a')!);
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+
+    // Releasing the last live-state user drops pending completions.
+    store.recordSessionActivity('/work', 'b');
+    releaseLiveState();
+    await Promise.resolve();
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    stopWake();
+  });
+
+  it('absorbs watermarks only for rows on reorder-owning pages', async () => {
+    legacy.mockImplementation(
+      async (_cwd: string, options: { archiveState?: string }) => ({
+        sessions:
+          options.archiveState === 'archived'
+            ? [{ sessionId: 'archived-only', workspaceCwd: '/work' }]
+            : [
+                { sessionId: 'a', workspaceCwd: '/work' },
+                {
+                  sessionId: 'row-archived',
+                  workspaceCwd: '/work',
+                  isArchived: true,
+                },
+                { sessionId: 'foreign-row', workspaceCwd: '/elsewhere' },
+                { sessionId: 'no-watermark', workspaceCwd: '/work' },
+              ],
+      }),
+    );
+    await store.loadOnce(query('/work'), { fresh: true });
+    await store.loadOnce(
+      {
+        ...query('/work'),
+        options: { pageSize: 1000, archiveState: 'archived' as const },
+      },
+      { fresh: true },
+    );
+    // The cursored page holds the only copy of a distinct session id, so a
+    // watermark for it must not be reported as absorbed.
+    legacy.mockResolvedValue({
+      sessions: [{ sessionId: 'cursor-only', workspaceCwd: '/work' }],
+    });
+    await store.loadOnce(
+      {
+        ...query('/work'),
+        options: { ...query('/work').options, cursor: 'cursor-1' },
+      },
+      { fresh: true },
+    );
+
+    const volatileState = {
+      clientCount: 0,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    const stamp = '2026-08-17T00:00:09.000Z';
+    const absorbed = store.applyLiveState('/work', [
+      { sessionId: 'a', ...volatileState, updatedAt: stamp },
+      { sessionId: 'row-archived', ...volatileState, updatedAt: stamp },
+      { sessionId: 'foreign-row', ...volatileState, updatedAt: stamp },
+      { sessionId: 'archived-only', ...volatileState, updatedAt: stamp },
+      { sessionId: 'cursor-only', ...volatileState, updatedAt: stamp },
+      { sessionId: 'unknown', ...volatileState, updatedAt: stamp },
+      { sessionId: 'no-watermark', ...volatileState },
+    ]);
+
+    expect([...absorbed]).toEqual(['a']);
+  });
+
+  it('orders unstamped rows by createdAt and bounds stamps by createdAt', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'm',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:03.000Z',
+        },
+        {
+          sessionId: 'zzz',
+          workspaceCwd: '/work',
+          createdAt: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          sessionId: 'aaa',
+          workspaceCwd: '/work',
+          createdAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    const volatileState = {
+      clientCount: 0,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    // A live stamp older than a row's createdAt lower bound is rejected.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'zzz',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:01.500Z',
+      },
+    ]);
+    expect(
+      store
+        .getSnapshot(target)
+        .page?.sessions.find((session) => session.sessionId === 'zzz')
+        ?.updatedAt,
+    ).toBeUndefined();
+
+    // A fresher stamp on another row triggers a re-sort; the unstamped rows
+    // must order by their createdAt lower bound, not the id tie-break.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'm',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:04.000Z',
+      },
+    ]);
+    expect(
+      store.getSnapshot(target).page?.sessions.map((s) => s.sessionId),
+    ).toEqual(['m', 'zzz', 'aaa']);
+
+    // A stamp above the createdAt lower bound is accepted.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'zzz',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:05.000Z',
+      },
+    ]);
+    expect(
+      store.getSnapshot(target).page?.sessions.map((s) => s.sessionId),
+    ).toEqual(['zzz', 'm', 'aaa']);
+  });
+
+  it('stages active queries through their own route kind and stales retained pages', async () => {
+    legacy.mockImplementation(async (cwd: string) => page(cwd, cwd));
+    const active = query('/work');
+    const pinned = {
+      ...query('/work'),
+      options: { ...query('/work').options, view: 'organized' as const },
+    };
+    const other = query('/other');
+    await store.loadOnce(active, { fresh: true });
+    await store.loadOnce(pinned, { fresh: true });
+    await store.loadOnce(other, { fresh: true });
+    const unsubscribe = store.subscribe(active, vi.fn());
+    const activeBefore = store.getSnapshot(active).page;
+    const pinnedBefore = store.getSnapshot(pinned).page;
+    qualified.mockResolvedValue(page('fresh'));
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+
+    expect(qualified).not.toHaveBeenCalled();
+    expect(legacy).toHaveBeenCalledTimes(4);
+    expect(store.getSnapshot(active).page).toBe(activeBefore);
+    expect(store.getSnapshot(pinned).page).toBe(pinnedBefore);
+    expect(store.getSnapshot(active).stale).toBe(true);
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    expect(store.getSnapshot(active).stale).toBe(false);
+    expect(store.getSnapshot(pinned).stale).toBe(true);
+    expect(store.getSnapshot(other).stale).toBe(false);
+    expect(store.getSnapshot(active).page?.sessions[0]?.sessionId).toBe(
+      '/work',
+    );
+    unsubscribe();
+  });
+
+  it('applies a pending title when a staged workspace refresh commits', async () => {
+    const active = query('/work');
+    legacy.mockResolvedValueOnce(page('cached'));
+    await store.loadOnce(active, { fresh: true });
+    const unsubscribe = store.subscribe(active, vi.fn());
+    store.setPendingSessionTitle('/work', 'fresh', 'Fix login');
+    legacy.mockResolvedValueOnce(page('fresh'));
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    expect(store.getSnapshot(active).page?.sessions[0]?.displayName).toBe(
+      'Fix login',
+    );
+    unsubscribe();
+  });
+
+  it('routes live workspace invalidations and new queries through reconciliation', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const active = query('/work');
+    await store.loadOnce(active, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    store.invalidateWorkspace('/work');
+    const unsubscribeActive = store.subscribe(active, vi.fn(), {
+      autoLoad: true,
+    });
+
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+    expect(
+      store.consumeWorkspaceLiveStateRefreshRequest('/work'),
+    ).toBeUndefined();
+
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: true,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(1);
+
+    const channel = {
+      ...active,
+      options: { ...active.options, sourceType: 'channel' },
+    };
+    const unsubscribeChannel = store.subscribe(channel, vi.fn());
+
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+
+    unsubscribeChannel();
+    releaseLiveState();
+    unsubscribeActive();
+  });
+
+  it('resolves an explicit live-state refresh only from a staged commit', async () => {
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockResolvedValueOnce(page('refreshed'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    const refresh = store.refresh(target);
+
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.getSnapshot(target).page).toEqual(page('cached'));
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    await expect(refresh).resolves.toEqual(page('refreshed'));
+
+    releaseLiveState();
+  });
+
+  it('resumes an explicit refresh when live-state ownership is released', async () => {
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockReturnValueOnce(stagedResponse.promise)
+      .mockResolvedValueOnce(page('legacy-refresh'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+    const refresh = store.refresh(target);
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+
+    releaseLiveState();
+    stagedResponse.resolve(page('staged'));
+    await stagedPromise;
+    await flushMicrotasks();
+
+    expect(legacy).toHaveBeenCalledTimes(3);
+    await expect(refresh).resolves.toEqual(page('legacy-refresh'));
+  });
+
+  it('does not publish an older request or a staged page before commit', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(stagedResponse.promise);
+    const target = query('/work');
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    initial.resolve(page('superseded'));
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.getSnapshot(target).page).toBeUndefined();
+
+    stagedResponse.resolve(page('staged'));
+    const staged = await stagedPromise;
+    expect(store.getSnapshot(target).page).toBeUndefined();
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    expect(store.getSnapshot(target).page).toEqual(page('staged'));
+    unsubscribe();
+  });
+
+  it('queues an explicit refresh behind staging and rejects the stale commit', async () => {
+    legacy.mockResolvedValueOnce(page('cached'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const unsubscribe = store.subscribe(target, vi.fn());
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    const refreshedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(stagedResponse.promise)
+      .mockReturnValueOnce(refreshedResponse.promise);
+
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    const refreshPromise = store.refresh(target);
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+    stagedResponse.resolve(page('staged'));
+    const staged = await stagedPromise;
+
+    expect(store.commitWorkspaceRefresh(staged)).toBe(false);
+    expect(store.getSnapshot(target).page).toEqual(page('cached'));
+    expect(legacy).toHaveBeenCalledTimes(3);
+    refreshedResponse.resolve(page('refreshed'));
+    await expect(refreshPromise).resolves.toEqual(page('refreshed'));
+    unsubscribe();
+  });
+
+  it('does not supersede an explicit request that started before staging', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValueOnce(response.promise);
+    const target = query('/work');
+    const request = store.loadOnce(target, { fresh: true });
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+
+    expect(staged.complete).toBe(false);
+    expect(qualified).not.toHaveBeenCalled();
+    response.resolve(page('explicit'));
+    await expect(request).resolves.toEqual(page('explicit'));
+  });
+
+  it('resolves a non-coordinated waiter after a live-mode invalidation', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockResolvedValueOnce(page('rescued'));
+    const target = query('/work');
+    const request = store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    store.invalidateWorkspace('/work');
+
+    initial.resolve(page('stale'));
+    await flushMicrotasks();
+    // The invalidation bumped the revision past the in-flight job; a real
+    // follow-up job must settle the pre-live waiter.
+    await expect(request).resolves.toEqual(page('rescued'));
+    expect(legacy).toHaveBeenCalledTimes(2);
+    releaseLiveState();
+  });
+
+  it('scopes a staged failure to the failing entry', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const active = query('/work');
+    const pinned = {
+      ...query('/work'),
+      options: { ...query('/work').options, view: 'organized' as const },
+    };
+    await store.loadOnce(active, { fresh: true });
+    await store.loadOnce(pinned, { fresh: true });
+    const unsubscribeActive = store.subscribe(active, vi.fn());
+    const unsubscribePinned = store.subscribe(pinned, vi.fn());
+    let calls = 0;
+    legacy.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error('pinned blip');
+      return page('fresh');
+    });
+
+    await expect(store.stageWorkspaceRefresh('/work')).rejects.toThrow(
+      'pinned blip',
+    );
+
+    expect(store.getSnapshot(active).error).toBeUndefined();
+    expect(store.getSnapshot(active).loading).toBe(false);
+    expect(store.getSnapshot(pinned).error?.message).toBe('pinned blip');
+    expect(store.getSnapshot(pinned).loading).toBe(false);
+    unsubscribeActive();
+    unsubscribePinned();
+  });
+
+  it('flags an interactive refresh when a live-mode subscriber maxAge expires', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    vi.advanceTimersByTime(2_000);
+    const unsubscribe = store.subscribe(target, vi.fn(), {
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
+
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+    unsubscribe();
+    releaseLiveState();
+  });
+
+  it('wakes live-state listeners for interactive refreshes only', () => {
+    const wake = vi.fn();
+    const stopWake = store.onLiveStateWake(wake);
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+    legacy.mockResolvedValue(page('cached'));
+
+    store.invalidateWorkspace('/work');
+    expect(wake).not.toHaveBeenCalled();
+
+    // The waiter settles via a later staged commit (not exercised here), so
+    // drop the promise; the wake fires synchronously inside refresh().
+    void store.refresh(query('/work')).catch(() => undefined);
+    expect(wake).toHaveBeenCalledWith('/work', false);
+
+    void store
+      .refresh(query('/work'), { interactive: true })
+      .catch(() => undefined);
+    expect(wake).toHaveBeenLastCalledWith('/work', true);
+
+    stopWake();
+    releaseLiveState();
+  });
+
+  it('does not let a trailing non-staged job settle staged-revision waiters', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    const trailing = deferred<DaemonSessionListPage>();
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(trailing.promise)
+      .mockReturnValueOnce(stagedResponse.promise);
+    const target = query('/work');
+    // A legacy background job is in flight when live-state takes over.
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    // Staging begins while the legacy job runs; the follower loadOnce arms
+    // a trailing non-staged job at the staging-target revision.
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    const followUp = store.loadOnce(target);
+    initial.resolve(page('initial'));
+    await flushMicrotasks();
+
+    // The trailing job fails at the staged revision: it must not reject
+    // the waiters the staged commit is about to resolve.
+    trailing.reject(new Error('trailing blip'));
+    stagedResponse.resolve(page('staged'));
+    const staged = await stagedPromise;
+    expect(staged.complete).toBe(true);
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    await expect(followUp).resolves.toEqual(page('staged'));
+    expect(store.getSnapshot(target).error).toBeUndefined();
+
+    unsubscribe();
+    releaseLiveState();
+  });
+
   it('uses the qualified client only for qualified queries', async () => {
     qualified.mockResolvedValue({
       sessions: [{ sessionId: 'qualified' }],
@@ -874,6 +2101,167 @@ describe('SessionCatalogStore', () => {
     const unsubscribe = store.subscribe(target, vi.fn());
 
     expect(legacy).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+});
+
+describe('SessionCatalogStore live-session snapshots (#9487)', () => {
+  let store: SessionCatalogStore;
+
+  function live(sessionId: string, hasActivePrompt: boolean) {
+    return {
+      sessionId,
+      clientCount: 1,
+      hasActivePrompt,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const client = {
+      listWorkspaceSessionsPage: vi.fn(),
+      workspaceByCwd: vi.fn(() => ({
+        listWorkspaceSessionsPage: vi.fn(),
+      })),
+    } as unknown as DaemonClient;
+    store = new SessionCatalogStore(client);
+  });
+
+  afterEach(() => {
+    store.dispose();
+    vi.useRealTimers();
+  });
+
+  it('publishes background execution changes while the session remains busy', () => {
+    const first = {
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+    };
+    store.applyLiveState('/work', [
+      { ...live('session', true), backgroundTurn: first },
+    ]);
+    const observer = vi.fn();
+    const unsubscribe = store.subscribeLiveSessionObservations(
+      '/work',
+      observer,
+    );
+    const second = {
+      ...first,
+      turnId: 'auto-2',
+      taskId: 'task-2',
+      startedAt: 200,
+    };
+    store.applyLiveState('/work', [
+      { ...live('session', true), backgroundTurn: second },
+    ]);
+    expect(store.getLiveSession('/work', 'session')?.backgroundTurn).toEqual(
+      second,
+    );
+    expect(observer).toHaveBeenCalled();
+    store.applyLiveState('/work', [live('session', false)]);
+    expect(
+      store.getLiveSession('/work', 'session')?.backgroundTurn,
+    ).toBeUndefined();
+    unsubscribe();
+  });
+
+  it('answers per-session lookups independently of any loaded page', () => {
+    expect(store.hasLiveSessions('/work')).toBe(false);
+    expect(store.getLiveSession('/work', 'off-page')).toBeUndefined();
+
+    // One live-state response is enough: no catalog page was ever loaded,
+    // yet a session that no page contains resolves from the snapshot.
+    store.applyLiveState('/work', [live('off-page', true)]);
+
+    expect(store.hasLiveSessions('/work')).toBe(true);
+    expect(store.getLiveSession('/work', 'off-page')?.hasActivePrompt).toBe(
+      true,
+    );
+    expect(store.getLiveSession('/work', 'unknown')).toBeUndefined();
+  });
+
+  it('separates content changes from fresh live-state observations', () => {
+    const listener = vi.fn();
+    const observationListener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+    const unsubscribeObservations = store.subscribeLiveSessionObservations(
+      '/work',
+      observationListener,
+    );
+
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(observationListener).toHaveBeenCalledTimes(1);
+
+    // Identical polls do not churn content readers, but still advance the
+    // freshness signal used by session ownership handoffs.
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(observationListener).toHaveBeenCalledTimes(2);
+
+    store.applyLiveState('/work', [live('s1', false)]);
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(observationListener).toHaveBeenCalledTimes(3);
+
+    unsubscribe();
+    unsubscribeObservations();
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(observationListener).toHaveBeenCalledTimes(3);
+  });
+
+  it('publishes background activity changes while the main prompt remains idle', () => {
+    store.applyLiveState('/work', [
+      { ...live('s1', false), hasRunningBackgroundTasks: true },
+    ]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+    store.applyLiveState('/work', [
+      { ...live('s1', false), hasRunningBackgroundTasks: false },
+    ]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(store.getLiveSession('/work', 's1')).toMatchObject({
+      hasActivePrompt: false,
+      hasRunningBackgroundTasks: false,
+    });
+    unsubscribe();
+  });
+
+  it('drops the snapshot when the last live-state retainer releases', async () => {
+    const release = store.retainWorkspaceLiveState('/work');
+    store.applyLiveState('/work', [live('s1', true)]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    release();
+
+    expect(store.hasLiveSessions('/work')).toBe(true);
+    await Promise.resolve();
+    expect(store.hasLiveSessions('/work')).toBe(false);
+    expect(store.getLiveSession('/work', 's1')).toBeUndefined();
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('keeps the snapshot during a same-tick live-state owner handoff', async () => {
+    const releaseFirst = store.retainWorkspaceLiveState('/work');
+    store.applyLiveState('/work', [live('s1', true)]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    releaseFirst();
+    const releaseSecond = store.retainWorkspaceLiveState('/work');
+    await Promise.resolve();
+
+    expect(store.getLiveSession('/work', 's1')).toEqual(live('s1', true));
+    expect(listener).not.toHaveBeenCalled();
+
+    releaseSecond();
+    await Promise.resolve();
     unsubscribe();
   });
 });

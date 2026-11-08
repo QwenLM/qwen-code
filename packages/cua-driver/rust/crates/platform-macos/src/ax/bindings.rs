@@ -13,9 +13,11 @@
 use core_foundation::{
     array::CFArrayRef,
     base::{CFRelease, CFRetain, CFTypeID, CFTypeRef},
+    data::{CFData, CFDataRef},
     string::CFStringRef,
 };
 use std::os::raw::{c_int, c_void};
+use std::time::{Duration, Instant};
 
 // ── AXUIElement opaque type ──────────────────────────────────────────────────
 
@@ -50,6 +52,7 @@ pub const kAXValueIllegalType: AXValueType = 1_000;
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
     pub fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
@@ -82,6 +85,7 @@ extern "C" {
         timeout_in_seconds: f32,
     ) -> AXError;
     pub fn AXUIElementGetTypeID() -> CFTypeID;
+    pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     pub fn AXIsProcessTrusted() -> bool;
     /// `AXIsProcessTrustedWithOptions(options)` — when called with
     /// `{kAXTrustedCheckOptionPrompt: true}` raises the system Accessibility
@@ -117,6 +121,7 @@ pub unsafe fn element_at_screen_position(pid: i32, x: f64, y: f64) -> Option<AXU
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     pub fn AXValueCreate(the_type: AXValueType, value_ptr: *const c_void) -> AXValueRef;
+    pub fn AXValueGetTypeID() -> CFTypeID;
     pub fn AXValueGetType(value: AXValueRef) -> AXValueType;
     pub fn AXValueGetValue(
         value: AXValueRef,
@@ -141,17 +146,95 @@ struct CGSizeValue {
 
 use core_foundation::{array::CFArray, base::TCFType, string::CFString as CFStr};
 
+#[derive(Debug)]
+pub struct CopiedAXAttribute<T> {
+    pub value: Option<T>,
+    pub complete: bool,
+}
+
+// Bounded, thread-local trace of why the current AX capture was judged
+// incomplete. `walk_tree_bounded` clears it before every walk and drains it
+// afterwards so a forced-full observation revision can explain itself instead
+// of reporting an opaque `capture_incomplete`.
+thread_local! {
+    static INCOMPLETE_NOTES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const MAX_INCOMPLETE_NOTES: usize = 12;
+
+pub(crate) fn reset_incomplete_notes() {
+    INCOMPLETE_NOTES.with(|notes| notes.borrow_mut().clear());
+}
+
+pub(crate) fn take_incomplete_notes() -> Vec<String> {
+    INCOMPLETE_NOTES.with(|notes| std::mem::take(&mut *notes.borrow_mut()))
+}
+
+pub(crate) fn note_incomplete(context: &str, detail: &str) {
+    INCOMPLETE_NOTES.with(|notes| {
+        let mut notes = notes.borrow_mut();
+        if notes.len() < MAX_INCOMPLETE_NOTES {
+            notes.push(format!("{context}: {detail}"));
+        }
+    });
+}
+
+fn missing_attribute_is_complete(error: AXError) -> bool {
+    // kAXErrorFailure is a stable app-side refusal, observed live on
+    // TextEdit's AXDescription and SwiftUI's AXSlider value writes — the
+    // element consistently answers "no", so it carries no evidence of a
+    // mid-capture mutation. Transient busy signals (kAXErrorCannotComplete)
+    // still mark the capture incomplete.
+    matches!(
+        error,
+        kAXErrorNoValue | kAXErrorAttributeUnsupported | kAXErrorFailure
+    )
+}
+
+/// Classify a failed attribute read, recording every transient verdict.
+fn attribute_error_is_complete(attr_name: &str, error: AXError) -> bool {
+    if missing_attribute_is_complete(error) {
+        return true;
+    }
+    note_incomplete(attr_name, &format!("ax_error {error}"));
+    false
+}
+
+/// Record a success-but-null read, which is treated as transient.
+fn null_value_incomplete(attr_name: &str) -> bool {
+    note_incomplete(attr_name, "null value");
+    false
+}
+
 /// Whether an AX attribute is currently writable on this element.
 ///
 /// # Safety
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn is_attribute_settable(element: AXUIElementRef, attr_name: &str) -> bool {
+    is_attribute_settable_with_status(element, attr_name)
+        .value
+        .unwrap_or(false)
+}
+
+pub unsafe fn is_attribute_settable_with_status(
+    element: AXUIElementRef,
+    attr_name: &str,
+) -> CopiedAXAttribute<bool> {
     let attr = CFStr::new(attr_name);
     let mut settable = 0_u8;
-    AXUIElementIsAttributeSettable(element, attr.as_concrete_TypeRef(), &mut settable)
-        == kAXErrorSuccess
-        && settable != 0
+    let error = AXUIElementIsAttributeSettable(element, attr.as_concrete_TypeRef(), &mut settable);
+    if error == kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: Some(settable != 0),
+            complete: true,
+        };
+    }
+    CopiedAXAttribute {
+        value: Some(false),
+        complete: attribute_error_is_complete(attr_name, error),
+    }
 }
 
 /// Copy a string attribute from an AX element. Returns `None` on any error.
@@ -160,19 +243,41 @@ pub unsafe fn is_attribute_settable(element: AXUIElementRef, attr_name: &str) ->
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn copy_string_attr(element: AXUIElementRef, attr_name: &str) -> Option<String> {
+    copy_string_attr_with_status(element, attr_name).value
+}
+
+pub unsafe fn copy_string_attr_with_status(
+    element: AXUIElementRef,
+    attr_name: &str,
+) -> CopiedAXAttribute<String> {
     let attr = CFStr::new(attr_name);
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return None;
+    if err != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete(attr_name, err),
+        };
+    }
+    if value.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: null_value_incomplete(attr_name),
+        };
     }
     let cf_string_type_id = CFStr::type_id();
     if core_foundation::base::CFGetTypeID(value) != cf_string_type_id {
         CFRelease(value);
-        return None;
+        return CopiedAXAttribute {
+            value: None,
+            complete: true,
+        };
     }
     let s = CFStr::wrap_under_create_rule(value as _);
-    Some(s.to_string())
+    CopiedAXAttribute {
+        value: Some(s.to_string()),
+        complete: true,
+    }
 }
 
 /// Copy a numeric attribute from an AX element as an `f64`. Returns `None` on
@@ -184,20 +289,42 @@ pub unsafe fn copy_string_attr(element: AXUIElementRef, attr_name: &str) -> Opti
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn copy_number_attr(element: AXUIElementRef, attr_name: &str) -> Option<f64> {
+    copy_number_attr_with_status(element, attr_name).value
+}
+
+pub unsafe fn copy_number_attr_with_status(
+    element: AXUIElementRef,
+    attr_name: &str,
+) -> CopiedAXAttribute<f64> {
     use core_foundation::number::CFNumber;
     let attr = CFStr::new(attr_name);
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return None;
+    if err != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete(attr_name, err),
+        };
+    }
+    if value.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: null_value_incomplete(attr_name),
+        };
     }
     let cf_number_type_id = CFNumber::type_id();
     if core_foundation::base::CFGetTypeID(value) != cf_number_type_id {
         CFRelease(value);
-        return None;
+        return CopiedAXAttribute {
+            value: None,
+            complete: true,
+        };
     }
     let n = CFNumber::wrap_under_create_rule(value as _);
-    n.to_f64()
+    CopiedAXAttribute {
+        value: n.to_f64(),
+        complete: true,
+    }
 }
 
 /// Copy a boolean attribute from an AX element. Returns `None` on any error
@@ -209,25 +336,50 @@ pub unsafe fn copy_number_attr(element: AXUIElementRef, attr_name: &str) -> Opti
 /// `element` must be a valid Accessibility object reference for the duration
 /// of this call.
 pub unsafe fn copy_bool_attr(element: AXUIElementRef, attr_name: &str) -> Option<bool> {
+    copy_bool_attr_with_status(element, attr_name).value
+}
+
+pub unsafe fn copy_bool_attr_with_status(
+    element: AXUIElementRef,
+    attr_name: &str,
+) -> CopiedAXAttribute<bool> {
     use core_foundation::boolean::CFBoolean;
     use core_foundation::number::CFNumber;
     let attr = CFStr::new(attr_name);
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return None;
+    if err != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete(attr_name, err),
+        };
+    }
+    if value.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: null_value_incomplete(attr_name),
+        };
     }
     let type_id = core_foundation::base::CFGetTypeID(value);
     if type_id == CFBoolean::type_id() {
         let b = CFBoolean::wrap_under_create_rule(value as _);
-        return Some(b.into());
+        return CopiedAXAttribute {
+            value: Some(b.into()),
+            complete: true,
+        };
     }
     if type_id == CFNumber::type_id() {
         let n = CFNumber::wrap_under_create_rule(value as _);
-        return n.to_f64().map(|f| f != 0.0);
+        return CopiedAXAttribute {
+            value: n.to_f64().map(|f| f != 0.0),
+            complete: true,
+        };
     }
     CFRelease(value);
-    None
+    CopiedAXAttribute {
+        value: None,
+        complete: true,
+    }
 }
 
 /// A copied AX attribute represented for both existing string-only consumers
@@ -294,15 +446,34 @@ pub unsafe fn copy_stringish_attr(
     element: AXUIElementRef,
     attr_name: &str,
 ) -> Option<StringishAttrValue> {
+    copy_stringish_attr_with_status(element, attr_name).value
+}
+
+pub unsafe fn copy_stringish_attr_with_status(
+    element: AXUIElementRef,
+    attr_name: &str,
+) -> CopiedAXAttribute<StringishAttrValue> {
     let attr = CFStr::new(attr_name);
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return None;
+    if err != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete(attr_name, err),
+        };
+    }
+    if value.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: null_value_incomplete(attr_name),
+        };
     }
     let result = coerce_stringish_value(value);
     CFRelease(value);
-    result
+    CopiedAXAttribute {
+        value: result,
+        complete: true,
+    }
 }
 
 /// Get the action names for an AX element.
@@ -311,19 +482,43 @@ pub unsafe fn copy_stringish_attr(
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn copy_action_names(element: AXUIElementRef) -> Vec<String> {
+    copy_action_names_with_status(element).actions
+}
+
+pub struct CopiedAXActions {
+    pub actions: Vec<String>,
+    pub complete: bool,
+}
+
+pub unsafe fn copy_action_names_with_status(element: AXUIElementRef) -> CopiedAXActions {
     let mut names: CFArrayRef = std::ptr::null_mut();
     let err = AXUIElementCopyActionNames(element, &mut names);
-    if err != kAXErrorSuccess || names.is_null() {
-        return vec![];
+    if err != kAXErrorSuccess {
+        return CopiedAXActions {
+            actions: Vec::new(),
+            complete: attribute_error_is_complete("AXActionNames", err),
+        };
+    }
+    if names.is_null() {
+        return CopiedAXActions {
+            actions: Vec::new(),
+            complete: null_value_incomplete("AXActionNames"),
+        };
     }
     // Use CFArray<CFStr> (the typed wrapper) to satisfy FromVoid bound.
     let arr = CFArray::<CFStr>::wrap_under_create_rule(names);
-    (0..arr.len())
-        .filter_map(|i| {
-            let cf = arr.get(i)?;
-            Some(cf.to_string())
-        })
-        .collect()
+    let mut actions = Vec::with_capacity(usize::try_from(arr.len()).unwrap_or_default());
+    let mut complete = true;
+    for index in 0..arr.len() {
+        match arr.get(index) {
+            Some(action) => actions.push(action.to_string()),
+            None => {
+                note_incomplete("AXActionNames", "missing array item");
+                complete = false;
+            }
+        }
+    }
+    CopiedAXActions { actions, complete }
 }
 
 /// Read the on-screen center of an AX element (AXPosition + AXSize → center).
@@ -334,53 +529,7 @@ pub unsafe fn copy_action_names(element: AXUIElementRef) -> Vec<String> {
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn element_screen_center(element: AXUIElementRef) -> Option<(f64, f64)> {
-    // AXPosition → CGPoint
-    let pos_attr = CFStr::new("AXPosition");
-    let mut pos_ref: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(element, pos_attr.as_concrete_TypeRef(), &mut pos_ref);
-    if err != kAXErrorSuccess || pos_ref.is_null() {
-        return None;
-    }
-    #[repr(C)]
-    struct CGPoint {
-        x: f64,
-        y: f64,
-    }
-    let mut pos = CGPoint { x: 0.0, y: 0.0 };
-    let ok = AXValueGetValue(
-        pos_ref as AXValueRef,
-        kAXValueCGPointType,
-        &mut pos as *mut _ as *mut std::ffi::c_void,
-    );
-    CFRelease(pos_ref);
-    if !ok {
-        return None;
-    }
-
-    // AXSize → CGSize
-    let sz_attr = CFStr::new("AXSize");
-    let mut sz_ref: CFTypeRef = std::ptr::null();
-    let err2 = AXUIElementCopyAttributeValue(element, sz_attr.as_concrete_TypeRef(), &mut sz_ref);
-    if err2 != kAXErrorSuccess || sz_ref.is_null() {
-        return None;
-    }
-    #[repr(C)]
-    struct CGSize {
-        w: f64,
-        h: f64,
-    }
-    let mut sz = CGSize { w: 0.0, h: 0.0 };
-    let ok2 = AXValueGetValue(
-        sz_ref as AXValueRef,
-        kAXValueCGSizeType,
-        &mut sz as *mut _ as *mut std::ffi::c_void,
-    );
-    CFRelease(sz_ref);
-    if !ok2 || sz.w < 1.0 || sz.h < 1.0 {
-        return None;
-    }
-
-    Some((pos.x + sz.w / 2.0, pos.y + sz.h / 2.0))
+    element_screen_rect(element).map(|[x, y, width, height]| (x + width / 2.0, y + height / 2.0))
 }
 
 /// Read the on-screen bounding rect of an AX element.
@@ -390,19 +539,48 @@ pub unsafe fn element_screen_center(element: AXUIElementRef) -> Option<(f64, f64
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn element_screen_rect(element: AXUIElementRef) -> Option<[f64; 4]> {
+    element_screen_rect_with_status(element).value
+}
+
+/// Read the bounding rect while distinguishing a stable missing/unsupported
+/// attribute from a transient native read failure. Revision capture must never
+/// retain the latter as if a frame had genuinely disappeared.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn element_screen_rect_with_status(
+    element: AXUIElementRef,
+) -> CopiedAXAttribute<[f64; 4]> {
     // AXPosition → CGPoint
     let pos_attr = CFStr::new("AXPosition");
     let mut pos_ref: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, pos_attr.as_concrete_TypeRef(), &mut pos_ref);
-    if err != kAXErrorSuccess || pos_ref.is_null() {
-        return None;
+    if err != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete("AXPosition", err),
+        };
     }
-    #[repr(C)]
-    struct CGPoint {
-        x: f64,
-        y: f64,
+    if pos_ref.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: {
+                note_incomplete("AXFrame", "null or undecodable value");
+                false
+            },
+        };
     }
-    let mut pos = CGPoint { x: 0.0, y: 0.0 };
+    if core_foundation::base::CFGetTypeID(pos_ref) != AXValueGetTypeID()
+        || AXValueGetType(pos_ref as AXValueRef) != kAXValueCGPointType
+    {
+        CFRelease(pos_ref);
+        return CopiedAXAttribute {
+            value: None,
+            complete: true,
+        };
+    }
+    let mut pos = CGPointValue { x: 0.0, y: 0.0 };
     let ok = AXValueGetValue(
         pos_ref as AXValueRef,
         kAXValueCGPointType,
@@ -410,33 +588,73 @@ pub unsafe fn element_screen_rect(element: AXUIElementRef) -> Option<[f64; 4]> {
     );
     CFRelease(pos_ref);
     if !ok {
-        return None;
+        return CopiedAXAttribute {
+            value: None,
+            complete: {
+                note_incomplete("AXFrame", "null or undecodable value");
+                false
+            },
+        };
     }
 
     // AXSize → CGSize
     let sz_attr = CFStr::new("AXSize");
     let mut sz_ref: CFTypeRef = std::ptr::null();
     let err2 = AXUIElementCopyAttributeValue(element, sz_attr.as_concrete_TypeRef(), &mut sz_ref);
-    if err2 != kAXErrorSuccess || sz_ref.is_null() {
-        return None;
+    if err2 != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete("AXSize", err2),
+        };
     }
-    #[repr(C)]
-    struct CGSize {
-        w: f64,
-        h: f64,
+    if sz_ref.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: {
+                note_incomplete("AXFrame", "null or undecodable value");
+                false
+            },
+        };
     }
-    let mut sz = CGSize { w: 0.0, h: 0.0 };
+    if core_foundation::base::CFGetTypeID(sz_ref) != AXValueGetTypeID()
+        || AXValueGetType(sz_ref as AXValueRef) != kAXValueCGSizeType
+    {
+        CFRelease(sz_ref);
+        return CopiedAXAttribute {
+            value: None,
+            complete: true,
+        };
+    }
+    let mut sz = CGSizeValue {
+        width: 0.0,
+        height: 0.0,
+    };
     let ok2 = AXValueGetValue(
         sz_ref as AXValueRef,
         kAXValueCGSizeType,
         &mut sz as *mut _ as *mut std::ffi::c_void,
     );
     CFRelease(sz_ref);
-    if !ok2 || sz.w < 1.0 || sz.h < 1.0 {
-        return None;
+    if !ok2 {
+        return CopiedAXAttribute {
+            value: None,
+            complete: {
+                note_incomplete("AXFrame", "null or undecodable value");
+                false
+            },
+        };
+    }
+    if sz.width < 1.0 || sz.height < 1.0 {
+        return CopiedAXAttribute {
+            value: None,
+            complete: true,
+        };
     }
 
-    Some([pos.x, pos.y, sz.w, sz.h])
+    CopiedAXAttribute {
+        value: Some([pos.x, pos.y, sz.width, sz.height]),
+        complete: true,
+    }
 }
 
 /// Get the focused UI element of a running application by pid.
@@ -450,6 +668,7 @@ pub unsafe fn focused_element_of_pid(pid: i32) -> Option<AXUIElementRef> {
     if app.is_null() {
         return None;
     }
+    let _ = AXUIElementSetMessagingTimeout(app, 0.1);
     let attr = CFStr::new("AXFocusedUIElement");
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value);
@@ -466,6 +685,29 @@ pub unsafe fn focused_element_of_pid(pid: i32) -> Option<AXUIElementRef> {
     Some(value as AXUIElementRef)
 }
 
+/// The process implementing an AX proxy, which can differ from its public owner.
+pub(crate) unsafe fn actual_pid_of_element(
+    element: AXUIElementRef,
+) -> Result<Option<i32>, AXError> {
+    type GetActualPid = unsafe extern "C" fn(AXUIElementRef, *mut i32) -> AXError;
+    static GET: std::sync::OnceLock<Option<GetActualPid>> = std::sync::OnceLock::new();
+    let Some(get) = *GET.get_or_init(|| {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"_AXUIElementGetActualPid".as_ptr());
+        (!symbol.is_null()).then(|| std::mem::transmute::<*mut c_void, GetActualPid>(symbol))
+    }) else {
+        return Ok(None);
+    };
+    let mut pid = 0;
+    let error = get(element, &mut pid);
+    if error != kAXErrorSuccess {
+        Err(error)
+    } else if pid <= 0 {
+        Err(kAXErrorFailure)
+    } else {
+        Ok(Some(pid))
+    }
+}
+
 /// Return the CGWindowID of the application's focused AX window.
 ///
 /// This is a narrow read-only proof used before global keyboard delivery: an
@@ -477,6 +719,7 @@ pub fn focused_window_id_of_pid(pid: i32) -> Option<u32> {
         if app.is_null() {
             return None;
         }
+        let _ = AXUIElementSetMessagingTimeout(app, 0.1);
         let window = copy_element_attr(app, "AXFocusedWindow");
         CFRelease(app as CFTypeRef);
         let window = window?;
@@ -486,37 +729,344 @@ pub fn focused_window_id_of_pid(pid: i32) -> Option<u32> {
     }
 }
 
+pub fn app_window_id_of_pid(pid: i32) -> Option<u32> {
+    app_window_id_of_pid_with_readiness(pid, None)
+}
+
+pub(crate) fn app_window_id_of_pid_with_readiness(
+    pid: i32,
+    readiness_deadline: Option<std::time::Instant>,
+) -> Option<u32> {
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return None;
+        }
+        let _ = AXUIElementSetMessagingTimeout(app, 2.0);
+        super::enablement::ensure_chromium_ax_enabled(pid, app, readiness_deadline);
+        let _ = AXUIElementSetMessagingTimeout(app, 2.0);
+        for attribute in ["AXFocusedWindow", "AXMainWindow"] {
+            let selection = copy_element_attr_with_status(app, attribute);
+            if let Some(window) = selection.value {
+                let id = app_target_window_id(window);
+                CFRelease(window as CFTypeRef);
+                if id.is_some() {
+                    CFRelease(app as CFTypeRef);
+                    return id;
+                }
+            }
+        }
+        let windows = copy_ax_windows_with_status(app);
+        let mut resolved = Vec::new();
+        if windows.complete {
+            for window in &windows.elements {
+                if let Some(id) = app_target_window_id(*window) {
+                    if !resolved.contains(&id) {
+                        resolved.push(id);
+                    }
+                }
+            }
+        }
+        for window in windows.elements {
+            CFRelease(window as CFTypeRef);
+        }
+        CFRelease(app as CFTypeRef);
+        if resolved.len() == 1 {
+            resolved.pop()
+        } else {
+            None
+        }
+    }
+}
+
+unsafe fn app_target_window_id(window: AXUIElementRef) -> Option<u32> {
+    app_target_window_id_with_proven_root(window, None)
+}
+
+pub(crate) unsafe fn app_target_window_id_with_proven_root(
+    window: AXUIElementRef,
+    proven_root: Option<(i32, u32)>,
+) -> Option<u32> {
+    let _ = AXUIElementSetMessagingTimeout(window, 2.0);
+    let (sheets, complete) = super::sheets::copy_attached_sheets(&[window]);
+    if !complete || sheets.len() > 1 {
+        return None;
+    }
+    if let Some(sheet) = sheets.first() {
+        if let Some(id) = sheet.window_id {
+            if let Some(info) = crate::windows::window_info_by_id(id) {
+                if proven_root.is_none_or(|(pid, _)| info.pid == pid) {
+                    return Some(id);
+                }
+            }
+        }
+        if proven_root.is_some() {
+            return None;
+        }
+    }
+    if let Some((pid, id)) = proven_root {
+        return crate::windows::window_info_by_id(id)
+            .filter(|info| info.pid == pid)
+            .map(|_| id);
+    }
+    ax_get_window_id(window).filter(|id| crate::windows::window_info_by_id(*id).is_some())
+}
+
+type CreateWithRemoteToken = unsafe extern "C" fn(CFDataRef) -> AXUIElementRef;
+
+fn remote_token_creator() -> Option<CreateWithRemoteToken> {
+    static CREATOR: std::sync::OnceLock<Option<CreateWithRemoteToken>> = std::sync::OnceLock::new();
+    *CREATOR.get_or_init(|| unsafe {
+        let symbol = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"_AXUIElementCreateWithRemoteToken".as_ptr(),
+        );
+        (!symbol.is_null())
+            .then(|| std::mem::transmute::<*mut c_void, CreateWithRemoteToken>(symbol))
+    })
+}
+
+fn remote_window_token(pid: i32, element_id: u64) -> [u8; 20] {
+    let mut token = [0; 20];
+    token[..4].copy_from_slice(&pid.to_ne_bytes());
+    token[8..12].copy_from_slice(&0x636f636fi32.to_ne_bytes());
+    token[12..].copy_from_slice(&element_id.to_ne_bytes());
+    token
+}
+
+unsafe fn set_remote_probe_timeout(element: AXUIElementRef, deadline: Instant) -> bool {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    !remaining.is_zero()
+        && AXUIElementSetMessagingTimeout(
+            element,
+            remaining.min(Duration::from_millis(50)).as_secs_f32(),
+        ) == kAXErrorSuccess
+}
+
+/// Recover one omitted AXWindow with exact process and SPI window identity.
+/// The caller owns the returned retain and must restore its normal AX timeout.
+pub(crate) unsafe fn copy_remote_window_for_id(
+    pid: i32,
+    window_id: u32,
+    caller_deadline: Option<Instant>,
+) -> Option<AXUIElementRef> {
+    let probe_deadline = Instant::now() + Duration::from_millis(300);
+    let deadline = caller_deadline.map_or(probe_deadline, |limit| limit.min(probe_deadline));
+    if Instant::now() >= deadline || pid <= 0 || window_id == 0 {
+        return None;
+    }
+    let info = crate::windows::window_info_by_id(window_id)?;
+    if info.pid != pid || info.layer != 0 {
+        return None;
+    }
+    match crate::windows::window_on_current_space_by_id(window_id) {
+        Some(false) => {}
+        Some(true) if !info.is_on_screen => {}
+        _ => return None,
+    }
+    let create = remote_token_creator()?;
+    for element_id in 0..2000 {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let token = CFData::from_buffer(&remote_window_token(pid, element_id));
+        let element = create(token.as_concrete_TypeRef());
+        if element.is_null() {
+            continue;
+        }
+        let mut owner = 0;
+        let mut mapped_window = 0;
+        let exact = core_foundation::base::CFGetTypeID(element as CFTypeRef)
+            == AXUIElementGetTypeID()
+            && set_remote_probe_timeout(element, deadline)
+            && copy_string_attr(element, "AXRole").as_deref() == Some("AXWindow")
+            && set_remote_probe_timeout(element, deadline)
+            && AXUIElementGetPid(element, &mut owner) == kAXErrorSuccess
+            && owner == pid
+            && set_remote_probe_timeout(element, deadline)
+            && _AXUIElementGetWindow(element, &mut mapped_window) == kAXErrorSuccess
+            && mapped_window == window_id
+            && Instant::now() < deadline;
+        if exact
+            && crate::windows::window_info_by_id(window_id)
+                .is_some_and(|current| current.pid == pid && current.layer == 0)
+            && Instant::now() < deadline
+        {
+            return Some(element);
+        }
+        CFRelease(element as CFTypeRef);
+    }
+    None
+}
+
+/// The returned menu-bar item owns its retain. Only an explicitly selected
+/// item with a visible submenu establishes menu context; cached children of a
+/// closed menu do not.
+pub unsafe fn copy_open_menu_context(app: AXUIElementRef) -> (Option<AXUIElementRef>, bool) {
+    let (bar, complete) = copy_selected_menu_bar_item(app);
+    if bar.is_some() || !complete {
+        return (bar, complete);
+    }
+    let mut pid = 0;
+    if AXUIElementGetPid(app, &mut pid) == kAXErrorSuccess {
+        let Some(menu) = super::menu::copy_current(pid) else {
+            return (None, true);
+        };
+        let (visible, complete) = menu_visibility(menu);
+        if visible && complete {
+            (Some(menu), true)
+        } else {
+            CFRelease(menu as CFTypeRef);
+            (None, complete)
+        }
+    } else {
+        (None, false)
+    }
+}
+
+unsafe fn copy_selected_menu_bar_item(app: AXUIElementRef) -> (Option<AXUIElementRef>, bool) {
+    let bar = copy_element_attr_with_status(app, "AXMenuBar");
+    let Some(bar_element) = bar.value else {
+        return (None, bar.complete);
+    };
+    let _ = AXUIElementSetMessagingTimeout(bar_element, 0.1);
+    let items = copy_children_with_status(bar_element);
+    CFRelease(bar_element as CFTypeRef);
+    let mut complete = items.complete;
+    let mut selected = Vec::new();
+    for item in items.elements {
+        let _ = AXUIElementSetMessagingTimeout(item, 0.1);
+        let read = copy_bool_attr_with_status(item, "AXSelected");
+        complete &= read.complete;
+        if read.value == Some(true) {
+            let children = copy_children_with_status(item);
+            complete &= children.complete;
+            let mut visible = false;
+            for child in children.elements {
+                let role = copy_string_attr_with_status(child, "AXRole");
+                complete &= role.complete;
+                if role.value.as_deref() == Some("AXMenu") {
+                    let (open, menu_complete) = menu_visibility(child);
+                    visible |= open;
+                    complete &= menu_complete;
+                }
+                CFRelease(child as CFTypeRef);
+            }
+            if visible {
+                selected.push(item);
+                continue;
+            }
+        }
+        CFRelease(item as CFTypeRef);
+    }
+    if complete && selected.len() == 1 {
+        (selected.pop(), true)
+    } else {
+        complete &= selected.len() <= 1;
+        for item in selected {
+            CFRelease(item as CFTypeRef);
+        }
+        if !complete {
+            note_incomplete("AXMenuBar", "menu context unavailable or ambiguous");
+        }
+        (None, complete)
+    }
+}
+
+unsafe fn menu_visibility(menu: AXUIElementRef) -> (bool, bool) {
+    let _ = AXUIElementSetMessagingTimeout(menu, 0.1);
+    let children = copy_element_array_attr(menu, "AXVisibleChildren");
+    let visible = !children.elements.is_empty();
+    for child in children.elements {
+        CFRelease(child as CFTypeRef);
+    }
+    if visible && children.complete {
+        return (true, true);
+    }
+    let frame = element_screen_rect_with_status(menu);
+    (frame.value.is_some(), children.complete && frame.complete)
+}
+
 /// Get the children of an AX element.
 ///
 /// # Safety
 ///
 /// `element` must be valid, and the caller must release every returned element.
-pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr = CFStr::new("AXChildren");
+pub struct CopiedAXElements {
+    pub elements: Vec<AXUIElementRef>,
+    pub complete: bool,
+}
+
+unsafe fn copy_element_array_attr(element: AXUIElementRef, attr_name: &str) -> CopiedAXElements {
+    let attr = CFStr::new(attr_name);
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    if matches!(err, kAXErrorNoValue | kAXErrorAttributeUnsupported) {
+        return CopiedAXElements {
+            elements: Vec::new(),
+            complete: true,
+        };
+    }
     if err != kAXErrorSuccess || value.is_null() {
-        return vec![];
+        return CopiedAXElements {
+            elements: Vec::new(),
+            complete: {
+                note_incomplete(
+                    attr_name,
+                    if err != kAXErrorSuccess {
+                        "ax_error on element array"
+                    } else {
+                        "null or non-array value"
+                    },
+                );
+                false
+            },
+        };
     }
     let cf_array_type_id = CFArray::<CFTypeRef>::type_id();
     if core_foundation::base::CFGetTypeID(value) != cf_array_type_id {
         CFRelease(value);
-        return vec![];
+        return CopiedAXElements {
+            elements: Vec::new(),
+            complete: {
+                note_incomplete(
+                    attr_name,
+                    if err != kAXErrorSuccess {
+                        "ax_error on element array"
+                    } else {
+                        "null or non-array value"
+                    },
+                );
+                false
+            },
+        };
     }
     let arr = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
     let ax_type_id = AXUIElementGetTypeID();
-    (0..arr.len())
-        .filter_map(|i| {
-            let item = *arr.get(i)?;
-            if core_foundation::base::CFGetTypeID(item) == ax_type_id {
-                // Retain so we own it — caller is responsible for releasing.
-                CFRetain(item);
-                Some(item as AXUIElementRef)
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut elements = Vec::with_capacity(usize::try_from(arr.len()).unwrap_or_default());
+    let mut complete = true;
+    for index in 0..arr.len() {
+        let Some(item) = arr.get(index) else {
+            complete = false;
+            continue;
+        };
+        let item = *item;
+        if core_foundation::base::CFGetTypeID(item) != ax_type_id {
+            complete = false;
+            continue;
+        }
+        CFRetain(item);
+        elements.push(item as AXUIElementRef);
+    }
+    CopiedAXElements { elements, complete }
+}
+
+pub unsafe fn copy_children_with_status(element: AXUIElementRef) -> CopiedAXElements {
+    copy_element_array_attr(element, "AXChildren")
+}
+
+pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
+    copy_children_with_status(element).elements
 }
 
 /// Copy an AX element-valued attribute. The returned element is retained and
@@ -540,6 +1090,39 @@ pub unsafe fn copy_element_attr(
         return None;
     }
     Some(value as AXUIElementRef)
+}
+
+pub unsafe fn copy_element_attr_with_status(
+    element: AXUIElementRef,
+    attr_name: &str,
+) -> CopiedAXAttribute<AXUIElementRef> {
+    let attr = CFStr::new(attr_name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    if error != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete(attr_name, error),
+        };
+    }
+    if value.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: null_value_incomplete(attr_name),
+        };
+    }
+    if core_foundation::base::CFGetTypeID(value) != AXUIElementGetTypeID() {
+        CFRelease(value);
+        note_incomplete(attr_name, "expected AX element");
+        return CopiedAXAttribute {
+            value: None,
+            complete: false,
+        };
+    }
+    CopiedAXAttribute {
+        value: Some(value as AXUIElementRef),
+        complete: true,
+    }
 }
 
 /// Perform an AX action using a string attribute name.
@@ -638,14 +1221,19 @@ pub unsafe fn set_bool_attr_true(element: AXUIElementRef, attr_name: &str) -> AX
     AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), cf_true.as_CFTypeRef())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccessibilityOptIn {
+    ManualAccessibility,
+    EnhancedUserInterface,
+    NotAccepted,
+}
+
 /// Signal to a Chromium/Electron application root that a real assistive client
 /// is present so it materializes its full web-content accessibility tree.
 ///
-/// Returns `true` when an attribute write was accepted — meaning the app was
-/// flipped from "tree off" to "tree building" and the caller should let the
-/// tree settle before walking. Returns `false` when the app does not support
-/// either attribute (native Cocoa apps such as Finder / Calculator / TextEdit),
-/// in which case no settle delay is warranted.
+/// Distinguishes the modern Chromium opt-in from the legacy fallback. An
+/// accepted write does not prove web-content readiness; callers decide whether
+/// their observation budget permits waiting. Native apps commonly reject both.
 ///
 /// `AXManualAccessibility` is the modern opt-in with no screen-reader side
 /// effects; `AXEnhancedUserInterface` is the legacy fallback some Electron
@@ -655,22 +1243,32 @@ pub unsafe fn set_bool_attr_true(element: AXUIElementRef, attr_name: &str) -> AX
 /// # Safety
 ///
 /// `app_element` must be a valid, live application `AXUIElementRef`.
-pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool {
+pub(crate) unsafe fn enable_chromium_accessibility(
+    app_element: AXUIElementRef,
+) -> AccessibilityOptIn {
     let manual = set_bool_attr_true(app_element, "AXManualAccessibility");
     if manual == kAXErrorSuccess {
-        return true;
+        return AccessibilityOptIn::ManualAccessibility;
     }
     if manual != kAXErrorAttributeUnsupported {
         // A transient error (e.g. timeout / app busy) rather than a hard
         // "this app has no such attribute" — don't bother with the legacy
         // fallback, and don't claim enablement happened.
-        return false;
+        return AccessibilityOptIn::NotAccepted;
     }
-    set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess
+    if set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess {
+        AccessibilityOptIn::EnhancedUserInterface
+    } else {
+        AccessibilityOptIn::NotAccepted
+    }
 }
 
-/// Get the CGWindowID of an AX window element via the private `_AXUIElementGetWindow` SPI.
-/// Returns `None` if the element is not a composited window.
+/// Get the CGWindowID of an AX window element.
+///
+/// The private SPI is the fast path. Some native apps return a valid AX window
+/// but reject that SPI, so fall back to the unique same-process WindowServer
+/// window with matching AX bounds. A title match may disambiguate identical
+/// bounds; otherwise the fallback refuses to guess.
 ///
 /// # Safety
 ///
@@ -679,10 +1277,21 @@ pub unsafe fn ax_get_window_id(element: AXUIElementRef) -> Option<u32> {
     let mut wid: u32 = 0;
     let err = _AXUIElementGetWindow(element, &mut wid);
     if err == kAXErrorSuccess && wid != 0 {
-        Some(wid)
-    } else {
-        None
+        return Some(wid);
     }
+
+    let mut pid = 0;
+    if AXUIElementGetPid(element, &mut pid) != kAXErrorSuccess || pid <= 0 {
+        return None;
+    }
+    let frame = element_screen_rect(element)?;
+    let title = copy_string_attr(element, "AXTitle");
+    crate::windows::match_ax_window(
+        pid,
+        title.as_deref(),
+        frame,
+        &crate::windows::all_windows_any_layer(),
+    )
 }
 
 /// Read the `AXWindows` attribute of an application element.
@@ -693,36 +1302,51 @@ pub unsafe fn ax_get_window_id(element: AXUIElementRef) -> Option<u32> {
 ///
 /// `element` must be valid, and the caller must release every returned element.
 pub unsafe fn copy_ax_windows(element: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr = CFStr::new("AXWindows");
-    let mut value: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return vec![];
-    }
-    let cf_array_type_id = CFArray::<CFTypeRef>::type_id();
-    if core_foundation::base::CFGetTypeID(value) != cf_array_type_id {
-        CFRelease(value);
-        return vec![];
-    }
-    let arr = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
-    let ax_type_id = AXUIElementGetTypeID();
-    (0..arr.len())
-        .filter_map(|i| {
-            let item = *arr.get(i)?;
-            if core_foundation::base::CFGetTypeID(item) == ax_type_id {
-                CFRetain(item);
-                Some(item as AXUIElementRef)
-            } else {
-                None
-            }
-        })
-        .collect()
+    copy_ax_windows_with_status(element).elements
+}
+
+pub unsafe fn copy_ax_windows_with_status(element: AXUIElementRef) -> CopiedAXElements {
+    copy_element_array_attr(element, "AXWindows")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use core_foundation::{boolean::CFBoolean, number::CFNumber};
+
+    #[test]
+    fn actual_pid_reader_preserves_a_direct_application_identity() {
+        let pid = std::process::id() as i32;
+        unsafe {
+            let app = AXUIElementCreateApplication(pid);
+            assert!(!app.is_null());
+            let result = actual_pid_of_element(app);
+            CFRelease(app as CFTypeRef);
+            assert!(
+                matches!(result, Ok(None)) || result == Ok(Some(pid)),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_window_token_matches_the_native_unpadded_spi_layout() {
+        let token = remote_window_token(0x12345678, 0x0123456789abcdef);
+        assert_eq!(token.len(), 20);
+        assert_eq!(
+            i32::from_ne_bytes(token[0..4].try_into().unwrap()),
+            0x12345678
+        );
+        assert_eq!(token[4..8], [0, 0, 0, 0]);
+        assert_eq!(
+            i32::from_ne_bytes(token[8..12].try_into().unwrap()),
+            0x636f636f
+        );
+        assert_eq!(
+            u64::from_ne_bytes(token[12..20].try_into().unwrap()),
+            0x0123456789abcdef
+        );
+    }
 
     #[test]
     fn stringish_value_coerces_cfstring_cfnumber_and_cfboolean() {
@@ -751,5 +1375,25 @@ mod tests {
         let false_result = unsafe { coerce_stringish_value(false_value.as_CFTypeRef()) }.unwrap();
         assert_eq!(false_result.string_value, None);
         assert_eq!(false_result.state_value, "0");
+    }
+
+    #[test]
+    fn stable_app_side_refusals_are_complete_transient_errors_are_not() {
+        assert!(attribute_error_is_complete(
+            "AXDescription",
+            kAXErrorNoValue
+        ));
+        assert!(attribute_error_is_complete(
+            "AXDescription",
+            kAXErrorAttributeUnsupported
+        ));
+        // Observed live: TextEdit's AXDescription and SwiftUI slider value
+        // writes refuse with -25200 consistently; not a mid-capture mutation.
+        assert!(attribute_error_is_complete(
+            "AXDescription",
+            kAXErrorFailure
+        ));
+        // -25204 kAXErrorCannotComplete: the app was busy mid-walk.
+        assert!(!attribute_error_is_complete("AXTitle", -25204));
     }
 }

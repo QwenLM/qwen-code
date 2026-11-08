@@ -7,6 +7,9 @@
 import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
+import { applyDeepSeekReasoningEffort } from '../../deepseek-reasoning.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { ensureReasoningContentOnAssistantMessage } from './utils.js';
@@ -14,13 +17,14 @@ import { ensureReasoningContentOnAssistantMessage } from './utils.js';
 /**
  * Hostname-only check used to decide whether `reasoning.effort` should be
  * rewritten into DeepSeek's flat `reasoning_effort` body parameter, and
- * whether to emit `thinking: { type: 'disabled' }` when reasoning is
- * turned off. The broader `isDeepSeekProvider` falls back to model-name
- * matching to cover self-hosted deployments (sglang/vllm/ollama) — that
- * fallback is right for content-part flattening (a model-format
- * constraint) but trusting it for the body-shape rewrite would push a
- * DeepSeek extension at strict OpenAI-compat backends that may not
- * accept it. Keep the two decisions separated.
+ * whether to emit `thinking: { type: 'disabled' }` when reasoning is turned
+ * off. The broader `isDeepSeekProvider` falls back to model-name matching to
+ * cover self-hosted deployments (sglang/vllm/ollama) — that
+ * fallback is right for selecting DeepSeek-specific content handling, but
+ * explicit image support still takes precedence over text-only flattening.
+ * Trusting it for the body-shape rewrite would push a DeepSeek extension at
+ * strict OpenAI-compat backends that may not accept it. Keep the two decisions
+ * separated.
  *
  * Parses the baseUrl with `new URL(...)` and matches the hostname
  * against `api.deepseek.com` (and its subdomains) exactly — a naive
@@ -49,13 +53,13 @@ export function isDeepSeekHostname(
 }
 
 /**
- * Broad detection used to select the DeepSeek provider class for
- * content-part flattening: hostname OR model-name. Self-hosted
- * deployments (sglang/vllm/ollama) running DeepSeek models share the
- * same input-format constraint, so the model-name fallback is
- * intentional. For decisions that depend on the wire shape DeepSeek's
- * own API exposes (e.g. `reasoning_effort`, `thinking`), use
- * `isDeepSeekHostname` instead — see https://github.com/QwenLM/qwen-code/issues/3613.
+ * Broad detection used to select the DeepSeek provider class for content-part
+ * handling: hostname OR model-name. Self-hosted deployments
+ * (sglang/vllm/ollama) running DeepSeek models share the same text-only input
+ * constraint unless image support is explicitly declared. For decisions that
+ * depend on the wire shape DeepSeek's own API exposes (e.g.
+ * `reasoning_effort`, `thinking`), use `isDeepSeekHostname` instead — see
+ * https://github.com/QwenLM/qwen-code/issues/3613.
  */
 export function isDeepSeekProvider(
   contentGeneratorConfig: ContentGeneratorConfig,
@@ -82,16 +86,34 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   static isDeepSeekHostname = isDeepSeekHostname;
 
   /**
-   * DeepSeek's API requires message content to be a plain string, not an
-   * array of content parts. Flatten any text-part arrays into joined
-   * strings; non-text parts (image_url, audio, …) are replaced with a
-   * `[Unsupported content type: <type>]` placeholder so the request still
-   * goes through with a textual breadcrumb rather than silently dropping
-   * the part or raising mid-conversation. Also translate the standard
-   * `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
-   * body parameter — but only on actual DeepSeek hostnames, since the
-   * model-name fallback above can match self-hosted/strict OpenAI-compat
-   * backends that don't accept the DeepSeek extension.
+   * The full ladder, including `max`, only on a verified DeepSeek host.
+   * `isDeepSeekProvider` also routes here on a `deepseek` substring in the
+   * model name, which says nothing about what the endpoint accepts, so the
+   * capability follows the rule the module comment above already states: a
+   * decision about the wire shape DeepSeek's own API exposes uses
+   * `isDeepSeekHostname`. Elsewhere the generic ceiling applies.
+   */
+  protected override supportedReasoningEffortsFor(
+    model: string | undefined,
+  ): readonly ReasoningEffort[] {
+    return !this.getReasoningCapabilities(model)?.profile &&
+      isDeepSeekHostname(this.contentGeneratorConfig)
+      ? REASONING_EFFORT_TIERS
+      : super.supportedReasoningEffortsFor(model);
+  }
+
+  /**
+   * Text-only DeepSeek APIs require message content to be a plain string, not
+   * an array of content parts. Flatten text-only request arrays into joined
+   * strings; non-text parts (image_url, audio, …) are replaced with an
+   * `[Unsupported content type: <type>]` placeholder so the request still goes
+   * through with a textual breadcrumb rather than silently dropping the part
+   * or raising mid-conversation. Models that explicitly declare image input
+   * retain multipart content for compatible gateways. Also translate the
+   * standard `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
+   * body parameter — but only on actual DeepSeek hostnames, since the model-name
+   * fallback above can match self-hosted/strict OpenAI-compat backends that
+   * don't accept the DeepSeek extension.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -99,16 +121,28 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
 
-    const reshaped = isDeepSeekHostname(this.contentGeneratorConfig)
-      ? translateReasoningEffort(baseRequest)
-      : baseRequest;
+    const profile = this.getReasoningCapabilities(baseRequest.model)?.profile;
+    const reshaped =
+      (!profile || profile === 'deepseek-openai') &&
+      isDeepSeekHostname(this.contentGeneratorConfig)
+        ? applyDeepSeekReasoningEffort(
+            baseRequest,
+            this.contentGeneratorConfig.baseUrl,
+          )
+        : baseRequest;
     if (!reshaped.messages?.length) {
       return reshaped;
     }
 
     const messages = reshaped.messages.map((message) => {
-      const flattened = flattenContentParts(message);
-      return ensureReasoningContentOnAssistantMessage(flattened);
+      const content = this.contentGeneratorConfig.modalities?.image
+        ? message
+        : flattenContentParts(message);
+      return isDeepSeekHostname(this.contentGeneratorConfig) ||
+        !profile ||
+        profile === 'deepseek-openai'
+        ? ensureReasoningContentOnAssistantMessage(content)
+        : content;
     });
 
     return {
@@ -118,9 +152,7 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   }
 
   override getDefaultGenerationConfig(): GenerateContentConfig {
-    return {
-      temperature: 0,
-    };
+    return {};
   }
 }
 
@@ -161,58 +193,4 @@ function flattenContentParts(
     ...message,
     content: text,
   } as OpenAI.Chat.ChatCompletionMessageParam;
-}
-
-// DeepSeek's chat-completions endpoint accepts a flat `reasoning_effort`
-// body parameter (Possible values: high, max — see
-// https://api-docs.deepseek.com/zh-cn/api/create-chat-completion). The
-// standard qwen-code config shape is `reasoning: { effort, ... }` which gets
-// passed through verbatim by the OpenAI pipeline. Translate to the flat
-// shape DeepSeek expects so user-configured effort levels actually take
-// effect; otherwise the nested `reasoning` object is ignored and the server
-// silently defaults to `high`. Backward-compatible mapping per the doc:
-// low / medium → high (the API does this anyway, but we surface it
-// explicitly so logs / dashboards are accurate).
-function translateReasoningEffort(
-  request: OpenAI.Chat.ChatCompletionCreateParams,
-): OpenAI.Chat.ChatCompletionCreateParams {
-  // The SDK type narrows reasoning_effort to 'low'|'medium'|'high', but
-  // DeepSeek extends it with 'max'. Treat the request as a loose record
-  // here so we can set 'max' without fighting the upstream union.
-  const r = request as unknown as Record<string, unknown>;
-  const nested = r['reasoning'] as { effort?: unknown } | undefined;
-  const nestedEffort = nested?.effort;
-  if (typeof nestedEffort !== 'string' || !nestedEffort) {
-    return request;
-  }
-
-  const next: Record<string, unknown> = { ...r };
-  // Don't clobber an already-set top-level reasoning_effort (user override
-  // via samplingParams or extra_body).
-  if (
-    typeof next['reasoning_effort'] !== 'string' ||
-    !next['reasoning_effort']
-  ) {
-    // Backward-compat mapping per the doc: low/medium → high, xhigh → max.
-    // Surface it client-side so logs reflect the wire value the server will
-    // actually act on (the server does the same mapping if we passed the
-    // raw value through, but explicit is better for observability).
-    let normalized = nestedEffort;
-    if (normalized === 'low' || normalized === 'medium') normalized = 'high';
-    else if (normalized === 'xhigh') normalized = 'max';
-    next['reasoning_effort'] = normalized;
-  }
-
-  // Drop only the duplicated `effort` key from the nested form so we don't
-  // ship two competing values for the same knob. Other keys inside
-  // `reasoning` (e.g. an extra_body-injected `budget_tokens`) stay
-  // intact — they're orthogonal data the server can ignore or honor on
-  // its own, and silently swallowing them here would be a surprise.
-  if (nested && Object.keys(nested).length === 1) {
-    delete next['reasoning'];
-  } else if (nested) {
-    const { effort: _drop, ...rest } = nested as Record<string, unknown>;
-    next['reasoning'] = rest;
-  }
-  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
 }

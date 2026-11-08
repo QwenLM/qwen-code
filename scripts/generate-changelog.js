@@ -61,7 +61,8 @@ const SECTION_ORDER = SECTIONS.map((section) => section.name);
 
 /** Matches a stable `vX.Y.Z` tag (no `-preview` / `-nightly` suffix). */
 const STABLE_TAG_RE = /^v?(\d+)\.(\d+)\.(\d+)$/;
-const CURATED_RELEASE_MARKER = '<!-- qwen-release-notes:v1 -->';
+/** Marker comment AI-assisted release notes start with (`v1`, `v2`, …). */
+const CURATED_RELEASE_MARKER_RE = /^<!-- qwen-release-notes:v(\d+) -->/;
 
 /**
  * Matches a GitHub "What's Changed" bullet, e.g.
@@ -143,6 +144,34 @@ export function formatEntry(entry, cat = categorize(entry.title)) {
   return `- ${text} ([#${entry.prNumber}](${entry.prUrl}))`;
 }
 
+/**
+ * Per-line adjustments applied before the heading demotion. v1 notes embed
+ * verbatim; v2 notes are a digest with a collapsed appendix and inline
+ * screenshots, and the changelog keeps the text while unwrapping the
+ * collapse and dropping the images and the Chinese-digest divider.
+ */
+export function transformCuratedLine(line, version) {
+  if (version < 2) {
+    return [line];
+  }
+  if (/^\s*!\[[^\]]*\]\(/.test(line)) {
+    return [];
+  }
+  if (/^\s*---\s*$/.test(line)) {
+    return [];
+  }
+  if (/^\s*<\/?details>\s*$/.test(line)) {
+    return [];
+  }
+  const summary = /^\s*<summary>([\s\S]*?)<\/summary>\s*$/.exec(line);
+  if (summary) {
+    // Emit at ## so the heading demotion below lands the unwrapped appendix
+    // at ### — the same sibling rank v1's "Complete Change List" reaches.
+    return [`## ${summary[1]}`];
+  }
+  return [line];
+}
+
 /** Render one release as a Markdown block. */
 export function formatRelease(release) {
   const lines = [];
@@ -151,10 +180,14 @@ export function formatRelease(release) {
     : `## [${release.version}] - ${release.date}`;
   lines.push(heading, '');
 
-  if (release.body?.trimStart().startsWith(CURATED_RELEASE_MARKER)) {
+  const marker = CURATED_RELEASE_MARKER_RE.exec(release.body?.trimStart());
+  if (marker) {
+    const version = Number(marker[1]);
     const curated = release.body
+      .trimStart()
       .split(/\r?\n/)
-      .filter((line) => line.trim() !== CURATED_RELEASE_MARKER)
+      .filter((line) => !CURATED_RELEASE_MARKER_RE.test(line))
+      .flatMap((line) => transformCuratedLine(line, version))
       .map((line) => line.replace(/^(#{2,5})(\s+)/, '#$1$2'))
       .join('\n')
       .trim();

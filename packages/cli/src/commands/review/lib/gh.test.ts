@@ -21,19 +21,69 @@ import {
   setGhHost,
   parseNdjson,
   gh,
+  ghRaw,
   ghWithInput,
   ghWithInputRetried,
   ensureAuthenticated,
+  isOwnerRepo,
+  ghApiAllNested,
 } from './gh.js';
+
+// The spawn-env pins below read CLICOLOR_FORCE, so stub it to the value that
+// makes `env: ghEnv()` and `env: process.env` observably differ — otherwise
+// those pins go inert on a machine that already exports CLICOLOR_FORCE=0.
+beforeEach(() => {
+  vi.stubEnv('CLICOLOR_FORCE', '1');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 // Host targeting is code, not prose: the subcommands thread `--host` here,
 // and every gh child gets GH_HOST from ghEnv(). These tests pin the pure
-// state machine; the spawn itself is exercised by the commands' own runs.
+// state machine; the spawn-level cells below pin that the env actually
+// reaches `execFileSync`.
 describe('setGhHost / ghEnv', () => {
   afterEach(() => setGhHost(undefined));
 
-  it('defaults to inheriting the parent env untouched (undefined)', () => {
-    expect(ghEnv()).toBeUndefined();
+  it('inherits the parent env and adds no GH_HOST of its own by default', () => {
+    const env = ghEnv();
+    // Inherited keys survive — gh still needs PATH, HOME, its auth env.
+    expect(env['PATH']).toBe(process.env['PATH']);
+    // Pass-through, not absence: an operator-exported GH_HOST must still reach
+    // the child, so asserting `undefined` here would go red in a GHE shell
+    // against correct code.
+    expect(env['GH_HOST']).toBe(process.env['GH_HOST']);
+  });
+
+  it('turns off forced colour and TTY emulation before spawning gh', () => {
+    // Neither default is safe to leave alone: gh reads ANY non-empty
+    // GH_FORCE_TTY as "yes" (`GH_FORCE_TTY=0` still colourises), so the key is
+    // deleted rather than zeroed, and NO_COLOR does NOT override an exported
+    // CLICOLOR_FORCE=1, so that one is pinned to '0'.
+    //
+    // Forced colour is not cosmetic on this path. Measured on gh 2.97.0 with a
+    // piped stdout, `CLICOLOR_FORCE=1 gh api … --jq '.[] | {sha}'` interleaves
+    // SGR escapes BETWEEN tokens AND switches the output from one JSON value
+    // per line to pretty-printed multi-line, so `parseNdjson`'s per-line
+    // JSON.parse sees `{` on a line of its own — a failure no strip-ANSI pass
+    // can undo, and `ghRaw`'s diff bytes carry the escapes into the file that
+    // is written back.
+    const savedForce = process.env['CLICOLOR_FORCE'];
+    const savedTty = process.env['GH_FORCE_TTY'];
+    process.env['CLICOLOR_FORCE'] = '1';
+    process.env['GH_FORCE_TTY'] = '1';
+    try {
+      const env = ghEnv();
+      expect(env['CLICOLOR_FORCE']).toBe('0');
+      expect('GH_FORCE_TTY' in env).toBe(false);
+    } finally {
+      if (savedForce === undefined) delete process.env['CLICOLOR_FORCE'];
+      else process.env['CLICOLOR_FORCE'] = savedForce;
+      if (savedTty === undefined) delete process.env['GH_FORCE_TTY'];
+      else process.env['GH_FORCE_TTY'] = savedTty;
+    }
   });
 
   it('with a host set, extends the inherited env with GH_HOST', () => {
@@ -47,22 +97,57 @@ describe('setGhHost / ghEnv', () => {
 
   it('accepts a host:port and resets on undefined or empty string', () => {
     setGhHost('ghe.internal:8443');
-    expect(ghEnv()!['GH_HOST']).toBe('ghe.internal:8443');
+    expect(ghEnv()['GH_HOST']).toBe('ghe.internal:8443');
+    // Reset means "adds no GH_HOST of its own", not "no env object": the
+    // colour/TTY neutralising is unconditional, so ghEnv() always returns one.
     setGhHost('');
-    expect(ghEnv()).toBeUndefined();
+    expect(ghEnv()['GH_HOST']).toBe(process.env['GH_HOST']);
     setGhHost('ghe.internal');
     setGhHost(undefined);
-    expect(ghEnv()).toBeUndefined();
+    expect(ghEnv()['GH_HOST']).toBe(process.env['GH_HOST']);
   });
 
   it('rejects non-hostname input (an env value must never smuggle shell or spaces)', () => {
     expect(() => setGhHost('ghe.internal; rm -rf /')).toThrow(/--host/);
     expect(() => setGhHost('bad host')).toThrow(/--host/);
     expect(() => setGhHost('https://ghe.internal')).toThrow(/--host/);
+    // The rejection is a TypeError — the subcommand handlers split usage
+    // (exit 2) from fetch failure (exit 1) on exactly this class.
+    expect(() => setGhHost('bad host')).toThrow(TypeError);
+    // Flag-shaped values are not hostnames (the weld interpolates unquoted).
+    expect(() => setGhHost('--help')).toThrow(TypeError);
+    // A non-empty all-whitespace value is an error, not a silent reset —
+    // only ''/undefined mean "restore default".
+    expect(() => setGhHost(' ')).toThrow(TypeError);
+  });
+
+  it('trims a padded valid host and stores the trimmed form', () => {
+    setGhHost(' ghe.internal ');
+    expect(ghEnv()!['GH_HOST']).toBe('ghe.internal');
+    setGhHost(undefined);
   });
 });
 
 describe('resolveGhHost precedence', () => {
+  it('trims the flag; an all-whitespace flag stays a real value, not an env fall-through', () => {
+    expect(resolveGhHost(' ghe.example.com ')).toBe('ghe.example.com');
+    const saved = process.env['GH_HOST'];
+    process.env['GH_HOST'] = 'env.example.com';
+    try {
+      // A NON-EMPTY all-whitespace flag must NOT silently fall through to the
+      // env (that would retarget a write at github.com). It is returned as ''
+      // so callers validating the raw flag via setGhHost see a real value and
+      // the documented TypeError fires.
+      expect(resolveGhHost(' ')).toBe('');
+      // Genuinely-absent input still inherits the env.
+      expect(resolveGhHost(undefined)).toBe('env.example.com');
+      expect(resolveGhHost('')).toBe('env.example.com');
+    } finally {
+      if (saved === undefined) delete process.env['GH_HOST'];
+      else process.env['GH_HOST'] = saved;
+    }
+  });
+
   it('an explicit --host wins over an operator-exported GH_HOST', () => {
     // Load-bearing for the gates: a GHE operator who exports GH_HOST and
     // reviews a github.com PR must resolve to github.com, or the matcher
@@ -268,6 +353,10 @@ describe('ghWithInput() does NOT retry (non-idempotent POST)', () => {
       'input',
       '{"body":"review"}',
     );
+    expect(mockExecFileSync.mock.calls[0]![2]).toHaveProperty(
+      'env.CLICOLOR_FORCE',
+      '0',
+    );
   });
 });
 
@@ -294,6 +383,10 @@ describe('ensureAuthenticated() transient retry', () => {
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
     expect(atomsWaitSpy).toHaveBeenCalledTimes(1);
     expect(atomsWaitSpy.mock.calls[0]![3]).toBe(2000);
+    expect(mockExecFileSync.mock.calls[0]![2]).toHaveProperty(
+      'env.CLICOLOR_FORCE',
+      '0',
+    );
   });
 
   it('throws after one retry when auth genuinely fails', () => {
@@ -319,5 +412,190 @@ describe('ensureAuthenticated() transient retry', () => {
     );
     expect(mockExecFileSync).toHaveBeenCalledTimes(1); // no retry
     expect(atomsWaitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('ghRaw()', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  afterEach(() => setGhHost(undefined));
+
+  it('returns bytes untouched — no trim, no CRLF rewrite, no utf8 loss', () => {
+    // A real Buffer carrying an invalid-UTF-8 byte (0xE9, Latin-1 é): the
+    // latin1 decode must actually execute and preserve it. Mocking a JS
+    // string here would make String.prototype.toString an identity call and
+    // the decode would never run — a utf8 refactor would ship green while
+    // corrupting the byte to U+FFFD.
+    mockExecFileSync.mockReturnValueOnce(
+      Buffer.from(' line one\r\n é\r\n', 'latin1'),
+    );
+    expect(ghRaw('pr', 'diff', '1')).toBe(' line one\r\n é\r\n');
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'gh',
+      expect.any(Array),
+      expect.objectContaining({
+        encoding: 'buffer',
+        // The spawn must hand over ghEnv(), not the raw parent env — that is
+        // the delivery path for the colour/TTY neutralising.
+        env: expect.objectContaining({ CLICOLOR_FORCE: '0' }),
+      }),
+    );
+  });
+
+  it('gh() still trims and normalises (the contrast pin)', () => {
+    mockExecFileSync.mockReturnValueOnce(' a\r\nb\n');
+    expect(gh('pr', 'diff', '1')).toBe('a\nb');
+  });
+});
+
+describe('isOwnerRepo', () => {
+  it('allows a dash-prefixed REPO name but rejects a dash-prefixed OWNER', () => {
+    // GitHub repo names can start with a hyphen (yezhaodan/-Git exists since
+    // 2018); owners cannot. Only the owner half carries the flag-shape ban —
+    // pinning BOTH directions so a "simplify to one segment rule" mutation
+    // goes red (real dash-prefixed repos must stay reviewable).
+    expect(isOwnerRepo('yezhaodan/-Git')).toBe(true);
+    expect(isOwnerRepo('-evil/repo')).toBe(false);
+    expect(isOwnerRepo('QwenLM/qwen-code')).toBe(true);
+    expect(isOwnerRepo('../escape')).toBe(false);
+    expect(isOwnerRepo('owner/..')).toBe(false);
+  });
+});
+
+describe('ghRaw() transient retry (buffer stderr)', () => {
+  let atomsWaitSpy: MockInstance<typeof Atomics.wait>;
+
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+    atomsWaitSpy = vi.spyOn(Atomics, 'wait').mockReturnValue('ok');
+  });
+
+  afterEach(() => {
+    atomsWaitSpy.mockRestore();
+    setGhHost(undefined);
+  });
+
+  it('still retries on HTTP 503 when stderr arrives as a Buffer', () => {
+    // In bytes mode `err.stderr` is a Buffer, so the typed-stderr check in
+    // isTransientGhError cannot fire — retry depends on the marker being in
+    // err.message (Node embeds it there). Pin that the retry still fires.
+    const err = new Error(
+      'gh: No server is currently available (HTTP 503)',
+    ) as Error & { stderr: Buffer };
+    err.stderr = Buffer.from('No server is currently available (HTTP 503)');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        throw err;
+      })
+      .mockReturnValueOnce(Buffer.from('ok'));
+    expect(ghRaw('pr', 'diff', '1')).toBe('ok');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    stderrSpy.mockRestore();
+  });
+});
+
+describe('ghApiAllNested() paginates, decodes, and fails closed', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  afterEach(() => setGhHost(undefined));
+
+  it('passes --paginate and the per-key jq, and decodes the streamed NDJSON', () => {
+    // presubmit.test.ts mocks this helper out entirely, so nothing in the suite
+    // pins the argv it actually builds — yet that argv IS the fix for the
+    // first-page-only CI-classification bug: a plain ghApiAll would concatenate
+    // raw `{<key>:[…]}` pages into unparseable output, so this instead streams
+    // each element as NDJSON via `--paginate --jq '.<key>[]'`. A `--slurp`-based
+    // rewrite is not a drop-in here: these commands shell out to the caller's
+    // `gh` with no minimum-version gate, and `--slurp` is not available on every
+    // gh this runs against. A refactor that dropped --paginate, projected a
+    // single object (`.key` not `.key[]`), or switched the transport fails here.
+    mockExecFileSync.mockReturnValueOnce('{"name":"a"}\n{"name":"b"}\n');
+
+    const result = ghApiAllNested(
+      'repos/o/r/commits/sha/check-runs',
+      'check_runs',
+    );
+
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'gh',
+      [
+        'api',
+        '--paginate',
+        'repos/o/r/commits/sha/check-runs',
+        '--jq',
+        '.check_runs[]',
+      ],
+      expect.anything(),
+    );
+    // One request per call: a silent second round-trip (e.g. an empty-result
+    // fallback to an older-gh workaround) would double the CI-snapshot fetches.
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    expect(result).toEqual([{ name: 'a' }, { name: 'b' }]);
+  });
+
+  it('interpolates the caller-provided key into the jq projection', () => {
+    // The jq expression is templated on `key`, not hardcoded to check_runs: pin
+    // a second key so a regression that bakes in the first call site's key
+    // (silently mis-projecting other endpoints' nested arrays) goes red.
+    mockExecFileSync.mockReturnValueOnce('');
+
+    ghApiAllNested('repos/o/r/actions/workflows', 'workflows');
+
+    const argv = mockExecFileSync.mock.calls[0][1];
+    expect(argv).toContain('--jq');
+    expect(argv[argv.indexOf('--jq') + 1]).toBe('.workflows[]');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a non-transient fetch failure instead of an empty snapshot', () => {
+    // ghApiAllNested has no defensive `return []` (unlike ghApiAll): a failed
+    // fetch must throw, not collapse to an empty list. If it were harmonized
+    // with ghApiAll's `try { … } catch { return []; }`, a non-transient 403/401
+    // (TRANSIENT_RE only covers the 5xx family, so it is not retried) would hand
+    // classifyCi([], []) the no_checks/totalChecks:0 state the approve gate
+    // exempts — the fail-open this file's pagination fix exists to close.
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw ghError('Not Found (HTTP 404)');
+    });
+
+    expect(() =>
+      ghApiAllNested('repos/o/r/commits/sha/check-runs', 'check_runs'),
+    ).toThrow(/Not Found/);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed on a malformed streamed line (strict-parse wiring)', () => {
+    // ghApiAllNested opts into strict parsing: flipping it to strict:false would
+    // silently skip a non-JSON line — e.g. an interleaved `gh version …` upgrade
+    // notice — hiding a failing check run. Blank lines are skipped
+    // unconditionally, so the fixture is a non-blank, non-JSON *string* line.
+    mockExecFileSync.mockReturnValueOnce(
+      '{"name":"a"}\ngh version 2.x available\n{"name":"b"}',
+    );
+
+    expect(() =>
+      ghApiAllNested('repos/o/r/commits/sha/check-runs', 'check_runs'),
+    ).toThrow();
+  });
+
+  it('decodes every streamed record (no silent page cap)', () => {
+    // A decode-side cap defeats the pagination fix but is invisible to a
+    // 2-record fixture (`.slice(0, 30)` still returns both). Feed well past one
+    // default page — a documented real head had 508 check runs — so any cap
+    // below this count reddens and a failing run can never hide behind it.
+    const lines = Array.from(
+      { length: 509 },
+      (_, i) => `{"name":"r${i}"}`,
+    ).join('\n');
+    mockExecFileSync.mockReturnValueOnce(lines);
+
+    expect(
+      ghApiAllNested('repos/o/r/commits/sha/check-runs', 'check_runs'),
+    ).toHaveLength(509);
   });
 });

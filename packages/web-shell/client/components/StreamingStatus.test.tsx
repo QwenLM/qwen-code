@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
+import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
@@ -15,12 +16,13 @@ import {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-// Keep StreamingStatus active (it renders null when idle) and give the real
-// useStreamingLoadingMetrics an empty transcript so it reports zero tokens.
-const mocks = vi.hoisted(() => ({ streamingState: 'responding' as string }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+const mocks = vi.hoisted(() => ({
+  streamingState: 'responding' as string,
+  blocks: [] as DaemonTranscriptBlock[],
+}));
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useStreamingState: () => mocks.streamingState,
-  useTranscriptBlocks: () => [],
+  useTranscriptBlocks: () => mocks.blocks,
 }));
 
 const { StreamingStatus } = await import('./StreamingStatus');
@@ -32,12 +34,22 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  mocks.streamingState = 'responding';
+  mocks.blocks = [];
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 function render(
   customization: WebShellCustomization = {},
-  props: { showPhrase?: boolean } = {},
+  props: {
+    showResponseTokensPerSecond?: boolean;
+    showPhrase?: boolean;
+    hasActivePrompt?: boolean;
+    startedAt?: number;
+    backgroundLabel?: string;
+    trailing?: ReactNode;
+  } = {},
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -244,5 +256,190 @@ describe('StreamingStatus loading phrases', () => {
     });
     expect(labelText(container)).toBe(getLoadingPhrases('en')[0]);
     expect(warn).toHaveBeenCalled();
+  });
+
+  it('stays visible when hasActivePrompt is true even if streamingState is idle (#9487)', () => {
+    mocks.streamingState = 'idle';
+    try {
+      const container = render({}, { hasActivePrompt: true });
+      // When streamingState is idle the component normally returns null.
+      // With hasActivePrompt, it should render the status element.
+      expect(container.firstElementChild).not.toBeNull();
+    } finally {
+      mocks.streamingState = 'responding';
+    }
+  });
+});
+
+describe('StreamingStatus daemon keep-alive (#9487)', () => {
+  afterEach(() => {
+    mocks.streamingState = 'responding';
+  });
+
+  it('stays visible while idle when the daemon reports an active prompt', () => {
+    mocks.streamingState = 'idle';
+    const container = render({}, { hasActivePrompt: true, showPhrase: false });
+    expect(container.firstElementChild).not.toBeNull();
+    // The hint stays honest: the cancel gates include the daemon signal.
+    expect(container.textContent).toContain('esc to cancel');
+  });
+
+  it('still renders nothing while idle without an active prompt', () => {
+    mocks.streamingState = 'idle';
+    const container = render({}, { hasActivePrompt: false });
+    expect(container.firstElementChild).toBeNull();
+  });
+
+  it('keeps the elapsed clock anchored across a silent gap', () => {
+    vi.useFakeTimers();
+    try {
+      mocks.streamingState = 'responding';
+      const anchor = Date.now() - 10 * 60 * 1000; // turn started 10 min ago
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const tree = (props: {
+        startedAt?: number;
+        hasActivePrompt?: boolean;
+      }) => (
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider value={{}}>
+            <StreamingStatus showPhrase={false} {...props} />
+          </WebShellCustomizationProvider>
+        </I18nProvider>
+      );
+
+      act(() => root.render(tree({ startedAt: anchor })));
+      mounted.push({ root, container });
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(container.textContent).toContain('10m 1s');
+
+      // Silent gap: streaming settles to idle but the daemon still owns the
+      // prompt, and the host's startedAt memo goes undefined with it.
+      mocks.streamingState = 'idle';
+      act(() => root.render(tree({ hasActivePrompt: true })));
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+
+      // The clock kept counting from the turn anchor instead of resetting.
+      expect(container.textContent).toContain('10m 4s');
+      expect(container.textContent).not.toContain('(0s');
+
+      // Turn settles on the daemon side: the indicator clears.
+      act(() => root.render(tree({ hasActivePrompt: false })));
+      expect(container.firstElementChild).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('advances the spinner frames during an idle keep-alive gap', () => {
+    vi.useFakeTimers();
+    try {
+      mocks.streamingState = 'idle';
+      const container = render(
+        {},
+        { hasActivePrompt: true, showPhrase: false },
+      );
+      const spinner = container.firstElementChild!.querySelector('span')!;
+      const firstFrame = spinner.textContent;
+      expect(firstFrame).not.toBe('');
+      act(() => {
+        vi.advanceTimersByTime(250);
+      });
+      expect(spinner.textContent).not.toBe(firstFrame);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+it('restores background execution time and label during a silent tool call', () => {
+  mocks.streamingState = 'idle';
+  const now = Date.now();
+  vi.spyOn(Date, 'now').mockReturnValue(now);
+  const container = render(
+    {},
+    {
+      hasActivePrompt: true,
+      startedAt: now - 42_000,
+      backgroundLabel: 'Explore',
+      showPhrase: false,
+    },
+  );
+  expect(container.textContent).toContain('Processing Explore results');
+  expect(container.textContent).toContain('42s');
+  mocks.streamingState = 'responding';
+});
+
+describe('StreamingStatus response speed', () => {
+  function stream(text: string): void {
+    mocks.blocks = [
+      {
+        id: 'reply',
+        kind: 'assistant',
+        text,
+        streaming: true,
+        createdAt: 1,
+        updatedAt: 1,
+        clientReceivedAt: 1,
+      },
+    ];
+  }
+
+  it.each([
+    { chars: 80, rate: '4.0 t/s' },
+    { chars: 400, rate: '20 t/s' },
+  ])(
+    'shows $rate from the current token estimate over elapsed time',
+    ({ chars, rate }) => {
+      vi.useFakeTimers();
+      stream('x'.repeat(chars));
+      const container = render({}, { showResponseTokensPerSecond: true });
+      expect(container.textContent).not.toContain('t/s');
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(container.textContent).toContain(`${chars / 4} tokens`);
+      expect(container.textContent).toContain(rate);
+    },
+  );
+
+  it('keeps the token counter without a rate when the setting is disabled', () => {
+    vi.useFakeTimers();
+    stream('x'.repeat(80));
+    const container = render();
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(container.textContent).toContain('20 tokens');
+    expect(container.textContent).not.toContain('t/s');
+  });
+
+  it('hides the rate while waiting even if the transcript retains a streaming block', () => {
+    vi.useFakeTimers();
+    mocks.streamingState = 'waiting';
+    stream('x'.repeat(80));
+    const container = render({}, { showResponseTokensPerSecond: true });
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(container.textContent).toContain('20 tokens');
+    expect(container.textContent).not.toContain('t/s');
+  });
+});
+
+describe('StreamingStatus trailing slot', () => {
+  it('renders the trailing control after the status metadata', () => {
+    pinPhraseSelection();
+    const container = render(
+      {},
+      { trailing: <button type="button">game</button> },
+    );
+    const status = container.firstElementChild;
+    expect(status?.lastElementChild?.textContent).toBe('game');
   });
 });

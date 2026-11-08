@@ -6,6 +6,7 @@
 
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { parseToolCallArguments } from '../tool-call-arguments.js';
 
 const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
 
@@ -45,7 +46,10 @@ export class StreamingToolCallParser {
   /** Whether the next character should be treated as escaped for each tool call index */
   private escapes: Map<number, boolean> = new Map();
   /** Metadata for each tool call index */
-  private toolCallMeta: Map<number, { id?: string; name?: string }> = new Map();
+  private toolCallMeta: Map<
+    number,
+    { id?: string; name?: string; thoughtSignature?: string }
+  > = new Map();
   private namelessToolCallIndices = new Set<number>();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
@@ -75,6 +79,7 @@ export class StreamingToolCallParser {
    * @param chunk - String chunk that may be empty, partial JSON, or complete data
    * @param id - Optional tool call ID for collision detection and chunk routing
    * @param name - Optional function name stored as metadata
+   * @param thoughtSignature - Optional opaque Gemini thought signature
    * @returns ToolCallParseResult with completion status, parsed value, and repair info
    */
   addChunk(
@@ -82,8 +87,11 @@ export class StreamingToolCallParser {
     chunk: string,
     id?: string,
     name?: string,
+    thoughtSignature?: string,
   ): ToolCallParseResult {
     const validName = name?.trim() || undefined;
+    const isSignatureOnlyDelta =
+      thoughtSignature !== undefined && !id && !validName && chunk.length === 0;
     if (!Number.isSafeInteger(index) || index < 0) {
       this.conflictingToolCallIdentity = true;
       this.invalidToolCallIndex = true;
@@ -92,7 +100,7 @@ export class StreamingToolCallParser {
         error: new Error(`Invalid tool call index: ${index}`),
       };
     }
-    if (!id && !validName && !chunk.trim()) {
+    if (!id && !validName && !chunk.trim() && thoughtSignature === undefined) {
       const depth = this.depths.get(index) ?? 0;
       const inString = this.inStrings.get(index) ?? false;
       if (!this.buffers.has(index) || (depth === 0 && !inString)) {
@@ -169,7 +177,11 @@ export class StreamingToolCallParser {
         actualIndex = this.pendingIndexRemaps.get(index)!;
         const existingBuffer = this.buffers.get(actualIndex)!;
         const existingDepth = this.depths.get(actualIndex)!;
-        if (existingDepth === 0 && existingBuffer.trim()) {
+        if (
+          !isSignatureOnlyDelta &&
+          existingDepth === 0 &&
+          existingBuffer.trim()
+        ) {
           try {
             JSON.parse(existingBuffer);
             actualIndex = this.findMostRecentIncompleteIndex();
@@ -182,7 +194,11 @@ export class StreamingToolCallParser {
         const existingDepth = this.depths.get(index)!;
 
         // If there's an incomplete tool call at this index, continue with it
-        if (existingDepth > 0 || !existingBuffer.trim()) {
+        if (
+          existingDepth > 0 ||
+          !existingBuffer.trim() ||
+          isSignatureOnlyDelta
+        ) {
           actualIndex = index;
         } else {
           // Check if the buffer at this index is complete
@@ -211,6 +227,9 @@ export class StreamingToolCallParser {
     const currentBuffer = this.buffers.get(actualIndex)!;
     const currentDepth = this.depths.get(actualIndex)!;
     const meta = this.toolCallMeta.get(actualIndex)!;
+    if (thoughtSignature !== undefined) {
+      meta.thoughtSignature = thoughtSignature;
+    }
     if (chunk.length === 0 && (id || validName)) {
       if (id) meta.id = id;
       if (validName && !meta.name) meta.name = validName;
@@ -329,7 +348,11 @@ export class StreamingToolCallParser {
    * @param index - The tool call index
    * @returns Object containing id and name if available
    */
-  getToolCallMeta(index: number): { id?: string; name?: string } {
+  getToolCallMeta(index: number): {
+    id?: string;
+    name?: string;
+    thoughtSignature?: string;
+  } {
     return this.toolCallMeta.get(index) || {};
   }
 
@@ -348,15 +371,7 @@ export class StreamingToolCallParser {
   hasInvalidToolCallArguments(): boolean {
     for (const [index, buffer] of this.buffers.entries()) {
       if (!this.toolCallMeta.get(index)?.name || buffer.length === 0) continue;
-
-      try {
-        const args: unknown = JSON.parse(buffer);
-        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
-          return true;
-        }
-      } catch {
-        return true;
-      }
+      if (!parseToolCallArguments(buffer).ok) return true;
     }
     return false;
   }
@@ -381,12 +396,14 @@ export class StreamingToolCallParser {
     name?: string;
     args: Record<string, unknown>;
     index: number;
+    thoughtSignature?: string;
   }> {
     const completed: Array<{
       id?: string;
       name?: string;
       args: Record<string, unknown>;
       index: number;
+      thoughtSignature?: string;
     }> = [];
     const emittedIds = new Set<string>();
 
@@ -448,6 +465,9 @@ export class StreamingToolCallParser {
           name: meta.name,
           args,
           index,
+          ...(meta.thoughtSignature !== undefined
+            ? { thoughtSignature: meta.thoughtSignature }
+            : {}),
         });
       }
     }

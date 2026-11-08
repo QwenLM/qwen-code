@@ -70,9 +70,8 @@ export const ASSET_HEADER_BYTES = 16;
  *
  * A sibling signature table lives in core: `sniffFileKind` in
  * `packages/core/src/utils/binary-content.ts` (best-effort kind detection for
- * fetched web content, deliberately looser) and the dimension extractors in
- * `packages/core/src/utils/request-tokenizer/imageTokenizer.ts`. Admitting or
- * correcting a format here means checking those sites too.
+ * fetched web content, deliberately looser). Admitting or correcting a format
+ * here means checking that site too.
  */
 export function sniffImageFormat(header: Uint8Array): ImageFormat | null {
   const at = (i: number): number => header[i] ?? -1;
@@ -223,8 +222,12 @@ export function parseAssetsRepo(
     return {
       error:
         'QWEN_REVIEW_ASSETS_REPO is not set. Designate an assets repository ' +
-        '(owner/repo you can push to — the repo under review for maintainers, ' +
-        'a fork or scratch repo otherwise) to publish review evidence images.',
+        '(owner/repo you can push to — a dedicated image-host repository, or ' +
+        'a fork or scratch repo rather than the repository under review, ' +
+        'whose clones would fetch the image branches) to publish review ' +
+        'evidence images. In CI, note that the PR-review workflow blanks a ' +
+        'designation pointing at the repository under review, so a set ' +
+        'repository variable can still arrive here as unset.',
     };
   }
   const parts = v.split('/');

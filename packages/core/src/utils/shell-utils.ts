@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AnyToolInvocation } from '../index.js';
+import type { AnyDeclarativeTool, AnyToolInvocation } from '../tools/tools.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
 import path from 'node:path';
 import { parse, quote } from 'shell-quote';
-import { doesToolInvocationMatch } from './tool-utils.js';
+import { isTool } from './is-tool.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   execFile,
@@ -17,8 +17,75 @@ import {
   type ExecFileOptions,
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
+import { resolveWorkspacePath } from './workspaceContext.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
+
+/**
+ * Checks if a tool invocation matches any of a list of patterns.
+ *
+ * @param toolOrToolName The tool object or the name of the tool being invoked.
+ * @param invocation The invocation object for the tool.
+ * @param patterns A list of patterns to match against.
+ *   Patterns can be:
+ *   - A tool name (e.g., "ReadFileTool") to match any invocation of that tool.
+ *   - A tool name with a prefix (e.g., "ShellTool(git status)") to match
+ *     invocations where the arguments start with that prefix.
+ * @returns True if the invocation matches any pattern, false otherwise.
+ */
+export function doesToolInvocationMatch(
+  toolOrToolName: AnyDeclarativeTool | string,
+  invocation: AnyToolInvocation,
+  patterns: string[],
+): boolean {
+  let toolNames: string[];
+  if (isTool(toolOrToolName)) {
+    toolNames = [toolOrToolName.name, toolOrToolName.constructor.name];
+  } else {
+    toolNames = [toolOrToolName as string];
+  }
+
+  if (toolNames.some((name) => SHELL_TOOL_NAMES.includes(name))) {
+    toolNames = [...new Set([...toolNames, ...SHELL_TOOL_NAMES])];
+  }
+
+  for (const pattern of patterns) {
+    const openParen = pattern.indexOf('(');
+
+    if (openParen === -1) {
+      // No arguments, just a tool name
+      if (toolNames.includes(pattern)) {
+        return true;
+      }
+      continue;
+    }
+
+    const patternToolName = pattern.substring(0, openParen);
+    if (!toolNames.includes(patternToolName)) {
+      continue;
+    }
+
+    if (!pattern.endsWith(')')) {
+      continue;
+    }
+
+    const argPattern = pattern.substring(openParen + 1, pattern.length - 1);
+
+    if (
+      'command' in invocation.params &&
+      toolNames.includes('run_shell_command')
+    ) {
+      const argValue = String(
+        (invocation.params as { command: string }).command,
+      );
+      if (argValue === argPattern || argValue.startsWith(argPattern + ' ')) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 
 /**
  * An identifier for the shell type.
@@ -169,6 +236,31 @@ export function getShellConfiguration(): ShellConfiguration {
  * Export the platform detection constant for use in process management (e.g., killing processes).
  */
 export const isWindows = () => os.platform() === 'win32';
+
+/**
+ * The name the model should see for a shell: the executable a command
+ * actually runs under, not the platform's usual shell. PowerShell is named by
+ * its real executable so `pwsh` is not described as Windows PowerShell 5.1.
+ */
+export function getShellDisplayName({
+  executable,
+  shell,
+}: ShellConfiguration): string {
+  switch (shell) {
+    case 'cmd':
+      return 'cmd.exe';
+    case 'powershell': {
+      const basename = path.win32.basename(executable).toLowerCase();
+      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
+    }
+    case 'bash':
+      return 'bash';
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
 
 /**
  * Escapes a string so that it can be safely used as a single argument
@@ -459,8 +551,51 @@ export function getCommandRoots(command: string): string[] {
     .filter((c): c is string => !!c);
 }
 
+/**
+ * Trim the characters bash's lexer discards at a command edge — space, tab and
+ * newline — plus a CR that is the first half of a CRLF pair. A lone CR is an
+ * ordinary bash word character, as are VT, FF and NBSP, which
+ * `String.prototype.trim` also strips; that deleted a redirection target before
+ * op extraction (#11865).
+ *
+ * Two pointers rather than a `$`-anchored `g` regex: with the `g` flag the
+ * engine retries the end-anchored alternative at every index, and inside an
+ * interior whitespace run the greedy `+` unwinds one character at a time, so
+ * the regex is quadratic there (~1.4 s at a 40 k run, ~3.2 s at 64 k) —
+ * synchronously, on model-controlled input, inside the permission gate.
+ */
+function trimBashEdgeSeparators(command: string): string {
+  let start = 0;
+  let end = command.length;
+  while (start < end) {
+    const ch = command[start]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      start++;
+      continue;
+    }
+    if (ch === '\r' && command[start + 1] === '\n') {
+      start++;
+      continue;
+    }
+    break;
+  }
+  while (end > start) {
+    const ch = command[end - 1]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      end--;
+      continue;
+    }
+    if (ch === '\r' && command[end] === '\n') {
+      end--;
+      continue;
+    }
+    break;
+  }
+  return command.slice(start, end);
+}
+
 export function stripShellWrapper(command: string): string {
-  const trimmed = command.trim();
+  const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
 
   // Skip leading env assignments (e.g. `FOO=bar bash -c '...'`)
@@ -1434,7 +1569,9 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         wrapperTokens,
         innerCommand,
         innerQuote,
-        innerArgsSuffix: commandToken.rest.trimStart(),
+        // Blanks only: a newline right after the script separates the
+        // next command, which the script's positional words are not.
+        innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
       };
     }
 
@@ -1515,6 +1652,150 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
     hasNonFinalTopLevelBackgroundOperator(innerCommand) ||
     hasNonFinalTopLevelBackgroundOperator(innerArgsSuffix ?? '')
   );
+}
+
+/**
+ * Whether `command` runs nothing but comments: every line blank or a `#`
+ * comment, or a shell wrapper whose script does (checked the same way, so
+ * nested wrappers too) with nothing after that script. Anything after the
+ * script (`bash -c '# x' && echo hi`) may run, so it counts as a command;
+ * plain words there are the script's positional parameters. Explicit no-ops
+ * such as `true` and `:` are commands. Best-effort: a wrapper behind a
+ * prefix (`nohup bash -c '# x'`) is not looked into.
+ */
+export function runsOnlyComments(command: string): boolean {
+  const { wrapperTokens, innerCommand, innerArgsSuffix } =
+    parseMonitorShellWrapper(command);
+  if (wrapperTokens) {
+    const suffix = innerArgsSuffix ?? '';
+    // A newline right after the script starts the next command: both must
+    // run only comments.
+    if (/^\r?\n/.test(suffix)) {
+      return (
+        runsOnlyComments(innerCommand) &&
+        runsOnlyComments(suffix.replace(/^\r?\n/, ''))
+      );
+    }
+    // Words after the script are its positional parameters, which run
+    // nothing; an operator there (`&& echo hi`, `; …`) runs more.
+    return !/[;&|()\n`]|\$\(/.test(suffix) && runsOnlyComments(innerCommand);
+  }
+  return command.split('\n').every((line) => /^\s*(#|$)/.test(line));
+}
+
+/**
+ * Whether a command backgrounds any part of itself with `&`: anywhere at its
+ * top level, at its end, or inside a script it hands to a shell wrapper —
+ * also a wrapper behind a prefix `normalizeMonitorCommand` does not unwrap
+ * (`nohup bash -c './probe.sh &'`, `sudo -u ci bash -c …`, `env FOO=1 bash
+ * -c …`). Nested scripts are checked the same way. An `&` inside a quoted
+ * argument that is not a shell script (`gh api 'pulls?a=1&b=2'`) or escaped
+ * at the end (`echo done \&`) does not count.
+ *
+ * The check is lexical and errs toward refusing. Each level is read twice,
+ * with comments and without, and an `&` either reading finds counts: a
+ * quote inside a comment cannot hide a later `&`, and neither can a `#` the
+ * comment rule misreads inside `$(…)`, `$'…'` or an escaped wrapper quote.
+ * So an `&` inside a comment, in a heredoc body, in `(( … ))`, or escaped
+ * inside a double-quoted wrapper script is refused too.
+ */
+export function backgroundsAnyPart(command: string): boolean {
+  return (
+    backgroundsAtLevel(command, true) || backgroundsAtLevel(command, false)
+  );
+}
+
+/** One reading of {@link backgroundsAnyPart} at this level; scripts it
+ * hands to a wrapper are read both ways again. */
+function backgroundsAtLevel(command: string, dropComments: boolean): boolean {
+  const read = (text: string) =>
+    dropComments ? stripShellComments(text) : text;
+  const text = read(command);
+  const { wrapperTokens, innerCommand, innerArgsSuffix } =
+    parseMonitorShellWrapper(text);
+  for (const part of [innerCommand, innerArgsSuffix ?? '']) {
+    const code = read(part);
+    if (
+      hasNonFinalTopLevelBackgroundOperator(code) ||
+      endsWithBackgroundAmp(code)
+    ) {
+      return true;
+    }
+  }
+  if (wrapperTokens) return backgroundsAnyPart(innerCommand);
+  // Not a wrapper at the head: look for one further along. Each recursion
+  // only enters a wrapper's script, which is shorter than the command.
+  let rest = takeLeadingToken(text)?.rest ?? '';
+  for (
+    let token = takeLeadingToken(rest);
+    token;
+    token = takeLeadingToken(rest)
+  ) {
+    if (
+      parseMonitorShellWrapper(rest).wrapperTokens &&
+      backgroundsAnyPart(rest)
+    ) {
+      return true;
+    }
+    rest = token.rest;
+  }
+  return false;
+}
+
+/**
+ * Whether `command` ends with an `&` that backgrounds it: not the second half
+ * of `&&`, and not escaped by an odd run of backslashes (`\&` is a literal
+ * ampersand; `\\&` is a literal backslash, then a backgrounding `&`).
+ */
+function endsWithBackgroundAmp(command: string): boolean {
+  const text = command.trimEnd();
+  if (!text.endsWith('&') || text.endsWith('&&')) return false;
+  let backslashes = 0;
+  for (let at = text.length - 2; at >= 0 && text[at] === '\\'; at--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 0;
+}
+
+/**
+ * `command` without its comments: a `#` that starts a word outside quotes
+ * runs to the end of its line. Quotes and backslash escapes are tracked, so
+ * `'#'`, `"a # b"`, `a\#b`, `$#` and `${#v}` stay.
+ */
+function stripShellComments(command: string): string {
+  let out = '';
+  let quote: "'" | '"' | '' = '';
+  for (let at = 0; at < command.length; at++) {
+    const char = command[at]!;
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = '';
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (command[at + 1] ?? '');
+      at++;
+      continue;
+    }
+    if (quote === '"') {
+      out += char;
+      if (char === '"') quote = '';
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === '#' && (at === 0 || /[\s;&|()<>]/.test(command[at - 1]!))) {
+      const end = command.indexOf('\n', at);
+      if (end < 0) break;
+      at = end - 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
 }
 
 /**
@@ -1972,6 +2253,25 @@ export function buildShellExecWarnings(
     return [COMMAND_SUBSTITUTION_WARNING];
   }
   return undefined;
+}
+
+/**
+ * The confirmation warning for a shell-like tool whose `directory` is outside
+ * the workspace. The workspace check follows symlinks, so name the directory
+ * it resolved to: a link inside the workspace that points out would otherwise
+ * be shown by a path that looks internal.
+ */
+export function buildOutsideWorkspaceWarning(directory: string): string {
+  let resolved: string;
+  try {
+    resolved = resolveWorkspacePath(directory);
+  } catch {
+    // Unresolvable: show the directory as given.
+    resolved = path.resolve(directory);
+  }
+  return resolved === path.resolve(directory)
+    ? `Runs outside the workspace in ${directory}`
+    : `Runs outside the workspace in ${resolved} (via ${directory})`;
 }
 
 /**

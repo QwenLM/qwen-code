@@ -24,7 +24,39 @@ export type ComposerTagContentSegment =
   | { type: 'text'; text: string }
   | { type: 'reference'; tag: WebShellComposerTag };
 
-function isValidComposerTag(tag: unknown): tag is WebShellComposerTag {
+/**
+ * Composer-tag display getters.
+ *
+ * These live here rather than in `hooks/useComposerCore.ts` on purpose: that
+ * module imports the whole CodeMirror editor at top level, and read-only
+ * consumers (`UserMessage`, and through it the `@qwen-code/web-shell/transcript`
+ * entry that `/export html` bundles) need nothing but these three string
+ * getters. Importing them from `useComposerCore` dragged ~1 MB of CodeMirror
+ * into every exported HTML file (#11031).
+ */
+export function getComposerTagLabel(tag: WebShellComposerTag): string {
+  return tag.label?.trim() ?? '';
+}
+
+export function getComposerTagValue(tag: WebShellComposerTag): string {
+  return tag.value?.trim() ?? '';
+}
+
+export function getComposerTagDisplay(tag: WebShellComposerTag): string {
+  return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
+}
+
+export function isPreviewableFileComposerTag(
+  tag: WebShellComposerTag,
+): tag is WebShellComposerTag & { kind: 'file'; value: string } {
+  if (tag.kind !== 'file' || !tag.value) return false;
+  const fileKind = (tag.metadata as { fileKind?: unknown } | undefined)
+    ?.fileKind;
+  if (fileKind !== undefined) return fileKind === 'file';
+  return !(tag.serialized ?? tag.value).trim().endsWith('/');
+}
+
+export function isValidComposerTag(tag: unknown): tag is WebShellComposerTag {
   if (!tag || typeof tag !== 'object') return false;
   const candidate = tag as Record<string, unknown>;
   return (
@@ -130,9 +162,43 @@ export function isBuiltinComposerTagIconUrl(
   return iconUrl !== undefined && builtinTagIconUrlSet.has(iconUrl);
 }
 
+// An inline chip's editor-known range, expressed in final prompt offsets.
+// The composer already knows where each inline chip lives; carrying the
+// range through submit keeps the annotation on the chip instead of an
+// earlier plain-text look-alike (#12980).
+export interface ComposerTagKnownPlacement {
+  start: number;
+  end: number;
+  tag: WebShellComposerTag;
+}
+
+function createReferenceAnnotation(
+  tag: WebShellComposerTag,
+  start: number,
+  end: number,
+  serialized: string,
+): DaemonInputAnnotation {
+  return {
+    type: 'reference',
+    start,
+    end,
+    text: serialized,
+    reference: {
+      id: tag.id,
+      ...(tag.kind ? { kind: tag.kind } : {}),
+      ...(tag.label ? { label: tag.label } : {}),
+      ...(tag.value ? { value: tag.value } : {}),
+      ...(tag.metadata !== undefined ? { metadata: tag.metadata } : {}),
+      ...(tag.serialized ? { serialized: tag.serialized } : {}),
+      ...(tag.removable !== undefined ? { removable: tag.removable } : {}),
+    },
+  };
+}
+
 export function createInputAnnotationsFromComposerTags(
   content: string,
   tags: readonly WebShellComposerTag[],
+  knownPlacements?: readonly ComposerTagKnownPlacement[],
 ): DaemonInputAnnotation[] {
   const annotations: DaemonInputAnnotation[] = [];
   let cursor = 0;
@@ -142,21 +208,42 @@ export function createInputAnnotationsFromComposerTags(
     const start = content.indexOf(serialized, cursor);
     if (start < 0) continue;
     const end = start + serialized.length;
-    annotations.push({
-      type: 'reference',
-      start,
-      end,
-      text: serialized,
-      reference: {
-        id: tag.id,
-        ...(tag.kind ? { kind: tag.kind } : {}),
-        ...(tag.label ? { label: tag.label } : {}),
-        ...(tag.value ? { value: tag.value } : {}),
-        ...(tag.serialized ? { serialized: tag.serialized } : {}),
-        ...(tag.removable !== undefined ? { removable: tag.removable } : {}),
-      },
-    });
+    annotations.push(createReferenceAnnotation(tag, start, end, serialized));
     cursor = end;
+  }
+  for (const placement of knownPlacements ?? []) {
+    const serialized = getComposerTagSerialized(placement.tag);
+    if (!serialized) continue;
+    const { start, end } = placement;
+    // Offsets cross a coordinate-space boundary here (editor document vs
+    // final prompt); never emit an annotation whose text does not match.
+    if (
+      start >= 0 &&
+      end > start &&
+      end <= content.length &&
+      content.slice(start, end) === serialized
+    ) {
+      annotations.push(
+        createReferenceAnnotation(placement.tag, start, end, serialized),
+      );
+      continue;
+    }
+    // A stale range (the document text under a chip can drift from its
+    // serialized form, which also shifts every later chip) must not drop the
+    // annotation outright: fall back to the text, but only when the
+    // serialized form occurs exactly once. A unique match cannot annotate
+    // the wrong span; a repeated one stays plain text rather than guessing
+    // (#12980).
+    const first = content.indexOf(serialized);
+    if (first < 0 || first !== content.lastIndexOf(serialized)) continue;
+    annotations.push(
+      createReferenceAnnotation(
+        placement.tag,
+        first,
+        first + serialized.length,
+        serialized,
+      ),
+    );
   }
   return annotations;
 }
@@ -173,7 +260,9 @@ export function splitComposerTagContentByAnnotations(
   const segments: ComposerTagContentSegment[] = [];
   let cursor = 0;
   for (const annotation of inputAnnotations) {
-    if (annotation.type !== 'reference') continue;
+    // Annotations cross a trust boundary (persisted JSONL, request `_meta`):
+    // skip non-object entries instead of throwing on `null`.
+    if (!annotation || annotation.type !== 'reference') continue;
     const { start, end, text } = annotation;
     const reference: DaemonInputAnnotation['reference'] | undefined =
       annotation.reference;
@@ -190,6 +279,8 @@ export function splitComposerTagContentByAnnotations(
     if (cursor < start) {
       segments.push({ type: 'text', text: content.slice(cursor, start) });
     }
+    const metadata = (reference as typeof reference & { metadata?: unknown })
+      .metadata;
     segments.push({
       type: 'reference',
       tag: {
@@ -197,6 +288,7 @@ export function splitComposerTagContentByAnnotations(
         ...(reference.kind ? { kind: reference.kind } : {}),
         ...(reference.label ? { label: reference.label } : {}),
         ...(reference.value ? { value: reference.value } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
         serialized: reference.serialized ?? text,
         ...(reference.removable !== undefined
           ? { removable: reference.removable }

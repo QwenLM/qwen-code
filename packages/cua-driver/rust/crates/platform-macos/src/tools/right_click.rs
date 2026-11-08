@@ -43,7 +43,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["pid"],
             "properties": {
-                "session": { "type": "string", "description": "Optional session id: declares/uses the agent cursor and per-session state for this run. The same id works over MCP, the CLI, or the raw socket, and follows the run across apps/windows. Omit to run cursor-less." },
+                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "element_index": cua_driver_core::tool_schema::element_index_schema(),
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
@@ -65,6 +65,7 @@ fn def() -> &'static ToolDef {
                     "items": { "type": "string" },
                     "description": "Modifier keys held during the right-click: cmd/shift/option/ctrl. Pixel path only."
                 },
+                "app_context": { "type": "boolean", "description": "Use app-bound native click routing." },
                 "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema()
             },
             "additionalProperties": false
@@ -84,6 +85,12 @@ impl Tool for RightClickTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        if args.bool_or("app_context", false) {
+            let mut args = args;
+            args["button"] = serde_json::json!("right");
+            args["count"] = serde_json::json!(1);
+            return super::click::invoke_app_click(Arc::clone(&self.state), args).await;
+        }
         let pid = match args.require_i32("pid") {
             Ok(v) => v,
             Err(e) => return e,
@@ -110,12 +117,14 @@ impl Tool for RightClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
         let x = args.opt_f64("x");
@@ -143,7 +152,7 @@ impl Tool for RightClickTool {
         if let (Some(idx), Some(wid)) = (element_index, window_id) {
             // Retain out of the cache so a concurrent get_window_state can't
             // free the element mid-action (use-after-free → daemon crash).
-            let element_guard = match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            let element_guard = match element_cache.get_element_retained(pid, wid, idx) {
                 Some(e) => e,
                 None => {
                     return ToolResult::error(format!(
@@ -153,13 +162,49 @@ impl Tool for RightClickTool {
             };
             let element_ptr = element_guard.as_ptr();
 
-            let result =
-                tokio::task::spawn_blocking(move || ax_show_menu(element_ptr, idx, pid, wid)).await;
+            let mutation_lease = match super::gate_background_window_action(
+                pid,
+                wid,
+                Some(element_ptr),
+                cua_driver_core::background_input::BackgroundAction::AxSemantic,
+            )
+            .await
+            {
+                Ok(lease) => lease,
+                Err(refusal_result) => return refusal_result,
+            };
 
-            return match result {
-                Ok(Ok(msg)) => ToolResult::text(msg),
-                Ok(Err(e)) => ToolResult::error(format!("Right-click failed: {e}")),
-                Err(e) => ToolResult::error(format!("Task error: {e}")),
+            let ax_result =
+                tokio::task::spawn_blocking(move || try_ax_show_menu(element_ptr, idx)).await;
+            match ax_result {
+                Ok(Some(result)) => return result,
+                Ok(None) => {}
+                Err(error) => return ToolResult::error(format!("Task error: {error}")),
+            }
+
+            if let Some(refusal) = super::click::libreoffice_pixel_refusal(
+                crate::apps::bundle_id_for_pid(pid).as_deref(),
+            ) {
+                return refusal;
+            }
+            if let Err(refusal_result) = mutation_lease
+                .gate_again(
+                    wid,
+                    Some(element_ptr),
+                    cua_driver_core::background_input::BackgroundAction::WindowPointer,
+                )
+                .await
+            {
+                return refusal_result;
+            }
+            let pointer_result = tokio::task::spawn_blocking(move || {
+                pixel_right_click_element(element_ptr, idx, pid, wid)
+            })
+            .await;
+            return match pointer_result {
+                Ok(Ok(message)) => ToolResult::text(message),
+                Ok(Err(error)) => ToolResult::error(format!("Right-click failed: {error}")),
+                Err(error) => ToolResult::error(format!("Task error: {error}")),
             };
         }
 
@@ -176,12 +221,53 @@ impl Tool for RightClickTool {
         // refuses a window with no live frame).
         let (screen_x, screen_y, win_local_x, win_local_y) = if let Some(wid) = window_id {
             match super::px_frame::resolve_or_refuse(wid).await {
-                Ok(frame) => frame.to_screen(cx, cy),
+                Ok(frame) => {
+                    let translated = frame.to_screen(cx, cy);
+                    if !delivery_mode.is_foreground()
+                        && (translated.2 < 0.0
+                            || translated.3 < 0.0
+                            || translated.2 > frame.bounds.width
+                            || translated.3 > frame.bounds.height)
+                    {
+                        return ToolResult::error(format!(
+                            "right_click: window-local point ({:.1}, {:.1}) pt lies outside \
+                             window {wid}'s {:.0}×{:.0} pt frame; background delivery refused",
+                            translated.2, translated.3, frame.bounds.width, frame.bounds.height
+                        ));
+                    }
+                    translated
+                }
                 Err(refusal) => return refusal,
             }
         } else {
             (cx, cy, cx, cy)
         };
+
+        let _mutation_lease = if !delivery_mode.is_foreground() {
+            if let Some(wid) = window_id {
+                match super::gate_background_window_action(
+                    pid,
+                    wid,
+                    None,
+                    cua_driver_core::background_input::BackgroundAction::WindowPointer,
+                )
+                .await
+                {
+                    Ok(lease) => Some(lease),
+                    Err(refusal_result) => return refusal_result,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(refusal) =
+            super::click::libreoffice_pixel_refusal(crate::apps::bundle_id_for_pid(pid).as_deref())
+        {
+            return refusal;
+        }
 
         // Pin overlay above the target window before animating.
         if let Some(wid) = window_id {
@@ -252,7 +338,7 @@ impl Tool for RightClickTool {
 
 // ── Blocking AX path ─────────────────────────────────────────────────────────
 
-fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::Result<String> {
+fn try_ax_show_menu(element_ptr: usize, idx: usize) -> Option<ToolResult> {
     let element = element_ptr as AXUIElementRef;
 
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
@@ -272,20 +358,30 @@ fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::R
     if advertised.iter().any(|a| a == "AXShowMenu") {
         let err = unsafe { perform_action(element, "AXShowMenu") };
         if err == kAXErrorSuccess {
-            return Ok(format!(
+            return Some(ToolResult::text(format!(
                 "Shown menu for [{idx}] {role} \"{title}\" (AXShowMenu)."
-            ));
+            )));
         }
-        // Advertised but the action failed — fall through to the pixel path
-        // rather than erroring out.
-        tracing::debug!("AXShowMenu returned {err} for [{idx}]; falling back to pixel right-click");
+        return Some(super::ax_action_unconfirmed("AXShowMenu", Some(idx), err));
     }
+    None
+}
+
+fn pixel_right_click_element(
+    element_ptr: usize,
+    idx: usize,
+    pid: i32,
+    wid: u32,
+) -> anyhow::Result<String> {
+    let element = element_ptr as AXUIElementRef;
+    let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
+    let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
 
     // Pixel right-click at the element's screen-space center.
     let (cx, cy) =
         unsafe { crate::ax::bindings::element_screen_center(element) }.ok_or_else(|| {
             anyhow::anyhow!(
-                "[{idx}] {role} \"{title}\" advertises no AXShowMenu and has no resolvable \
+                "[{idx}] {role} \"{title}\" has no available AXShowMenu action and no resolvable \
              on-screen center for a pixel right-click. Pass x, y directly."
             )
         })?;
@@ -295,6 +391,6 @@ fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::R
     crate::input::mouse::right_click_at_xy_with_window_local(pid, cx, cy, wx, wy, wid, &[])?;
     Ok(format!(
         "Right-clicked [{idx}] {role} \"{title}\" at element center ({cx:.0}, {cy:.0}) \
-         (pixel right-click; element advertises no AXShowMenu)."
+         (pixel right-click; AXShowMenu was unavailable)."
     ))
 }

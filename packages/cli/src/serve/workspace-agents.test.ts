@@ -22,7 +22,16 @@ import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
+import {
+  mountWorkspaceAgentsRoutes,
+  mountWorkspaceQualifiedAgentsRoutes,
+  type WorkspaceAgentsRouteDeps,
+} from './workspace-agents.js';
+import {
+  createSingleWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
@@ -111,6 +120,8 @@ function buildApp(opts: {
   boundWorkspace: string;
   strictNoToken?: boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  qualified?: boolean;
+  trusted?: boolean;
 }) {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -118,7 +129,7 @@ function buildApp(opts: {
     tokenConfigured: opts.strictNoToken !== true,
     requireAuth: false,
   });
-  mountWorkspaceAgentsRoutes(app, {
+  const deps: WorkspaceAgentsRouteDeps = {
     bridge: opts.bridge,
     boundWorkspace: opts.boundWorkspace,
     mutate,
@@ -148,10 +159,25 @@ function buildApp(opts: {
       }
       return out;
     },
+    isWorkspaceTrusted: () => opts.trusted !== false,
     ...(opts.captureGenerationAssertion
       ? { captureGenerationAssertion: opts.captureGenerationAssertion }
       : {}),
-  });
+  };
+  if (opts.qualified) {
+    mountWorkspaceQualifiedAgentsRoutes(app, {
+      ...deps,
+      workspaceRegistry: createSingleWorkspaceRegistry({
+        workspaceId: 'selected',
+        workspaceCwd: opts.boundWorkspace,
+        primary: true,
+        trusted: opts.trusted !== false,
+        bridge: opts.bridge,
+      } as WorkspaceRuntime),
+    });
+  } else {
+    mountWorkspaceAgentsRoutes(app, deps);
+  }
   return app;
 }
 
@@ -180,6 +206,93 @@ describe('workspace agents routes', () => {
   function missingAgentName(prefix = 'missing-agent') {
     return `${prefix}-${path.basename(tmp)}`;
   }
+
+  describe.each([false, true])(
+    'backend rejection (qualified=%s)',
+    (qualified) => {
+      const prefix = qualified
+        ? '/workspaces/selected/agents'
+        : '/workspace/agents';
+
+      it.each(['container', 'local', null])(
+        'rejects create and mixed update with executionBackend=%j without writes or events',
+        async (executionBackend) => {
+          const bridge = buildBridgeStub();
+          const app = buildApp({
+            bridge,
+            boundWorkspace: workspace,
+            qualified,
+          });
+          const agentDir = path.join(workspace, QWEN_DIR, 'agents');
+          await fs.mkdir(agentDir, { recursive: true });
+          const original =
+            '---\nname: policy-agent\ndescription: Original\n---\nComplete the requested task.\n';
+          const file = path.join(agentDir, 'policy-agent.md');
+          await fs.writeFile(file, original);
+
+          const create = await request(app).post(prefix).send({
+            name: 'new-policy-agent',
+            description: 'New agent',
+            systemPrompt: 'Complete the requested task.',
+            scope: 'workspace',
+            executionBackend,
+          });
+          expect(create.status).toBe(422);
+          expect(create.body.error).toBe(
+            'Daemon agents do not support executionBackend.',
+          );
+          const update = await request(app)
+            .post(`${prefix}/policy-agent`)
+            .send({
+              description: 'Changed',
+              executionBackend,
+            });
+          expect(update.status).toBe(422);
+          expect(update.body.error).toBe(
+            'Daemon agents do not support executionBackend.',
+          );
+          expect(await fs.readdir(agentDir)).toEqual(['policy-agent.md']);
+          expect(await fs.readFile(file, 'utf8')).toBe(original);
+          expect(bridge.events).toEqual([]);
+        },
+      );
+
+      it('retains a manually authored backend during unrelated edits', async () => {
+        const bridge = buildBridgeStub();
+        const app = buildApp({ bridge, boundWorkspace: workspace, qualified });
+        const agentDir = path.join(workspace, QWEN_DIR, 'agents');
+        await fs.mkdir(agentDir, { recursive: true });
+        const file = path.join(agentDir, 'policy-agent.md');
+        await fs.writeFile(
+          file,
+          '---\nname: policy-agent\ndescription: Original\nexecutionBackend: container\n---\nComplete the requested task.\n',
+        );
+        const update = await request(app)
+          .post(`${prefix}/policy-agent`)
+          .send({ description: 'Changed' });
+        expect(update.status).toBe(200);
+        expect(await fs.readFile(file, 'utf8')).toContain(
+          'executionBackend: container',
+        );
+      });
+
+      it('retains the workspace trust refusal before processing the backend field', async () => {
+        const bridge = buildBridgeStub();
+        const app = buildApp({
+          bridge,
+          boundWorkspace: workspace,
+          qualified,
+          trusted: false,
+        });
+        const response = await request(app)
+          .post(prefix)
+          .send({ scope: 'workspace', executionBackend: 'container' });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe('untrusted_workspace');
+        expect(bridge.events).toEqual([]);
+      });
+    },
+  );
 
   it('lists built-in agents alongside on-disk project agents', async () => {
     const projectAgentsDir = path.join(workspace, QWEN_DIR, 'agents');
@@ -735,13 +848,18 @@ describe('workspace agents routes', () => {
     });
   });
 
-  it('returns 403 agent_readonly when deleting a built-in agent', async () => {
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).delete('/workspace/agents/general-purpose');
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('agent_readonly');
-  });
+  it.each(['', '?scope=workspace'])(
+    'returns 403 agent_readonly when deleting a built-in agent with scope %s',
+    async (scope) => {
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).delete(
+        `/workspace/agents/general-purpose${scope}`,
+      );
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('agent_readonly');
+    },
+  );
 
   it('returns 404 when deleting a missing agent', async () => {
     const bridge = buildBridgeStub();
@@ -752,7 +870,7 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('agent_not_found');
   });
 
-  it('refuses POST with 401 token_required on no-token loopback strict mode', async () => {
+  it('refuses POST when the injected strict gate fails closed', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({
       bridge,
@@ -997,75 +1115,77 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('invalid_agent_type');
   });
 
-  it('returns 500 agent_delete_partial when one level unlink silently fails', async () => {
-    // Windows ignores Unix-style permission bits passed to
-    // `fs.chmod` — the user-agents directory stays writable, the
-    // unlink succeeds, and the partial-delete path this test
-    // exercises is unreachable. SubagentManager's `unlink` import
-    // (`import * as fs from 'fs/promises'`) creates a sealed
-    // namespace object that vitest can't `spyOn`, so a per-platform
-    // mock is also off-limits. The route logic itself is
-    // platform-agnostic; the Ubuntu + macOS runs cover it. Mirrors
-    // the `process.platform === 'win32'` early-return idiom used in
-    // `customBanner.test.ts:232`.
-    if (process.platform === 'win32') return;
+  // Where permission bits do not bind (Windows ignores them; root holding
+  // CAP_DAC_OVERRIDE bypasses them) the user-agents directory stays
+  // writable, the unlink succeeds, and the partial-delete path this test
+  // exercises is unreachable. SubagentManager's `unlink` import
+  // (`import * as fs from 'fs/promises'`) creates a sealed namespace
+  // object that vitest can't `spyOn`, so a per-platform mock is also
+  // off-limits. The route logic itself is platform-agnostic; the Ubuntu +
+  // macOS runs cover it.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'returns 500 agent_delete_partial when one level unlink silently fails',
+    async () => {
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
 
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
+      // Set up a project-level agent.
+      await request(app).post('/workspace/agents').send({
+        name: 'partial-target',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a partial-target agent',
+        scope: 'workspace',
+      });
+      // Set up a user-level shadow with the same name.
+      await request(app).post('/workspace/agents').send({
+        name: 'partial-target',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a partial-target user agent',
+        scope: 'global',
+      });
 
-    // Set up a project-level agent.
-    await request(app).post('/workspace/agents').send({
-      name: 'partial-target',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'you are a partial-target agent',
-      scope: 'workspace',
-    });
-    // Set up a user-level shadow with the same name.
-    await request(app).post('/workspace/agents').send({
-      name: 'partial-target',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'you are a partial-target user agent',
-      scope: 'global',
-    });
+      // Lock the user-level agent's containing directory so the unlink
+      // raises EACCES — `SubagentManager.deleteSubagent` swallows the
+      // error and returns "success" because the project-level unlink
+      // worked. Without this PR's per-level `fs.access` verification,
+      // the route would 204 and publish a misleading `agent_changed`
+      // event for the user-level file that's still on disk.
+      const userAgentsDir = path.join(globalDir, 'agents');
+      const userPath = path.join(userAgentsDir, 'partial-target.md');
+      const originalMode = (await fs.stat(userAgentsDir)).mode;
+      await fs.chmod(userAgentsDir, 0o555); // r-x: blocks unlink
+      try {
+        const res = await request(app).delete(
+          '/workspace/agents/partial-target',
+        );
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('agent_delete_partial');
+        expect(res.body.removedLevels).toEqual(['project']);
+        expect(res.body.remainingLevels).toEqual(['user']);
 
-    // Lock the user-level agent's containing directory so the unlink
-    // raises EACCES — `SubagentManager.deleteSubagent` swallows the
-    // error and returns "success" because the project-level unlink
-    // worked. Without this PR's per-level `fs.access` verification,
-    // the route would 204 and publish a misleading `agent_changed`
-    // event for the user-level file that's still on disk.
-    const userAgentsDir = path.join(globalDir, 'agents');
-    const userPath = path.join(userAgentsDir, 'partial-target.md');
-    const originalMode = (await fs.stat(userAgentsDir)).mode;
-    await fs.chmod(userAgentsDir, 0o555); // r-x: blocks unlink
-    try {
-      const res = await request(app).delete('/workspace/agents/partial-target');
-      expect(res.status).toBe(500);
-      expect(res.body.code).toBe('agent_delete_partial');
-      expect(res.body.removedLevels).toEqual(['project']);
-      expect(res.body.remainingLevels).toEqual(['user']);
+        // Event fan-out: only one event for the level that actually
+        // disappeared. The remaining level (still on disk) must NOT
+        // emit a misleading deleted event.
+        const events = (bridge as unknown as { events: RecordedEvent[] })
+          .events;
+        const deletedEvents = events.filter(
+          (e) =>
+            e.type === 'agent_changed' &&
+            (e.data as { change: string }).change === 'deleted',
+        );
+        expect(deletedEvents).toHaveLength(1);
+        expect((deletedEvents[0]?.data as { level: string }).level).toBe(
+          'project',
+        );
 
-      // Event fan-out: only one event for the level that actually
-      // disappeared. The remaining level (still on disk) must NOT
-      // emit a misleading deleted event.
-      const events = (bridge as unknown as { events: RecordedEvent[] }).events;
-      const deletedEvents = events.filter(
-        (e) =>
-          e.type === 'agent_changed' &&
-          (e.data as { change: string }).change === 'deleted',
-      );
-      expect(deletedEvents).toHaveLength(1);
-      expect((deletedEvents[0]?.data as { level: string }).level).toBe(
-        'project',
-      );
-
-      // Verify the user-level file is still on disk.
-      await expect(fs.access(userPath)).resolves.toBeUndefined();
-    } finally {
-      // Restore permissions so afterEach's rmdir succeeds.
-      await fs.chmod(userAgentsDir, originalMode);
-    }
-  });
+        // Verify the user-level file is still on disk.
+        await expect(fs.access(userPath)).resolves.toBeUndefined();
+      } finally {
+        // Restore permissions so afterEach's rmdir succeeds.
+        await fs.chmod(userAgentsDir, originalMode);
+      }
+    },
+  );
 
   it('DELETE /workspace/agents/:agentType?scope=workspace removes only the project shadow', async () => {
     const bridge = buildBridgeStub();

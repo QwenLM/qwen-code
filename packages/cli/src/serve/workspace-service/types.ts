@@ -17,6 +17,7 @@
 import type {
   ServeWorkspaceMcpStatus,
   ServeWorkspaceSkillsStatus,
+  ServeWorkspaceSkillsRefreshResult,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
@@ -24,6 +25,7 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
+import type { SkillToggleBlock } from '../../config/skill-settings.js';
 import type { WorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import type {
   PermissionRuleType,
@@ -39,13 +41,16 @@ import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import type {
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
 
 export type {
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
@@ -102,7 +107,9 @@ export type InvokeWorkspaceCommandFn = <T>(
   opts?: { timeoutMs?: number },
 ) => Promise<T>;
 
-export type RefreshExtensionsForAllSessionsFn = () => Promise<{
+export type RefreshExtensionsForAllSessionsFn = (
+  sessionIds?: readonly string[],
+) => Promise<{
   refreshed: number;
   failed: number;
 }>;
@@ -122,6 +129,22 @@ export interface DaemonWorkspaceService {
 
   /** Skill status for the bound workspace. */
   getWorkspaceSkillsStatus(
+    ctx: WorkspaceRequestContext,
+    /**
+     * Await a new observation, bypassing the warm snapshot path and read
+     * throttling. A retained observation may still answer if both fresh
+     * sources fail.
+     */
+    opts?: { requireFresh?: boolean },
+  ): Promise<ServeWorkspaceSkillsStatus>;
+
+  /** Live runtime Skills catalog without daemon-local fallback. */
+  getWorkspaceSkillsRuntimeStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeWorkspaceSkillsStatus>;
+
+  /** Daemon-local Skills inventory without starting or querying ACP. */
+  getWorkspaceSkillsConfigStatus(
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceSkillsStatus>;
 
@@ -144,6 +167,22 @@ export interface DaemonWorkspaceService {
   getWorkspaceHooksStatus(
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceHooksStatus>;
+
+  /**
+   * Record the user's decision on the workspace's pending project hooks.
+   * Daemon-local: works without a live ACP child (the decision is needed on
+   * a cold, possibly untrusted workspace), writes the same hash-bound
+   * record the TUI dialog writes, and never grants folder trust.
+   *
+   * `expectedHash` is the hash the approving client rendered; when present
+   * the decision binds to that exact block and a block that changed since
+   * the render stays pending instead of being persisted unseen.
+   */
+  approveProjectHooks(
+    ctx: WorkspaceRequestContext,
+    decision: 'approve' | 'reject',
+    expectedHash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }>;
 
   /** Installed extension status for the bound workspace. */
   getWorkspaceExtensionsStatus(
@@ -184,6 +223,18 @@ export interface DaemonWorkspaceService {
     request: WorkspaceTrustChangeRequest,
   ): Promise<WorkspaceTrustChangeResult>;
 
+  /**
+   * Record the bound workspace as trusted in the local trusted-folders file.
+   *
+   * `requestWorkspaceTrustChange` only publishes an operator prompt; this
+   * writes the decision. The path is always the bound workspace, never
+   * caller-supplied, and the route reaching it sits behind the strict
+   * mutation gate, so the caller already holds operator authority.
+   */
+  grantWorkspaceTrust(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceTrustStatus>;
+
   /** Replace one permission rule list. */
   setWorkspacePermissionRules(
     ctx: WorkspaceRequestContext,
@@ -208,6 +259,7 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     skillName: string,
     enabled: boolean,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillToggleResult>;
 
   /** Toggle multiple skills with one settings write and one session refresh. */
@@ -221,6 +273,7 @@ export interface DaemonWorkspaceService {
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
     request: WorkspaceSkillInstallRequest,
+    opts?: WorkspaceSkillInstallOptions & { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Delete a managed project- or user-level Skill. */
@@ -228,6 +281,7 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     skillName: string,
     scope: WorkspaceSkillScope,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Scaffold (init) a QWEN.md file in the workspace. */
@@ -246,11 +300,22 @@ export interface DaemonWorkspaceService {
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
 
+  /** Reload only the runtime model-provider registry and spawn environment. */
+  reloadModelProviders(
+    ctx: WorkspaceRequestContext,
+    options?: { subscriptionSignedOut?: boolean },
+  ): Promise<ServeModelProviderRuntimeSyncResult>;
+
   /** Drop cached skill status so extension skill changes are re-enumerated. */
   invalidateWorkspaceSkillsStatus(): void;
 
-  /** Broadcast extension refresh to all active sessions (fire-and-forget). */
-  refreshExtensionsForAllSessions(): Promise<{
+  refreshWorkspaceSkills(
+    ctx: WorkspaceRequestContext,
+    sessionIds?: readonly string[],
+  ): Promise<ServeWorkspaceSkillsRefreshResult>;
+
+  /** Refresh selected sessions, or all active sessions when omitted. */
+  refreshExtensionsForAllSessions(sessionIds?: readonly string[]): Promise<{
     refreshed: number;
     failed: number;
   }>;
@@ -267,6 +332,7 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
 }
 
 export interface WorkspaceAcpPreheatResult {
@@ -331,6 +397,46 @@ export class WorkspacePermissionRulesSessionRequiredError extends Error {
   }
 }
 
+/**
+ * A trust grant wrote its rule but the decision did not change: an
+ * equal-depth DO_NOT_TRUST rule under an alias spelling of the same
+ * directory, a settings error, or an IDE distrust of the daemon's own cwd
+ * wins over the new entry. The write is durably recorded; the failure is
+ * about the grant not taking effect, not about persistence.
+ */
+export class WorkspaceTrustGrantIneffectiveError extends Error {
+  constructor(state: string, source: string) {
+    super(
+      `Workspace trust grant did not take effect (state: ${state}, source: ${source}). ` +
+        'Check the workspace trust status and trust policy before retrying.',
+    );
+    this.name = 'WorkspaceTrustGrantIneffectiveError';
+  }
+}
+
+export class WorkspaceProjectHooksNotPendingError extends Error {
+  constructor() {
+    super('No project hooks await approval in this workspace.');
+    this.name = 'WorkspaceProjectHooksNotPendingError';
+  }
+}
+
+/**
+ * The decision named the hash of a block that no longer matches the
+ * workspace file: the hooks changed since the client rendered them, so the
+ * decision must not be persisted against a block the user never saw. The
+ * client re-renders and asks again.
+ */
+export class WorkspaceProjectHooksChangedError extends Error {
+  constructor() {
+    super(
+      'The project hooks changed since they were shown for review; ' +
+        'review the current block and decide again.',
+    );
+    this.name = 'WorkspaceProjectHooksChangedError';
+  }
+}
+
 export interface WorkspaceVoiceSettingsUpdate {
   enabled?: boolean;
   mode?: VoiceMode;
@@ -338,28 +444,33 @@ export interface WorkspaceVoiceSettingsUpdate {
   voiceModel?: string;
 }
 
-export type WorkspaceSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type WorkspaceSkillToggleActivation =
+  | 'applied'
+  | 'deferred'
+  | 'reconciling'
+  | 'partial';
 
 export interface WorkspaceSkillToggleResult {
   skillName: string;
   enabled: boolean;
   changed: boolean;
+  /**
+   * The settings entry that forbids the toggle from taking effect, when the
+   * write was refused for one. A client that flips its row optimistically
+   * must read this or it shows an enable the config still denies.
+   */
+  block?: SkillToggleBlock;
   activation: WorkspaceSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
 }
 
-export type WorkspaceSkillToggleErrorCode =
-  | 'skill_not_found'
-  | 'skill_not_toggleable'
-  | 'skill_inactive_extension';
+export type WorkspaceSkillToggleErrorCode = 'skill_not_found';
 
 export interface WorkspaceSkillToggleError {
   skillName: string;
   code: WorkspaceSkillToggleErrorCode;
   error: string;
-  reason?: WorkspaceSkillNotToggleableReason;
-  lockedScope?: 'system' | 'user' | 'systemDefaults';
 }
 
 export interface WorkspaceSkillBatchToggleItem {
@@ -380,15 +491,18 @@ export interface WorkspaceSkillBatchToggleResult {
 export interface PersistDisabledSkillResult {
   changed: boolean;
   disabled: string[];
+  /** Set with `changed: false` when a standing entry refused the write. */
+  block?: SkillToggleBlock;
   settingsChanges?: Array<{
     key: 'skills.disabled' | 'skills.enabled';
     value: string[] | undefined;
   }>;
 }
 
-export type PersistDisabledSkillsBatchOutcome =
-  | { skillName: string; changed: boolean }
-  | { skillName: string; error: WorkspaceSkillNotToggleableError };
+export interface PersistDisabledSkillsBatchOutcome {
+  skillName: string;
+  changed: boolean;
+}
 
 export interface PersistDisabledSkillsBatchResult {
   outcomes: PersistDisabledSkillsBatchOutcome[];
@@ -398,30 +512,18 @@ export interface PersistDisabledSkillsBatchResult {
   }>;
 }
 
-export type WorkspaceSkillNotToggleableReason =
-  | 'not_user_invocable'
-  | 'inactive_extension'
-  | 'locked';
+export interface PersistUserSkillsActivationResult {
+  outcomes: PersistDisabledSkillsBatchOutcome[];
+  settingsChanges: Array<{
+    key: 'skills.disabled' | 'skills.defaultDisabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
+}
 
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
     super(`Skill not found: ${skillName}`);
     this.name = 'WorkspaceSkillNotFoundError';
-  }
-}
-
-export class WorkspaceSkillNotToggleableError extends Error {
-  constructor(
-    readonly skillName: string,
-    readonly reason: WorkspaceSkillNotToggleableReason,
-    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
-  ) {
-    super(
-      lockedScope
-        ? `Skill ${skillName} is locked by ${lockedScope} settings`
-        : `Skill ${skillName} is not toggleable: ${reason}`,
-    );
-    this.name = 'WorkspaceSkillNotToggleableError';
   }
 }
 
@@ -433,18 +535,6 @@ export function mapWorkspaceSkillToggleError(
       skillName: error.skillName,
       code: 'skill_not_found',
       error: error.message,
-    };
-  }
-  if (error instanceof WorkspaceSkillNotToggleableError) {
-    return {
-      skillName: error.skillName,
-      code:
-        error.reason === 'inactive_extension'
-          ? 'skill_inactive_extension'
-          : 'skill_not_toggleable',
-      error: error.message,
-      reason: error.reason,
-      ...(error.lockedScope ? { lockedScope: error.lockedScope } : {}),
     };
   }
   return undefined;
@@ -521,9 +611,9 @@ export interface DaemonWorkspaceServiceDeps {
   workspaceSkillsStatusProvider?: WorkspaceSkillsStatusProvider;
 
   /**
-   * Returns whether the ACP channel is currently live. Used by
-   * `getWorkspaceEnvStatus` to populate the `acpChannelLive` field
-   * without requiring an ACP round-trip.
+   * Returns whether the workspace-control ACP channel (Legacy on a paired
+   * Bridge) is currently live. Used for preheat results, post-mutation
+   * refreshes and the `acpChannelLive` fields without an ACP round-trip.
    */
   isChannelLive?: () => boolean;
 
@@ -578,7 +668,21 @@ export interface DaemonWorkspaceServiceDeps {
   reloadDaemonEnv?: (
     workspace: string,
     assertGenerationOpen?: () => void,
-  ) => Promise<EnvReloadResult>;
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
+
+  /** Refresh the runtime-local spawn environment for provider mutations. */
+  reloadModelProvidersDaemonEnv?: (
+    workspace: string,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
 
   /** Eagerly start the ACP child/channel without creating a session. */
   preheatAcpChild?: () => Promise<void>;

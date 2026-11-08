@@ -7,13 +7,17 @@
 import type { Content } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Config } from '../config/config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import { deriveConfig, type Config } from '../config/config.js';
+import type {
+  PermissionManager,
+  ToolRegistrationStatus,
+} from '../permissions/permission-manager.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
 } from '../permissions/types.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -49,8 +53,10 @@ type SkillScopedPermissionManager = Pick<
   PermissionManager,
   | 'evaluate'
   | 'findMatchingDenyRule'
+  | 'getToolRegistrationStatus'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
+  | 'isToolDisabledByCoreToolsAllowList'
   | 'isToolEnabled'
 >;
 
@@ -249,17 +255,41 @@ export function createSkillScopedAgentConfig(
         : 'default';
       return mergePermissionDecision(scopedDecision, baseDecision);
     },
-    async isToolEnabled(toolName: string): Promise<boolean> {
+    async isToolEnabled(
+      toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
+    ): Promise<boolean> {
       if (isScopedTool(toolName)) return true;
-      if (basePm) return basePm.isToolEnabled(toolName);
+      if (basePm)
+        return basePm.isToolEnabled(toolName, toolAliases, mcpIdentity);
       return true;
+    },
+    async getToolRegistrationStatus(
+      toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
+    ): Promise<ToolRegistrationStatus> {
+      if (isScopedTool(toolName)) return 'registered';
+      if (basePm) {
+        return typeof basePm.getToolRegistrationStatus === 'function'
+          ? basePm.getToolRegistrationStatus(toolName, toolAliases, mcpIdentity)
+          : Promise.resolve('registered' as ToolRegistrationStatus);
+      }
+      return 'registered';
+    },
+    isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
+      return (
+        (typeof basePm?.isToolDisabledByCoreToolsAllowList === 'function' &&
+          basePm.isToolDisabledByCoreToolsAllowList(toolName)) ||
+        false
+      );
     },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+  });
 }
 
 // Exported for tests so the `auto-skill-` prefix instruction stays asserted
@@ -397,7 +427,7 @@ export async function buildTaskPrompt(projectRoot: string): Promise<string> {
     '',
     existingLine,
     '',
-    'Use `ls` and `read_file` to inspect existing skills before writing.',
+    'Use `read_file` to inspect the existing skill files listed above before writing.',
     'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
     `New skills you create MUST live at \`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/SKILL.md\` — the \`${AUTO_SKILL_DIR_PREFIX}\` directory prefix is mandatory so the project's .gitignore keeps auto-generated skills out of version control. Keep the frontmatter \`name:\` as the natural \`<name>\` (no prefix). The frontmatter MUST include 'source: auto-skill':`,
     '',
@@ -439,19 +469,18 @@ export async function runSkillReviewByAgent(params: {
         ? params.timeoutMs / 60_000
         : (params.config.getMemoryAgentTimeoutMinutes() ??
           DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000),
-    tools: [
-      ToolNames.READ_FILE,
-      ToolNames.LS,
-      ToolNames.WRITE_FILE,
-      ToolNames.EDIT,
-    ],
+    tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.EDIT],
     extraHistory: buildAgentHistory(params.history),
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: this planner passes no abortSignal, so
+    // runForkedAgent cannot resolve 'cancelled' here.
     throw new Error(
-      result.terminateReason ||
+      terminateReasonMessage(
+        result.terminateReason,
         'Skill review agent did not complete successfully',
+      ),
     );
   }
 

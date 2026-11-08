@@ -26,6 +26,27 @@ import {
 export const CHARS_PER_TOKEN = TOKEN_TO_CHAR_RATIO;
 
 /**
+ * Estimate text tokens for context-usage reporting. This intentionally keeps
+ * the CJK-aware `/context` heuristic separate from the conservative
+ * compaction estimator below.
+ */
+export function estimateContextTextTokens(text: string): number {
+  if (!text) return 0;
+
+  let asciiChars = 0;
+  let nonAsciiChars = 0;
+  for (let index = 0; index < text.length; index++) {
+    if (text.charCodeAt(index) < 128) {
+      asciiChars++;
+    } else {
+      nonAsciiChars++;
+    }
+  }
+
+  return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
+}
+
+/**
  * Estimate the token count of a list of Content objects via char/4.
  *
  * Reuses `estimateContentChars` so that inlineData / functionCall /
@@ -79,15 +100,16 @@ export const CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR = 1.5;
 
 export function estimatePromptTokens(
   history: Content[],
-  userMessage: Content,
+  userMessage: Content | Content[],
   lastPromptTokenCount: number,
   lastOutputTokenCount: number = 0,
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
   conservative: boolean = false,
 ): number {
+  const newContent = Array.isArray(userMessage) ? userMessage : [userMessage];
   if (lastPromptTokenCount > 0) {
     const newContentTokens = estimateContentTokens(
-      [userMessage],
+      newContent,
       imageTokenEstimate,
     );
     return (
@@ -103,7 +125,7 @@ export function estimatePromptTokens(
   // skill content, and cache headers — typically ~15-20K of under-estimate.
   // The reactive overflow handler is the safety net if the hard-tier rescue
   // misses for that reason. See review #4168 R3.3.
-  return estimateContentTokens([...history, userMessage], imageTokenEstimate);
+  return estimateContentTokens([...history, ...newContent], imageTokenEstimate);
 }
 
 export function getUsageOutputTokenCountForPromptEstimate(

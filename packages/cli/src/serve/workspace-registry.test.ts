@@ -171,6 +171,151 @@ describe('createSingleWorkspaceRegistry', () => {
 });
 
 describe('createWorkspaceRegistry', () => {
+  it('hides internal runtimes from ordinary selectors and preserves owner routing', () => {
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+    });
+    const internal = makeRuntime('/work/conversations', {
+      workspaceId: 'ws-conversations',
+      provenance: 'live-conversation',
+      removable: false,
+      bridge: bridgeWithSummary((sessionId: string) => ({
+        sessionId,
+        workspaceCwd: '/work/conversations',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register('live-session', internal.workspaceCwd);
+    const registry = createWorkspaceRegistry([primary, internal], {
+      sessionOwnerIndex,
+      scanUnindexedOwners: false,
+    });
+
+    expect(registry.list()).toEqual([primary]);
+    expect(registry.listEntries()).toEqual([registry.primaryEntry]);
+    expect(registry.getByWorkspaceId(internal.workspaceId)).toBeUndefined();
+    expect(registry.getByWorkspaceCwd(internal.workspaceCwd)).toBeUndefined();
+    expect(
+      registry.getEntryByWorkspaceId(internal.workspaceId),
+    ).toBeUndefined();
+    expect(registry.resolveWorkspaceCwd(internal.workspaceCwd)).toBeUndefined();
+    expect(registry.listAll()).toEqual([primary, internal]);
+    expect(registry.getManagedByWorkspaceId(internal.workspaceId)).toBe(
+      internal,
+    );
+    expect(registry.resolveLiveSessionOwner('live-session')).toEqual({
+      kind: 'found',
+      runtime: internal,
+    });
+
+    const entry = registry.getManagedEntryByWorkspaceId(internal.workspaceId)!;
+    expect(registry.beginReplacement(entry, 'policy-2')).toBe(true);
+    expect(registry.resolveLiveSessionOwner('live-session')).toEqual({
+      kind: 'unavailable',
+    });
+    expect(sessionOwnerIndex.getWorkspaceCwds('live-session')).toEqual([
+      internal.workspaceCwd,
+    ]);
+    expect(() =>
+      registry.activateReplacement(
+        entry,
+        makeRuntime(internal.workspaceCwd, {
+          workspaceId: internal.workspaceId,
+        }),
+        'policy-2',
+      ),
+    ).toThrow(/identity does not match/);
+  });
+
+  it('does not fall back to an ordinary duplicate while an indexed internal owner is unavailable', () => {
+    const sessionId = 'duplicate-session';
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(() => ({
+        sessionId,
+        workspaceCwd: '/work/primary',
+      })),
+    });
+    const internal = makeRuntime('/work/conversations', {
+      workspaceId: 'ws-conversations',
+      provenance: 'live-conversation',
+      removable: false,
+      bridge: bridgeWithSummary(() => ({
+        sessionId,
+        workspaceCwd: '/work/conversations',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register(sessionId, primary.workspaceCwd);
+    sessionOwnerIndex.register(sessionId, internal.workspaceCwd);
+    const registry = createWorkspaceRegistry([primary, internal], {
+      sessionOwnerIndex,
+      scanUnindexedOwners: true,
+    });
+
+    expect(
+      registry.beginReplacement(
+        registry.getManagedEntryByWorkspaceId(internal.workspaceId)!,
+        'policy-2',
+      ),
+    ).toBe(true);
+    expect(registry.resolveLiveSessionOwner(sessionId)).toEqual({
+      kind: 'unavailable',
+    });
+    expect(sessionOwnerIndex.getWorkspaceCwds(sessionId)).toEqual([
+      primary.workspaceCwd,
+      internal.workspaceCwd,
+    ]);
+  });
+
+  it('keeps an internal owner unavailable after terminal drain completes', () => {
+    const sessionId = 'duplicate-session';
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(() => ({
+        sessionId,
+        workspaceCwd: '/work/primary',
+      })),
+    });
+    const internal = makeRuntime('/work/conversations', {
+      workspaceId: 'ws-conversations',
+      provenance: 'live-conversation',
+      removable: false,
+      bridge: bridgeWithSummary(() => ({
+        sessionId,
+        workspaceCwd: '/work/conversations',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register(sessionId, primary.workspaceCwd);
+    sessionOwnerIndex.register(sessionId, internal.workspaceCwd);
+    const registry = createWorkspaceRegistry([primary, internal], {
+      sessionOwnerIndex,
+      scanUnindexedOwners: true,
+    });
+
+    expect(registry.beginDrain(internal)).toBe(true);
+    registry.commitDrain(internal);
+    sessionOwnerIndex.handleBridgeSessionLifecycle({
+      type: 'removed',
+      sessionId,
+      workspaceCwd: internal.workspaceCwd,
+    });
+    registry.completeDrain(internal);
+
+    expect(registry.listAll()).toEqual([primary]);
+    expect(sessionOwnerIndex.getWorkspaceCwds(sessionId)).toEqual([
+      primary.workspaceCwd,
+      internal.workspaceCwd,
+    ]);
+    expect(registry.resolveLiveSessionOwner(sessionId)).toEqual({
+      kind: 'unavailable',
+    });
+  });
+
   it('keeps runtime order frozen and uses the marked primary runtime', () => {
     const primary = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',

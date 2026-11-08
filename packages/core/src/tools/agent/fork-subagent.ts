@@ -4,21 +4,23 @@ import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { ToolNames } from '../tool-names.js';
+import { cloneApiHistory } from '../../utils/api-history-metadata.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
-} from '../../utils/environmentContext.js';
+} from '../../core/environmentContext.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
 /**
  * Forking is an explicit choice — the caller selects it with
  * `subagent_type: "fork"`. Omitting `subagent_type` always resolves to the
- * general-purpose subagent, never a fork. Regular top-level subagents run in
- * the background by default; callers can set `run_in_background: false` for an
- * inline result. Forks are available in both interactive and headless
- * sessions; headless forks use the background registry so the caller waits for
- * completion and non-interactive permission policy is applied.
+ * general-purpose subagent, never a fork. Regular top-level subagents use
+ * `agents.defaultBackground` (default true) unless the definition's `background`
+ * or an explicit `run_in_background` overrides it; false returns results inline.
+ * Forks are available in both interactive and headless sessions; headless forks
+ * use the background registry so the caller waits for completion and
+ * non-interactive permission policy is applied.
  */
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
 export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
@@ -48,7 +50,7 @@ export const FORK_DEFAULT_MAX_TURNS = 200;
 // reads the marker and rejects nested fork calls.
 //
 // Why ALS and not a history scan: the nested AgentTool's `this.config` is the
-// main process Config, so `getGeminiClient().getHistory()` returns the parent
+// main process Config, so `getLlmClient().getHistory()` returns the parent
 // conversation — not the fork child's chat — and cannot be used to detect
 // nesting. Async context propagation works naturally across the fork's
 // await chain and is scoped per-execution.
@@ -108,9 +110,18 @@ export const FORK_PLACEHOLDER_RESULT =
 
 export function buildForkExecutionAllowlist(
   requestedTools: readonly string[] | undefined,
-  declaredTools: readonly string[],
+  inheritedExecutionTools: readonly string[],
+  advertisedTools: readonly string[] = inheritedExecutionTools,
 ): string[] {
-  return (requestedTools ?? declaredTools).filter(
+  const allowedTools = new Set(requestedTools ?? inheritedExecutionTools);
+  if (requestedTools !== undefined && requestedTools.length > 0) {
+    for (const bridgeTool of [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]) {
+      if (advertisedTools.includes(bridgeTool)) {
+        allowedTools.add(bridgeTool);
+      }
+    }
+  }
+  return [...allowedTools].filter(
     (toolName) => toolName !== ToolNames.ASK_USER_QUESTION,
   );
 }
@@ -173,7 +184,26 @@ function isSystemReminderPart(content: Content, partIndex: number): boolean {
     : false;
 }
 
-function isRealUserTurn(content: Content): boolean {
+/**
+ * Whether `content` starts a fork window.
+ *
+ * Deliberately NOT the rewind classifier (`isApiUserPrompt` in
+ * services/api-user-prompt.ts), despite answering a similar-sounding
+ * question. Two differences are load-bearing here:
+ *
+ * - A media-only user entry (inlineData with no text) starts a fork window;
+ *   the rewind classifier requires a text part, because a media-only entry
+ *   produces no visible UI turn to rewind to.
+ * - Exclusions apply per part, not per entry: an entry mixing a
+ *   functionResponse or a reminder with real prompt content still starts a
+ *   window, whereas rewind drops any entry carrying a functionResponse
+ *   because such an entry is a tool result, not a turn boundary.
+ *
+ * Named apart from `isRealUserTurn` so the two are not read as copies of one
+ * rule that drifted — that drift is exactly the regression class #9437
+ * tracks.
+ */
+function startsForkWindow(content: Content): boolean {
   if (content.role !== 'user' || !content.parts?.length) return false;
   return content.parts.some((part, index) => {
     if (part.functionResponse || isSystemReminderPart(content, index)) {
@@ -240,7 +270,7 @@ export function selectForkHistory(
     const realUserTurnIndexes: number[] = [];
     for (let index = syntheticPrefixLength; index < history.length; index++) {
       const content = history[index]!;
-      if (isRealUserTurn(content)) {
+      if (startsForkWindow(content)) {
         realUserTurnIndexes.push(index);
       }
     }
@@ -256,7 +286,7 @@ export function selectForkHistory(
     }
   }
 
-  return structuredClone(selected);
+  return cloneApiHistory(selected);
 }
 
 /**

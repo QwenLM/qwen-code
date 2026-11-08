@@ -20,7 +20,9 @@
  *   - For writes: `wfs.writeTextOverwrite(resolved, content)` — the
  *     primitive that does atomic temp+rename with target-mode
  *     preservation (existing `0o600` survives the edit; new files
- *     default to `0o600`, NOT umask). Picked over `wfs.writeText` (no
+ *     default to `0o600`, or follow the daemon umask under the
+ *     factory's `'system'` new-file mode policy — see
+ *     `QWEN_SERVE_NEW_FILE_MODE`). Picked over `wfs.writeText` (no
  *     mode handling, non-atomic) and over `wfs.writeTextAtomic` (whose
  *     `expectedHash` CAS gate doesn't map to ACP's hash-less
  *     `WriteTextFileRequest` wire shape).

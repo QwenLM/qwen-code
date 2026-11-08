@@ -11,22 +11,72 @@
 // negative cases (a path that legitimately exists untouched, a count from a
 // suite this review did not run) carry as much weight here as the positives.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs, { type Argv } from 'yargs';
+
+// The Aone half of the platform registry — mocked so the body-fetch routing
+// tests never reach a real `a1`. importOriginal keeps parseRemoteUrl and the
+// write-path exports the registry module re-exports untouched. The auth
+// gate is mocked with it: the Aone route runs it before any fetch, and a
+// real one would exec the machine's actual a1.
+const { aoneFetchMetaMock, aoneEnsureAuthMock } = vi.hoisted(() => ({
+  aoneFetchMetaMock: vi.fn(),
+  aoneEnsureAuthMock: vi.fn(),
+}));
+vi.mock('./lib/platform/aone.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./lib/platform/aone.js')>();
+  return {
+    ...actual,
+    aoneReader: {
+      ...actual.aoneReader,
+      getFetchMeta: aoneFetchMetaMock,
+      ensureAuthenticated: aoneEnsureAuthMock,
+    },
+  };
+});
+
+// The gh seam — `gh` is the one export that reaches a real `gh pr view`, and
+// it is a plain function on a frozen ESM namespace, so observing it needs a
+// module mock rather than a spy. `...actual` is load-bearing: the handler
+// harness below saves and restores the host through the REAL getGhHost /
+// setGhHost, so mocking those would break it (and asserting on them would be
+// a false red — the harness itself calls them).
+const { ghCallMock } = vi.hoisted(() => ({
+  ghCallMock: vi.fn(() => ''),
+}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghCallMock,
+  };
+});
+
 import {
   testPlanCommand,
   extractTestPlanSection,
   extractClaims,
   observedTestCounts,
   npmScriptOf,
+  platformBodyFetcher,
+  fetchPrBody,
   runTestPlan,
   type TestPlanClaim,
   type TestPlanArgs,
 } from './test-plan.js';
+import { getGhHost, setGhHost } from './lib/gh.js';
 import type { BuildTestReport } from './build-test.js';
 
 describe('extractTestPlanSection', () => {
@@ -206,6 +256,99 @@ describe('extractClaims', () => {
       'expect all four files and 471 tests to pass',
     ).filter((c) => c.kind === 'count');
     expect(claims.map((c) => c.text)).toEqual(['471 tests to pass']);
+  });
+
+  it('reads comma-grouped thousands as the full count', () => {
+    // "2,239 passed" is a claim of 2239 — `\b(\d+)` claimed the tail after the
+    // last comma and the review carried a false `239 passed` note (PR #12250).
+    const claims = extractClaims(
+      '2,239 passed\nexpect 1,234 tests to pass\nTests: 12,345 passed',
+    ).filter((c) => c.kind === 'count');
+    // Claim order is pattern order (future-tense, runner-summary, bare), not
+    // position order — the overlap claim keeps one statement to one claim.
+    expect(claims.map((c) => c.text)).toEqual([
+      '1,234 tests to pass',
+      'Tests: 12,345 passed',
+      '2,239 passed',
+    ]);
+  });
+
+  it('does not read a comma-grouped PR number as a count', () => {
+    // The grouped count is claimed whole; the PR number next to it is not
+    // (red before the fix: the count claimed as `239 passed`). A `#`-prefixed
+    // reference beside the pass word is not a count either (`#13,881`).
+    const claims = extractClaims('See PR 1,234 — 2,239 passed').filter(
+      (c) => c.kind === 'count',
+    );
+    expect(claims.map((c) => c.text)).toEqual(['2,239 passed']);
+    expect(
+      extractClaims('CI on #13,881 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+  });
+
+  it('does not claim the tail of a malformed grouped number', () => {
+    // The lookbehind is the guard: without it `1,23 passed` claims
+    // `23 passed` at the comma's word boundary. The future-tense pattern
+    // carries the same guard (deleting it there alone otherwise greens).
+    expect(
+      extractClaims('1,23 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,2345 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,23 tests to pass').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,2345 specs to pass').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+  });
+
+  it('does not glue a count onto the tail of a preceding numeric token', () => {
+    // A numeric token joins its digits with punctuation — a timestamp `:`,
+    // a date `-`, a version `.`, a ratio `/`, a sum `+`; the grouped
+    // alternative would otherwise open a new group there (`30,471`). The
+    // lookbehind keys on a digit before any separator, so these stay silent —
+    // fail-closed beats a fabricated figure.
+    expect(
+      extractClaims('2026-10-11T12:00:30,471 passed').filter(
+        (c) => c.kind === 'count',
+      ),
+    ).toEqual([]);
+    expect(
+      extractClaims('2026-10-11,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1.5,239 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('2,239/2,500 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('12/30,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('ratio 3/4,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,239+2,500 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+  });
+
+  it('still reads a count after an unspaced separator comma', () => {
+    // `1 failed,471 passed` — the comma is a segment separator, not a
+    // grouping comma; `observedTestCounts` reads the same line, so the claim
+    // side must not go silent on it. A letter before the separator is the
+    // other half of the guard's pass case (`Tests:2,239`).
+    const claims = extractClaims('Tests: 1 failed,471 passed').filter(
+      (c) => c.kind === 'count',
+    );
+    expect(claims.map((c) => c.text)).toEqual(['471 passed']);
+    expect(
+      extractClaims('Tests:2,239 passed')
+        .filter((c) => c.kind === 'count')
+        .map((c) => c.text),
+    ).toEqual(['2,239 passed']);
   });
 
   it('pulls path arguments out of a repro command', () => {
@@ -406,6 +549,27 @@ describe('observedTestCounts', () => {
     expect(
       observedTestCounts(report(['Tests  1 failed | 40 passed (41)'])),
     ).toEqual([40]);
+  });
+
+  it('reads comma-grouped thousands in a summary', () => {
+    expect(observedTestCounts(report(['Tests  2,239 passed (2,239)']))).toEqual(
+      [2239],
+    );
+    expect(
+      observedTestCounts(
+        report(['Tests:  1 failed, 2,239 passed, 2,240 total']),
+      ),
+    ).toEqual([2239]);
+  });
+
+  it('reads a grouped count in a non-passed summary segment', () => {
+    // The segment class is widened too: a grouped `failed` count must not make
+    // the whole line unparseable and silently drop the observed count.
+    expect(
+      observedTestCounts(
+        report(['Tests  1,234 failed | 2,345 passed (3,579)']),
+      ),
+    ).toEqual([2345]);
   });
 
   it('reads a three-segment summary (failed | skipped | passed)', () => {
@@ -886,6 +1050,119 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('exit 1');
     });
 
+    it('settles a test claim by a related run, read as the suite it stands in for', () => {
+      const report = (exitCode: number, whole?: number) =>
+        ({
+          build: [],
+          test: [
+            ...(whole === undefined
+              ? []
+              : [
+                  {
+                    command: 'npm test --workspace="packages/core"',
+                    exitCode: whole,
+                    seconds: 3,
+                    timedOut: false,
+                    output: '',
+                  },
+                ]),
+            {
+              command:
+                'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+              exitCode,
+              seconds: 3,
+              timedOut: false,
+              output: '',
+            },
+          ],
+        }) as unknown as BuildTestReport;
+      const claim = (text: string, bt: BuildTestReport) =>
+        run(`## Test Plan\n\nRan \`${text}\``, [], bt).claims.find(
+          (c) => c.text === text,
+        );
+      // A failed related run contradicts, alone or beside a green whole one.
+      for (const bt of [report(1), report(1, 0)]) {
+        expect(claim('npm test', bt)).toMatchObject({
+          verdict: 'contradicted',
+          observed: 'exit 1',
+          note: 'this review ran the tests related to the diff (vitest related) and they failed',
+        });
+      }
+      expect(
+        claim('npm test --workspace="packages/cli"', report(1)),
+      ).toMatchObject({ verdict: 'contradicted', observed: 'exit 1' });
+      // A green one says it ran a part, never that it ran the suite.
+      expect(claim('npm test', report(0))).toMatchObject({
+        verdict: 'reproduces',
+        observed: 'exit 0',
+        note: 'this review ran only its tests related to the diff (vitest related), in packages/cli, and they passed',
+      });
+      expect(claim('npm test', report(0, 0))?.note).toBe(
+        // The whole-suite run settled the claim: the narrowed run beside it
+        // is not what the verdict rests on, so the note must not say it was.
+        'this review ran it',
+      );
+      // A claim no suite command settles is not one a related run settles.
+      expect(claim('npm run test:e2e', report(1))?.note).not.toContain(
+        'this review ran',
+      );
+      expect(
+        claim('npm test --workspace="packages/other"', report(1))?.note,
+      ).not.toContain('this review ran');
+    });
+
+    it('does not settle a claim by a related run that found no test', () => {
+      // vitest related exits 0 when it collects nothing; that run executed no
+      // test, so it certifies nothing about the claimed suite.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: 'No test files found, exiting with code 0',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const claim = run('## Test Plan\n\nRan `npm test`', [], bt).claims.find(
+        (c) => c.text === 'npm test',
+      );
+      expect(claim?.observed).toBeUndefined();
+      expect(claim?.note).not.toContain('this review ran');
+      expect(claim?.note).toBe('`test` is a defined script');
+    });
+
+    it('does not let an npm related run settle a pnpm or yarn claim', () => {
+      // The review ran npm, not the claimed package manager: its exit code is
+      // no evidence for `pnpm test` / `yarn test`.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      for (const claimText of ['pnpm test', 'yarn test']) {
+        const claim = run(
+          `## Test Plan\n\nRan \`${claimText}\``,
+          [],
+          bt,
+        ).claims.find((c) => c.text === claimText);
+        expect(claim?.note).not.toContain('this review ran');
+        expect(claim?.observed).toBeUndefined();
+        expect(claim?.note).toBe('`test` is a defined script');
+      }
+    });
+
     it('does not rule on a command killed by the deadline', () => {
       // A timeout is an infrastructure result, never a defect in the PR.
       const bt = {
@@ -972,9 +1249,118 @@ describe('runTestPlan', () => {
         })),
       }) as unknown as BuildTestReport;
 
+    it('says a differing count may come from a suite the review narrowed', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  312 passed (312)',
+          },
+        ],
+        relatedTests: ['packages/cli'],
+      } as unknown as BuildTestReport;
+      const claim = run(
+        '## Test Plan\n\n1351 tests passed',
+        [],
+        bt,
+      ).claims.find((c) => c.kind === 'count');
+      expect(claim?.verdict).toBe('differs');
+      expect(claim?.note).toContain(
+        'in packages/cli, this review ran only the tests related to the diff',
+      );
+      // A related run the deadline killed printed no count, so it is not what
+      // the differing number was measured against.
+      const killed = run('## Test Plan\n\n1351 tests passed', [], {
+        ...bt,
+        test: [
+          {
+            command: 'npm test --workspace="packages/core"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  472 passed (472)',
+          },
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: null,
+            seconds: 60,
+            timedOut: true,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport).claims.find((c) => c.kind === 'count');
+      expect(killed?.verdict).toBe('differs');
+      expect(killed?.note).not.toContain('related to the diff');
+    });
+
+    it('says a matching count came from a narrowed run', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  312 passed (312)',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const claim = run('## Test Plan\n\n312 tests passed', [], bt).claims.find(
+        (c) => c.kind === 'count',
+      );
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain(
+        'in packages/cli, this review ran only the tests related to the diff',
+      );
+    });
+
+    it('renders the root suite as the root package, not a bare dot', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  312 passed (312)',
+          },
+          {
+            command: 'npm exec --yes=false -- vitest related --run "a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  9 passed (9)',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const claim = run(
+        '## Test Plan\n\n1351 tests passed',
+        [],
+        bt,
+      ).claims.find((c) => c.kind === 'count');
+      expect(claim?.note).toContain('the root package');
+      expect(claim?.note).not.toContain('in .,');
+    });
+
     it('reproduces a count a suite in this review reported', () => {
       const r = run('## Test Plan\n\n471 tests passed', [], withCounts(471));
       expect(verdictOf(r.claims, '471 tests passed')).toBe('reproduces');
+    });
+
+    it('reproduces a comma-grouped claim against an ungrouped observed count', () => {
+      // Runners print `2239`; humans paste `2,239`. Same number, same verdict.
+      const r = run('## Test Plan\n\n2,239 passed', [], withCounts(2239));
+      expect(verdictOf(r.claims, '2,239 passed')).toBe('reproduces');
     });
 
     it('reports a mismatch as `differs`, NOT as a contradiction', () => {
@@ -1000,6 +1386,227 @@ describe('runTestPlan', () => {
     expect(r.note).toMatch(/1 contradicted/);
     expect(r.note).toMatch(/1 reproduced/);
     expect(r.note).toMatch(/1 unchecked/);
+  });
+});
+
+describe('platformBodyFetcher — the body fetch routes through the platform reader', () => {
+  // The gap this closes: the body fetch used to be `gh pr view` always, so
+  // on an Aone target the Test Plan went unchecked on EVERY run. Routed
+  // through the reader, the MR description (already in the reader's fetch
+  // metadata) backs it — no new API surface.
+  beforeEach(() => {
+    aoneFetchMetaMock.mockReset();
+    // A leaking throwing implementation (the refused-gate test below) would
+    // arm every later fetcher construction in this file.
+    aoneEnsureAuthMock.mockReset();
+  });
+
+  it('routes an Aone host at the reader: the MR description', () => {
+    aoneFetchMetaMock.mockReturnValue({ body: '## Test Plan\n\nran it' });
+    const fetcher = platformBodyFetcher('gitlab.alibaba-inc.com');
+    expect(fetcher('maxcompute/odps_src', '29295886')).toBe(
+      '## Test Plan\n\nran it',
+    );
+    expect(aoneFetchMetaMock).toHaveBeenCalledWith(
+      29295886,
+      'maxcompute/odps_src',
+    );
+  });
+
+  it('the web host is Aone too — one platform under two host names', () => {
+    aoneFetchMetaMock.mockReturnValue({ body: 'x' });
+    expect(platformBodyFetcher('code.alibaba-inc.com')('g/p', '7')).toBe('x');
+  });
+
+  it('an absent description degrades to an empty body, not a fetch failure', () => {
+    // An MR with no description is a legal shape — it reads as "no Test
+    // Plan section", the same as a body-less PR on GitHub, never as a
+    // failed fetch.
+    aoneFetchMetaMock.mockReturnValue({});
+    expect(platformBodyFetcher('gitlab.alibaba-inc.com')('g/p', '7')).toBe('');
+  });
+
+  it('refuses a malformed MR id before any platform call', () => {
+    const fetcher = platformBodyFetcher('gitlab.alibaba-inc.com');
+    expect(() => fetcher('g/p', 'not-a-number')).toThrow(TypeError);
+    expect(() => fetcher('g/p', '0')).toThrow(TypeError);
+    // Non-decimal spellings a bare `Number()` would admit — '0x10' is MR
+    // 16, not an error; the decimal-shape gate refuses them all.
+    expect(() => fetcher('g/p', '0x10')).toThrow(TypeError);
+    expect(() => fetcher('g/p', '1e3')).toThrow(TypeError);
+    expect(() => fetcher('g/p', ' 7 ')).toThrow(TypeError);
+    // A past-2^53 id would double-round to a DIFFERENT MR — isSafeInteger
+    // (the pipeline's isDiffLine gate) rejects it instead.
+    expect(() => fetcher('g/p', '9007199254740993')).toThrow(TypeError);
+    expect(aoneFetchMetaMock).not.toHaveBeenCalled();
+  });
+
+  it('routes a non-Aone host at the GitHub fetcher (behavior unchanged)', () => {
+    expect(platformBodyFetcher('github.com')).toBe(fetchPrBody);
+    // The GitHub arm keeps its historical degrade — no auth gate.
+    expect(aoneEnsureAuthMock).not.toHaveBeenCalled();
+  });
+
+  it('runs the auth gate BEFORE any fetch — a refused gate throws at fetcher construction', () => {
+    // Every other a1-backed flow gates first; a standalone invocation on a
+    // missing/stale/logged-out a1 must fail with the actionable message,
+    // not exit 0 into the generic "could not be fetched" note.
+    aoneEnsureAuthMock.mockImplementation(() => {
+      throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
+    });
+    expect(() => platformBodyFetcher('gitlab.alibaba-inc.com')).toThrow(
+      /a1 CLI not found on PATH/,
+    );
+    expect(aoneFetchMetaMock).not.toHaveBeenCalled();
+  });
+
+  it('passes the gate when the a1 is fresh and authed', () => {
+    platformBodyFetcher('gitlab.alibaba-inc.com');
+    expect(aoneEnsureAuthMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe('end to end through runTestPlan', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'qwen-test-plan-aone-'));
+      writeFileSync(join(dir, 'diff.txt'), 'diff');
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    const planFile = (files: string[]) => {
+      const p = join(dir, 'plan.json');
+      writeFileSync(
+        p,
+        JSON.stringify({
+          files: files.map((path) => ({ path, kind: 'source' })),
+          diffPathAbsolute: join(dir, 'diff.txt'),
+        }),
+      );
+      return p;
+    };
+
+    it('rules on an MR description exactly as it rules on a PR body', () => {
+      aoneFetchMetaMock.mockReturnValue({
+        body: '## Test Plan\n\nAdded `packages/cli/src/a.test.ts`',
+      });
+      const r = runTestPlan(
+        {
+          plan: planFile(['packages/cli/src/a.test.ts']),
+          pr: '29295886',
+          repo: 'maxcompute/odps_src',
+          worktree: dir,
+        },
+        platformBodyFetcher('gitlab.alibaba-inc.com'),
+      );
+      expect(r.found).toBe(true);
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0].verdict).toBe('reproduces');
+    });
+
+    it('a failed a1 fetch degrades to the unchecked note, same as a failed gh fetch', () => {
+      aoneFetchMetaMock.mockImplementation(() => {
+        throw new Error('Command failed: a1 repo mr view\nnot logged in');
+      });
+      const r = runTestPlan(
+        {
+          plan: planFile([]),
+          pr: '7',
+          repo: 'g/p',
+          worktree: dir,
+        },
+        platformBodyFetcher('gitlab.alibaba-inc.com'),
+      );
+      expect(r.found).toBe(false);
+      expect(r.note).toMatch(/could not be fetched/);
+    });
+  });
+});
+
+describe('the handler wiring — the integration point of the Aone fix', () => {
+  // Nothing else in this file exercises testPlanCommand.handler: a revert
+  // to `runTestPlan(args)` (or a dropped `args.host`) would silently
+  // restore the pre-#9619 gh-direct body fetch on Aone targets while every
+  // test above stays green. Sibling suites pin their handlers the same way
+  // (comment-status.test.ts, pr-context.test.ts) — drive the real one.
+  let dir: string;
+  let savedGhHost: string | undefined;
+
+  beforeEach(() => {
+    aoneFetchMetaMock.mockReset();
+    aoneEnsureAuthMock.mockReset();
+    dir = mkdtempSync(join(tmpdir(), 'qwen-test-plan-handler-'));
+    writeFileSync(join(dir, 'diff.txt'), 'diff');
+    savedGhHost = getGhHost();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    setGhHost(savedGhHost);
+    process.exitCode = undefined;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const argv = () =>
+    ({
+      plan: (() => {
+        const p = join(dir, 'plan.json');
+        writeFileSync(
+          p,
+          JSON.stringify({
+            files: [{ path: 'packages/cli/src/a.test.ts', kind: 'source' }],
+            diffPathAbsolute: join(dir, 'diff.txt'),
+          }),
+        );
+        return p;
+      })(),
+      pr: '29295886',
+      repo: 'maxcompute/odps_src',
+      worktree: dir,
+      out: join(dir, 'report.json'),
+      host: 'gitlab.alibaba-inc.com',
+    }) as never;
+
+  it('an Aone --host routes the body through the reader, gates first, and never touches gh', async () => {
+    aoneFetchMetaMock.mockReturnValue({
+      body: '## Test Plan\n\nAdded `packages/cli/src/a.test.ts`',
+    });
+    await testPlanCommand.handler?.(argv());
+    const report = JSON.parse(
+      readFileSync(join(dir, 'report.json'), 'utf8'),
+    ) as { found: boolean; claims: Array<{ verdict: string }> };
+    // The verdict is reachable ONLY through the Aone fetcher's body — the
+    // default fetchPrBody (gh pr view) never runs in this path.
+    expect(report.found).toBe(true);
+    expect(report.claims[0].verdict).toBe('reproduces');
+    expect(aoneEnsureAuthMock).toHaveBeenCalledTimes(1);
+    expect(aoneFetchMetaMock).toHaveBeenCalledWith(
+      29295886,
+      'maxcompute/odps_src',
+    );
+    // The "never touches gh" half of this pin's title. The two assertions
+    // above are satisfied by the reader alone, so an added `gh pr view`
+    // fallback (a dropped args.host, a handler reverted to runTestPlan)
+    // would still leave them green — only this one observes the gh seam.
+    // Targeted at `gh` itself, NOT getGhHost/setGhHost: the harness in this
+    // describe calls the real getGhHost/setGhHost to save and restore the
+    // host, so asserting on those would fail on the harness's own call.
+    expect(ghCallMock).not.toHaveBeenCalled();
+  });
+
+  it('a refused gate fails the command (exit 1) with the actionable message, before any fetch', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    aoneEnsureAuthMock.mockImplementation(() => {
+      throw new Error(
+        'a1 0.1.89 is older than the 0.1.90 this review provider requires',
+      );
+    });
+    await testPlanCommand.handler?.(argv());
+    expect(process.exitCode).toBe(1);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('older than the 0.1.90'),
+    );
+    expect(aoneFetchMetaMock).not.toHaveBeenCalled();
+    expect(existsSync(join(dir, 'report.json'))).toBe(false);
+    stderrSpy.mockRestore();
   });
 });
 

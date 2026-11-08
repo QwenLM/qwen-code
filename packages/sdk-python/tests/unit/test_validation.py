@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, cast
+import json
+import re
+from pathlib import Path
+from typing import Any, cast, get_args
 
 import pytest
 from qwen_code_sdk.errors import ValidationError
-from qwen_code_sdk.types import QueryOptions, TimeoutOptions
+from qwen_code_sdk.types import PermissionMode, QueryOptions, TimeoutOptions
 from qwen_code_sdk.validation import validate_query_options
 
 VALID_UUID = "123e4567-e89b-12d3-a456-426614174000"
@@ -74,8 +77,31 @@ def test_accepts_canonical_session_id_in_either_case() -> None:
     validate_query_options(QueryOptions(session_id=VALID_UUID.upper()))
 
 
+@pytest.mark.parametrize(
+    "mode",
+    get_args(PermissionMode),
+)
+def test_accepts_valid_permission_modes(mode: str) -> None:
+    validate_query_options(QueryOptions.from_mapping({"permission_mode": mode}))
+
+
+def test_permission_modes_match_core_contract() -> None:
+    contract_path = (
+        Path(__file__).parents[3] / "core" / "src" / "config" / "approval-modes.json"
+    )
+    expected = set(json.loads(contract_path.read_text(encoding="utf-8")))
+
+    assert set(get_args(PermissionMode)) == expected
+
+
 def test_rejects_invalid_permission_mode() -> None:
-    with pytest.raises(ValidationError, match="Invalid permission_mode"):
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Invalid permission_mode: 'unsafe-mode'. "
+            "Expected one of: default, plan, auto-edit, auto, yolo."
+        ),
+    ):
         validate_query_options(
             QueryOptions.from_mapping({"permission_mode": "unsafe-mode"})
         )
@@ -84,6 +110,17 @@ def test_rejects_invalid_permission_mode() -> None:
 def test_rejects_invalid_auth_type() -> None:
     with pytest.raises(ValidationError, match="Invalid auth_type"):
         validate_query_options(QueryOptions.from_mapping({"auth_type": "custom"}))
+
+
+@pytest.mark.parametrize(
+    "auth_type",
+    ["openai", "openai-responses", "anthropic", "qwen-oauth", "gemini", "vertex-ai"],
+)
+def test_accepts_every_cli_auth_type(auth_type: str) -> None:
+    # Pins the SDK's auth-type set against the CLI's --auth-type choices. An
+    # auth type the CLI accepts but the SDK omits is rejected here with no
+    # other signal, so enumerate the whole set rather than spot-checking one.
+    validate_query_options(QueryOptions.from_mapping({"auth_type": auth_type}))
 
 
 def test_from_mapping_rejects_non_callable_can_use_tool() -> None:

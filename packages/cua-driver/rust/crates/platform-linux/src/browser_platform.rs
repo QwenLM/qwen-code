@@ -2,13 +2,15 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use cua_driver_core::browser::existing_profile_setup_descriptor;
 use cua_driver_core::browser::platform::{
-    BrowserConsentOutcome, BrowserConsentRequest, BrowserPlatform, ExistingProfileSetupOutcome,
-    ExistingProfileSetupRequest, PrepareAction, PrepareOutcome, PrepareRequest,
+    BrowserConsentOutcome, BrowserConsentRequest, BrowserPlatform, BrowserVisualAction,
+    BrowserVisualActionKind, ExistingProfileSetupOutcome, ExistingProfileSetupRequest,
+    PrepareAction, PrepareOutcome, PrepareRequest,
 };
 use cua_driver_core::browser::refusal::{BrowserRefusal, BrowserRefusalCode};
 use cua_driver_core::browser::types::{
@@ -18,8 +20,68 @@ use cua_driver_core::browser::types::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+// Adapted from trycua/cua #3778 (MIT); only the existing native browser tools use this.
+pub struct LinuxBrowserPlatform {
+    cursor_registry: Arc<cursor_overlay::CursorRegistry>,
+    browser_cursors: Mutex<BrowserCursorTracker>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserCursorBinding {
+    window_id: u64,
+    cdp_target_id: String,
+}
+
 #[derive(Debug, Default)]
-pub struct LinuxBrowserPlatform;
+struct BrowserCursorTracker {
+    bindings: HashMap<String, BrowserCursorBinding>,
+}
+
+impl BrowserCursorTracker {
+    fn update(
+        &mut self,
+        session: &str,
+        window_id: u64,
+        cdp_target_id: &str,
+        tab_is_active: bool,
+    ) -> Vec<(String, bool)> {
+        self.bindings.insert(
+            session.to_owned(),
+            BrowserCursorBinding {
+                window_id,
+                cdp_target_id: cdp_target_id.to_owned(),
+            },
+        );
+
+        if !tab_is_active {
+            return vec![(session.to_owned(), false)];
+        }
+
+        self.bindings
+            .iter()
+            .filter(|(_, binding)| binding.window_id == window_id)
+            .map(|(key, binding)| {
+                (
+                    key.clone(),
+                    key == session && binding.cdp_target_id == cdp_target_id,
+                )
+            })
+            .collect()
+    }
+}
+
+impl LinuxBrowserPlatform {
+    pub fn new(cursor_registry: Arc<cursor_overlay::CursorRegistry>) -> Self {
+        Self {
+            cursor_registry,
+            browser_cursors: Mutex::new(BrowserCursorTracker::default()),
+        }
+    }
+}
+impl Default for LinuxBrowserPlatform {
+    fn default() -> Self {
+        Self::new(Arc::new(cursor_overlay::CursorRegistry::new()))
+    }
+}
 
 fn refusal(code: BrowserRefusalCode, message: impl Into<String>) -> BrowserRefusal {
     BrowserRefusal::new(code, message)
@@ -388,6 +450,76 @@ async fn browser_websocket_url(port: u16) -> Option<String> {
 
 #[async_trait]
 impl BrowserPlatform for LinuxBrowserPlatform {
+    async fn visualize_browser_action(&self, action: BrowserVisualAction) {
+        if action.session.is_empty()
+            || action.cdp_target_id.is_empty()
+            || cua_driver_core::session::is_session_ended(&action.session)
+        {
+            return;
+        }
+
+        let visibility_updates = self.browser_cursors.lock().unwrap().update(
+            &action.session,
+            action.window_id,
+            &action.cdp_target_id,
+            action.tab_is_active,
+        );
+        let cursor_enabled = self
+            .cursor_registry
+            .get_or_create(&action.session)
+            .config
+            .enabled;
+        for (key, visible) in visibility_updates {
+            let enabled = if key == action.session {
+                visible && cursor_enabled
+            } else {
+                visible
+                    && self
+                        .cursor_registry
+                        .get(&key)
+                        .is_some_and(|state| state.config.enabled)
+            };
+            crate::overlay::send_command_for(
+                key,
+                cursor_overlay::OverlayCommand::SetEnabled(enabled),
+            );
+        }
+        if !action.tab_is_active || !cursor_enabled {
+            return;
+        }
+        let (Some(screen_x), Some(screen_y)) = (action.screen_x, action.screen_y) else {
+            return;
+        };
+        if !screen_x.is_finite() || !screen_y.is_finite() {
+            return;
+        }
+
+        crate::overlay::send_command_for(
+            action.session.clone(),
+            cursor_overlay::OverlayCommand::PinAbove(action.window_id),
+        );
+        crate::overlay::animate_cursor_to_for(action.session.clone(), screen_x, screen_y).await;
+        self.cursor_registry
+            .update_position(&action.session, screen_x, screen_y);
+
+        if matches!(
+            action.kind,
+            BrowserVisualActionKind::Click
+                | BrowserVisualActionKind::Type
+                | BrowserVisualActionKind::RightClick
+                | BrowserVisualActionKind::DoubleClick
+                | BrowserVisualActionKind::Drag
+        ) {
+            crate::overlay::send_command_for(
+                action.session,
+                cursor_overlay::OverlayCommand::ClickPulse {
+                    x: screen_x,
+                    y: screen_y,
+                },
+            );
+        }
+    }
+
     fn standalone_trusted_input_background_limitation(&self) -> Option<&'static str> {
         Some("Chromium's trusted CDP Input route activates its standalone browser window on Linux")
     }
@@ -450,91 +582,6 @@ impl BrowserPlatform for LinuxBrowserPlatform {
                 format!("pid {pid} is outside the Linux process-id range"),
             )
         })?;
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            if let Some(window) = crate::wayland::sway_ipc::window_for_id(window_id) {
-                if window.pid != pid_u32 {
-                    return Err(refusal(
-                        BrowserRefusalCode::BrowserWrongTargetRefused,
-                        format!("Sway window {window_id} is not owned by pid {pid}"),
-                    ));
-                }
-                return Ok(NativeWindowInfo {
-                    pid,
-                    window_id,
-                    title: window.title,
-                    bounds: Rect::new(
-                        f64::from(window.x),
-                        f64::from(window.y),
-                        f64::from(window.width),
-                        f64::from(window.height),
-                    ),
-                    geometry_exact: true,
-                    ownership: NativeOwnershipProof {
-                        method: NativeOwnershipMethod::WindowServerOwner,
-                        owner_pid: pid,
-                        detail: Some("Sway IPC pid and rect".to_owned()),
-                    },
-                });
-            }
-            if let Some(window) =
-                crate::wayland::shell_helper::trusted_window_for_id(pid_u32, window_id)
-            {
-                return Ok(NativeWindowInfo {
-                    pid,
-                    window_id,
-                    title: window.title,
-                    bounds: Rect::new(
-                        f64::from(window.x),
-                        f64::from(window.y),
-                        f64::from(window.width),
-                        f64::from(window.height),
-                    ),
-                    geometry_exact: true,
-                    ownership: NativeOwnershipProof {
-                        method: NativeOwnershipMethod::PlatformAttested,
-                        owner_pid: pid,
-                        detail: Some(
-                            "verified GNOME Shell helper owner, stable window id, pid, and frame rect"
-                                .to_owned(),
-                        ),
-                    },
-                });
-            }
-            let window = tokio::task::spawn_blocking(move || {
-                crate::wayland::list_windows_dispatch(Some(pid_u32))
-                    .into_iter()
-                    .find(|window| window.xid == window_id)
-            })
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                refusal(
-                    BrowserRefusalCode::BrowserRouteUnavailable,
-                    "the active Wayland compositor cannot prove this window's pid and geometry",
-                )
-            })?;
-            return Ok(NativeWindowInfo {
-                pid,
-                window_id,
-                title: window.title,
-                bounds: Rect::new(
-                    f64::from(window.x),
-                    f64::from(window.y),
-                    f64::from(window.width),
-                    f64::from(window.height),
-                ),
-                geometry_exact: false,
-                ownership: NativeOwnershipProof {
-                    method: NativeOwnershipMethod::PlatformAttested,
-                    owner_pid: pid,
-                    detail: Some(
-                        "Wayland shell/AT-SPI metadata; geometry may be unavailable, so core permits read-only heuristic binding only"
-                            .to_owned(),
-                    ),
-                },
-            });
-        }
 
         let window = tokio::task::spawn_blocking(move || {
             crate::x11::list_windows(Some(pid_u32))
@@ -583,44 +630,7 @@ impl BrowserPlatform for LinuxBrowserPlatform {
                 format!("pid {pid} is outside the Linux process-id range"),
             )
         })?;
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            let Some(windows) = crate::wayland::sway_ipc::list_windows() else {
-                if let Some(owned) =
-                    crate::wayland::shell_helper::trusted_window_ids_for_pid(pid_u32)
-                {
-                    return Ok(Some(owned.len() == 1 && owned[0] == window_id));
-                }
-                if crate::wayland::is_inject_mode() {
-                    // The private cua-compositor route owns both the native
-                    // toplevel enumeration and its PID correlation. Unlike a
-                    // generic AT-SPI-only Wayland session, that is sufficient
-                    // to attest singleton native-window cardinality for an
-                    // embedded Chromium endpoint.
-                    let owned = tokio::task::spawn_blocking(move || {
-                        crate::wayland::list_windows_dispatch(Some(pid_u32))
-                            .into_iter()
-                            .filter(|window| window.pid == Some(pid_u32))
-                            .map(|window| window.xid)
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-                    .map_err(|error| {
-                        refusal(
-                            BrowserRefusalCode::BrowserRouteUnavailable,
-                            format!("could not enumerate cua-compositor browser windows: {error}"),
-                        )
-                    })?;
-                    return Ok(Some(owned.len() == 1 && owned[0] == window_id));
-                }
-                return Ok(None);
-            };
-            let owned = windows
-                .into_iter()
-                .filter(|window| window.pid == pid_u32)
-                .map(|window| window.id)
-                .collect::<Vec<_>>();
-            return Ok(Some(owned.len() == 1 && owned[0] == window_id));
-        }
+
         let owned = tokio::task::spawn_blocking(move || {
             crate::x11::list_windows(Some(pid_u32))
                 .into_iter()
@@ -762,16 +772,16 @@ impl BrowserPlatform for LinuxBrowserPlatform {
                 "the approved browser pid is outside the Linux process-id range",
             )
         })?;
-        if self
-            .is_only_exact_native_window(request.pid, request.window_id)
-            .await?
-            != Some(true)
-        {
-            return Err(refusal(
-                BrowserRefusalCode::BrowserBindingAmbiguous,
-                "existing-profile setup on Linux requires exactly one PID-owned native window; generic Wayland and multi-window processes are refused",
-            ));
-        }
+        // Window cardinality is deliberately NOT a precondition here. Setup acts
+        // inside one named window, and `browser_setup_ui` proves that window's
+        // identity directly by resolving the native window to exactly one
+        // accessibility top-level before it matches or actuates any control. A
+        // process owning several windows is the ordinary case for a browser and
+        // says nothing about whether the driver can act precisely; refusing on
+        // it made the whole existing-profile route unreachable for most real
+        // sessions. Where identity genuinely cannot be established — a generic
+        // Wayland session with no compositor window list — that same proof fails
+        // and setup refuses with a reason that names the cause.
         let window_id = request.window_id;
         let listeners_before =
             tokio::task::spawn_blocking(move || loopback_ports_for_pid(request.pid))
@@ -892,6 +902,54 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         };
         let endpoint = match endpoint_result {
             Ok(endpoint) => endpoint,
+            // The toggle took, but no endpoint appeared. That is Chromium's
+            // documented-by-behaviour semantics rather than a failure: "Allow
+            // remote debugging for this browser instance" persists a preference
+            // that the browser acts on at its NEXT launch — verified on Chrome
+            // 151 by enabling it and observing no listener for 25s, then a
+            // listener on 127.0.0.1 plus a DevToolsActivePort file immediately
+            // after a restart with no --remote-debugging-port flag.
+            //
+            // Rolling back here erased the setting moments before the restart
+            // that would activate it, so this path could never succeed. Keep the
+            // preference, close the temporary tab, and tell the caller the one
+            // thing it needs to do. The profile is armed, not broken.
+            Err(error)
+                if enabled_remote_debugging
+                    && error.code == BrowserRefusalCode::BrowserRequiresSetup =>
+            {
+                let closed = tokio::task::spawn_blocking(move || handle.close_for_success())
+                    .await
+                    .map_err(|join_error| {
+                        refusal(
+                            BrowserRefusalCode::BrowserRouteUnavailable,
+                            format!("could not finish browser setup cleanup: {join_error}"),
+                        )
+                    })??;
+                return Err(refusal(
+                    BrowserRefusalCode::BrowserRequiresSetup,
+                    format!(
+                        "remote debugging is now enabled for this {} profile, but {} only opens \
+                         its debugging endpoint at startup. Restart the browser, then call \
+                         browser_prepare again — the setting persists and does not need to be \
+                         applied twice.",
+                        descriptor.product_name, descriptor.product_name
+                    ),
+                )
+                .with_detail(serde_json::json!({
+                    "restart_required": true,
+                    "remote_debugging_enabled": true,
+                    "setup_side_effects": {
+                        "opened_setup_page": opened_setup_page,
+                        "closed_setup_page": closed.unwrap_or(false),
+                        "enabled_remote_debugging": true,
+                        "restored_remote_debugging": false,
+                        "focused_setup_address_field": focused_setup_address_field,
+                        "foregrounded_window": foregrounded_window,
+                        "injected_global_input": injected_global_input,
+                    },
+                })));
+            }
             Err(error) => {
                 let error = tokio::task::spawn_blocking(move || handle.abort(error))
                     .await

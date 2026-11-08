@@ -14,17 +14,22 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import type { ConversationWorkspace } from './conversation-workspace.js';
-import { ConversationRuntimeManager } from './conversation-runtime-manager.js';
+import {
+  ConversationRuntimeManager,
+  type ConversationRuntimeManagerOptions,
+} from './conversation-runtime-manager.js';
 
 const root = {
   configuredRoot: '/work/conversations',
   canonicalRoot: '/work/conversations',
   device: 1,
   inode: 2,
+  inodeVerifiable: true,
 };
 
-function createBridge() {
+function createBridge(mandatoryLeaseAttested = true) {
   return {
+    mandatoryLeaseAttested,
     preheat: vi.fn(async () => undefined),
     setLiveScreenContextCaptureHandler: vi.fn(),
     setLiveTaskToolRequestHandler: vi.fn(),
@@ -96,7 +101,64 @@ function createOwnedRuntime(bridge = createBridge()): WorkspaceRuntime {
   });
 }
 
+function createManager(
+  options: Omit<
+    ConversationRuntimeManagerOptions,
+    'checkLegacyOwner' | 'quarantineRuntime'
+  > & {
+    checkLegacyOwner?: () => Promise<void>;
+    quarantineRuntime?: ConversationRuntimeManagerOptions['quarantineRuntime'];
+  },
+): ConversationRuntimeManager {
+  return new ConversationRuntimeManager({
+    ...options,
+    quarantineRuntime:
+      options.quarantineRuntime ?? vi.fn(async () => undefined),
+    checkLegacyOwner: options.checkLegacyOwner ?? vi.fn(async () => undefined),
+  });
+}
+
 describe('ConversationRuntimeManager', () => {
+  it('retries legacy admission after failure but never polls a published runtime', async () => {
+    const candidate = createOwnedRuntime();
+    const checkLegacyOwner = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('legacy active'))
+      .mockResolvedValue(undefined);
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry: createRegistry(candidate),
+      publishRuntime: vi.fn(),
+      checkLegacyOwner,
+    });
+    await expect(manager.ensure()).rejects.toThrow('legacy active');
+    await expect(manager.ensure()).resolves.toBe(candidate);
+    await expect(manager.ensure()).resolves.toBe(candidate);
+    expect(checkLegacyOwner).toHaveBeenCalledTimes(2);
+  });
+
+  it('checks the legacy owner before touching the root or registry', async () => {
+    const workspace = createWorkspace();
+    const registry = createRegistry();
+    const publishRuntime = vi.fn();
+    const ownershipError = new Error('owner unavailable');
+    const checkLegacyOwner = vi.fn(async () => Promise.reject(ownershipError));
+    const manager = createManager({
+      workspace,
+      registry,
+      publishRuntime,
+      checkLegacyOwner,
+    });
+
+    await expect(manager.ensure()).rejects.toBe(ownershipError);
+    expect(workspace.revalidate).not.toHaveBeenCalled();
+    expect(workspace.assertExactRoot).not.toHaveBeenCalled();
+    expect(publishRuntime).not.toHaveBeenCalled();
+    expect(
+      registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot),
+    ).toBeUndefined();
+  });
+
   it('one-flights publication and revalidates cached reuse without preheating or binding Live', async () => {
     const workspace = createWorkspace();
     const registry = createRegistry();
@@ -112,7 +174,7 @@ describe('ConversationRuntimeManager', () => {
       registry.add(candidate);
       return candidate;
     });
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace,
       registry,
       publishRuntime,
@@ -140,7 +202,7 @@ describe('ConversationRuntimeManager', () => {
     const registry = createRegistry(candidate);
     const workspace = createWorkspace();
     const publishRuntime = vi.fn();
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace,
       registry,
       publishRuntime,
@@ -149,6 +211,143 @@ describe('ConversationRuntimeManager', () => {
     await expect(manager.ensure()).resolves.toBe(candidate);
     expect(publishRuntime).not.toHaveBeenCalled();
     expect(workspace.assertExactRoot).toHaveBeenCalledWith(root.canonicalRoot);
+  });
+
+  it('asserts the cached current generation without root I/O', async () => {
+    const candidate = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const workspace = createWorkspace();
+    const manager = createManager({
+      workspace,
+      registry,
+      publishRuntime: vi.fn(),
+    });
+    await manager.ensure();
+    workspace.revalidate.mockClear();
+    workspace.assertExactRoot.mockClear();
+
+    expect(manager.assertCurrent(candidate)).toBe(candidate);
+    expect(workspace.revalidate).not.toHaveBeenCalled();
+    expect(workspace.assertExactRoot).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stale expected runtime generation without root I/O', async () => {
+    const candidate = createOwnedRuntime();
+    const replacement = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const workspace = createWorkspace();
+    const manager = createManager({
+      workspace,
+      registry,
+      publishRuntime: vi.fn(),
+    });
+    await manager.ensure();
+    const entry = registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot)!;
+    registry.beginReplacement(entry, 'replacement');
+    registry.activateReplacement(entry, replacement, 'replacement');
+    workspace.revalidate.mockClear();
+    workspace.assertExactRoot.mockClear();
+
+    let error: unknown;
+    try {
+      manager.assertCurrent(candidate);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
+    expect(workspace.revalidate).not.toHaveBeenCalled();
+    expect(workspace.assertExactRoot).not.toHaveBeenCalled();
+  });
+
+  it('terminally quarantines the current runtime with one disposal', async () => {
+    const candidate = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    let releaseQuarantine!: () => void;
+    const quarantineGate = new Promise<void>((resolve) => {
+      releaseQuarantine = resolve;
+    });
+    const quarantineRuntime = vi.fn(() => quarantineGate);
+    const onTerminalQuarantine = vi.fn();
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime: vi.fn(),
+      quarantineRuntime,
+      onTerminalQuarantine,
+    });
+    await manager.ensure();
+
+    const first = manager.quarantine(
+      candidate,
+      'standalone_session_containment_failed',
+    );
+    const second = manager.quarantine(
+      candidate,
+      'standalone_session_containment_failed',
+    );
+
+    expect(second).toBe(first);
+    expect(onTerminalQuarantine).toHaveBeenCalledOnce();
+    expect(() => manager.assertCurrent(candidate)).toThrowError(
+      expect.objectContaining({ code: 'conversation_runtime_unavailable' }),
+    );
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+    });
+    await vi.waitFor(() => expect(quarantineRuntime).toHaveBeenCalledOnce());
+    releaseQuarantine();
+    await expect(first).resolves.toBeUndefined();
+  });
+
+  it('does not terminalize for a stale quarantine target', async () => {
+    const candidate = createOwnedRuntime();
+    const stale = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const quarantineRuntime = vi.fn(async () => undefined);
+    const onTerminalQuarantine = vi.fn();
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime: vi.fn(),
+      quarantineRuntime,
+      onTerminalQuarantine,
+    });
+    await manager.ensure();
+
+    expect(() =>
+      manager.quarantine(stale, 'standalone_session_containment_failed'),
+    ).toThrowError(
+      expect.objectContaining({ code: 'conversation_runtime_unavailable' }),
+    );
+    expect(manager.assertCurrent(candidate)).toBe(candidate);
+    expect(onTerminalQuarantine).not.toHaveBeenCalled();
+    expect(quarantineRuntime).not.toHaveBeenCalled();
+  });
+
+  it('keeps quarantine terminal when its observer or disposal fails', async () => {
+    const candidate = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const disposalError = new Error('dispose failed');
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime: vi.fn(),
+      onTerminalQuarantine: () => {
+        throw new Error('observer failed');
+      },
+      quarantineRuntime: vi.fn(async () => Promise.reject(disposalError)),
+    });
+    await manager.ensure();
+
+    await expect(
+      manager.quarantine(candidate, 'standalone_session_containment_failed'),
+    ).rejects.toBe(disposalError);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+    });
   });
 
   it('rejects an adopted runtime marked as primary', async () => {
@@ -163,13 +362,16 @@ describe('ConversationRuntimeManager', () => {
     const registry = createRegistry();
     registry.add(candidate);
     const publishRuntime = vi.fn();
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace: createWorkspace(),
       registry,
       publishRuntime,
     });
 
-    await expect(manager.ensure()).rejects.toThrow(/without Live provenance/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
     expect(publishRuntime).not.toHaveBeenCalled();
   });
 
@@ -182,13 +384,16 @@ describe('ConversationRuntimeManager', () => {
       return root;
     });
     const publishRuntime = vi.fn();
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace,
       registry,
       publishRuntime,
     });
 
-    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
     expect(publishRuntime).not.toHaveBeenCalled();
   });
 
@@ -248,14 +453,77 @@ describe('ConversationRuntimeManager', () => {
     },
   ])('rejects an existing runtime with invalid $name', async ({ runtime }) => {
     const publishRuntime = vi.fn();
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace: createWorkspace(),
       registry: createRegistry(runtime),
       publishRuntime,
     });
 
-    await expect(manager.ensure()).rejects.toThrow(/without Live provenance/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
     expect(publishRuntime).not.toHaveBeenCalled();
+  });
+
+  it('rejects and does not publish a candidate missing the mandatory-lease attestation', async () => {
+    const candidate = createOwnedRuntime(createBridge(false));
+    const registry = createRegistry();
+    const publishRuntime = vi.fn(
+      async (_cwd: string, validate: (runtime: WorkspaceRuntime) => void) => {
+        await validate(candidate);
+        throw new Error('unreachable: validation must reject the candidate');
+      },
+    );
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+    });
+
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(publishRuntime).toHaveBeenCalledOnce();
+    expect(
+      registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot),
+    ).toBeUndefined();
+  });
+
+  it('terminally quarantines a registered runtime missing the mandatory-lease attestation', async () => {
+    const candidate = createOwnedRuntime(createBridge(false));
+    const registry = createRegistry(candidate);
+    const quarantineRuntime = vi.fn(async () => undefined);
+    const onTerminalQuarantine = vi.fn();
+    const publishRuntime = vi.fn();
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+      quarantineRuntime,
+      onTerminalQuarantine,
+    });
+
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(quarantineRuntime).toHaveBeenCalledWith(
+      candidate,
+      'missing_mandatory_lease_attestation',
+    );
+    expect(publishRuntime).not.toHaveBeenCalled();
+    // The static contract violation keeps its non-retryable classification on
+    // every later access instead of degrading to retryable
+    // `conversation_runtime_unavailable`.
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(() => manager.assertCurrent(candidate)).toThrowError(
+      expect.objectContaining({ code: 'conversation_root_compromised' }),
+    );
   });
 
   it.each(['draining', 'blocked'] as const)(
@@ -263,7 +531,7 @@ describe('ConversationRuntimeManager', () => {
     async (state) => {
       const candidate = createOwnedRuntime();
       const registry = createRegistry(candidate);
-      const entry = registry.getEntryByWorkspaceCwd(root.canonicalRoot)!;
+      const entry = registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot)!;
       if (state === 'draining') {
         registry.beginDrain(candidate);
       } else {
@@ -271,13 +539,16 @@ describe('ConversationRuntimeManager', () => {
         registry.blockReplacement(entry, 'blocked');
       }
       const publishRuntime = vi.fn();
-      const manager = new ConversationRuntimeManager({
+      const manager = createManager({
         workspace: createWorkspace(),
         registry,
         publishRuntime,
       });
 
-      await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+      await expect(manager.ensure()).rejects.toMatchObject({
+        code: 'conversation_runtime_unavailable',
+        retryable: true,
+      });
       expect(publishRuntime).not.toHaveBeenCalled();
     },
   );
@@ -286,7 +557,7 @@ describe('ConversationRuntimeManager', () => {
     const candidate = createOwnedRuntime();
     const registry = createRegistry(candidate);
     const publishRuntime = vi.fn();
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace: createWorkspace(),
       registry,
       publishRuntime,
@@ -295,7 +566,10 @@ describe('ConversationRuntimeManager', () => {
     registry.beginDrain(candidate);
     registry.completeDrain(candidate);
 
-    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
     expect(publishRuntime).not.toHaveBeenCalled();
   });
 
@@ -307,7 +581,7 @@ describe('ConversationRuntimeManager', () => {
       registry.add(candidate);
       return candidate;
     });
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace: createWorkspace(),
       registry,
       publishRuntime,
@@ -316,7 +590,10 @@ describe('ConversationRuntimeManager', () => {
     registry.beginDrain(candidate);
     registry.completeDrain(candidate);
 
-    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
     expect(publishRuntime).toHaveBeenCalledOnce();
   });
 
@@ -325,17 +602,20 @@ describe('ConversationRuntimeManager', () => {
     const replacement = createOwnedRuntime();
     const registry = createRegistry(candidate);
     const publishRuntime = vi.fn();
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace: createWorkspace(),
       registry,
       publishRuntime,
     });
     await manager.ensure();
-    const entry = registry.getEntryByWorkspaceCwd(root.canonicalRoot)!;
+    const entry = registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot)!;
     registry.beginReplacement(entry, 'next');
     registry.activateReplacement(entry, replacement, 'next');
 
-    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
     expect(publishRuntime).not.toHaveBeenCalled();
   });
 
@@ -408,7 +688,7 @@ describe('ConversationRuntimeManager', () => {
     'rejects a publication candidate with invalid $name',
     async ({ runtime }) => {
       const registry = createRegistry();
-      const manager = new ConversationRuntimeManager({
+      const manager = createManager({
         workspace: createWorkspace(),
         registry,
         publishRuntime: async (_cwd, validate) => {
@@ -417,7 +697,10 @@ describe('ConversationRuntimeManager', () => {
         },
       });
 
-      await expect(manager.ensure()).rejects.toThrow(/ownership gate/);
+      await expect(manager.ensure()).rejects.toMatchObject({
+        code: 'conversation_root_compromised',
+        retryable: false,
+      });
       expect(registry.getByWorkspaceCwd(root.canonicalRoot)).toBeUndefined();
     },
   );
@@ -445,13 +728,16 @@ describe('ConversationRuntimeManager', () => {
         registry.add(candidate);
         return candidate;
       });
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace,
       registry,
       publishRuntime,
     });
 
-    await expect(manager.ensure()).rejects.toThrow(/exact/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
     await expect(manager.ensure()).resolves.toBe(candidate);
     expect(registry.getByWorkspaceCwd('/work/wrong')).toBeUndefined();
     expect(publishRuntime).toHaveBeenCalledTimes(2);
@@ -482,7 +768,7 @@ describe('ConversationRuntimeManager', () => {
       registry.add(candidate);
       return candidate;
     });
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace,
       registry,
       publishRuntime,
@@ -512,13 +798,16 @@ describe('ConversationRuntimeManager', () => {
         registry.add(second);
         return second;
       });
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace: createWorkspace(),
       registry,
       publishRuntime,
     });
 
-    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
     registry.completeDrain(first);
     await expect(manager.ensure()).resolves.toBe(second);
     expect(publishRuntime).toHaveBeenCalledTimes(2);
@@ -539,14 +828,20 @@ describe('ConversationRuntimeManager', () => {
         registry.add(candidate);
         return candidate;
       });
-    const manager = new ConversationRuntimeManager({
+    const manager = createManager({
       workspace,
       registry,
       publishRuntime,
     });
 
-    await expect(manager.ensure()).rejects.toThrow('root unavailable');
-    await expect(manager.ensure()).rejects.toThrow('publication unavailable');
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
     await expect(manager.ensure()).resolves.toBe(candidate);
     expect(publishRuntime).toHaveBeenCalledTimes(2);
   });

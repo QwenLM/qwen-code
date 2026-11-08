@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonWorkspaceAgentSummary } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceAgentSummary } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   canModifyAgent,
   filterAgents,

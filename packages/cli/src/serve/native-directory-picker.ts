@@ -5,6 +5,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -14,7 +16,85 @@ const execFileAsync = promisify(execFile);
 // that spawned it is gone.
 const PICKER_TIMEOUT_MS = 300_000;
 
+// Zenity's wording for an unreachable display is version-specific: zenity 3
+// prints `cannot open display`, zenity 4 prints `Failed to open display`.
+const ZENITY_DISPLAY_FAILURE = /(cannot|failed to) open display/i;
+
+// A `:<n>` DISPLAY is served by a local X server over `/tmp/.X11-unix/X<n>`.
+// An env var alone says nothing about whether that server is listening, so a
+// headless host with a stale DISPLAY would advertise the capability and hand
+// the client a Browse button whose click can only fail. Probing the socket
+// path keeps the check synchronous — no spawn, no connection — inside the
+// startup probe's budget.
+const X11_SOCKET_DIR = '/tmp/.X11-unix';
+const LOCAL_X11_DISPLAY = /^:(\d+)(?:\.\d+)?$/;
+
 export class NativeDirectoryPickerUnavailableError extends Error {}
+
+interface MacOsSessionUids {
+  readonly processUid?: number;
+  readonly consoleUid?: number;
+}
+
+// Startup probe so `/capabilities` can omit the picker feature on headless
+// hosts and clients hide the Browse affordance instead of surfacing a
+// guaranteed `cannot open display` failure.
+export function isNativeDirectoryPickerAvailable(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  macOsSessionUids = process.platform === 'darwin'
+    ? readMacOsSessionUids()
+    : undefined,
+): boolean {
+  if (process.platform === 'darwin') {
+    return (
+      macOsSessionUids?.processUid !== undefined &&
+      macOsSessionUids.processUid > 0 &&
+      macOsSessionUids.consoleUid === macOsSessionUids.processUid &&
+      !env['SSH_CONNECTION'] &&
+      !env['SSH_TTY']
+    );
+  }
+  if (process.platform === 'win32') {
+    const sessionName = env['SESSIONNAME']?.trim();
+    return Boolean(sessionName && sessionName.toLowerCase() !== 'services');
+  }
+  if (process.platform !== 'linux') return false;
+  if (!env['DISPLAY'] && !env['WAYLAND_DISPLAY']) return false;
+  if (!isX11DisplayReachable(env['DISPLAY'])) return false;
+  return (env['PATH'] ?? '')
+    .split(delimiter)
+    .some((dir) => dir !== '' && isExecutableFile(join(dir, 'zenity')));
+}
+
+// Only the local `:<n>` / `:<n>.<screen>` form maps to a socket path, so any
+// other DISPLAY value keeps the result the env-var check alone produced.
+function isX11DisplayReachable(display: string | undefined): boolean {
+  const match = LOCAL_X11_DISPLAY.exec(display ?? '');
+  return !match || existsSync(join(X11_SOCKET_DIR, `X${match[1]}`));
+}
+
+function readMacOsSessionUids(): MacOsSessionUids {
+  try {
+    return {
+      processUid: process.getuid?.(),
+      consoleUid: statSync('/dev/console').uid,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function isExecutableFile(file: string): boolean {
+  try {
+    // A directory passes an X_OK probe (search permission) but cannot be
+    // exec'd, so it must not count as an installed zenity.
+    if (!statSync(file).isFile()) return false;
+    accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function pickNativeDirectory(
   signal?: AbortSignal,
@@ -80,11 +160,11 @@ export async function pickNativeDirectory(
       (process.platform === 'darwin' &&
         (result.stderr?.includes('(-128)') ||
           result.stderr?.includes('User canceled'))) ||
-      // Zenity exits 1 both for a deliberate cancel and for "cannot open
-      // display" on headless Linux; only the former is a silent cancel.
+      // Zenity exits 1 both for a deliberate cancel and for an unreachable
+      // display on headless Linux; only the former is a silent cancel.
       (process.platform === 'linux' &&
         result.code === 1 &&
-        !result.stderr?.includes('cannot open display'))
+        !ZENITY_DISPLAY_FAILURE.test(result.stderr ?? ''))
     ) {
       return undefined;
     }

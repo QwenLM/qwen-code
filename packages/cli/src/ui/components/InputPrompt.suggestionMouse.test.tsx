@@ -24,6 +24,11 @@ import {
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useVoiceInput } from '../hooks/use-voice-input.js';
+import {
+  useExportCompletion,
+  type ExportCompletionResult,
+} from '../hooks/useExportCompletion.js';
+import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import { LoadedSettings } from '../../config/settings.js';
@@ -50,6 +55,8 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
+vi.mock('../hooks/useExportCompletion.js');
+vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
 }));
@@ -157,6 +164,10 @@ describe('InputPrompt suggestion mouse routing', () => {
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
+      activeCategory: 'all',
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory: vi.fn(),
+      selectCategory: vi.fn(),
     } as unknown as UseCommandCompletionReturn;
     vi.mocked(useCommandCompletion).mockReturnValue(mockCommandCompletion);
 
@@ -184,6 +195,15 @@ describe('InputPrompt suggestion mouse routing', () => {
       audioLevel: 0,
       handleKeypress: vi.fn(() => false),
     });
+    vi.mocked(useExportCompletion).mockReturnValue({
+      shouldShowSuggestions: false,
+      suggestionDisplayProps: null,
+      handleExportInput: vi.fn(() => false),
+      reset: vi.fn(),
+      markNextTextChangeAsUserInput: vi.fn(),
+      navigatedRef: { current: false },
+      navigatedTextRef: { current: '' },
+    } as ExportCompletionResult);
 
     props = {
       buffer: mockBuffer,
@@ -216,6 +236,123 @@ describe('InputPrompt suggestion mouse routing', () => {
     expect(captured.props).not.toBeNull();
     expect(typeof captured.props!['onSelectIndex']).toBe('function');
     expect(typeof captured.props!['onHoverIndex']).toBe('function');
+    unmount();
+  });
+
+  it('routes category selection and clears an expanded suggestion', async () => {
+    const selectCategory = vi.fn();
+    (
+      mockCommandCompletion as UseCommandCompletionReturn & {
+        selectCategory: typeof selectCategory;
+      }
+    ).selectCategory = selectCategory;
+    vi.mocked(useReverseSearchCompletion).mockReturnValue({
+      suggestions: [
+        {
+          label: 'long search result',
+          value: 'x'.repeat(200),
+        },
+      ],
+      activeSuggestionIndex: 0,
+      visibleStartIndex: 0,
+      showSuggestions: true,
+      isLoadingSuggestions: false,
+      navigateUp: vi.fn(),
+      navigateDown: vi.fn(),
+      handleAutocomplete: vi.fn(),
+      resetCompletionState: vi.fn(),
+      setActiveSuggestionIndex: vi.fn(),
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    expect(captured.props).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\x12');
+      await Promise.resolve();
+    });
+    expect(captured.props!['onSelectCategory']).toBeUndefined();
+
+    await act(async () => {
+      stdin.write('\u001B[C');
+      await Promise.resolve();
+    });
+    expect(captured.props!['expandedIndex']).toBe(0);
+
+    act(() => {
+      (captured.props!['onSelectIndex'] as (index: number) => void)(0);
+    });
+    expect(captured.props!['expandedIndex']).toBe(0);
+
+    act(() => {
+      (captured.props!['onSelectCategory'] as (category: 'session') => void)(
+        'session',
+      );
+    });
+
+    expect(selectCategory).toHaveBeenCalledWith('session');
+    expect(captured.props!['expandedIndex']).toBe(-1);
+    unmount();
+  });
+
+  it('drops a clipboard read that resolves after a mouse suggestion accept', async () => {
+    let resolveRead: (value: string | null) => void = () => {};
+    vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+    vi.mocked(clipboardUtils.readClipboardText).mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    const reverseSearchCompletion = {
+      suggestions: [{ label: 'recalled prompt', value: 'recalled prompt' }],
+      activeSuggestionIndex: 0,
+      visibleStartIndex: 0,
+      showSuggestions: true,
+      isLoadingSuggestions: false,
+      navigateUp: vi.fn(),
+      navigateDown: vi.fn(),
+      // The reverse-search accept replaces the buffer wholesale.
+      handleAutocomplete: vi.fn(() => mockBuffer.setText('recalled prompt')),
+      resetCompletionState: vi.fn(),
+      setActiveSuggestionIndex: vi.fn(),
+    };
+    vi.mocked(useReverseSearchCompletion).mockReturnValue(
+      reverseSearchCompletion,
+    );
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      stdin.write(process.platform === 'win32' ? '\x1Bv' : '\x16');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stdin.write('\x12');
+      await Promise.resolve();
+    });
+    expect(captured.props).not.toBeNull();
+
+    act(() => {
+      (captured.props!['onSelectIndex'] as (index: number) => void)(0);
+    });
+    expect(reverseSearchCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+
+    await act(async () => {
+      resolveRead('clipboard payload');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The accept replaced the buffer, so the late read must not land in the
+    // recalled entry.
+    expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+      'clipboard payload',
+      expect.anything(),
+    );
     unmount();
   });
 
@@ -268,6 +405,8 @@ describe('InputPrompt suggestion mouse routing', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/skills', {
       deferUntilIdle: false,
       submittedPrompt: '/skills',
+      displayText: '/skills',
+      humanInput: { text: '/skills' },
     });
     unmount();
   });
@@ -309,6 +448,7 @@ describe('InputPrompt suggestion mouse routing', () => {
       stdin.write('\x12');
       await Promise.resolve();
     });
+    expect(captured.props!['onSelectCategory']).toBeUndefined();
 
     // Hover routes to the command-search source, not the default completion.
     act(() => {
@@ -327,6 +467,55 @@ describe('InputPrompt suggestion mouse routing', () => {
     expect(searchCompletion.handleAutocomplete).toHaveBeenCalledWith(1);
     expect(searchCompletion.resetCompletionState).toHaveBeenCalled();
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('omits category selection while shell reverse search is active', async () => {
+    props.shellModeActive = true;
+    vi.mocked(useReverseSearchCompletion).mockReturnValue({
+      suggestions: [{ label: 'history', value: 'history' }],
+      activeSuggestionIndex: 0,
+      visibleStartIndex: 0,
+      showSuggestions: true,
+      isLoadingSuggestions: false,
+      navigateUp: vi.fn(),
+      navigateDown: vi.fn(),
+      handleAutocomplete: vi.fn(),
+      resetCompletionState: vi.fn(),
+      setActiveSuggestionIndex: vi.fn(),
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await act(async () => {
+      stdin.write('\x12');
+      await Promise.resolve();
+    });
+
+    expect(captured.props!['onSelectCategory']).toBeUndefined();
+    unmount();
+  });
+
+  it('omits category mouse handlers while export completion is active', () => {
+    vi.mocked(useExportCompletion).mockReturnValue({
+      shouldShowSuggestions: true,
+      suggestionDisplayProps: {
+        suggestions: [{ label: 'md', value: 'md' }],
+        activeIndex: 0,
+        isLoading: false,
+        scrollOffset: 0,
+      },
+      handleExportInput: vi.fn(() => false),
+      reset: vi.fn(),
+      markNextTextChangeAsUserInput: vi.fn(),
+      navigatedRef: { current: false },
+      navigatedTextRef: { current: '' },
+    } as ExportCompletionResult);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    expect(captured.props!['onSelectCategory']).toBeUndefined();
+    expect(captured.props!['onHoverIndex']).toBeUndefined();
+    expect(captured.props!['onSelectIndex']).toBeUndefined();
     unmount();
   });
 

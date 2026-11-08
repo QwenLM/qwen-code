@@ -411,43 +411,8 @@ fn snapshot(fixture: &mut Fixture) -> ToolResponse {
             "capture_mode": "ax"
         }),
     );
-    refresh_wayland_window_geometry(fixture);
     state
 }
-
-#[cfg(target_os = "linux")]
-fn refresh_wayland_window_geometry(fixture: &mut Fixture) {
-    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        return;
-    }
-    // A compositor may place a newly mapped toplevel after its first
-    // list_windows appearance. Re-read the current compositor-owned geometry
-    // for every snapshot, matching the native GTK harness, instead of turning
-    // that launch-time placement into a stale PX coordinate origin.
-    let windows = fixture.driver.call(
-        "list_windows",
-        serde_json::json!({ "pid": fixture.pid as i64 }),
-    );
-    let Some(window) = windows.structured()["windows"]
-        .as_array()
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|window| window["pid"].as_u64() == Some(fixture.pid as u64))
-        })
-    else {
-        return;
-    };
-    if let Some(window_id) = window["window_id"].as_u64() {
-        fixture.wid = window_id;
-    }
-    let bounds = &window["bounds"];
-    fixture.window_x = bounds["x"].as_f64().unwrap_or(fixture.window_x);
-    fixture.window_y = bounds["y"].as_f64().unwrap_or(fixture.window_y);
-}
-
-#[cfg(not(target_os = "linux"))]
-fn refresh_wayland_window_geometry(_fixture: &mut Fixture) {}
 
 fn window_origin(fixture: &Fixture, _state: &ToolResponse) -> (f64, f64) {
     #[cfg(target_os = "macos")]
@@ -795,6 +760,7 @@ fn run_text_action(fixture: &mut Fixture, addressing: &str, delivery: &str) -> O
     }
     thread::sleep(Duration::from_millis(250));
     assert_fixture_contains(fixture, &format!("mirror={text}"));
+    assert_fixture_value(fixture, "number-input", "42");
     Observation::delivered(passed, Evidence::default())
 }
 
@@ -818,6 +784,7 @@ fn run_type_submit_action(fixture: &mut Fixture, addressing: &str, delivery: &st
         type_response.text()
     );
     assert_fixture_value(fixture, "keyboard-input", &text);
+    assert_fixture_value(fixture, "number-input", "42");
 
     let post_type = snapshot(fixture);
     let mut enter_args =
@@ -837,6 +804,7 @@ fn run_type_submit_action(fixture: &mut Fixture, addressing: &str, delivery: &st
         enter_response.text()
     );
     assert_fixture_contains(fixture, &format!("key_state=submitted:{text}"));
+    assert_fixture_value(fixture, "number-input", "42");
 
     let mut passed = vec![OracleKind::FixtureState];
     if addressing == "px" {
@@ -873,6 +841,7 @@ fn run_press_key_action(fixture: &mut Fixture, addressing: &str, delivery: &str)
     let mut passed = vec![OracleKind::FixtureState];
     passed.extend(unverified_background_protocol_oracle(&response, delivery));
     assert_fixture_contains(fixture, "key_state=enter");
+    assert_fixture_value(fixture, "number-input", "42");
 
     Observation::delivered(passed, Evidence::default())
 }
@@ -896,6 +865,7 @@ fn run_hotkey_action(fixture: &mut Fixture, addressing: &str, delivery: &str) ->
         response.text()
     );
     assert_fixture_contains(fixture, "key_state=hotkey");
+    assert_fixture_value(fixture, "number-input", "42");
     #[cfg(target_os = "macos")]
     if fixture.name == "electron" && addressing == "px" && delivery == "foreground" {
         run_macos_selection_hotkeys(fixture);
@@ -1207,9 +1177,7 @@ fn shared_case(spec: &HostSpec, action: &str, addressing: &str, delivery: &str) 
         // occluded, unfocused toplevel. Focus-free AT-SPI button actions are
         // the exception: they are externally verified by the fixture and the
         // focus/z-order/leak sentinels.
-        if std::env::var_os("CUA_INJECT_SOCKET").is_some() {
-            Vec::new()
-        } else {
+        {
             match (action, targeting) {
                 ("left_click" | "child_window", Targeting::Ax) => Vec::new(),
                 _ => vec![RefusalCode::BackgroundUnavailable],
@@ -1247,11 +1215,7 @@ fn shared_case(spec: &HostSpec, action: &str, addressing: &str, delivery: &str) 
             OracleKind::ZOrder,
             OracleKind::NoLeakedInput,
         ]);
-        if cua_driver_testkit::e2e::DisplayServer::current()
-            != cua_driver_testkit::e2e::DisplayServer::Wayland
-        {
-            oracles.push(OracleKind::Cursor);
-        }
+        oracles.push(OracleKind::Cursor);
         if !expected_background_refusal
             && cfg!(target_os = "windows")
             && (matches!(action, "press_key" | "hotkey" | "type_submit")
@@ -1582,11 +1546,7 @@ fn embedded_browser_case(spec: &HostSpec) -> CaseSpec {
         OracleKind::ZOrder,
         OracleKind::NoLeakedInput,
     ];
-    if cua_driver_testkit::e2e::DisplayServer::current()
-        != cua_driver_testkit::e2e::DisplayServer::Wayland
-    {
-        oracles.push(OracleKind::Cursor);
-    }
+    oracles.push(OracleKind::Cursor);
     let case = CaseSpec::delivered(
         format!(
             "{}-{}-browser-tool-roundtrip",

@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const wrapper = join(here, 'classify-pr-profile.sh');
 
-function run(scenario, { stubNodeFailure = false } = {}) {
+function run(scenario, { stubNodeFailure = false, mode } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'classify-pr-profile-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -60,6 +60,7 @@ function run(scenario, { stubNodeFailure = false } = {}) {
       '      list-fail) exit 1 ;;',
       '      docs-only) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1},{"filename":"README.md","status":"modified","previous_filename":null,"sha":"y","additions":1}]\' ;;',
       '      renamed-source) FIXTURE=\'[{"filename":"docs/new.md","status":"renamed","previous_filename":"packages/core/src/runtime.ts","sha":"z","additions":0}]\' ;;',
+      '      script-change) FIXTURE=\'[{"filename":"scripts/tests/install-script.test.js","status":"modified","previous_filename":null,"sha":"s","additions":3}]\' ;;',
       '      truncated) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1}]\' ;;',
       '      declared-fails) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1}]\' ;;',
       '      *) exit 9 ;;',
@@ -70,6 +71,7 @@ function run(scenario, { stubNodeFailure = false } = {}) {
       '      truncated) echo 5 ;;',
       '      declared-fails) exit 1 ;;',
       '      docs-only) echo 2 ;;',
+      '      script-change) echo 1 ;;',
       '      renamed-source) echo 1 ;;',
       '      *) exit 9 ;;',
       '    esac ;;',
@@ -82,7 +84,9 @@ function run(scenario, { stubNodeFailure = false } = {}) {
     write('node', '#!/bin/bash\nexit 1\n');
   }
   try {
-    const stdout = execFileSync('bash', [wrapper, 'o/r', '42'], {
+    const argv = [wrapper, 'o/r', '42'];
+    if (mode) argv.push(mode);
+    const stdout = execFileSync('bash', argv, {
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -125,4 +129,37 @@ test('exit 2 when the changed_files fetch fails after a successful listing', () 
   // `|| exit 2` → `|| true` classified a docs first page as docs_only).
   const r = run('declared-fails');
   assert.equal(r.code, 2);
+});
+
+// The platform mode added for the macOS/Windows lane gate. It shares this
+// wrapper's listing so both gates always judge the same files — the reason the
+// listing lives here — but it answers a different question, and each mode has
+// its own conservative answer when the listing cannot be trusted.
+test('platform mode: an ordinary docs change does not need the expensive lanes', () => {
+  assert.deepEqual(run('docs-only', { mode: 'platform' }), {
+    code: 0,
+    stdout: 'false',
+  });
+});
+
+test('platform mode: a script-layer change does', () => {
+  assert.deepEqual(run('script-change', { mode: 'platform' }), {
+    code: 0,
+    stdout: 'true',
+  });
+});
+
+test('platform mode: a truncated listing runs the lanes, not skips them', () => {
+  // The mode-specific half of the 3,000-file cap guard: `full` is the
+  // conservative answer for the profile, `true` for the lanes. Hardcoding
+  // either one for both modes silently skips the lanes on a large PR.
+  assert.deepEqual(run('truncated', { mode: 'platform' }), {
+    code: 0,
+    stdout: 'true',
+  });
+});
+
+test('an unknown mode fails loudly instead of falling back to a classifier', () => {
+  // A typo'd mode must not silently classify with the wrong question.
+  assert.equal(run('docs-only', { mode: 'platfrom' }).code, 3);
 });

@@ -5,6 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
+import type { EventLoopLagMonitorOptions } from './event-loop-lag.js';
 
 const histogram = vi.hoisted(() => ({
   enable: vi.fn(),
@@ -43,15 +45,58 @@ describe('startEventLoopLagMonitor', () => {
     vi.useRealTimers();
   });
 
+  const zeroes = { meanMs: 0, p50Ms: 0, p99Ms: 0, maxMs: 0 };
+  const tick = () => vi.advanceTimersByTimeAsync(10);
+  const skipWallClock = (ms: number) => vi.setSystemTime(Date.now() + ms);
+
+  // Seeds the histogram max (ns) and starts a 10 ms monitor with a stall spy;
+  // stallThresholdMs is 1_000 unless `options` overrides it.
+  function startWithMax(
+    maxNs: number,
+    options: Pick<
+      EventLoopLagMonitorOptions,
+      'stallThresholdMs' | 'suspendThresholdMs'
+    > = {},
+    onNewMaxStall: Mock<(maxMs: number) => void> = vi.fn(),
+  ) {
+    histogram.max = maxNs;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      ...options,
+      onNewMaxStall,
+    });
+    return { monitor, onNewMaxStall };
+  }
+
+  // startWithMax, then one tick after an optional wall-clock jump of `gapMs`.
+  async function afterOneTick(
+    maxNs: number,
+    {
+      gapMs,
+      ...options
+    }: Parameters<typeof startWithMax>[1] & { gapMs?: number } = {},
+  ) {
+    const started = startWithMax(maxNs, options);
+    if (gapMs !== undefined) skipWallClock(gapMs);
+    await tick();
+    return started;
+  }
+
+  function expectReported(onNewMaxStall: Mock, maxMs: number) {
+    expect(histogram.reset).not.toHaveBeenCalled();
+    expect(onNewMaxStall).toHaveBeenCalledWith(maxMs);
+  }
+
+  function expectSuppressed(onNewMaxStall: Mock) {
+    expect(histogram.reset).toHaveBeenCalledTimes(1);
+    expect(onNewMaxStall).not.toHaveBeenCalled();
+  }
+
   it('returns finite zeroes before the monitor has samples', () => {
     const monitor = startEventLoopLagMonitor({ resolutionMs: 10 });
 
-    expect(monitor.snapshot()).toEqual({
-      meanMs: 0,
-      p50Ms: 0,
-      p99Ms: 0,
-      maxMs: 0,
-    });
+    expect(monitor.snapshot()).toEqual(zeroes);
 
     monitor.dispose();
   });
@@ -75,21 +120,16 @@ describe('startEventLoopLagMonitor', () => {
   });
 
   it('reads snapshots without advancing suspension detection state', async () => {
-    const onNewMaxStall = vi.fn();
-    histogram.max = 300_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
+    const { monitor, onNewMaxStall } = startWithMax(300_000_000_000, {
       suspendThresholdMs: 300_000,
-      onNewMaxStall,
     });
 
-    vi.setSystemTime(Date.now() + 300_000);
+    skipWallClock(300_000);
     expect(monitor.snapshot().maxMs).toBe(300_000);
     expect(cpuUsage).toHaveBeenCalledOnce();
     expect(histogram.reset).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
 
     expect(histogram.reset).toHaveBeenCalledOnce();
     expect(onNewMaxStall).not.toHaveBeenCalled();
@@ -98,19 +138,15 @@ describe('startEventLoopLagMonitor', () => {
   });
 
   it('actively reports only new max stalls above threshold', async () => {
-    const onNewMaxStall = vi.fn();
-    histogram.max = 15_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
+    const { monitor, onNewMaxStall } = startWithMax(15_000_000, {
       stallThresholdMs: 10,
-      onNewMaxStall,
     });
 
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
     histogram.max = 12_000_000;
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
     histogram.max = 20_000_000;
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
 
     expect(onNewMaxStall).toHaveBeenCalledTimes(2);
     expect(onNewMaxStall).toHaveBeenNthCalledWith(1, 15);
@@ -118,42 +154,33 @@ describe('startEventLoopLagMonitor', () => {
 
     monitor.dispose();
     histogram.max = 30_000_000;
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
     expect(onNewMaxStall).toHaveBeenCalledTimes(2);
   });
 
   it('swallows stall callback errors', async () => {
-    const onNewMaxStall = vi.fn(() => {
+    const throwing = vi.fn((_maxMs: number) => {
       throw new Error('callback failed');
     });
-    histogram.max = 15_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 10,
-      onNewMaxStall,
-    });
+    const { monitor } = startWithMax(
+      15_000_000,
+      { stallThresholdMs: 10 },
+      throwing,
+    );
 
-    await vi.advanceTimersByTimeAsync(10);
-    expect(onNewMaxStall).toHaveBeenCalledWith(15);
+    await tick();
+    expect(throwing).toHaveBeenCalledWith(15);
 
     monitor.dispose();
   });
 
   it('resets suspended samples without reporting them as stalls', async () => {
-    const onNewMaxStall = vi.fn();
-    histogram.max = 15_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
+    const { monitor, onNewMaxStall } = await afterOneTick(15_000_000_000, {
       suspendThresholdMs: 10_000,
-      onNewMaxStall,
+      gapMs: 10_000,
     });
 
-    vi.setSystemTime(Date.now() + 10_000);
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(histogram.reset).toHaveBeenCalledTimes(1);
-    expect(onNewMaxStall).not.toHaveBeenCalled();
+    expectSuppressed(onNewMaxStall);
 
     monitor.dispose();
   });
@@ -172,7 +199,7 @@ describe('startEventLoopLagMonitor', () => {
       suspendThresholdMs: 10_000,
     });
 
-    vi.setSystemTime(Date.now() + 10_000);
+    skipWallClock(10_000);
     expect(monitor.snapshot()).toEqual({
       meanMs: 15_000,
       p50Ms: 15_000,
@@ -181,35 +208,25 @@ describe('startEventLoopLagMonitor', () => {
     });
     expect(histogram.reset).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
     expect(histogram.reset).toHaveBeenCalledOnce();
-    expect(monitor.snapshot()).toEqual({
-      meanMs: 0,
-      p50Ms: 0,
-      p99Ms: 0,
-      maxMs: 0,
-    });
+    expect(monitor.snapshot()).toEqual(zeroes);
 
     monitor.dispose();
   });
 
   it('reports lower stalls after resetting a suspended sample', async () => {
-    const onNewMaxStall = vi.fn();
-    histogram.max = 15_000_000_000;
     histogram.reset.mockImplementation(() => {
       histogram.max = Number.NaN;
     });
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
+    const { monitor, onNewMaxStall } = startWithMax(15_000_000_000, {
       suspendThresholdMs: 10_000,
-      onNewMaxStall,
     });
 
-    vi.setSystemTime(Date.now() + 10_000);
-    await vi.advanceTimersByTimeAsync(10);
+    skipWallClock(10_000);
+    await tick();
     histogram.max = 5_000_000_000;
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
 
     expect(histogram.reset).toHaveBeenCalledTimes(1);
     expect(onNewMaxStall).toHaveBeenCalledOnce();
@@ -219,119 +236,72 @@ describe('startEventLoopLagMonitor', () => {
   });
 
   it('reports a real stall below the suspend threshold', async () => {
-    const onNewMaxStall = vi.fn();
-    histogram.max = 5_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
+    const { monitor, onNewMaxStall } = await afterOneTick(5_000_000_000, {
       suspendThresholdMs: 10_000,
-      onNewMaxStall,
     });
 
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(histogram.reset).not.toHaveBeenCalled();
-    expect(onNewMaxStall).toHaveBeenCalledWith(5_000);
+    expectReported(onNewMaxStall, 5_000);
 
     monitor.dispose();
   });
 
   it('reports a low-CPU gap just below the configured suspend threshold', async () => {
-    const onNewMaxStall = vi.fn();
-    histogram.max = 299_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
+    const { monitor, onNewMaxStall } = await afterOneTick(299_000_000_000, {
       suspendThresholdMs: 300_000,
-      onNewMaxStall,
+      gapMs: 300_000,
     });
 
-    vi.setSystemTime(Date.now() + 300_000);
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(histogram.reset).not.toHaveBeenCalled();
-    expect(onNewMaxStall).toHaveBeenCalledWith(299_000);
+    expectReported(onNewMaxStall, 299_000);
 
     monitor.dispose();
   });
 
   it('resets a low-CPU sample at the default suspend threshold', async () => {
-    const onNewMaxStall = vi.fn();
-    histogram.max = 300_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
-      onNewMaxStall,
+    const { monitor, onNewMaxStall } = await afterOneTick(300_000_000_000, {
+      gapMs: 600_000,
     });
 
-    vi.setSystemTime(Date.now() + 600_000);
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(histogram.reset).toHaveBeenCalledTimes(1);
-    expect(onNewMaxStall).not.toHaveBeenCalled();
+    expectSuppressed(onNewMaxStall);
 
     monitor.dispose();
   });
 
   it('reports a long active stall when CPU time advanced', async () => {
-    const onNewMaxStall = vi.fn();
     cpuUsage
       .mockReset()
       .mockReturnValueOnce({ user: 0, system: 0 })
       .mockReturnValue({ user: 20_000_000, system: 0 });
-    histogram.max = 600_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
-      onNewMaxStall,
-    });
+    const { monitor, onNewMaxStall } = await afterOneTick(600_000_000_000);
 
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(histogram.reset).not.toHaveBeenCalled();
-    expect(onNewMaxStall).toHaveBeenCalledWith(600_000);
+    expectReported(onNewMaxStall, 600_000);
 
     monitor.dispose();
   });
 
   it('reports rather than suppressing when CPU usage is unavailable', async () => {
-    const onNewMaxStall = vi.fn();
     cpuUsage.mockImplementation(() => {
       throw new Error('cpu accounting unavailable');
     });
-    histogram.max = 600_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
-      onNewMaxStall,
-    });
+    const { monitor, onNewMaxStall } = await afterOneTick(600_000_000_000);
 
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(histogram.reset).not.toHaveBeenCalled();
-    expect(onNewMaxStall).toHaveBeenCalledWith(600_000);
+    expectReported(onNewMaxStall, 600_000);
 
     monitor.dispose();
   });
 
   it('does not suppress an old histogram max after a short idle check', async () => {
-    const onNewMaxStall = vi.fn();
     cpuUsage
       .mockReset()
       .mockReturnValueOnce({ user: 0, system: 0 })
       .mockReturnValueOnce({ user: 20_000_000, system: 0 })
       .mockReturnValue({ user: 20_000_000, system: 0 });
-    histogram.max = 600_000_000_000;
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
+    const { monitor, onNewMaxStall } = startWithMax(600_000_000_000, {
       suspendThresholdMs: 300_000,
-      onNewMaxStall,
     });
 
-    vi.setSystemTime(Date.now() + 600_000);
-    await vi.advanceTimersByTimeAsync(10);
-    await vi.advanceTimersByTimeAsync(10);
+    skipWallClock(600_000);
+    await tick();
+    await tick();
 
     expect(onNewMaxStall).toHaveBeenCalledOnce();
     expect(histogram.reset).not.toHaveBeenCalled();
@@ -339,27 +309,20 @@ describe('startEventLoopLagMonitor', () => {
     monitor.dispose();
   });
   it('suppresses a suspension gap whose histogram max lands one tick late', async () => {
-    const onNewMaxStall = vi.fn();
-    const monitor = startEventLoopLagMonitor({
-      resolutionMs: 10,
-      stallThresholdMs: 1_000,
+    const { monitor, onNewMaxStall } = startWithMax(Number.NaN, {
       suspendThresholdMs: 10_000,
-      onNewMaxStall,
     });
 
-    vi.setSystemTime(Date.now() + 10_000);
-    // Tick 1: our interval sees the 10 s gap but the histogram has not
-    // published the matching max yet.
-    await vi.advanceTimersByTimeAsync(10);
+    skipWallClock(10_000);
+    // Tick 1 sees the 10 s gap before the histogram publishes its max.
+    await tick();
     expect(histogram.reset).not.toHaveBeenCalled();
 
-    // The histogram publishes the gap between ticks.
+    // The max lands between ticks; tick 2's carried gap qualifies it.
     histogram.max = 10_000_000_000;
-    // Tick 2: the carried gap qualifies the late histogram max.
-    await vi.advanceTimersByTimeAsync(10);
+    await tick();
 
-    expect(histogram.reset).toHaveBeenCalledTimes(1);
-    expect(onNewMaxStall).not.toHaveBeenCalled();
+    expectSuppressed(onNewMaxStall);
 
     monitor.dispose();
   });

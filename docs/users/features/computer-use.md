@@ -1,77 +1,96 @@
 # Computer Use
 
-Qwen Code ships built-in **Computer Use** tools that let the agent drive your desktop — clicking, typing, scrolling, launching apps, reading window contents, and taking screenshots. This turns Qwen Code into a general desktop automation agent, not just a coding assistant confined to the terminal.
+Computer Use runs through the standalone Node REPL MCP server. Its first `js` call loads global `cua` and displays documentation for the current platform. Computer Use and Browser Use no longer require bundled skills.
 
-Computer Use is powered by the [`cua-driver`](https://github.com/trycua/cua) native driver. The tools are registered as deferred (lazy-loaded) built-ins under the `computer_use__` prefix, so they only cost prompt space once the model actually reaches for them.
-
-> [!warning]
->
-> Computer Use gives the agent control of your mouse, keyboard, and windows, and lets it read the contents of your screen. Only use it with trusted prompts and, where possible, in a sandboxed or disposable environment. The action tools (click, type, drag, etc.) go through the normal [approval flow](./approval-mode.md); read-only tools such as listing windows may run without a prompt.
-
-## Enabling and disabling
-
-Computer Use is **enabled by default**. The `computer_use__*` tools are registered automatically at startup.
-
-To disable it entirely — which also prevents the native driver from being downloaded or spawned — set `tools.computerUse.enabled` to `false` in your `settings.json`:
-
-```jsonc
-{
-  "tools": {
-    "computerUse": {
-      "enabled": false,
-    },
-  },
-}
+```text
+Qwen Code / any MCP client
+  -> @qwen-code/node-repl-mcp (js, js_reset)
+  -> @qwen-code/cua-sdk/runtime
+     -> native Qwen CUA Driver (desktop applications)
+     -> @qwen-code/browser-use (Qwen browser extension)
 ```
 
-This setting requires a restart to take effect.
+## Setup
 
-## First run and the native driver
+This checkout documents the upcoming CUA 0.27.0 release. The installation commands below require its native GitHub Release (`cua-driver-rs-v0.27.0`) and matching npm packages to be published; merging these sources does not publish them. Before publication, use the [local development setup](https://github.com/QwenLM/qwen-code/blob/890cb0349a259761a571da889f4fe1cccc6ed108/packages/node-repl/README.md#local-development-and-environment) to test a repository build.
 
-The first time the agent invokes a Computer Use tool, Qwen Code downloads a pinned, signed `cua-driver` binary (~20 MB) into `~/.qwen/computer-use/` and spawns it as a local process. Prebuilt binaries are published for macOS (Apple Silicon and Intel), Linux (x86_64), and Windows (x86_64).
+Node.js 22 or later and npm are required. Once the release is published, register the MCP server, then restart Qwen Code:
 
-### macOS permissions
+```bash
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.27.0
+```
 
-On macOS, desktop automation requires two system permissions:
+The server installs the matching SDK and browser SDK as dependencies. The native SDK payload is downloaded for the current platform and verified against the matching release's SHA-256 checksums. It is cached outside the npm package; no workspace SDK bootstrap command is needed. Version 0.27.0 is a local development target until its release is published.
 
-- **Accessibility** — to read window/UI state and synthesize input
-- **Screen Recording** — to capture screenshots
+Windows uses ordinary input delivery by default and does not install a UIAccess
+worker. Opting into UIAccess with `CUA_DRIVER_USE_UIACCESS=1` requires a signed
+worker under `Program Files\Qwen\CuaDriver`; install the SDK from an elevated
+terminal with that variable set. An unsigned worker cannot enable UIAccess;
+do not bypass the signature check. Older unsigned releases need a new signed
+driver release for UIAccess, not a reinstall of the same version.
 
-On first use the driver walks you through granting these via the standard macOS system dialogs. The agent can also check permission status on demand (the `check_permissions` tool). Because macOS attributes permission grants to the _responsible_ process, grants may need to be given to the terminal or IDE that launched Qwen Code.
+## Application tasks
 
-## What the agent can do
+```js
+var app = await cua.getApp('Microsoft Excel');
+// Use a short ID from the automatically displayed AX state.
+await app.click(37);
+await app.typeText('hello');
+await app.getAXState();
+```
 
-The full `cua-driver` tool surface is exposed. Highlights:
+`getApp` displays full AX text without an image. `getAXState` displays subsequent diffs. `getScreenshot` captures only the current window; `getAXStateAndScreenshot` captures both. Observations return strings and display themselves; `{emit:false}` suppresses output. Request a screenshot before using `{x,y}` coordinates, which are pixels in that window's current screenshot.
 
-| Category      | Tools (a selection)                                                                |
-| ------------- | ---------------------------------------------------------------------------------- |
-| Mouse         | `click`, `double_click`, `right_click`, `drag`, `move_cursor`, `scroll`            |
-| Keyboard      | `type_text`, `press_key`, `hotkey`                                                 |
-| Windows / UI  | `list_windows`, `get_window_state`, `get_accessibility_tree`, `set_value`, `zoom`  |
-| Apps          | `launch_app`, `list_apps`, `bring_to_front`, `kill_app`                            |
-| Browser pages | `page` (execute JavaScript, read text, query the DOM, click elements)              |
-| Screenshots   | `get_window_state` (captures a PNG), `page`                                        |
-| Recording     | `start_recording`, `stop_recording`, `replay_trajectory` (record/replay a session) |
-| Sessions      | `start_session`, `end_session`, agent-cursor overlay controls                      |
+The driver resolves applications/windows, owns current short IDs and coordinates, and chooses input delivery. macOS uses accessibility and directed events. Windows and Linux try background delivery first and use foreground input only after a refusal that proves nothing was sent. Foreground input stops when physical user activity is detected; it restores the prior application only if the user has not switched elsewhere. A dispatch acknowledgement does not prove the UI changed: observe before retrying.
 
-Element-addressed actions are preferred over raw pixel coordinates: `get_window_state` returns a Markdown rendering of a window's accessibility tree with a stable `element_index` for each actionable element, which the input tools can target directly.
+Linux supports X11, including X11 applications under XWayland. Native Wayland applications are unsupported. Pass DISPLAY, XAUTHORITY and the desktop accessibility session bus to the server.
 
-Support is most complete on macOS; some tools are platform-specific (for example, `bring_to_front` is Windows-only, and `launch_app` targets macOS apps).
+## Desktop and browser tasks
 
-## Configuration
+Use the explicit desktop interface for full-screen tasks:
 
-All Computer Use settings live under `tools.computerUse` in `settings.json`. See the [Settings reference](../configuration/settings.md) for the authoritative list.
+```js
+await cua.desktop.getScreenshot();
+await cua.desktop.click({ x: 300, y: 200 }, { key: 'shift' });
+```
 
-| Setting                               | Type    | Default  | Description                                                                                                                                                                                                                                               |
-| ------------------------------------- | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tools.computerUse.enabled`           | boolean | `true`   | Register the `computer_use__*` tools. When `false`, the driver is never downloaded or spawned.                                                                                                                                                            |
-| `tools.computerUse.maxImageDimension` | number  | `-1`     | Longest-edge pixel cap for screenshots. `-1` keeps the driver's default (1568); `0` disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost. Env override: `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION`. |
-| `tools.computerUse.idleTimeoutMs`     | number  | `300000` | Milliseconds to keep the driver process alive after the last `computer_use__*` call (default 5 minutes). `0` keeps it running until Qwen Code exits.                                                                                                      |
+Desktop coordinates are pixels in the latest primary-display screenshot. Desktop input controls the visible foreground desktop and can move the real pointer. For held keys, always use `try/finally` with `cua.desktop.keyDown(key)` and `keyUp(key)`. Held keys belong to the calling session and are released on graceful reset/end. While holding keys, use `keyDown/keyUp` for chords and desktop pointer actions without explicit modifiers; release them before text, ordinary shortcuts or application input. Abrupt OS process termination cannot guarantee cleanup.
 
-All three settings require a restart to take effect.
+```js
+var browser = await cua.getBrowser('Chrome');
+// Browser documentation and tabs are displayed on first selection.
+var tab = await cua.getTab('TAB_ID', { browser: 'Chrome' });
+await tab.playwright.domSnapshot();
+```
 
-## See also
+`getBrowser`, `getTab`, and `createBrowserTab` return the existing repository browser-use SDK handles. Follow the selected browser's runtime documentation and connect the Qwen browser extension as before. The integration adds no browser windows API, DOM diff or new Windows support.
 
-- [Approval Mode](./approval-mode.md) — how tool executions are gated
-- [Sandboxing](./sandbox.md) — isolating what tools can touch
-- [Settings reference](../configuration/settings.md) — the full `tools.computerUse.*` schema
+## Permissions and lifecycle
+
+The server executes JavaScript with ordinary Node.js permissions and follows the client's MCP approval flow. On macOS, Accessibility is required for input/AX observation and Screen Recording for screenshots; Automation may be requested for document save/Finder rename. Grants belong to the host process's OS responsibility chain. On Windows, the normal installed daemon uses the existing UAC/logon-task path; applications it launches use a token derived from its own token at normal-user integrity. UIAccess is optional: explicitly setting `CUA_DRIVER_USE_UIACCESS=1` requires a trusted signed worker under Program Files and fails if unavailable. Default npm installation does not stage that worker or require its signature.
+
+`js` completes in one call and defaults to a 30-second timeout. A timeout can leave external effects; observe before retrying. `js_reset` discards bindings and gracefully closes the owning native/browser session. After context compaction call `cua.rewriteDocumentation()` before continuing.
+
+The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. The borderless window starts near the lower-right; drag a card or its Move preview handle to reposition it. Hover reveals floating controls and brings a rear card forward. Close it to stop that preview; a later authorized observation can create it again. The image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
+
+To disable PiP without changing the MCP registration, set `"experimental_pip": false` in `~/.cua-driver/config.json`, preserving its other keys, then restart the owning MCP server or runtime. This existing key is retained for compatibility. The server's `--no-pip` argument also disables PiP and takes precedence over the file.
+
+The preview may be visible to others when you share or record the desktop, including during a full-screen presentation. For a persistent opt-out, disable PiP and restart its owning runtime before sharing; closing the current panel alone does not prevent a later observation from recreating it. Sharing is not detected automatically.
+
+## Remote desktop relay
+
+For an existing macOS desktop relay setup, install its matching server:
+
+```bash
+npx -y @qwen-code/node-repl-mcp@0.27.0 desktop-relay install
+```
+
+This uses the existing local launchd socket at `127.0.0.1:47821`. In a secure Web Shell, choose **Use this computer**, then **Connect this computer**. The desktop prompts for each connection. The remote daemon must enable `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`.
+
+## Direct MCP and troubleshooting
+
+`qwen-cua-driver mcp` exposes the same 19 native Computer Use operations directly. App calls use `app`; desktop-capable calls use `scope:"desktop"` instead. `key_down/key_up` are desktop-only. Advanced native tools remain available through the host opt-in `CUA_DRIVER_EXTRA_TOOLS=1`.
+
+If the server is unavailable, check `qwen mcp list` and restart the client after adding it. If capture fails, check the current desktop session and OS permissions. If native download fails, check the exact release version/checksum asset or supply a locally built matching payload through `QWEN_CUA_SDK_NATIVE_DIR`. A locked desktop cannot provide GUI acceptance evidence.
+
+See [MCP servers](./mcp.md), [Approval Mode](./approval-mode.md) and [Sandboxing](./sandbox.md).
