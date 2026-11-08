@@ -2743,7 +2743,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // to a (kind, state) index whose range holds every Session's pending
         // rows, and two Sessions' settles then deadlock. H2 skips the hint.
         for (String operationKey : jdbc.queryForList("SELECT operation_key"
-                        + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
+                        + " FROM ma_operation /*! FORCE INDEX (uk_ma_operation_identity) */"
                         + " WHERE scope_key = ? AND"
                         + " operation_kind = ? AND target_key = ? AND state ="
                         + " 'PENDING' FOR UPDATE",

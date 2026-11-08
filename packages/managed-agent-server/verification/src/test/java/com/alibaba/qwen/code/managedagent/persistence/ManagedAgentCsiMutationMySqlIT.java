@@ -228,7 +228,7 @@ class ManagedAgentCsiMutationMySqlIT {
                     originalLock.setAutoCommit(false);
                     try (var query = originalLock.prepareStatement(
                                     "SELECT is_csi_guard FROM ma_session FORCE INDEX"
-                                        + " (ma_session_csi_guard_idx) WHERE tenant_id = 'tenant'"
+                                        + " (idx_ma_session_csi_guard) WHERE tenant_id = 'tenant'"
                                         + " AND session_id = ? AND is_csi_guard = TRUE FOR UPDATE")) {
                         query.setQueryTimeout(5);
                         query.setString(1, original.sessionId());

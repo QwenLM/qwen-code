@@ -401,7 +401,7 @@ public final class JdbcCsiFilesRetirementGuard {
 
     private static Pin readPin(Connection connection, String tenantId, String sessionId) throws SQLException {
         // By primary key: on an existing root this locks that record alone.
-        // Through ma_session_csi_guard_idx, an unpinned root left a gap lock
+        // Through idx_ma_session_csi_guard, an unpinned root left a gap lock
         // that spans other tenants' keys, so their first writers could not
         // insert their own roots (#13996).
         try (PreparedStatement statement = statement(connection,

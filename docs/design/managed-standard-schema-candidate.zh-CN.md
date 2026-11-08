@@ -10,7 +10,7 @@
 
 39 张 Managed 表采用数据库生成的 BIGINT UNSIGNED 主键，并保留非空业务唯一键。布尔字段使用 is_* TINYINT UNSIGNED，时间戳保留毫秒语义，9 个生成列继续约束派生身份的唯一性。普通 MySQL 写入要求全局及当前会话均启用严格 SQL 模式。
 
-部分受治理的 DDL 流程无法保留 CHECK 定义。本方案将原 73 条行谓词迁到 Java 完整行校验及具备类型的事务写入边界。必须提供谓词涉及的所有非生成字段。校验保留 SQL FALSE/UNKNOWN 语义、精确封闭域、字段配对、正数及安全整数边界、UTF-8 字节上限和流进度关系。回执命名空间包含现有契约值 EXTERNAL_WORKSPACE。
+部分受治理的 DDL 流程无法保留 CHECK 定义：导出的基线里有 58 条（`V1__managed_schema.sql` 中的 `CONSTRAINT ... CHECK`），迁移后的结构里一条也没有。因此行完整性改由 Java 完整行校验及具备类型的事务写入边界承担——共 73 条行规则（`ManagedSchemaIntegrity` 中 `new Rule(` 的计数），覆盖 39 张 Managed 表中的 30 张，其余 9 张没有行级谓词。必须提供谓词涉及的所有非生成字段。校验保留 SQL FALSE/UNKNOWN 语义、精确封闭域、字段配对、正数及安全整数边界、UTF-8 字节上限和流进度关系。回执命名空间包含现有契约值 EXTERNAL_WORKSPACE。
 
 Session 受理、事务锁定后的 Session/Turn 复制、head/stream 读取、CSI 规范恢复及在线解码使用这些行规则。原始数字布尔值在强制转换前校验。输出捕获插入显式填写数据库时间。物理 NOT NULL、UNSIGNED、唯一键、生成表达式、所有权检查、CAS 和租约 fencing 保留。直接 SQL 写入会绕过 Java 谓词，不能将其视为受支持的业务写入方。
 
