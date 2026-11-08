@@ -152,12 +152,15 @@ export function describeDwsCommandFailure(
   code: unknown,
   stderr: string,
 ): string {
-  const subcommand = args.filter(
-    (arg, index) =>
-      !arg.startsWith('--') &&
-      args[index - 1] !== '--profile' &&
-      args[index - 1] !== '--format',
-  );
+  // Only the leading positional words name the subcommand. Everything after
+  // the first flag is either a flag value — `--text` carries the whole
+  // generated reply — or the trailing `--format json` that `run()` appends.
+  // Keeping flag values would both leak outbound message content into stderr
+  // and spend the caller's 300-code-point log budget before the exit code and
+  // the stderr tail, which are the only parts worth reading.
+  const rest = args[0] === '--profile' ? args.slice(2) : args;
+  const firstFlag = rest.findIndex((arg) => arg.startsWith('-'));
+  const subcommand = firstFlag === -1 ? rest : rest.slice(0, firstFlag);
   const detail = [
     `\`dws ${subcommand.join(' ')}\``,
     code === undefined ? '' : `(exit ${String(code)})`,

@@ -6,7 +6,11 @@
 
 import { execFile } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DwsClient, DwsCommandError } from './dws-client.js';
+import {
+  describeDwsCommandFailure,
+  DwsClient,
+  DwsCommandError,
+} from './dws-client.js';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
@@ -105,5 +109,46 @@ describe('DWS command process', () => {
     expect(error.message).toContain('sender is not in the conversation');
     expect(error.message.startsWith('…')).toBe(false);
     expect(error.message.length).toBeLessThan(800);
+  });
+
+  it('does not leak flag values from a send-shaped argv', () => {
+    const message = describeDwsCommandFailure(
+      [
+        '--profile',
+        'corp:user',
+        'chat',
+        'message',
+        'send',
+        '--group',
+        'cid-1',
+        '--text',
+        'the entire generated reply',
+        '--uuid',
+        'idem-1',
+        '--format',
+        'json',
+      ],
+      1,
+      'error: conversation is not open',
+    );
+
+    expect(message).toContain('`dws chat message send`');
+    expect(message).toContain('error: conversation is not open');
+    expect(message).not.toContain('generated reply');
+    expect(message).not.toContain('cid-1');
+    expect(message).not.toContain('idem-1');
+    expect(message.length).toBeLessThan(300);
+  });
+
+  it.each([
+    [['version'], 'dws version'],
+    [['profile', 'list'], 'dws profile list'],
+    [['auth', 'status', '--format', 'json'], 'dws auth status'],
+    [
+      ['--profile', 'p', 'todo', 'comment', 'add', '--task-id', 't'],
+      'dws todo comment add',
+    ],
+  ])('names %j as %s', (args, expected) => {
+    expect(describeDwsCommandFailure(args, 1, '')).toContain(expected);
   });
 });
