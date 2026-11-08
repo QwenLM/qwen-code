@@ -7917,9 +7917,7 @@ describe('stale agent-home reclaim guard (#16616)', () => {
       env: {
         ...process.env,
         RUNNER_TEMP: runnerTemp,
-        ...(sudoBlocked
-          ? { PATH: `${binDir}:/usr/bin:/bin` }
-          : {}),
+        ...(sudoBlocked ? { PATH: `${binDir}:/usr/bin:/bin` } : {}),
       },
       encoding: 'utf8',
     });
