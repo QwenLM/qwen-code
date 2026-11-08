@@ -55,6 +55,14 @@ export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated';
 
 /**
+ * Opening tag of the envelope `buildStub` emits when the full output was saved
+ * to a file. It is the only form that carries a path back to the bytes, so
+ * consumers that must not orphan that reference key on it rather than on the
+ * broader truncation sentinel.
+ */
+export const PERSISTED_OUTPUT_STUB_PREFIX = '<persisted-output>';
+
+/**
  * Tolerance factor applied by the scheduler's combined (second) pass:
  * metadata appended after truncation is only re-bounded above 2x the
  * applicable budget, so compliant retained content can legitimately
@@ -800,7 +808,7 @@ function buildStub(
   const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
 
   if (isFilePath) {
-    return `<persisted-output>
+    return `${PERSISTED_OUTPUT_STUB_PREFIX}
 Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
 ${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
 Total characters: ${content.length}; total lines: ${countLines(content)}.

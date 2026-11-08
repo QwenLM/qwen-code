@@ -279,6 +279,19 @@ describe('microcompactHistory', () => {
 
   const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
 
+  function makePersistedOutputStub(path = '/tmp/tool-results/c1.txt'): string {
+    return `<persisted-output>
+Output too large (3000 KB). Full output saved to: ${path}
+Full output sha256: ${'a'.repeat(64)}
+Total characters: 3145728; total lines: 4000.
+Note: this file may be cleaned up after 24 hours.
+Page in with read_file using the absolute file_path above, offset (zero-based line) and limit (line count).
+
+Preview (up to 2000 chars):
+the first 2000 characters
+</persisted-output>`;
+  }
+
   it('should return history unchanged when trigger does not fire', () => {
     const history: Content[] = [
       makeUserMessage('hello'),
@@ -930,6 +943,64 @@ describe('microcompactHistory', () => {
     expect(
       result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
     ).toBe('Y'.repeat(25_500));
+  });
+
+  it('leaves persisted-output stubs intact even when the size trigger is over threshold', () => {
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', stub),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'g'.repeat(5_000)),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    // The stub stays over threshold — its saved output is unrecoverable if the
+    // reference is blanked — but the plan must still clear what it can.
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+    });
+    expect(result.meta!.toolsCleared).toBeGreaterThan(0);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not spend a keepRecent slot on a persisted-output stub', () => {
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'o'.repeat(5_000)),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', stub),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    // Idle-path clearing protects the most recent result that is actually at
+    // risk. The stub never is, so the slot belongs to the older ordinary
+    // result instead of being wasted on it.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('o'.repeat(5_000));
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
   });
 
   it('size-compacts bridged tool results using the target tool identity', () => {
