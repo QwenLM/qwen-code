@@ -243,8 +243,9 @@ The B2d invariants hold. In addition:
 
 M1 to M4 are implemented and retained; M2, M4, M5a, M5b and M5c landed
 ahead of the priority review described in Status without registering the
-engine. M6 is implemented in #14483; the review fixes are in #14488, and the
-workspace-change tests and the end-to-end pass are still open. Reference
+engine. M6 is implemented in #14483; the review fixes are in #14488, the
+workspace-change tests in #14525 and #14554, and the end-to-end pass found
+and fixed the Managed restore refusal in #14688. Reference
 commits
 describe the original port; the linked host decision supersedes the old
 in-process M2 approach.
@@ -569,28 +570,28 @@ approval mode. The runtime carries:
 
 The first condition that applies decides the result:
 
-| Condition                                                               | Result     |
-| ----------------------------------------------------------------------- | ---------- |
-| The workspace is not trusted                                            | deferred   |
-| The session or workspace directory cannot be resolved                   | unknown    |
-| The session directory is not the runtime workspace                      | deferred   |
-| `--experimental-lsp` is forwarded                                       | deferred   |
-| `--restore-ask-user-question` is forwarded                              | deferred   |
-| Another argument is forwarded                                           | unknown    |
-| The running workspace holds MCP servers outside its files               | deferred   |
-| The home directory or the environment cannot be read                    | unknown    |
-| A settings location in the environment depends on the working directory | unknown    |
-| A settings layer cannot be read                                         | unknown    |
-| MCP servers in any settings layer, or `mcp.serverCommand`               | deferred   |
-| `tools.discoveryCommand` or `tools.callCommand`                         | deferred   |
-| Hooks in the system, user or trusted project layer                      | deferred   |
-| The approval mode in settings is not valid                              | unknown    |
-| Approval mode `plan`, requested or from settings                        | deferred   |
-| `.mcp.json` cannot be read or is malformed                              | unknown    |
-| Servers in `.mcp.json`                                                  | deferred   |
-| Extensions are installed                                                | deferred   |
-| The extension store cannot be proven empty                              | unknown    |
-| Otherwise                                                               | compatible |
+| Condition                                                                                                                                    | Result     |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| The workspace is not trusted                                                                                                                 | deferred   |
+| The session or workspace directory cannot be resolved                                                                                        | unknown    |
+| The session directory is not the runtime workspace                                                                                           | deferred   |
+| `--restore-ask-user-question` is forwarded                                                                                                   | deferred   |
+| Another argument is forwarded; a forwarded `--experimental-lsp` is known                                                                     | unknown    |
+| The running workspace holds MCP servers outside its files                                                                                    | deferred   |
+| The home directory or the environment cannot be read                                                                                         | unknown    |
+| A settings location in the environment depends on the working directory                                                                      | unknown    |
+| A settings layer cannot be read                                                                                                              | unknown    |
+| The runtime's sessions resolve LSP on (`--experimental-lsp`, `tools.lspEnabled` or the `QWEN_CODE_ENABLE_LSP` pair; the disable switch wins) | deferred   |
+| MCP servers in any settings layer, or `mcp.serverCommand`                                                                                    | deferred   |
+| `tools.discoveryCommand` or `tools.callCommand`                                                                                              | deferred   |
+| Hooks in the system, user or trusted project layer                                                                                           | deferred   |
+| The approval mode in settings is not valid                                                                                                   | unknown    |
+| Approval mode `plan`, requested or from settings                                                                                             | deferred   |
+| `.mcp.json` cannot be read or is malformed                                                                                                   | unknown    |
+| Servers in `.mcp.json`                                                                                                                       | deferred   |
+| Extensions are installed                                                                                                                     | deferred   |
+| The extension store cannot be proven empty                                                                                                   | unknown    |
+| Otherwise                                                                                                                                    | compatible |
 
 A hooks entry counts unless it is an empty list or one of the configuration
 fields `enabled`, `disabled` and `notifications`, which the hook registry
@@ -1285,8 +1286,9 @@ without registration.
 
 **Status: implemented in #14483.** The engine is registered at every paired
 runtime and the Managed host answers `qwen/control/workspace/change`. The
-review fixes are in #14488; the workspace-change tests and the end-to-end
-pass are still open.
+review fixes are in #14488; the workspace-change tests are in #14525 and
+#14554, and the end-to-end pass found and fixed the Managed restore refusal
+in #14688.
 
 #### M6a: registration and compatibility
 

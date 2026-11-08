@@ -29,6 +29,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   getDefaultBranch: vi.fn(),
 }));
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+}));
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 const createGitHubPullRequestMock = vi.mocked(createGitHubPullRequest);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 const getDefaultBranchMock = vi.mocked(getDefaultBranch);
@@ -203,6 +211,130 @@ describe('workspace GitHub PR routes', () => {
       code: 'github_prs_failed',
     });
     expect(response.body.error).not.toContain('/work/main');
+  });
+
+  it('sweeps an absolute gh binary path out of a spawn failure', async () => {
+    // The resolver can hand the child an absolute install path; Node embeds
+    // it in the spawn error, and this body is what remote clients read. Only
+    // a fail-closed absolute-path sweep keeps the host layout out.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'spawn /Users/alice/.local/bin/gh EACCES',
+      gitRoot: '/work/main',
+    });
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get('/workspaces/primary/github/prs');
+
+    expect(response.status).toBe(502);
+    expect(response.body.code).toBe('github_prs_failed');
+    expect(response.body.error).toBe('spawn <path> EACCES');
+    expect(response.body.error).not.toContain('/Users/alice');
+  });
+
+  it('redacts the resolved fallback binary even when its path has spaces', async () => {
+    // A whitespace-bounded token sweep cannot own `/Users/John Smith/...`; the
+    // producer's exact value is the only thing that can.
+    const binary = '/Users/John Smith/.local/bin/gh';
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'failed',
+      message: `spawn ${binary} EACCES`,
+      gitRoot: '/work/main',
+      binary,
+    });
+    const app = mount();
+
+    const response = await request(app).get('/workspaces/primary/github/prs');
+
+    expect(response.status).toBe(502);
+    expect(response.body.error).toBe('spawn <path> EACCES');
+    expect(response.body.error).not.toContain('Smith');
+    expect(response.body.error).not.toContain('.local');
+  });
+
+  it('sweeps paths glued after = and a backtick', async () => {
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'failed',
+      message:
+        'open=/Users/alice/.config/gh/hosts.yml; see `/Users/alice/.ssh/config`',
+      gitRoot: '/work/main',
+    });
+    const app = mount();
+
+    const response = await request(app).get('/workspaces/primary/github/prs');
+
+    expect(response.status).toBe(502);
+    expect(response.body.error).not.toContain('/Users/alice');
+    expect(response.body.error).toContain('<path>');
+  });
+
+  it('sweeps drive-letter and UNC paths', async () => {
+    // gh's own stderr is the producer here; the Windows shapes the sweep
+    // names must not survive on a Windows daemon host.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'failed',
+      message:
+        'could not open C:\\Users\\alice\\hosts.yml; spawn \\\\host\\share\\gh EACCES',
+      gitRoot: '/work/main',
+    });
+    const app = mount();
+
+    const response = await request(app).get('/workspaces/primary/github/prs');
+
+    expect(response.status).toBe(502);
+    expect(response.body.error).not.toContain('alice');
+    expect(response.body.error).not.toContain('share');
+    expect(response.body.error).toContain('<path>');
+  });
+
+  it('sweeps an absolute path out of a PR create spawn failure', async () => {
+    createGitHubPullRequestMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'spawn /Users/alice/.local/bin/gh EACCES',
+      gitRoot: '/work/main',
+    });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(502);
+    expect(response.body.error).toBe('spawn <path> EACCES');
+    expect(response.body.error).not.toContain('/Users/alice');
+  });
+
+  it('logs the raw gh failure server-side while redacting the body', async () => {
+    const raw = 'spawn /Users/alice/.local/bin/gh EACCES';
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'failed',
+      message: raw,
+      gitRoot: '/work/main',
+    });
+    const app = mount();
+
+    const response = await request(app).get('/workspaces/primary/github/prs');
+
+    expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+      'GitHub PR list failed',
+      {
+        workspaceCwd: '/work/main',
+        gitRoot: '/work/main',
+        message: raw,
+      },
+    );
+    expect(response.body.error).not.toContain('/Users/alice');
   });
 
   it('sanitizes a path straddling the display cap before truncating', async () => {

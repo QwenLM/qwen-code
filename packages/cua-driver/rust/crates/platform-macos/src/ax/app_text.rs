@@ -91,7 +91,7 @@ pub(super) unsafe fn associated_title(
     Some((super::tree::AXIdentity::retained(element), title))
 }
 
-pub(super) unsafe fn element_url(element: AXUIElementRef) -> Option<String> {
+pub(crate) unsafe fn element_url(element: AXUIElementRef) -> Option<String> {
     let value = copy_attribute(element, "AXURL")?;
     url(value.as_CFTypeRef())
 }

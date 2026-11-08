@@ -4,6 +4,16 @@
 
 [English](2026-10-04-managed-agent-event-transport.md) | [简体中文](2026-10-04-managed-agent-event-transport.zh-CN.md)
 
+> **Wake recovery update (2026-10-19):** The earlier source-ledger-only
+> fallback described here is superseded by the
+> [Hosted SQL wake scan](2026-10-18-hosted-wake-recovery.md). It discovers
+> committed, unconsumed monitor/background Shell, channel, child/workflow,
+> automation and Session-message inputs after writer loss. Public foreground
+> Turns still belong to their dispatcher; private CSI and other sources retain
+> their existing recovery paths. Real MQ-on and deployed/cross-platform scan
+> acceptance remain unverified. The historical MQ gates below do not prove this
+> new scan; its fault acceptance is specified in the linked design.
+
 **Status: design reserved — 设计预留·未交付.** The transport side remains
 unimplemented: no MQ client, no consumer, and no multi-node wake anywhere in
 the repository. (Written when no `EventTransport` type existed; MQ1 has since

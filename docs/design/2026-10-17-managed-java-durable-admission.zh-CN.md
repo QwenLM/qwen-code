@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-java-durable-admission.md) | [简体中文](2026-10-17-managed-java-durable-admission.zh-CN.md)
 
-状态：已在本次改动中实现，契约 `1.61.0`，schema 不变。
+状态：历史设计。[首发契约清理](2026-10-23-managed-first-release-contract.zh-CN.md)已用 Turn 准入必须返回 operation 字段的单一契约替代可选 profile 和能力开关。下文保留早期实现的设计记录。
 
 这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 总 issue）的 **D7-3** 切片，由 [#14167](https://github.com/QwenLM/qwen-code/issues/14167) 跟踪。#12380 规定，只有同时具备持久命令投递和原命令对账，Stage D 才能暴露 `java_durable`。对 Turn 输入与取消来说，这两者都已在 `main` 上：D7-1（[Turn 命令 operation](2026-10-16-managed-turn-command-operations.zh-CN.md)）在每次准入时保存一个 `submit_input` 或 `cancel` operation；D7-2（[operation 对账](2026-10-17-managed-operation-reconciliation.zh-CN.md)）依据 Session journal 对准入未知的输入做对账。
 

@@ -181,7 +181,7 @@ B2d 的不变量仍然成立。此外：
 ### 切片计划
 
 M1 到 M4 已实现并保留；M2、M4、M5a、M5b 与 M5c 先于状态一节所述的优先级评估落地，
-但不注册引擎。M6 已在 #14483 实现；评审修复在 #14488，工作区变更测试与端到端验收仍待完成。
+但不注册引擎。M6 已在 #14483 实现；评审修复在 #14488，工作区变更测试在 #14525 与 #14554，端到端验收发现并在 #14688 修复了 Managed 恢复被拒的问题。
 参考提交描述原始移植方案；所链接的宿主决定取代了旧的进程内 M2 方案。
 
 | 切片                                                                 | 交付内容                                                                                                                                                                                                                                                                                                                                                               | 验收检查                                                                                                                                                                                                                                                                                                                                                            | 参考                                                                                                                                                                               |
@@ -432,28 +432,28 @@ M3 把 B2d 设计中的配置兼容契约实现为 CLI 配置层中的一个函�
 
 按顺序匹配，第一个成立的条件决定结果：
 
-| 条件                                                            | 结果       |
-| --------------------------------------------------------------- | ---------- |
-| 工作区不受信                                                    | deferred   |
-| 无法解析会话目录或工作区目录                                    | unknown    |
-| 会话目录不是 runtime 的工作区                                   | deferred   |
-| 转发了 `--experimental-lsp`                                     | deferred   |
-| 转发了 `--restore-ask-user-question`                            | deferred   |
-| 转发了其他参数                                                  | unknown    |
-| 运行中的工作区持有配置文件之外的 MCP 服务器                     | deferred   |
-| 无法读取 home 目录或环境                                        | unknown    |
-| 环境中的某个 settings 位置依赖工作目录                          | unknown    |
-| 某一层 settings 无法读取                                        | unknown    |
-| 任何一层 settings 中有 MCP 服务器，或配置了 `mcp.serverCommand` | deferred   |
-| 配置了 `tools.discoveryCommand` 或 `tools.callCommand`          | deferred   |
-| system、user 或受信 project 层中配置了 hooks                    | deferred   |
-| settings 中的审批模式无效                                       | unknown    |
-| 审批模式为 `plan`（请求指定或来自 settings）                    | deferred   |
-| `.mcp.json` 无法读取或格式不正确                                | unknown    |
-| `.mcp.json` 中有服务器                                          | deferred   |
-| 已安装扩展                                                      | deferred   |
-| 无法证明 extension store 为空                                   | unknown    |
-| 其他情况                                                        | compatible |
+| 条件                                                                                                                         | 结果       |
+| ---------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| 工作区不受信                                                                                                                 | deferred   |
+| 无法解析会话目录或工作区目录                                                                                                 | unknown    |
+| 会话目录不是 runtime 的工作区                                                                                                | deferred   |
+| 转发了 `--restore-ask-user-question`                                                                                         | deferred   |
+| 转发了其他参数；转发的 `--experimental-lsp` 属已知参数                                                                       | unknown    |
+| 运行中的工作区持有配置文件之外的 MCP 服务器                                                                                  | deferred   |
+| 无法读取 home 目录或环境                                                                                                     | unknown    |
+| 环境中的某个 settings 位置依赖工作目录                                                                                       | unknown    |
+| 某一层 settings 无法读取                                                                                                     | unknown    |
+| runtime 的会话解析出 LSP 开启（`--experimental-lsp`、`tools.lspEnabled` 或 `QWEN_CODE_ENABLE_LSP` 环境变量对；禁用开关优先） | deferred   |
+| 任何一层 settings 中有 MCP 服务器，或配置了 `mcp.serverCommand`                                                              | deferred   |
+| 配置了 `tools.discoveryCommand` 或 `tools.callCommand`                                                                       | deferred   |
+| system、user 或受信 project 层中配置了 hooks                                                                                 | deferred   |
+| settings 中的审批模式无效                                                                                                    | unknown    |
+| 审批模式为 `plan`（请求指定或来自 settings）                                                                                 | deferred   |
+| `.mcp.json` 无法读取或格式不正确                                                                                             | unknown    |
+| `.mcp.json` 中有服务器                                                                                                       | deferred   |
+| 已安装扩展                                                                                                                   | deferred   |
+| 无法证明 extension store 为空                                                                                                | unknown    |
+| 其他情况                                                                                                                     | compatible |
 
 hooks 条目只要不是空列表，也不是 hook 注册表会跳过的配置字段 `enabled`、`disabled`
 和 `notifications`，就算已配置。settings 中的审批模式按会话创建时的方式规范化，请求
@@ -918,7 +918,7 @@ daemon 的双引擎站点上，并补上 Managed 通道唯一没有应答的扩�
 工作区控制变更都变成通道隔离；没有注册，回执也没有生产调用方。
 
 **状态：已在 #14483 实现。** 引擎已注册到每个双引擎运行时，Managed 宿主也已应答
-`qwen/control/workspace/change`；评审修复在 #14488，工作区变更测试与端到端验收仍待完成。
+`qwen/control/workspace/change`；评审修复在 #14488，工作区变更测试在 #14525 与 #14554，端到端验收发现并在 #14688 修复了 Managed 恢复被拒的问题。
 
 #### M6a：注册与兼容性
 

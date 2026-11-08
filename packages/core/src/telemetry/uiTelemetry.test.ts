@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { UiTelemetryService, MAIN_SOURCE } from './uiTelemetry.js';
+import {
+  UiTelemetryService,
+  MAIN_SOURCE,
+  MAX_FAILURE_SAMPLES,
+  MAX_TIMING_SAMPLES,
+} from './uiTelemetry.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import type { ApiErrorEvent, ApiResponseEvent } from './types.js';
 import { ToolCallEvent } from './types.js';
@@ -235,6 +240,16 @@ describe('UiTelemetryService', () => {
     expect(lastPromptTokenCount).toBe(0);
   });
 
+  it('passes the added event to update listeners', () => {
+    const spy = vi.fn();
+    service.on('update', spy);
+    const event = proResponse();
+
+    service.addEvent(event);
+
+    expect(spy.mock.calls[0][0].event).toBe(event);
+  });
+
   describe('API Response Event Processing', () => {
     it('applies cached-input fallback per session event without changing global metrics', () => {
       const sessionId = 'session-mixed-cache';
@@ -288,11 +303,90 @@ describe('UiTelemetryService', () => {
     });
   });
 
+  describe('Per-event billable output', () => {
+    it.each([
+      { auth: 'openai', output: 150_000 },
+      { auth: 'openai-responses', output: 150_000 },
+      { auth: 'qwen-oauth', output: 150_000 },
+      { auth: 'gemini', output: 270_000 },
+      { auth: undefined, output: 270_000 },
+    ])(
+      'uses the $auth convention when total is missing',
+      ({ auth, output }) => {
+        service.addEvent(
+          apiResponse('model', 1, [100_000, 150_000, 0, 0, 120_000], {
+            auth_type: auth,
+            subagent_name: 'researcher',
+          }),
+          'session-a',
+        );
+        for (const metrics of [
+          service.getMetrics(),
+          service.getMetricsForSession('session-a'),
+        ]) {
+          expect(metrics.billableOutputTokens?.['model']).toEqual({
+            total: output,
+            bySource: { researcher: output },
+          });
+          expect(metrics.models['model'].tokens).toEqual({
+            prompt: 100_000,
+            candidates: 150_000,
+            total: 0,
+            cached: 0,
+            thoughts: 120_000,
+          });
+        }
+      },
+    );
+
+    it('clones billing on rollback, isolates sessions, and resets it with usage', () => {
+      const response = apiResponse('model', 1, [10, 20, 30, 0, 5], {
+        auth_type: 'openai',
+        subagent_name: '__proto__',
+      });
+      service.addEvent(response, 'session-a');
+      const snapshot = service.snapshotForReplay('session-a');
+      service.addEvent(response, 'session-a');
+      service.addEvent(response, 'session-b');
+      expect(snapshot.metrics.billableOutputTokens?.['model'].total).toBe(20);
+      service.restoreFromReplaySnapshot(snapshot);
+      service.addEvent(response, 'session-a');
+      const billable =
+        service.getMetricsForSession('session-a').billableOutputTokens?.[
+          'model'
+        ];
+      expect(billable?.total).toBe(40);
+      expect(billable?.bySource['__proto__']).toBe(40);
+      expect(Object.getPrototypeOf(billable!.bySource)).toBeNull();
+      expect(
+        service.getMetricsForSession('session-b').billableOutputTokens?.[
+          'model'
+        ].total,
+      ).toBe(20);
+      expect(
+        snapshot.sessionMetrics?.billableOutputTokens?.['model'].total,
+      ).toBe(20);
+      service.resetSession('session-a');
+      expect(
+        service.getMetricsForSession('session-a').billableOutputTokens,
+      ).toBeUndefined();
+      service.addEvent(response, 'session-a');
+      expect(
+        service.getMetricsForSession('session-a').billableOutputTokens?.[
+          'model'
+        ].total,
+      ).toBe(20);
+      service.reset();
+      expect(service.getMetrics().billableOutputTokens).toBeUndefined();
+    });
+  });
+
   describe('Generation Timing Metrics', () => {
     const timedResponse = (overrides: Partial<ApiResponseEvent> = {}) =>
       apiResponse('qwen3-coder', 500, [10, 20, 30, 0, 0], {
         prompt_id: 'user-query',
         ttft_ms: 100,
+        generation_ms: 400,
         ...overrides,
       });
 
@@ -303,6 +397,7 @@ describe('UiTelemetryService', () => {
           model: 'qwen-plus',
           duration_ms: 800,
           ttft_ms: 200,
+          generation_ms: 600,
           output_token_count: 30,
         }),
       );
@@ -328,17 +423,188 @@ describe('UiTelemetryService', () => {
       expect(service.getMetrics().generation).toBeUndefined();
     });
 
-    it('clamps sampling time when TTFT exceeds request duration', () => {
-      service.addEvent(timedResponse({ duration_ms: 100, ttft_ms: 150 }));
+    it('measures generation time from generation_ms when the event has it', () => {
+      service.addEvent(timedResponse({ generation_ms: 300 }));
+      service.addEvent(timedResponse({ generation_ms: 0 }));
 
-      expect(service.getMetrics().generation).toMatchObject({
+      expect(service.getMetrics().generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 200,
+        totalGenerationDurationMs: 300,
+        totalThroughputOutputTokens: 20,
+        last: {
+          model: 'qwen3-coder',
+          ttftMs: 100,
+          generationDurationMs: 0,
+          outputTokens: 20,
+        },
+      });
+    });
+
+    it('aggregates generation per model for the stats route only', () => {
+      const add = (overrides: Partial<ApiResponseEvent>) =>
+        service.addEvent(timedResponse(overrides), 'session-a');
+      add({ generation_ms: 200 });
+      add({ ttft_ms: 50, generation_ms: 100, output_token_count: 10 });
+      add({ model: 'qwen-plus', ttft_ms: 300, generation_ms: 0 });
+      add({ model: 'qwen-plus', prompt_id: 'prompt_suggestion' });
+
+      const metrics = service.getMetricsForSession('session-a');
+      expect(metrics.statsModels?.['qwen3-coder'].generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 150,
+        totalGenerationDurationMs: 300,
+        totalThroughputOutputTokens: 30,
+      });
+      expect(metrics.statsModels?.['qwen-plus'].generation).toEqual({
         timedRequests: 1,
+        totalTtftMs: 300,
         totalGenerationDurationMs: 0,
         totalThroughputOutputTokens: 0,
-        last: {
-          ttftMs: 150,
-          generationDurationMs: 0,
-        },
+      });
+      expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
+    });
+
+    it('keeps a capped per-model timeline of timed responses', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(9_000);
+      try {
+        const add = (overrides: Partial<ApiResponseEvent>) =>
+          service.addEvent(timedResponse(overrides), 'session-a');
+        add({ 'event.timestamp': '2026-11-02T00:00:01.000Z' });
+        add({
+          'event.timestamp': '2026-11-02T00:00:02.000Z',
+          subagent_name: 'explorer',
+          generation_ms: 50,
+        });
+        // Untimed, internal and timestamp-less events.
+        add({ ttft_ms: undefined });
+        add({ prompt_id: 'prompt_suggestion' });
+        add({ 'event.timestamp': 'not a date', model: 'qwen-plus' });
+        // Without a session id the stats route has no model buckets.
+        service.addEvent(timedResponse());
+
+        const metrics = service.getMetricsForSession('session-a');
+        expect(metrics.statsModels?.['qwen3-coder'].timingSamples).toEqual([
+          {
+            at: Date.parse('2026-11-02T00:00:01.000Z'),
+            ttftMs: 100,
+            generationMs: 400,
+            outputTokens: 20,
+          },
+          {
+            at: Date.parse('2026-11-02T00:00:02.000Z'),
+            ttftMs: 100,
+            generationMs: 50,
+            outputTokens: 20,
+            source: 'explorer',
+          },
+        ]);
+        expect(metrics.statsModels?.['qwen-plus'].timingSamples).toEqual([
+          { at: 9_000, ttftMs: 100, generationMs: 400, outputTokens: 20 },
+        ]);
+        expect(metrics.models['qwen3-coder']).not.toHaveProperty(
+          'timingSamples',
+        );
+
+        for (let i = 0; i < MAX_TIMING_SAMPLES + 5; i++) {
+          add({ output_token_count: i });
+        }
+        const samples =
+          service.getMetricsForSession('session-a').statsModels?.['qwen3-coder']
+            .timingSamples ?? [];
+        expect(samples).toHaveLength(MAX_TIMING_SAMPLES);
+        expect(samples[0]?.outputTokens).toBe(5);
+        expect(samples.at(-1)?.outputTokens).toBe(MAX_TIMING_SAMPLES + 4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records failures per model by status code, then error type', () => {
+      const fail = (extra: Record<string, unknown>) =>
+        service.addEvent(
+          apiError('qwen3-coder', 10, 'boom', {
+            'event.timestamp': '2026-11-02T00:00:03.000Z',
+            ...extra,
+          }),
+          'session-a',
+        );
+      fail({ status_code: 429 });
+      fail({ status_code: 429, subagent_name: 'explorer' });
+      fail({ error_type: 'TimeoutError' });
+      fail({ status_code: '', error_type: '__proto__' });
+      fail({});
+
+      const model =
+        service.getMetricsForSession('session-a').statsModels?.['qwen3-coder'];
+      expect(model?.api.totalErrors).toBe(5);
+      expect({ ...model?.failures?.byKind }).toEqual({
+        '429': 2,
+        TimeoutError: 1,
+        ['__proto__']: 1,
+        unknown: 1,
+      });
+      expect(Object.getPrototypeOf(model?.failures?.byKind)).toBeNull();
+      expect(model?.failures?.recent.map((f) => [f.kind, f.source])).toEqual([
+        ['429', undefined],
+        ['429', 'explorer'],
+        ['TimeoutError', undefined],
+        ['__proto__', undefined],
+        ['unknown', undefined],
+      ]);
+      expect(model?.failures?.recent[0]?.at).toBe(
+        Date.parse('2026-11-02T00:00:03.000Z'),
+      );
+
+      for (let i = 0; i < MAX_FAILURE_SAMPLES; i++) fail({ status_code: 500 });
+      const failures =
+        service.getMetricsForSession('session-a').statsModels?.['qwen3-coder']
+          .failures;
+      expect(failures?.recent).toHaveLength(MAX_FAILURE_SAMPLES);
+      expect(failures?.byKind['500']).toBe(MAX_FAILURE_SAMPLES);
+      expect(failures?.byKind['429']).toBe(2);
+    });
+
+    it('keeps failure kinds prototype-free after snapshot restore', () => {
+      service.addEvent(
+        apiError('qwen3-coder', 10, 'boom', { status_code: 503 }),
+        'session-a',
+      );
+      service.restoreFromReplaySnapshot(service.snapshotForReplay('session-a'));
+
+      const byKind =
+        service.getMetricsForSession('session-a').statsModels?.['qwen3-coder']
+          .failures?.byKind;
+      expect(byKind?.['503']).toBe(1);
+      expect(Object.getPrototypeOf(byKind)).toBeNull();
+    });
+
+    it('leaves events recorded without generation_ms out of timing', () => {
+      service.addEvent(
+        timedResponse({ ttft_ms: 1_500, generation_ms: undefined }),
+      );
+
+      expect(service.getMetrics().generation).toBeUndefined();
+      expect(service.getMetrics().models['qwen3-coder'].tokens.candidates).toBe(
+        20,
+      );
+    });
+
+    it('keeps sub-100ms generation windows out of output speed', () => {
+      service.addEvent(
+        timedResponse({ generation_ms: 99, output_token_count: 95 }),
+      );
+      service.addEvent(
+        timedResponse({ generation_ms: 100, output_token_count: 10 }),
+      );
+
+      expect(service.getMetrics().generation).toMatchObject({
+        timedRequests: 2,
+        totalTtftMs: 200,
+        totalGenerationDurationMs: 100,
+        totalThroughputOutputTokens: 10,
+        last: { generationDurationMs: 100, outputTokens: 10 },
       });
     });
 
@@ -609,7 +875,7 @@ describe('UiTelemetryService', () => {
       },
     );
 
-    it.each(['openai', 'qwen-oauth'])(
+    it.each(['openai', 'openai-responses', 'qwen-oauth'])(
       'does not double-count reasoning for %s events',
       (authType) => {
         service.addEvent(
@@ -1340,6 +1606,15 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     service.addEvent(response('hook', 20), 'session-a');
     service.restoreSessionModelMetrics('session-a', saved);
     expect(service.getTotalOutputTokens('session-a')).toBe(170);
+    expect(
+      service.getMetricsForSession('session-a').billableOutputTokens,
+    ).toBeUndefined();
+    service.addEvent(response('new-model', 7), 'session-a');
+    expect(
+      service.getMetricsForSession('session-a').billableOutputTokens,
+    ).toEqual({
+      'new-model': { total: 7, bySource: { main: 7 } },
+    });
     expect(service.getTotalOutputTokens('session-b')).toBe(9);
   });
 

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -85,6 +86,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  getShellDisplayName,
   hasShellSubstitution,
   SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
@@ -106,6 +108,8 @@ import {
 } from '../utils/sedEditParser.js';
 import {
   detectLineEnding,
+  ensureCrlfLineEndings,
+  needsCrlfLineEndings,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
@@ -116,6 +120,13 @@ const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
 // (long-run advisory, attribution warning). The reservation math and the
 // append loop share it so the two cannot drift.
 const APPENDED_METADATA_SEPARATOR = '\n\n';
+
+type GitHeadBeforeCommand =
+  | { sha: string; unborn: false }
+  | { sha: null; unborn: true };
+
+export const SHELL_RECORD_ARTIFACT_REMINDER =
+  'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, notebook, image, pdf, or an office document), call record_artifact for each one. workspacePath is relative to the current execution directory, and title is required. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
 
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
@@ -683,8 +694,8 @@ const COMMIT_RECOGNITION_LEADING_NOISE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The program recogniser shared by `gitCommitContext` and
- * `findAttributableCommitSegment` (#12514): skip leading
+ * The program recogniser shared by `gitCommitContext`,
+ * `findAttributableCommitSegment` and `isAmendCommit` (#12514): skip leading
  * control-flow/noise keywords and match the program on its
  * basename (see `programBasename`), so `then git commit`,
  * `time git commit`, `! git commit` and `/usr/bin/git commit` all
@@ -758,7 +769,10 @@ function programBasename(program: string): string {
  * attribution. The trade-off matches the wrong-repo guard's intent
  * (better miss than corrupt unrelated repos).
  */
-function gitCommitContext(command: string): {
+function gitCommitContext(
+  command: string,
+  cwd: string,
+): {
   hasCommit: boolean;
   attributableInCwd: boolean;
 } {
@@ -779,17 +793,19 @@ function gitCommitContext(command: string): {
       // `git commit` into a different repo. A cd AFTER the commit
       // doesn't matter for the commit we already saw.
       //
-      // A heuristic relaxation: relative cd targets that don't escape
-      // upward (no `..`, no absolute path, no env-var/$home expansion)
-      // almost always stay within the same repo. The very common
-      // `cd subdir && git commit -m "..."` flow is the motivating case
-      // — same repo, same toplevel, attribution is still safe. Only
+      // A heuristic relaxation: cd targets that keep us inside this
+      // repository — a relative path without upward escape, or an
+      // absolute path under the shell's cwd — almost always stay in the
+      // same repo. The very common `cd subdir && git commit -m "..."`
+      // and `cd /abs/repo && git commit -m "..."` flows are the
+      // motivating cases — same repo, same toplevel, attribution is
+      // still safe. Only
       // mark as shifted when the target *could* land us in a different
       // repo. We can't be 100% certain without running `git rev-parse
       // --show-toplevel` after the cd, which would require a synchronous
       // fs/exec call that the rest of this walk avoids — the heuristic
       // covers the common case and stays conservative on the rest.
-      if (!hasCommit && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      if (!hasCommit && cdTargetMayChangeRepo(tokens, cwd)) cwdShifted = true;
       continue;
     }
     if (program === 'popd') {
@@ -860,23 +876,45 @@ function parseGhInvocation(tokens: string[]): string[] {
  * whether a subsequent `git commit` in the same chain is still
  * attributable in our cwd.
  *
- * Returns true (conservative — assume shift) when the target is
- * absolute, escapes upward (`..`), goes to `$HOME` / `~`, contains an
- * env-var (we can't resolve it statically), or is missing entirely
- * (`cd` alone goes to `$HOME`). Plain relative paths like `cd src`,
- * `cd ./packages/foo`, or `cd subdir/nested` are treated as in-repo.
+ * Returns true (conservative — assume shift) when the target escapes
+ * upward (`..`), goes to `$HOME` / `~`, contains an env-var (we can't
+ * resolve it statically), or is missing entirely (`cd` alone goes to
+ * `$HOME`). Plain relative paths like `cd src`, `cd ./packages/foo`,
+ * or `cd subdir/nested` are treated as in-repo.
+ *
+ * An absolute target is resolved against `cwd` (the directory the shell
+ * command runs in, #12514-A): landing on that directory or in a
+ * subdirectory of it cannot change the repository, so the very common
+ * `cd /abs/path/to/this/repo && git commit -m "..."` spelling keeps
+ * attribution. Anything else absolute — a sibling, an unrelated tree —
+ * still shifts. Resolution is static (`path.resolve`) on purpose: the
+ * walk must not spawn `git rev-parse` (see `gitCommitContext`). Because
+ * it never touches the filesystem, a symlink or a nested repo inside
+ * `cwd` is a known residue of this heuristic, and containment is
+ * measured against `cwd`, not the repository root.
  */
-function cdTargetMayChangeRepo(tokens: string[]): boolean {
+function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
   // tokens[0] is 'cd'. The next non-flag token is the target.
   let i = 1;
   while (i < tokens.length && tokens[i]!.startsWith('-')) i++;
   const target = tokens[i];
   // `cd` with no argument goes to $HOME.
   if (target === undefined) return true;
-  if (target.startsWith('/')) return true;
+  // An env-var (`$PKG`, `${PKG}`) or a backtick substitution expands at
+  // runtime, so the literal text looking contained proves nothing: with
+  // `PKG=../other-repo`, `cd /repo/$PKG` resolves lexically to a path
+  // under `cwd` while bash lands elsewhere. Checked before the absolute
+  // branch so `/repo/$PKG` cannot be certified.
+  if (target.includes('$') || target.includes('`')) return true;
+  if (target.startsWith('/')) {
+    // Same directory, or a subdirectory of it: still this repo. The
+    // `path.sep` in the prefix test is load-bearing — `<repo>-sibling`
+    // shares the string prefix but is a different repository.
+    const root = path.resolve(cwd);
+    const resolved = path.resolve(cwd, target);
+    return !(resolved === root || resolved.startsWith(root + path.sep));
+  }
   if (target.startsWith('~')) return true;
-  // Env-var reference (e.g. `$HOME`, `$REPO`) — can't resolve here.
-  if (target.includes('$')) return true;
   // `..`, `../..`, `..\\foo` etc. could escape the repo root.
   if (target === '..') return true;
   if (target.startsWith('../') || target.startsWith('..\\')) return true;
@@ -905,15 +943,21 @@ function cdTargetMayChangeRepo(tokens: string[]): boolean {
  * shell tool counts. `git -C ../other commit --amend && git commit -m x`
  * must not flip the diff range for the second (fresh) commit, since
  * `preHead` would be the inner repo's SHA there, not ours.
+ *
+ * Recognition matches the other commit walks: leading shell
+ * control-flow/noise keywords are skipped and the program is matched on
+ * its basename, so a loose spelling still gets the amend-range diff.
  */
-function isAmendCommit(command: string): boolean {
+function isAmendCommit(command: string, cwd: string): boolean {
   let cwdShifted = false;
   for (const sub of splitCommands(command)) {
-    const tokens = tokeniseSegment(sub);
-    if (!tokens || tokens.length === 0) continue;
-    const program = tokens[0]!;
+    const rawTokens = tokeniseSegment(sub);
+    if (!rawTokens || rawTokens.length === 0) continue;
+    const tokens = skipCommitRecognitionNoise(rawTokens);
+    if (!tokens) continue;
+    const program = programBasename(tokens[0]!);
     if (program === 'cd' || program === 'pushd') {
-      if (!cwdShifted && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      if (!cwdShifted && cdTargetMayChangeRepo(tokens, cwd)) cwdShifted = true;
       continue;
     }
     if (program === 'popd') {
@@ -981,6 +1025,7 @@ function isAmendCommit(command: string): boolean {
  */
 function findAttributableCommitSegment(
   command: string,
+  cwd: string,
 ): { start: number; end: number } | null {
   let cursor = 0;
   let cwdShifted = false;
@@ -1006,10 +1051,11 @@ function findAttributableCommitSegment(
     if (!looseTokens) continue;
     const program = programBasename(looseTokens[0]!);
     if (program === 'cd' || program === 'pushd') {
-      // Mirror gitCommitContext's cd/pushd heuristic: relative paths
-      // that don't escape upward are treated as in-repo, so
-      // `cd subdir && git commit ...` still finds the segment.
-      if (!cwdShifted && cdTargetMayChangeRepo(looseTokens)) {
+      // Mirror gitCommitContext's cd/pushd heuristic: targets that keep
+      // us inside this repository are treated as in-repo, so
+      // `cd subdir && git commit ...` and `cd /abs/repo && git commit ...`
+      // still find the segment.
+      if (!cwdShifted && cdTargetMayChangeRepo(looseTokens, cwd)) {
         cwdShifted = true;
       }
       continue;
@@ -1888,9 +1934,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       );
     }
     await this.checkSedPriorRead(filePath);
-    const { content, _meta } = await this.config
-      .getFileSystemService()
-      .readTextFile({ path: filePath });
+    const fileSystemService = this.config.getFileSystemService();
+    const { content, _meta } = await fileSystemService.readTextFile({
+      path: filePath,
+    });
     let newContent: string;
     try {
       newContent = applySedSubstitution(content, sedInfo);
@@ -1898,15 +1945,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw new SedEditSimulationError(getErrorMessage(err));
     }
 
+    const meta = {
+      ..._meta,
+      lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
+    };
+    // Judge the edit by the content a read-back would return, not by the
+    // substitution string: the local writer re-applies CRLF for
+    // `lineEnding: 'crlf'` (and for Windows command scripts), so a substitution
+    // whose only effect is consuming the trailing `\r` (e.g. `s/.$//` on a CRLF
+    // file) would otherwise report an applied edit whose bytes never change.
+    // Comparing strings also keeps a BOM or a non-UTF-8 encoding from making
+    // the comparison false on a file that did not change. The prediction
+    // always assumes the normalization: a write capability says a client *can*
+    // write, not how it stores the content, and the in-repo `qwen serve` writer
+    // re-applies CRLF, so assuming verbatim would report a false success there.
+    const restored =
+      meta.lineEnding === 'crlf' || needsCrlfLineEndings(filePath);
+    if (
+      (restored ? ensureCrlfLineEndings(newContent) : newContent) === content
+    ) {
+      newContent = content;
+    }
+
     return {
       filePath,
       fileName: path.basename(filePath),
       originalContent: content,
       newContent,
-      meta: {
-        ..._meta,
-        lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
-      },
+      meta,
     };
   }
 
@@ -2498,23 +2564,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // text like `echo "git commit"` doesn't trigger snapshot/notes,
     // and so attribution still runs after a `git commit && cd ..`
     // chain (which would have failed an "any cd anywhere" gate).
-    const commitCtx = gitCommitContext(strippedCommand);
-    // Capture preHead only when the commit will actually be
-    // attributed in our cwd: that's the only consumer (the
-    // `attributableInCwd` branch below feeds preHead into
-    // `attachCommitAttribution` and `trackSessionCommit`). For
-    // non-attributable hasCommit cases (`cd /elsewhere && git
-    // commit`, `git -C /other commit`), no consumer reads preHead and
-    // the ~10–50 ms execFileSync is dead work that just blocks the
-    // event loop before the user's real command spawns.
-    // Registration must never run against a null preHead —
-    // `head.sha !== preHead` would be trivially true and exempt
-    // whatever HEAD happens to be there (the fail-open #12463's
-    // regression row ② pins).
-    const preHead: string | null =
+    const commitCtx = gitCommitContext(strippedCommand, cwd);
+    // Capture HEAD only when the commit will actually be attributed in our
+    // cwd: that's the only consumer (the `attributableInCwd` branch below
+    // feeds `preHead` into `attachCommitAttribution` and passes the full
+    // state to promoted-path registration). For non-attributable hasCommit
+    // cases (`cd /elsewhere && git commit`, `git -C /other commit`), no
+    // consumer reads HEAD and the ~10–50 ms execFileSync is dead work that
+    // just blocks the event loop before the user's real command spawns.
+    // Registration must never run against a failed probe —
+    // `head.sha !== preHead` would be trivially true and exempt whatever
+    // HEAD happens to be there (the fail-open #12463's regression row ②
+    // pins). An unborn HEAD is represented separately from that failure.
+    const headBeforeCommand: GitHeadBeforeCommand | null =
       !this.config.getShellExecutionSandbox?.() && commitCtx.attributableInCwd
-        ? this.getGitHeadSync(cwd)
+        ? this.getGitHeadBeforeCommand(cwd)
         : null;
+    const preHead = headBeforeCommand?.sha ?? null;
 
     // Snapshot the attribution inputs BEFORE spawn so bindGhPrCreate can
     // tell a run that CREATED a PR from one that merely RESOLVED the
@@ -2946,7 +3012,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         commandToExecute,
         promoteAbortController,
         promoteArtifacts,
-        preHead,
+        headBeforeCommand,
       );
       return promotedToolResult;
     }
@@ -3061,7 +3127,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // — `preHead` was captured synchronously before spawn and is
       // the pre-amend SHA, so this range captures only the amend
       // delta.
-      const isAmend = isAmendCommit(strippedCommand);
+      const isAmend = isAmendCommit(strippedCommand, cwd);
       attributionWarning = await this.attachCommitAttribution(
         cwd,
         preHead,
@@ -3178,18 +3244,33 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // below (deliberately outside the truncation envelope — see the append
     // loop), so their size comes out of the body budget here: the marker
     // asserts the ASSEMBLED string fits the declared budget, and a body that
-    // fits whole must still fit once they land. The reservation and the
-    // append loop both iterate this one list, so the two cannot disagree.
+    // fits whole must still fit once they land. The reservation counts every
+    // model-facing notice; the record-artifact reminder is not shown in the TUI.
     const longRunHint = shouldAppendLongRunHint
       ? buildLongRunningForegroundHint(elapsedMs)
+      : null;
+    const recordArtifactReminder = (await this.shouldRemindToRecordArtifact(
+      result,
+    ))
+      ? SHELL_RECORD_ARTIFACT_REMINDER
       : null;
     const appendedMetadata = [longRunHint, attributionWarning].filter(
       (s): s is string => s !== null,
     );
-    const appendedMetadataChars = appendedMetadata.reduce(
+    const modelNotices = [...appendedMetadata, recordArtifactReminder].filter(
+      (s): s is string => s !== null,
+    );
+    const appendedMetadataChars = modelNotices.reduce(
       (total, s) => total + APPENDED_METADATA_SEPARATOR.length + s.length,
       0,
     );
+
+    // A capture-bound discard leaves llmContent a retained prefix, so the
+    // pre-reduction size is unrecoverable: declare it unknown, not the bound.
+    const rawOutputSize =
+      rawCapture || result.outputCaptureLimitExceeded
+        ? null
+        : measureToolOutput(llmContent);
 
     // Raw capture owns full output; result.output is only a bounded preview.
     // Otherwise truncate large output and save full content to a temp file.
@@ -3226,6 +3307,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
+          layer: 'producer',
+          source: this.config.isTruncateToolOutputThresholdExplicit?.()
+            ? 'explicit'
+            : 'per_tool',
           threshold: bodyBudgetChars,
           previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',
@@ -3283,9 +3368,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // hint to error.message too so the advisory survives whichever
     // branch the scheduler takes.
     //
-    // Note on reach: `ShellExecutionResult.error` is reserved for
-    // SPAWN / setup failures (per the field's doc comment in
-    // shellExecutionService.ts); non-zero exits leave it null. Real
+    // Note on reach: `ShellExecutionResult.error` includes PTY resource
+    // failures as well as SPAWN / setup failures; non-zero exits leave it
+    // null. Resource failures retain the bounded output body below. Real
     // spawn failures (ENOENT, permission denied) typically resolve in
     // <1s, so the elapsed >= threshold + spawn-error combination is
     // rare. The preservation is here for the slow-spawn edge cases
@@ -3298,6 +3383,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // SIEM alerting, hook-side error parsers) have an unambiguous
     // boundary they can split on rather than getting ~400 chars of
     // advisory text mixed inline with the original error body.
+    const isPtyResourceFailure =
+      isNodeError(result.error) && result.error.code === 'QWEN_PTY_WRITE_LIMIT';
     const executionError = timeoutSummary
       ? {
           error: {
@@ -3308,9 +3395,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : result.error
         ? {
             error: {
-              message:
-                result.error.message +
-                (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+              message: isPtyResourceFailure
+                ? typeof llmContent === 'string'
+                  ? llmContent
+                  : returnDisplayMessage
+                : result.error.message +
+                  (longRunHint ? `\n\n---\n${longRunHint}` : ''),
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
@@ -3328,8 +3418,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
           : {};
 
+    // Shell cannot see which files the command wrote. Ask only the model,
+    // after truncation, and not on a failure the scheduler reports via error.message.
+    if (recordArtifactReminder && typeof llmContent === 'string') {
+      llmContent += `${APPENDED_METADATA_SEPARATOR}${recordArtifactReminder}`;
+    }
+
     return {
       llmContent,
+      rawOutputSize,
+      // `rawCapture` alone may still carry the complete output in its bounded
+      // preview; only a capture-bound discard means the body was cut.
+      ...(result.outputCaptureLimitExceeded
+        ? { truncatedByProducer: true }
+        : {}),
       returnDisplay: {
         type: 'shell_result',
         version: 1,
@@ -3362,8 +3464,41 @@ export class ShellToolInvocation extends BaseToolInvocation<
       },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
+      // A user cancel kills the process group but returns a normal result, so
+      // tell the scheduler its work did not finish.
+      ...(result.aborted && !wasTimeout && !wasPromoteRefused
+        ? { interruptedBeforeCompletion: true }
+        : {}),
       ...executionError,
     };
+  }
+
+  /**
+   * The model only sees this after a command that may have written a file.
+   * Disabled sessions have no record_artifact tool. Commands the AST proves
+   * read-only did not create one.
+   */
+  private async shouldRemindToRecordArtifact(
+    result: ShellExecutionResult,
+  ): Promise<boolean> {
+    if (this.config.isRecordArtifactEnabled?.() !== true) return false;
+    if (
+      result.aborted ||
+      result.error ||
+      isSignalTermination(result.signal) ||
+      isShellExitError(this.params.command, result.exitCode)
+    ) {
+      return false;
+    }
+    try {
+      const readOnly = await isShellCommandReadOnlyASTInDirectory(
+        stripShellWrapper(this.params.command),
+        this.params.directory || this.config.getTargetDir(),
+      );
+      return !readOnly;
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -3408,13 +3543,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // An ERRORED pre-run fetch proved nothing about the branch's prior
         // PRs — decline instead of failing open, or a branch whose snapshot
         // flaked would bind its existing PR as this session's creation.
-        if (preRunPrSnapshot?.status === 'error') return;
+        if (preRunPrSnapshot?.status === 'error') {
+          debugLogger.debug(
+            'gh pr create not bound: pre-run PR snapshot unavailable',
+          );
+          return;
+        }
         // The launch directory (`directory` param, else target dir), not a
         // repo the command may have `cd`'d into: gh resolves THIS repo's
         // branch, so an internal-`cd` create binds only when this branch's
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
-        if (created.status !== 'pr' || created.state !== 'open') return;
+        if (created.status !== 'pr' || created.state !== 'open') {
+          // Keep the facts distinct: `none` is gh's proved absence for this
+          // branch; `error` means gh could not answer at all; a merged/closed
+          // PR arrives as status `pr` with a non-open state. A paraphrase that
+          // names only one cause sends the operator hunting for a PR this gate
+          // already ruled on.
+          debugLogger.debug('gh pr create not bound: post-run gh resolution', {
+            status: created.status,
+            ...(created.status === 'pr' ? { state: created.state } : {}),
+          });
+          return;
+        }
         // The run resolved the branch's EXISTING PR — nothing was created
         // (a retry's view segment exits 0 and prints the existing URL).
         // Binding would stamp this session as creator of a PR it did not
@@ -3424,6 +3575,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
           preRunPrSnapshot?.status === 'pr' &&
           created.number === preRunPrSnapshot.number
         ) {
+          debugLogger.debug(
+            'gh pr create not bound: PR already existed before the run',
+            { number: created.number },
+          );
           return;
         }
         // Repo identity lives in on-disk state an in-command
@@ -3440,6 +3595,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
           (createdRepoKey !== preRunRepoKeys.resolved &&
             createdRepoKey !== preRunRepoKeys.parent)
         ) {
+          debugLogger.debug('gh pr create not bound: repo identity mismatch', {
+            created: createdRepoKey ?? 'unknown',
+            expected: preRunRepoKeys?.resolved ?? 'unknown',
+            parent: preRunRepoKeys?.parent ?? 'unknown',
+          });
           return;
         }
         // Branch identity: a command that switched branches mid-run
@@ -3452,9 +3612,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
           preRunBranch === undefined ||
           created.headRefName !== preRunBranch
         ) {
+          debugLogger.debug('gh pr create not bound: branch mismatch', {
+            created: created.headRefName ?? 'unknown',
+            expected: preRunBranch ?? 'unknown',
+          });
           return;
         }
-        if (!output.includes(created.url)) return;
+        if (!output.includes(created.url)) {
+          debugLogger.debug(
+            'gh pr create not bound: URL absent from the command output',
+          );
+          return;
+        }
         const sessionService = this.config.getSessionService();
         // Re-resolve the session's archive location immediately before the
         // locked mutation: an archive transition landing during the gh
@@ -3488,15 +3657,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
         const applied = await upsertSessionPrs(prPath, [
           { ...createdPr, source: 'create' },
         ]);
-        if (!applied.added.includes(created.number)) return;
+        if (!applied.added.includes(created.number)) {
+          debugLogger.debug('gh pr create not bound: already bound', {
+            number: created.number,
+          });
+          return;
+        }
         // The daemon never sees this write; the notification carries the
         // catalog mark so live-state clients refetch it (~2s) instead of
         // waiting for unrelated catalog churn.
         this.config
           .getSessionService()
           .emitSessionPrBound(this.config.getSessionId(), createdPr);
-      } catch {
-        /* best-effort binding */
+      } catch (error) {
+        // Best-effort binding; name the swallowed cause so silence reads as a
+        // failure, not as "the gate never ran".
+        debugLogger.debug('gh pr create binding failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     })();
   }
@@ -3518,11 +3696,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * pre-allocated buffer/stream slots that absorb the race between
    * service-side promote-time data flush and this finalizer running.
    *
-   * `preHead` is the HEAD captured synchronously before spawn (null
-   * unless the command carried a commit recognisable as landing in our
-   * cwd, unsandboxed). A promoted command settles after `execute()`
-   * has returned, so the foreground registration block never runs for
-   * it — registration happens here, at settle (#12514).
+   * `headBeforeCommand` is the HEAD state captured synchronously before
+   * spawn (null unless the command carried a commit recognisable as
+   * landing in our cwd, unsandboxed). A promoted command settles after
+   * `execute()` has returned, so the foreground registration block never
+   * runs for it — registration happens here, at settle (#12514).
    */
   private async handlePromotedForeground(
     result: ShellExecutionResult,
@@ -3530,7 +3708,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     commandToExecute: string,
     abortController: AbortController,
     promoteArtifacts: PromoteArtifacts,
-    preHead: string | null,
+    headBeforeCommand: GitHeadBeforeCommand | null,
   ): Promise<ToolResult> {
     // Mirror executeBackground's outputPath layout so /tasks-on-disk and
     // ReadFileTool's auto-allow rules treat foreground-promoted shells
@@ -3918,13 +4096,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Session-commit registration for the promoted path (#12514 A.3).
     // `execute()` returns the promote ToolResult without reaching the
     // foreground registration block, so a commit landed by a promoted
-    // command would never earn the amend exemption. `preHead` arrives
-    // from the caller's pre-spawn capture, gated there on
-    // `attributableInCwd` (and non-sandboxed), so a
-    // null here means the command carried no commit recognisable as
-    // landing in our cwd — `cd /elsewhere && git commit` stays
-    // unregistered exactly as the foreground path leaves it, and
-    // `head.sha !== preHead` can never be trivially true.
+    // command would never earn the amend exemption. The pre-spawn HEAD
+    // state arrives from the caller, gated there on
+    // `attributableInCwd` (and non-sandboxed), so a null here means the
+    // command carried no commit recognisable as landing in our cwd —
+    // `cd /elsewhere && git commit` stays unregistered exactly as the
+    // foreground path leaves it. An unborn HEAD is a distinct value:
+    // `rev-parse --git-dir` succeeded but `HEAD` had no commit yet, so a
+    // root commit from this command is still attributable (#12514-D).
     //
     // Registration is settle-only by design: the commit can land at any
     // point in the backgrounded child's life, and the only moment this
@@ -3946,7 +4125,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // registry.
     const registrationGeneration = getSessionCommitGeneration();
     const registerPromotedCommit = (): void => {
-      if (preHead === null || promotedCommitRegistration !== null) return;
+      if (headBeforeCommand === null || promotedCommitRegistration !== null) {
+        return;
+      }
       if (getSessionCommitGeneration() !== registrationGeneration) {
         // Fail-closed: the registry this decision was made against no
         // longer exists, so the exemption it would grant is stale. The
@@ -3962,7 +4143,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
       promotedCommitRegistration = this.trackSessionCommit(
         cwd,
-        preHead,
+        headBeforeCommand.sha,
         // Lineage, not mere difference. This runs when the backgrounded
         // child exits — arbitrarily later than the caller's pre-spawn
         // capture — so a commit anybody else lands in this repository
@@ -3970,9 +4151,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // and `head.sha !== preHead` alone would adopt it: the foreign
         // commit would earn the amend exemption and the promoted one
         // would lose its own. Requiring that entry to have moved HEAD
-        // *from* `preHead` keeps the registered SHA one this command
-        // created (see `trackSessionCommit`'s `requirePredecessor`).
-        preHead,
+        // *from* `preHead` rejects the foreign one unless this command's
+        // own commit landed first; a foreign commit landed straight on
+        // `preHead` still passes — the #12523 residue disclosed on
+        // `trackSessionCommit`'s `requirePredecessor`.
+        headBeforeCommand.unborn ? null : headBeforeCommand.sha,
       ).catch((err: unknown) => {
         // Registration must never break the settle path — a failure
         // here costs the exemption (fail-closed), nothing more.
@@ -4114,7 +4297,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Use the broader `hasCommit` flag rather than `attributableInCwd`:
     // `cd /elsewhere && git commit` should still be refused even
     // though we wouldn't attribute it.
-    if (gitCommitContext(strippedCommand).hasCommit) {
+    if (
+      gitCommitContext(
+        strippedCommand,
+        this.params.directory || this.config.getTargetDir(),
+      ).hasCommit
+    ) {
       return {
         llmContent:
           'Refusing to run `git commit` in background mode: AI-attribution notes ' +
@@ -4414,30 +4602,60 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Synchronous companion to {@link getGitHead}. Captured BEFORE the
-   * user's shell command spawns so a fast `git commit` (hot-cached,
-   * no hooks) cannot move HEAD before our async rev-parse has a chance
-   * to read it — a real race seen on slow filesystems / heavy contention
-   * where preHead would otherwise resolve to the new SHA, postHead would
-   * match, and `attachCommitAttribution` would silently skip writing the
-   * attribution note even though the commit succeeded.
+   * Synchronous pre-spawn HEAD probe. Captured BEFORE the user's shell
+   * command spawns so a fast `git commit` (hot-cached, no hooks) cannot
+   * move HEAD before our async rev-parse has a chance to read it — a real
+   * race seen on slow filesystems / heavy contention where preHead would
+   * otherwise resolve to the new SHA, postHead would match, and
+   * `attachCommitAttribution` would silently skip writing the attribution
+   * note even though the commit succeeded.
+   *
+   * A non-repository, missing git binary, or failed `--git-dir` probe
+   * returns `null`. A verified repository whose HEAD has no commit returns
+   * `{ sha: null, unborn: true }` instead: callers that need a SHA still
+   * see null, while session-commit registration can require an explicitly
+   * empty predecessor rather than conflating the unborn state with a
+   * failed probe.
    *
    * Worst case is ~10–50 ms of event-loop block per commit-shaped shell
    * command; acceptable trade for correctness of the post-command HEAD
    * comparison.
    */
-  private getGitHeadSync(cwd: string): string | null {
+  private getGitHeadBeforeCommand(cwd: string): GitHeadBeforeCommand | null {
     try {
-      const stdout = childProcess.execFileSync('git', ['rev-parse', 'HEAD'], {
+      const stdout = childProcess.execFileSync(
+        'git',
+        ['rev-parse', '--verify', 'HEAD'],
+        {
+          cwd,
+          timeout: 2000,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        },
+      );
+      const sha = String(stdout).trim();
+      if (sha.length > 0) return { sha, unborn: false };
+      return null;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !('status' in error) ||
+        error.status !== 128 ||
+        !('signal' in error) ||
+        error.signal !== null
+      ) {
+        return null;
+      }
+      // A failed HEAD lookup is either an unborn branch or no repository.
+    }
+    try {
+      childProcess.execFileSync('git', ['rev-parse', '--git-dir'], {
         cwd,
         timeout: 2000,
         windowsHide: true,
-        // Discard stderr noise (e.g. "fatal: not a git repository") —
-        // the catch-or-empty-output path already covers failure.
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'ignore', 'ignore'],
       });
-      const sha = String(stdout).trim();
-      return sha.length > 0 ? sha : null;
+      return { sha: null, unborn: true };
     } catch {
       return null;
     }
@@ -4490,17 +4708,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * lands in this repository meanwhile is not a narrow race but the
    * expected shape, and difference-from-`preHead` alone would adopt it.
    * Passing the captured `preHead` here requires the entry that created
-   * HEAD to have moved it *from* that SHA, which only this command's own
-   * commit does. Fail-closed both ways: a foreign commit never earns an
-   * exemption, and a multi-commit promoted chain (`commit a && commit b`,
-   * whose newest entry descends from `a`) loses one it had earned rather
-   * than guessing. The foreground call site passes nothing and keeps the
-   * disclosed window unchanged.
+   * HEAD to have moved it *from* that SHA. For an unborn repository the
+   * expected predecessor is explicitly `null`, which lets the initial
+   * commit register without treating a failed probe as a valid empty
+   * history. That sentinel is not provenance: every root commit satisfies
+   * it, so a root commit somebody else lands during the promoted window is
+   * indistinguishable from this command's own and registers too (#12523).
+   * A born HEAD narrows that window but does not close it: a foreign commit
+   * landed directly on `preHead` while this command's own commit never
+   * landed has the same predecessor and registers too, the same #12523
+   * residue. Fail-closed once this command's own commit landed first: a
+   * foreign commit on top of it never earns an exemption, and a multi-commit
+   * promoted chain (`commit a && commit b`, whose newest entry descends
+   * from `a`) loses one it had earned rather than guessing. The foreground
+   * call site passes nothing and keeps the disclosed window unchanged.
    */
   private async trackSessionCommit(
     cwd: string,
     preHead: string | null,
-    requirePredecessor?: string,
+    requirePredecessor?: string | null,
   ): Promise<void> {
     const head = await this.getGitHeadOrigin(cwd);
     if (
@@ -4512,10 +4738,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // only other output of this path is a block reason asserting the
       // commit was not the agent's, so say which side of the lineage
       // check failed.
+      const predecessorLabel =
+        requirePredecessor === null
+          ? '(unborn)'
+          : requirePredecessor.slice(0, 12);
       debugLogger.warn(
         `Session commit not registered in ${cwd}: the newest HEAD reflog entry descends from ` +
           `${head.predecessor ?? '(no predecessor)'}, not from the pre-spawn HEAD ` +
-          `${requirePredecessor.slice(0, 12)}, so it was not created by this command.`,
+          `${predecessorLabel}, so it was not created by this command.`,
       );
       return;
     }
@@ -5277,7 +5507,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (with the trailer mid-string) back to the executor. The
     // in-cwd check is what we want here: only inject the
     // trailer when we're confident the commit lands in our cwd.
-    const segmentRange = findAttributableCommitSegment(command);
+    const segmentRange = findAttributableCommitSegment(
+      command,
+      this.params.directory || this.config.getTargetDir(),
+    );
     if (!segmentRange) {
       return command;
     }
@@ -5554,30 +5787,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 }
 
-function getExecutableBasename(executable: string): string {
-  return path.basename(path.win32.basename(executable));
-}
-
-function getShellDisplayName({
-  executable,
-  shell,
-}: ShellConfiguration): string {
-  switch (shell) {
-    case 'cmd':
-      return 'cmd.exe';
-    case 'powershell': {
-      const basename = getExecutableBasename(executable).toLowerCase();
-      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
-    }
-    case 'bash':
-      return 'bash';
-    default: {
-      const _exhaustive: never = shell;
-      return _exhaustive;
-    }
-  }
-}
-
 function getShellExecutionWrapper(
   shellConfiguration = getShellConfiguration(),
 ): string {
@@ -5642,9 +5851,10 @@ function getShellCommandSequencingGuidance({
   - Use '&' only when you need to run commands sequentially but don't care if earlier commands fail.
   - DO NOT use ';' or newlines to separate commands in cmd.exe.`;
     case 'powershell': {
-      const executableBasename =
-        getExecutableBasename(executable).toLowerCase();
-      if (executableBasename === 'pwsh.exe') {
+      if (
+        getShellDisplayName({ executable, argsPrefix: [], shell }) ===
+        'pwsh.exe'
+      ) {
         return `- When issuing multiple commands:
   ${independentGuidance}
   - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).

@@ -13,9 +13,16 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import { MessageType } from '../types.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
-  type AuthType,
+  AuthType,
   type AvailableModel,
   type Config,
   isImageCapable,
@@ -164,12 +171,10 @@ async function switchMainModel(
   config: Config,
   settings: LoadedSettings,
   currentAuthType: AuthType,
-  modelArg: string,
+  parsed: ReturnType<typeof parseAcpModelOption>,
   scopeOverride?: SettingScope,
   persistSelection = true,
 ): Promise<string> {
-  const parsed = parseAcpModelOption(modelArg);
-
   if (parsed.authType) {
     // The main-model branch of the `/model` action rejects a typed
     // `(qwen-oauth)` selection before this point (the free tier is
@@ -195,12 +200,12 @@ async function switchMainModel(
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, modelArg, undefined);
+  await config.switchModel(currentAuthType, parsed.modelId, undefined);
   if (persistSelection) {
-    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   }
-  return modelArg;
+  return parsed.modelId;
 }
 
 function formatUnavailableModelMessage(
@@ -1098,24 +1103,6 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const contentGeneratorConfig = config.getContentGeneratorConfig();
-    if (!contentGeneratorConfig) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Content generator configuration not available.'),
-      };
-    }
-
-    const authType = contentGeneratorConfig.authType;
-    if (!authType) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Authentication type not available.'),
-      };
-    }
-
     // `/model <id>` switches the session model; `/model <id> <prompt>` runs the
     // prompt on <id> for this turn only (inline one-shot override) without
     // changing or persisting the session model.
@@ -1125,8 +1112,70 @@ export const modelCommand: SlashCommand = {
       firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
     const inlinePrompt =
       firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
+    const parsed = parseAcpModelOption(modelName);
+    const contentGeneratorConfig = config.getContentGeneratorConfig();
+    const authType =
+      contentGeneratorConfig?.authType ??
+      (settings.merged.security?.auth?.selectedType ===
+      AuthType.QWEN_SUBSCRIPTION
+        ? AuthType.QWEN_SUBSCRIPTION
+        : parsed.authType);
+    if (!authType && !trimmedArgs && context.executionMode === 'interactive') {
+      return {
+        type: 'dialog',
+        dialog: 'model',
+        ...persistScopeSpread(scopeOverride),
+      };
+    }
+    if (
+      modelName &&
+      (parsed.authType ?? authType) === AuthType.QWEN_SUBSCRIPTION
+    ) {
+      context.ui.addItem(
+        { type: MessageType.INFO, text: t('Loading models from provider…') },
+        Date.now(),
+      );
+      try {
+        const result = await config.refreshSubscriptionModels(
+          context.abortSignal,
+        );
+        if (result.cached)
+          context.ui.addItem(
+            { type: MessageType.WARNING, text: SUBSCRIPTION_MODELS_CACHED },
+            Date.now(),
+          );
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            error instanceof SubscriptionOAuthError
+              ? subscriptionErrorMessage(error)
+              : SUBSCRIPTION_MODELS_UNAVAILABLE,
+        };
+      }
+    }
+    if (
+      !contentGeneratorConfig &&
+      authType !== AuthType.QWEN_SUBSCRIPTION &&
+      !parsed.authType
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Content generator configuration not available.'),
+      };
+    }
+
+    if (!authType) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Authentication type not available.'),
+      };
+    }
+
     if (modelName) {
-      const parsed = parseAcpModelOption(modelName);
       // `coder-model(qwen-oauth)` from the shipped registry would otherwise
       // reach the switch and surface a misleading "credentials expired" error
       // for a tier that no longer exists. A wrapped
@@ -1239,7 +1288,7 @@ export const modelCommand: SlashCommand = {
         config,
         settings,
         authType,
-        modelName,
+        parsed,
         scopeOverride,
         context.executionPolicy?.persistModelSelection !== false,
       );
