@@ -287,6 +287,8 @@ function currentShellPidScope(): ShellPidScope {
 }
 
 function isSamePidScope(recorded: unknown, current: ShellPidScope): boolean {
+  // Matching nulls prove neither the machine/boot nor its PID namespace.
+  if (current.bootId === null || current.pidNamespace === null) return false;
   if (typeof recorded !== 'object' || recorded === null) return false;
   const scope = recorded as Record<string, unknown>;
   return (
@@ -353,7 +355,21 @@ function settleShellStatusFile(
     if (!stats.isFile() || stats.size > MAX_STATUS_FILE_BYTES) {
       return { kind: 'skipped' };
     }
-    text = fs.readFileSync(fd, 'utf8');
+    const buffer = Buffer.allocUnsafe(MAX_STATUS_FILE_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = fs.readSync(
+        fd,
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    if (bytesRead > MAX_STATUS_FILE_BYTES) return { kind: 'skipped' };
+    text = buffer.toString('utf8', 0, bytesRead);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     // Gone, or a symlink: nothing a later attempt could settle.

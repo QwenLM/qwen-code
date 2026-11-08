@@ -57,17 +57,22 @@ still running.
 `hostname` is `os.hostname()`. `bootId` and `pidNamespace` come from the
 existing `readLocalBootId()` and `readPidNamespaceId()` in
 `process-liveness.ts`, and are `null` where the platform does not expose
-them. A container on the same kernel has another pid namespace, another
-machine has another host name and boot, and a reboot has another boot id.
-A sidecar is settled only when all three match the settling process.
+them. A hostname alone cannot distinguish machines. A sidecar is settled
+only when both boot and PID-namespace identities are available and all three
+fields match the settling process. Matching `null` values do not prove a
+shared scope. Without those identities, including on macOS and Windows,
+automatic settling is skipped and the sidecar stays `running`.
 
 ### B. Settling function
 
 `settleOrphanedShellStatusFiles(dir)` reads every `*.status` file in a
 session's `background-shells` directory. It opens each without following a
 symlink or waiting on a FIFO, and reads it only when it is a regular file of
-at most 1 MiB. A sidecar whose `status` is `running`, whose recorded `pid` is
-a positive safe integer, whose `pidScope` matches, and whose process
+at most 1 MiB. Reads are bounded to 1 MiB plus one overflow-detection byte,
+including when the same file grows after the size check. Short reads are
+continued until EOF or that bound; overflowing files are left untouched.
+A sidecar whose `status` is `running`, whose recorded `pid` is a positive
+safe integer, whose `pidScope` matches, and whose process
 `isPidAlive` reports gone is rewritten with `status: 'unknown'` and a new
 `updatedAt`. Every other field is kept. The write uses the same atomic,
 owner-only, no-follow options as `writeStatusFile()`. The persisted value has
@@ -75,8 +80,9 @@ its own type, `ShellStatusFileStatus`; `BackgroundShellStatus` stays the
 in-memory set.
 
 Left alone: other statuses, sidecars without a pid or with an invalid one,
-sidecars whose `pidScope` differs or is missing, files that are not regular,
-oversized, unreadable or malformed, and sidecars whose pid is alive. One
+sidecars whose `pidScope` differs, is missing, or lacks a boot or PID-namespace
+identity, files that are not regular, oversized, unreadable or malformed,
+and sidecars whose pid is alive. One
 sidecar that fails does not stop the others.
 
 The function returns the sidecars it left `running` that may need settling
@@ -143,6 +149,9 @@ the process ended without recording how it finished.
   the owner's later write still lands, but a write in the other order would leave
   `unknown`. Two concurrent writers on one session are already unsupported.
 - Sidecars written by older versions have no `pidScope` and stay `running`.
+- Automatic settling currently requires Linux boot and PID-namespace identities.
+  On macOS, Windows, or Linux where either identity cannot be read, sidecars
+  stay `running`; matching hostnames alone do not justify checking their PIDs.
 - A change of host name, which macOS can make when the network changes, keeps
   that session's sidecars `running`. A sidecar written in an earlier sandbox
   container is also kept, because the new container has another pid
@@ -151,11 +160,12 @@ the process ended without recording how it finished.
 ## Validation plan
 
 - Unit tests for the settling function: a dead pid, a live pid, a foreign pid
-  namespace, boot or host, a missing scope, other statuses, no pid, invalid
-  pids, malformed JSON, a status-shaped non-status file, a FIFO, an oversized
-  file, one sidecar whose check throws, a missing directory, a real exited
-  process through the default `isPidAlive`, and a sidecar the registry wrote
-  settled with the default scope.
+  namespace, boot or host, a missing or incomplete scope, other statuses, no pid,
+  invalid pids, malformed JSON, a status-shaped non-status file, a FIFO, an oversized
+  file, post-stat growth, exactly-at-limit and one-byte-over files, short reads
+  through multibyte text, one sidecar whose check throws, a missing directory,
+  a real exited process through the default `isPidAlive`, and a registry-written
+  sidecar settled only when the native scope identities are available.
 - Watcher tests: a watched sidecar is settled once its process exits and not
   after the watch is stopped; a failed rewrite is retried until it lands while
   a sibling settles; the timer is unref'd; and, with a real child, a process
@@ -172,15 +182,20 @@ the process ended without recording how it finished.
   repo's fake OpenAI server, kill it with SIGKILL and with SIGHUP to its
   process group while a background shell runs, let the command finish, then
   resume the session and read the sidecar. Repeat with the sidecar's
-  `pidScope` changed to another host, which must stay `running`.
+  `pidScope` changed to another host, which must stay `running`. On macOS,
+  whose native scope lacks these identities, verify that the default recovery
+  leaves the sidecar `running` instead of judging the PID by hostname alone.
 
 ## Acceptance criteria
 
-- After the owning CLI is killed and its background command finishes, resuming
-  the session turns the sidecar into `unknown` with its original fields.
-- A sidecar whose process is still running stays `running`, and becomes
-  `unknown` once that process exits while the resumed session is open.
-- A sidecar written in another pid scope, or without one, stays `running`.
+- With proven same-scope identities, after the owning CLI is killed and its
+  background command finishes, resuming the session turns the sidecar into
+  `unknown` with its original fields.
+- With proven same-scope identities, a sidecar whose process is still running
+  stays `running`, and becomes `unknown` once that process exits while the
+  resumed session is open.
+- A sidecar written in another pid scope, without one, or with either
+  boot or PID-namespace identity missing stays `running`.
 - Orderly shutdowns still write `cancelled`, as before.
 
 ## Open questions

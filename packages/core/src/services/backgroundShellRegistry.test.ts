@@ -5,6 +5,7 @@
  */
 
 import {
+  appendFileSync,
   chmodSync,
   constants as fsConstants,
   lstatSync,
@@ -16,8 +17,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import fs from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { hostname, tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -27,6 +30,7 @@ import {
   settleOrphanedShellStatusFiles,
   statusFilePathFor,
   watchOrphanedShellStatusFiles,
+  type ShellPidScope,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 import {
@@ -1148,6 +1152,116 @@ describe('settleOrphanedShellStatusFiles', () => {
     }
   });
 
+  it.each([
+    { ...scope, bootId: null },
+    { ...scope, pidNamespace: null },
+    { ...scope, bootId: null, pidNamespace: null },
+  ])(
+    'does not infer a shared pid scope from missing identities: %j',
+    (unknownScope) => {
+      const sidecar = { ...running, pidScope: unknownScope };
+      write('shell-bg_1.status', sidecar);
+      const isAlive = vi.fn(() => false);
+      expect(
+        settleOrphanedShellStatusFiles(dir, { isAlive, scope: unknownScope }),
+      ).toEqual({ settled: 0, unsettled: [] });
+      expect(isAlive).not.toHaveBeenCalled();
+      expect(read('shell-bg_1.status')).toEqual(sidecar);
+    },
+  );
+
+  it('bounds actual reads when a sidecar grows after its size check', () => {
+    const statusPath = join(dir, 'shell-bg_1.status');
+    write('shell-bg_1.status', running);
+    const originalFstat = fs.fstatSync;
+    const originalRead = fs.readSync;
+    let grew = false;
+    let bytesRead = 0;
+    const statSpy = vi.spyOn(fs, 'fstatSync').mockImplementation(((
+      ...args: Parameters<typeof fs.fstatSync>
+    ) => {
+      const stats = originalFstat(...args);
+      if (!grew && typeof stats.size === 'number') {
+        grew = true;
+        appendFileSync(statusPath, ' '.repeat(2 * 1024 * 1024));
+      }
+      return stats;
+    }) as typeof fs.fstatSync);
+    const readSpy = vi.spyOn(fs, 'readSync').mockImplementation(((
+      ...args: Parameters<typeof fs.readSync>
+    ) => {
+      const count = originalRead(...args);
+      bytesRead += count;
+      return count;
+    }) as typeof fs.readSync);
+    syncBuiltinESMExports();
+    try {
+      expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+        settled: 0,
+        unsettled: [],
+      });
+      expect(bytesRead).toBe(1024 * 1024 + 1);
+      expect(grew).toBe(true);
+      expect(read('shell-bg_1.status')['status']).toBe('running');
+    } finally {
+      statSpy.mockRestore();
+      readSpy.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+
+  it.each([1024 * 1024, 1024 * 1024 + 1])(
+    'handles a sidecar of exactly %i bytes',
+    (size) => {
+      const json = JSON.stringify(running);
+      write(
+        'shell-bg_1.status',
+        json + ' '.repeat(size - Buffer.byteLength(json)),
+      );
+      const withinLimit = size === 1024 * 1024;
+      expect(settleOrphanedShellStatusFiles(dir, dead).settled).toBe(
+        withinLimit ? 1 : 0,
+      );
+      expect(read('shell-bg_1.status')['status']).toBe(
+        withinLimit ? 'unknown' : 'running',
+      );
+    },
+  );
+
+  it('continues short reads through multibyte text to EOF', () => {
+    const command = 'echo 你好';
+    write('shell-bg_1.status', { ...running, command });
+    const originalRead = fs.readSync;
+    const readSpy = vi
+      .spyOn(fs, 'readSync')
+      .mockImplementation(((
+        fd: number,
+        buffer: NodeJS.ArrayBufferView,
+        offset: number,
+        length: number,
+        position: number | bigint | null,
+      ) =>
+        originalRead(
+          fd,
+          buffer,
+          offset,
+          Math.min(length, 1),
+          position,
+        )) as typeof fs.readSync);
+    syncBuiltinESMExports();
+    try {
+      expect(settleOrphanedShellStatusFiles(dir, dead).settled).toBe(1);
+      expect(read('shell-bg_1.status')).toMatchObject({
+        status: 'unknown',
+        command,
+      });
+      expect(readSpy.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      readSpy.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+
   it('leaves settled, pid-less, invalid-pid, malformed and non-status files alone', () => {
     const { pid: _pid, ...withoutPid } = running;
     write('shell-done.status', { ...running, status: 'completed' });
@@ -1214,7 +1328,7 @@ describe('settleOrphanedShellStatusFiles', () => {
     expect(read('shell-bg_1.status')['status']).toBe('unknown');
   });
 
-  it('settles a sidecar the registry wrote, with its own pid scope', () => {
+  it('settles a registry-written sidecar only when native scope identities are available', () => {
     const { pid } = spawnSync(process.execPath, ['-e', '']);
     new BackgroundShellRegistry().register(
       makeEntry({
@@ -1223,11 +1337,19 @@ describe('settleOrphanedShellStatusFiles', () => {
         outputPath: join(dir, 'shell-bg_1.output'),
       }),
     );
-    expect(read('shell-bg_1.status')['pidScope']).toMatchObject({
+    const pidScope = read('shell-bg_1.status')['pidScope'] as ShellPidScope;
+    expect(pidScope).toMatchObject({
       hostname: hostname(),
     });
-    expect(settleOrphanedShellStatusFiles(dir).settled).toBe(1);
-    expect(read('shell-bg_1.status')['status']).toBe('unknown');
+    const canProveScope =
+      pidScope.bootId !== null && pidScope.pidNamespace !== null;
+    expect(settleOrphanedShellStatusFiles(dir)).toEqual({
+      settled: canProveScope ? 1 : 0,
+      unsettled: [],
+    });
+    expect(read('shell-bg_1.status')['status']).toBe(
+      canProveScope ? 'unknown' : 'running',
+    );
   });
 
   it('settles a watched sidecar once its process exits, until stopped', () => {
