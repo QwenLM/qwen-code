@@ -9,7 +9,9 @@
  * the quiesce/resume pair a reversible session close depends on. The ACP-side
  * cases in `Session.test.ts` inject a fake manager and call the leader callback
  * directly, so they cannot see a poll that was stopped and never restarted;
- * these cases can (#16540 review round 5, F1/F2).
+ * these cases can. Reviewers of this PR asked for both halves: a poll that gets
+ * stopped needs a matching resume, and at least one case has to drive the real
+ * manager instead of a stand-in.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
