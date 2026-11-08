@@ -205,8 +205,10 @@ const project = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-project-'));
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-home-'));
 // Isolate settings: user, QWEN_HOME and system settings would all merge in,
 // and a provider config there would override the env endpoint and point the
-// command at a real, billable API. Every settings source is redirected into
-// empty temp paths.
+// command at a real, billable API. The user scope is redirected into an empty
+// temp file; QWEN_CODE_SYSTEM_*_PATH are deliberately left unset because the
+// trust gate (#13513) rejects a user-owned temp fixture and fails loud when
+// the platform default is absent (exit 52) on an unprivileged host.
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-fakehome-'));
 fs.mkdirSync(path.join(project, 'docs', 'zh'), { recursive: true });
 fs.writeFileSync(path.join(project, 'docs', 'zh', 'a.md'), '# A\n\n甲文档。\n');
@@ -228,8 +230,6 @@ const env = {
   HOME: fakeHome,
   USERPROFILE: fakeHome,
   QWEN_HOME: path.join(fakeHome, '.qwen'),
-  QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(fakeHome, 'system-settings.json'),
-  QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(fakeHome, 'system-defaults.json'),
   OPENAI_API_KEY: 'fake-key',
   OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
   OPENAI_MODEL: 'qwen-plus',

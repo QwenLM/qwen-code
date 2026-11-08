@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -15,22 +16,43 @@ import {
   getSystemDefaultsPath,
   getSystemSettingsPath,
   isFullyQualifiedPath,
+  isInsideWindowsSystemSettingsDir,
+  isSystemSettingsPathTrusted,
   passedEnvironment,
   readEnvironmentVariable,
   spawnedEnvironmentView,
 } from './storage-paths-lite.js';
+
+// The trust gate for the Windows system directory also requires the name to
+// point at a file that is there; on a non-Windows host the real check cannot
+// say so, so the tests register the paths they want to count as present.
+const { mockExistingWindowsPaths } = vi.hoisted(() => ({
+  mockExistingWindowsPaths: new Set<string>(),
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: (location: fs.PathLike) =>
+      mockExistingWindowsPaths.has(String(location)) ||
+      actual.existsSync(location),
+  };
+});
 
 describe('settings locations in a given environment', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const runOn = (value: string) =>
     Object.defineProperty(process, 'platform', { value });
   const home = path.resolve('/located', 'qwen-home');
-  const settingsPath = path.resolve('/located', 'settings.json');
-  const defaultsPath = path.resolve('/located', 'system-defaults.json');
+  // The overrides live in the system-wide directory: the trust gate rejects
+  // a user-controlled location (see the describe below).
+  const settingsPath = 'C:\\ProgramData\\qwen-code\\settings.json';
+  const defaultsPath = 'C:\\ProgramData\\qwen-code\\system-defaults.json';
 
   afterEach(() => {
     Object.defineProperty(process, 'platform', platform);
     vi.unstubAllEnvs();
+    mockExistingWindowsPaths.clear();
   });
 
   it.each([
@@ -241,6 +263,8 @@ describe('settings locations in a given environment', () => {
 
   it('finds a name spelled in another case on Windows', () => {
     runOn('win32');
+    mockExistingWindowsPaths.add(settingsPath);
+    mockExistingWindowsPaths.add(defaultsPath);
 
     expect(getGlobalQwenDirLite({ qwen_home: home })).toBe(home);
     expect(
@@ -293,4 +317,256 @@ describe('settings locations in a given environment', () => {
       path.join(os.homedir(), '.qwen'),
     );
   });
+});
+
+describe('system settings overrides are honored only for administrator-controlled locations', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const runOn = (value: string) =>
+    Object.defineProperty(process, 'platform', { value });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', platform);
+  });
+
+  // The Unix gate reads real ownership metadata, which only a Unix host can
+  // arrange, so these run where the host itself is Unix.
+  const itOnUnix = os.platform() === 'win32' ? it.skip : it;
+  const itOnWindows = os.platform() === 'win32' ? it : it.skip;
+  const euid = typeof process.getuid === 'function' ? process.getuid() : -1;
+
+  // The rejection warning is one-shot per variable, so these run before any
+  // other test in the file that rejects an override: an earlier rejection
+  // of the same variable would suppress the warning under observation.
+  itOnUnix(
+    'warns once per variable when a user-owned override is rejected, and stays quiet after',
+    () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-system-trust-'));
+      const file = path.join(root, 'settings.json');
+      fs.writeFileSync(file, '{}');
+      if (euid === 0) fs.chownSync(file, 12345, 12345);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(
+          getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: file }),
+        ).toBe(getSystemSettingsPath({}));
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          `QWEN_CODE_SYSTEM_SETTINGS_PATH is set to ${JSON.stringify(file)}, which is not a regular root-owned file, so the platform default is used instead.`,
+        );
+        // A second rejection of the same variable stays quiet...
+        getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: file });
+        expect(warn).toHaveBeenCalledTimes(1);
+        // ...while the other variable warns once of its own.
+        getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: file });
+        getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: file });
+        expect(warn).toHaveBeenCalledTimes(2);
+        expect(warn).toHaveBeenCalledWith(
+          `QWEN_CODE_SYSTEM_DEFAULTS_PATH is set to ${JSON.stringify(file)}, which is not a regular root-owned file, so the platform default is used instead.`,
+        );
+      } finally {
+        warn.mockRestore();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnWindows(
+    'warns once per variable when a Windows override points outside the system settings directory',
+    () => {
+      const configured = 'C:\\evil\\settings.json';
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(
+          getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: configured }),
+        ).toBe('C:\\ProgramData\\qwen-code\\settings.json');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          `QWEN_CODE_SYSTEM_SETTINGS_PATH is set to ${JSON.stringify(configured)}, which does not point inside C:\\ProgramData\\qwen-code\\, so the platform default is used instead.`,
+        );
+        getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: configured });
+        expect(warn).toHaveBeenCalledTimes(1);
+        getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: configured });
+        getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: configured });
+        expect(warn).toHaveBeenCalledTimes(2);
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['C:\\ProgramData\\qwen-code\\settings.json', true],
+    ['c:/programdata/qwen-code/system-defaults.json', true],
+    ['C:\\ProgramData\\qwen-code\\.\\settings.json', true],
+    ['C:\\ProgramData\\qwen-code\\nested\\settings.json', true],
+    ['C:\\ProgramData\\qwen-code', false],
+    ['C:\\ProgramData\\qwen-code2\\settings.json', false],
+    ['C:\\ProgramData\\qwen-code\\..\\settings.json', false],
+    ['C:\\ProgramData\\qwen-code\\..\\..\\evil.json', false],
+    ['C:\\qwen\\settings.json', false],
+    ['C:qwen\\settings.json', false],
+    ['qwen-code\\settings.json', false],
+    ['..\\..\\settings.json', false],
+    ['\\\\server\\share\\settings.json', false],
+    [
+      '\\\\server\\share\\..\\..\\C:\\ProgramData\\qwen-code\\settings.json',
+      false,
+    ],
+    ['..\\C:\\ProgramData\\qwen-code\\settings.json', false],
+    ['', false],
+  ])(
+    'on Windows, treats %s as inside the system settings directory: %s',
+    (location, expected) => {
+      expect(isInsideWindowsSystemSettingsDir(location)).toBe(expected);
+    },
+  );
+
+  // The rows above resolve against the host working directory, which on a
+  // Unix host cannot point inside the Windows system directory; pin the
+  // guards against a working directory that sits inside it, where a relative
+  // spelling would resolve into the directory if the guards were absent.
+  it('on Windows, refuses a relative or UNC spelling even from a working directory inside the system settings directory', () => {
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValue('C:\\ProgramData\\qwen-code\\nested');
+    try {
+      expect(
+        isInsideWindowsSystemSettingsDir(
+          '..\\C:\\ProgramData\\qwen-code\\settings.json',
+        ),
+      ).toBe(false);
+      expect(isInsideWindowsSystemSettingsDir('..\\settings.json')).toBe(false);
+      expect(
+        isInsideWindowsSystemSettingsDir('\\\\server\\share\\settings.json'),
+      ).toBe(false);
+    } finally {
+      cwdSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    'C:\\ProgramData\\qwen-code\\settings.json',
+    'c:/programdata/qwen-code/system-defaults.json',
+  ])(
+    'on Windows, honors an override that stays inside the system settings directory: %s',
+    (configured) => {
+      runOn('win32');
+      // The gate checks existence on the configured spelling itself.
+      mockExistingWindowsPaths.add(configured);
+
+      expect(
+        getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: configured }),
+      ).toBe(configured);
+      expect(
+        getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: configured }),
+      ).toBe(configured);
+    },
+  );
+
+  it('on Windows, fails closed to the platform default for a name inside the system settings directory that names no file', () => {
+    runOn('win32');
+
+    expect(
+      getSystemSettingsPath({
+        QWEN_CODE_SYSTEM_SETTINGS_PATH:
+          'C:\\ProgramData\\qwen-code\\no-such-file.json',
+      }),
+    ).toBe('C:\\ProgramData\\qwen-code\\settings.json');
+  });
+
+  it.each([
+    'C:\\evil\\settings.json',
+    'C:\\ProgramData\\qwen-code\\..\\..\\evil.json',
+    'C:qwen\\settings.json',
+  ])(
+    'on Windows, fails closed to the platform default for an override of %s',
+    (configured) => {
+      runOn('win32');
+
+      expect(
+        getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: configured }),
+      ).toBe('C:\\ProgramData\\qwen-code\\settings.json');
+    },
+  );
+
+  itOnUnix(
+    'fails closed for an override that is not a root-owned regular file',
+    () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-system-trust-'));
+      try {
+        const file = path.join(root, 'settings.json');
+        fs.writeFileSync(file, '{}');
+        const link = path.join(root, 'link.json');
+        fs.symlinkSync(file, link);
+
+        expect(
+          isSystemSettingsPathTrusted(path.join(root, 'absent.json')),
+        ).toBe(false);
+        expect(isSystemSettingsPathTrusted(root)).toBe(false);
+        if (euid === 0) {
+          // Root owns what root creates: the trusted case for the file and a
+          // link to it, and chowning gives the other direction.
+          expect(isSystemSettingsPathTrusted(file)).toBe(true);
+          expect(isSystemSettingsPathTrusted(link)).toBe(true);
+          fs.chownSync(file, 12345, 12345);
+        }
+        // A link is judged by the file it resolves to; that file is
+        // user-owned here (the host user owns it, or root gave it away).
+        expect(isSystemSettingsPathTrusted(file)).toBe(false);
+        expect(isSystemSettingsPathTrusted(link)).toBe(false);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix(
+    'honors an override only while the file it names is root-owned',
+    () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-system-trust-'));
+      const file = path.join(root, 'settings.json');
+      const defaultsFile = path.join(root, 'system-defaults.json');
+      fs.writeFileSync(file, '{}');
+      fs.writeFileSync(defaultsFile, '{}');
+      const platformDefault = getSystemSettingsPath({});
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        if (euid === 0) {
+          expect(
+            getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: file }),
+          ).toBe(file);
+          // Without a defaults override, the defaults path is derived from the
+          // honored settings path.
+          expect(
+            getSystemDefaultsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: file }),
+          ).toBe(path.join(root, 'system-defaults.json'));
+          // A rejected defaults override falls back to the platform default,
+          // not to the path beside the honored settings override: with both
+          // layers relocated to one directory that would be the very path the
+          // gate rejected.
+          fs.chownSync(defaultsFile, 12345, 12345);
+          expect(
+            getSystemDefaultsPath({
+              QWEN_CODE_SYSTEM_SETTINGS_PATH: file,
+              QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaultsFile,
+            }),
+          ).toBe(
+            path.join(path.dirname(platformDefault), 'system-defaults.json'),
+          );
+          fs.chownSync(file, 12345, 12345);
+        }
+        expect(
+          getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: file }),
+        ).toBe(platformDefault);
+        expect(
+          getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: file }),
+        ).toBe(
+          path.join(path.dirname(platformDefault), 'system-defaults.json'),
+        );
+      } finally {
+        warn.mockRestore();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

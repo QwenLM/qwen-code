@@ -116,14 +116,6 @@ export class HostedHarnessProcess {
             USERPROFILE: this.root,
             QWEN_HOME: config,
             QWEN_CODE_MODELS_DEV_REFRESH: 'off',
-            QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(
-              this.root,
-              'system-settings.json',
-            ),
-            QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(
-              this.root,
-              'system-defaults.json',
-            ),
             QWEN_RUNTIME_DIR: path.join(this.root, 'runtime'),
             OPENAI_API_KEY: 'local-fixture-key',
             OPENAI_BASE_URL: modelUrl,

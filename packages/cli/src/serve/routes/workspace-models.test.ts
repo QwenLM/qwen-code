@@ -17,6 +17,7 @@ import { loadSettings, SettingScope } from '../../config/settings.js';
 import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import * as jsoncEditor from '../../utils/jsonc-editor.js';
+import { trustedSystemSettingsDirs } from '../../test-utils/trusted-system-settings.js';
 
 // The DELETE route resolves the User-scope selection env from the real home
 // (`~/.env`, plus the legacy `~/.qwen/.env` whenever `QWEN_HOME` points
@@ -28,6 +29,30 @@ vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
   const homedir = () => mockedHome.dir || actual.homedir();
   return { ...actual, default: { ...actual, homedir }, homedir };
+});
+
+// The system settings overrides are only honored for a root-owned regular
+// file, which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
 });
 
 let home: string;
@@ -136,12 +161,14 @@ beforeEach(() => {
   prevHome = process.env['QWEN_HOME'];
   process.env['QWEN_HOME'] = home;
   mockedHome.dir = home;
+  trustedSystemSettingsDirs.add(home);
 });
 
 afterEach(() => {
   if (prevHome === undefined) delete process.env['QWEN_HOME'];
   else process.env['QWEN_HOME'] = prevHome;
   mockedHome.dir = '';
+  trustedSystemSettingsDirs.delete(home);
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(workspace, { recursive: true, force: true });
 });
@@ -165,7 +192,18 @@ describe('DELETE /workspace/models', () => {
         modelProviders: { [provider]: [model] },
       });
       fs.writeFileSync(systemFile, system);
+      // Pin the other system scope to an empty fixture inside the trusted
+      // home as well: the trust gate (#13513) only honors the root-owned
+      // fixtures the lstat mock above reports, so the platform default a
+      // dev host may ship must not reach the merge.
+      const otherVariable =
+        variable === 'QWEN_CODE_SYSTEM_SETTINGS_PATH'
+          ? 'QWEN_CODE_SYSTEM_DEFAULTS_PATH'
+          : 'QWEN_CODE_SYSTEM_SETTINGS_PATH';
+      const emptySystemFile = path.join(home, 'system-empty.json');
+      fs.writeFileSync(emptySystemFile, JSON.stringify({ $version: 4 }));
       vi.stubEnv(variable, systemFile);
+      vi.stubEnv(otherVariable, emptySystemFile);
       try {
         const { app, persistSettings } = makeApp();
         const listed = await request(app).get('/workspace/models');

@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/react */
 /** Real native view + shared Ink text/undo owner, compared with the Ink reference. */
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,10 +54,10 @@ try {
     process.env[key] = join(scratch, key.toLowerCase());
     await mkdir(process.env[key]!, { recursive: true });
   }
-  for (const key of fileKeys) {
-    process.env[key] = join(scratch, key.toLowerCase() + '.json');
-    await writeFile(process.env[key]!, '{}');
-  }
+  // The system scopes stay at the platform default: the trust gate (#13513)
+  // rejects a user-owned temp fixture, so an inherited override is cleared
+  // for the run instead of being pointed at one.
+  for (const key of fileKeys) delete process.env[key];
   mock.module('child_process', () => ({
     ...childProcess,
     execFile: (...args: unknown[]) => {
