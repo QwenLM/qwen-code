@@ -1208,6 +1208,46 @@ describe('normalizeMonitorCommand', () => {
     },
   );
 
+  // R3-4 (#16540 review): the locale introducer can be split by a continuation,
+  // and reading the literal next character classified `$\<newline>"…"` as an
+  // unquoted expansion, so the payload's writes were never analysed (witnessed:
+  // `sh -c $\<newline>"cat > /tmp/…"` creates the file, rc 0).
+  it('reads a locale payload whose introducer is split by a continuation', () => {
+    expect(stripShellWrapper('bash -c $\\\n"cat > /etc/motd"')).toBe(
+      'cat > /etc/motd',
+    );
+    // The unsplit spelling is unchanged.
+    expect(stripShellWrapper('bash -c $"cat > /etc/motd"')).toBe(
+      'cat > /etc/motd',
+    );
+  });
+
+  // R3-5 (#16540 review): inside `$'…'` a backslash escapes, so `\'` does not
+  // close the word. Reading it as a plain quote closed the word early and
+  // brace-expanded text that was still quoted data, dropping the real payload.
+  it('keeps a brace group inside an ANSI-C word out of brace expansion', () => {
+    expect(
+      stripShellWrapper(`bash -c $'\\'\\'--{ls,cat > /tmp/probe3 }'`),
+    ).toBe(`''--{ls,cat > /tmp/probe3 }`);
+    // A plain single-quoted word still closes at its first quote, so a brace
+    // group inside it is still data rather than an expansion.
+    expect(stripShellWrapper(`bash -c '--{ls,cat}'`)).toBe(`--{ls,cat}`);
+  });
+
+  // R3-6 (#16540 review): a second unquoted group in the suffix is part of the
+  // same cartesian expansion — `{a,b}{c,d}` is four words and the first is what
+  // the shell runs (witnessed: `bash -c {'cat',x}{' > /tmp/…',y}` creates the
+  // file). Bailing out handed the whole command back, hiding the redirect.
+  it('enumerates a second brace group instead of handing the command back', () => {
+    expect(stripShellWrapper(`bash -c {'cat',x}{' > /etc/motd',y}`)).toBe(
+      'cat > /etc/motd',
+    );
+    // The single-group pins are unchanged.
+    expect(stripShellWrapper(`bash -c {--,'cat > /etc/motd'}`)).toBe(
+      'cat > /etc/motd',
+    );
+  });
+
   // R4-1 (#16540 review): the payload's background `&` sits inside the closing
   // quote even when the payload word has an unquoted prefix. The old
   // start-anchored pattern missed it, so the tracked shell forked the payload

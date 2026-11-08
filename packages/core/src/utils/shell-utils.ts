@@ -761,10 +761,22 @@ function findUnquotedChar(
   target: '{' | '}',
 ): number {
   let quote: '"' | "'" | '' = '';
+  let ansiC = false;
   for (let i = from; i < token.length; i++) {
     const ch = token[i]!;
     if (quote === "'") {
-      if (ch === "'") quote = '';
+      // Inside `$'…'` a backslash escapes the next character, so `\'` does not
+      // close the word; in a plain `'…'` the backslash is literal. Reading both
+      // the same way closed the word early and brace-expanded text that was
+      // still quoted data (#16540 review, R3-5).
+      if (ansiC && ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === "'") {
+        quote = '';
+        ansiC = false;
+      }
       continue;
     }
     if (quote === '"') {
@@ -778,6 +790,7 @@ function findUnquotedChar(
     }
     if (ch === '"' || ch === "'") {
       quote = ch;
+      ansiC = ch === "'" && opensAnsiCQuote(token, i);
       continue;
     }
     if (ch === target) return i;
@@ -918,11 +931,14 @@ function shellWordQuoteRemoval(token: string): QuoteRemovedWord | null {
       continue;
     }
     if (ch === '$') {
-      const next = token[i + 1];
-      if (next === '"') {
-        // Locale quoting: same escape rules as a double-quoted word, no
-        // ANSI-C decoding. Re-enter the loop with the quote handled above.
-        i++;
+      // Locale quoting: same escape rules as a double-quoted word, no ANSI-C
+      // decoding. Re-enter the loop with the quote handled above. The introducer
+      // can be split by a continuation — `$\<newline>"…"` is still locale
+      // quoting, and reading `token[i + 1]` classified it as an unquoted
+      // expansion, so the payload's writes were never analysed
+      // (#16540 review, R3-4).
+      if (ansiCStart < n && token[ansiCStart] === '"') {
+        i = ansiCStart;
         continue;
       }
       // Parameter / command / arithmetic expansion: not statically resolvable.
@@ -1024,7 +1040,17 @@ function expandBraceWords(token: string): string[] | null {
   const suffix = trimmed.slice(close + 1);
   const words: string[] = [];
   for (const part of parts) {
-    const removal = shellWordQuoteRemoval(prefix + part + suffix);
+    const candidate = prefix + part + suffix;
+    // A second group in the suffix expands too: `{a,b}{c,d}` is the cartesian
+    // product in that order, and the first word is what the shell runs. Bailing
+    // out here handed the whole command back unchanged, so the payload's
+    // redirect stayed invisible (#16540 review, R3-6).
+    const expanded = expandBraceWords(candidate);
+    if (expanded !== null) {
+      words.push(...expanded);
+      continue;
+    }
+    const removal = shellWordQuoteRemoval(candidate);
     if (removal === null || removal.hasExpansion) return null;
     words.push(removal.text);
   }
