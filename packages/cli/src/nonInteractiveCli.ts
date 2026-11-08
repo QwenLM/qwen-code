@@ -680,6 +680,28 @@ export async function runNonInteractive(
       }
     };
 
+    const emitMaxSessionTurnsResult = async (): Promise<number> => {
+      const message =
+        'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
+      if (outputFormat === OutputFormat.TEXT) {
+        await handleMaxTurnsExceededError(config);
+      }
+      const metrics = uiTelemetryService.getMetrics();
+      await emitResult({
+        isError: true,
+        errorMessage: message,
+        durationMs: Date.now() - startTime,
+        apiDurationMs: totalApiDurationMs,
+        numTurns: turnCount,
+        usage: computeUsageFromMetrics(metrics),
+        stats:
+          outputFormat === OutputFormat.JSON
+            ? uiTelemetryService.getMetrics()
+            : undefined,
+      });
+      return 1;
+    };
+
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
@@ -3234,8 +3256,7 @@ export async function runNonInteractive(
               await failClosedActiveGoalTurn(
                 'Headless Goal stopped after the session turn limit',
               );
-              await settleBeforeTerminalOutput();
-              return handleMaxTurnsExceededError(config);
+              return await emitMaxSessionTurnsResult();
             case 'next_round':
               currentMessages = [{ role: 'user', parts: result.parts ?? [] }];
               hasUnsentToolResponse = true;
@@ -3289,6 +3310,7 @@ export async function runNonInteractive(
           // Start assistant message for this turn
           adapter.startAssistantMessage();
 
+          let maxSessionTurnsReached = false;
           for await (const event of responseStream) {
             captureActiveInteractionOwner();
             if (abortController.signal.aborted) {
@@ -3308,6 +3330,10 @@ export async function runNonInteractive(
             // Process fallback metadata only after the abandoned attempt has
             // been reset, so batch adapters do not roll the system event back.
             adapter.processEvent(event);
+            if (event.type === LlmEventType.MaxSessionTurns) {
+              maxSessionTurnsReached = true;
+              break;
+            }
             modTurn?.saw(event);
             if (
               event.type === LlmEventType.HookSystemMessage &&
@@ -3355,6 +3381,10 @@ export async function runNonInteractive(
           // Finalize assistant message
           adapter.finalizeAssistantMessage();
           totalApiDurationMs += Date.now() - apiStartTime;
+
+          if (maxSessionTurnsReached) {
+            return await emitMaxSessionTurnsResult();
+          }
 
           if (loopDetected) {
             return await emitLoopDetectedResult();
