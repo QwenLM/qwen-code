@@ -744,7 +744,9 @@ describe('observeWorkspacePrBindings', () => {
         },
       }),
     );
-    expect(result.consumed).toBe(1);
+    // The guard throws before the view starts, so the rotation is not
+    // advanced (consumed 0): master §1 advances by views actually started.
+    expect(result.consumed).toBe(0);
     expect(result.observed).toBe(0);
     expect(result.failed).toBe(1);
     expect(view).not.toHaveBeenCalled();

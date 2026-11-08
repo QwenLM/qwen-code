@@ -366,13 +366,15 @@ export async function observeWorkspacePrBindings(
     if (consumed >= cap) break;
     if (options.deadline !== undefined && now() > options.deadline) break;
     if (options.viewedThisTick?.has(target.key)) continue;
-    consumed += 1;
     const startedAt = now();
     const detectedAt = new Date(startedAt).toISOString();
     let result: Awaited<ReturnType<typeof fetchGitHubPullRequestView>>;
     try {
-      // A retired generation must not run gh with its stale env.
+      // A retired generation must not run gh with its stale env, and a view
+      // that never started must not advance the rotation (master §1): count
+      // it only once the guard passes and the view is about to start.
       deps.assertGenerationOpen?.();
+      consumed += 1;
       result = await view(target.url, deps.watchDir, deps.env);
     } catch (error) {
       failed += 1;
@@ -514,6 +516,11 @@ export async function runPrWatchObservationTick(
   for (const runtime of workspaces) {
     const bindings: SessionPrBindingSummary[] = [];
     try {
+      // The scan's `partial` flag is deliberately discarded here: this
+      // increment makes no negative decision (no deletion, no role-group
+      // skip), which master §4 reserves for a complete scan. The enablement
+      // increment MUST thread `partial` through before adding any such
+      // decision, or an unreadable workspace could delete a watch file.
       await scanWorkspaceBindings(runtime, bindings);
     } catch (error) {
       log(

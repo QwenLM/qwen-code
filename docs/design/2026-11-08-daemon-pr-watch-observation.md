@@ -37,7 +37,7 @@ The master design's foundations are merged: the per-PR watch store and its owner
 
 Two layers, both unit-testable without a daemon:
 
-1. **Pure detection** — `detectPrTransitions(previous, observation, detectedAt)`:
+1. **Pure detection** — `detectPrTransitions(identity, previous, observation, detectedAt)`:
    - Input: the previous `PrWatchState` (or `undefined` for a first observation), a fresh observation (`state`, `title`, `headSha`, `checks`, `mergeable?`, `failingChecks`), and the observation's start timestamp.
    - Output: the next `PrWatchState` to write and the list of detected transitions (`type`, `key`, `summary`, `detectedAt`).
    - Rules exactly as master §3: `head_change` on a differing `headSha`; `ci_failure` when `checks` is `failing`, the previous observation of the same head was not, and the head is not in `ciFired` (append, cap 16); `merge_conflict` edge-triggered into `conflicting` (a never-known `mergeable` counts as non-conflicting once a `headSha` exists); `state_change` when `state` leaves `open`.
@@ -45,7 +45,7 @@ Two layers, both unit-testable without a daemon:
    - `mergeable: UNKNOWN` (absent in the observation) leaves the stored value in place and emits no transition; the no-overwrite is applied here when building the next state.
    - Keys use the master §3 shape `pr-state:<owner/repo>#<number>:<type>:<head or prev→next>:<detectedAt>`, hashed to `pr-state:h:<40 hex>` when the key plus the longest role-group suffix (`:untyped`, 8 chars) would exceed the prompt route's 200-character `idempotencyKey` cap — the suffix is appended at delivery (§4), so the base key reserves room for it.
 
-2. **Observation sweep** — `observeWorkspacePrBindings(runtime, bindings, deps)`:
+2. **Observation sweep** — `observeWorkspacePrBindings(bindings, deps, options)`:
    - Builds the view set from the scan's bindings: open bound PRs plus closed PRs the slim listing did not return; merged is terminal by the newest observation. Foreign-host bindings are skipped with a log line before any `gh` call.
    - Restricts hosts to the allowed set (normalised lowercased, `www.` stripped): `github.com`, the daemon `gh` config hosts, and the hosted GitHub channels' web hosts.
    - Runs `fetchGitHubPullRequestView` by the binding URL with the workspace's `effectiveEnv` and the daemon-private watch directory as `cwd`, under a rotating offset and the tick deadline. The cap (30) bounds views actually started, not the rotated window: a PR already viewed by another workspace this tick is skipped without consuming the cap, so unique PRs past a skipped prefix are still observed (master §1 "a skipped view does not count against the cap"). A view that returns another host or number is logged and discarded, a renamed/transferred repository (same host and number, different `owner/repo`) is accepted and logged once per tick (the cross-workspace dedup views each PR once per tick). It asserts the workspace's generation guard before each view so a retired generation never runs `gh` with stale env.
@@ -99,4 +99,7 @@ Two layers, both unit-testable without a daemon:
 ## Open questions
 
 - Inherited from the master design (on-by-default, `cancelled`/`stale` CI predicate, `review_decision`, Aone parity, manual-push ledger); none are decided here.
-- The exact internal switch shape (a module constant vs. an injected flag) is an implementation choice; tests need to exercise the on path, so the sweep functions are exported and the constant only gates the timer/refresh hook.
+
+## Resolved implementation choices
+
+- The internal switch is a module constant `SESSION_PR_WATCH_OBSERVATION_ENABLED` (off) gating the timer hook, with an `observationEnabled` timer-deps test seam defaulting to that constant so a fixture can exercise the on path; production omits the seam, so the constant governs. The sweep functions are exported and tested directly. Flipping the constant alone still no-ops until `getPrWatchDeps` is populated (fail closed).

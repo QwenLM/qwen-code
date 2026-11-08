@@ -37,7 +37,7 @@
 
 两层，均可在无 daemon 下单测：
 
-1. **纯检测** — `detectPrTransitions(previous, observation, detectedAt)`：
+1. **纯检测** — `detectPrTransitions(identity, previous, observation, detectedAt)`：
    - 输入：上一个 `PrWatchState`（首次观测为 `undefined`）、一次新观测（`state`、`title`、`headSha`、`checks`、`mergeable?`、`failingChecks`）、以及观测起始时间戳。
    - 输出：要写入的下一个 `PrWatchState` 与检测到的转换列表（`type`、`key`、`summary`、`detectedAt`）。
    - 规则严格依主 §3：`headSha` 不同触发 `head_change`；`checks` 为 `failing`、同一 head 的上一次观测并非 failing、且该 head 不在 `ciFired` 时触发 `ci_failure`（追加，cap 16）；边缘触发进入 `conflicting` 触发 `merge_conflict`（一旦存在 `headSha`，从未已知的 `mergeable` 视为非冲突）；`state` 离开 `open` 触发 `state_change`。
@@ -45,7 +45,7 @@
    - `mergeable: UNKNOWN`（观测中缺省）保留存储值且不触发转换；no-overwrite 在构造下一个 state 时于此应用。
    - key 用主 §3 形状 `pr-state:<owner/repo>#<number>:<type>:<head or prev→next>:<detectedAt>`，当 key 加上最长角色组后缀（`:untyped`，8 字符）会超过 prompt 路由 200 字符 `idempotencyKey` 上限时哈希为 `pr-state:h:<40 hex>`——后缀在投递时（§4）追加，故基础 key 为其预留空间。
 
-2. **观测扫描** — `observeWorkspacePrBindings(runtime, bindings, deps)`：
+2. **观测扫描** — `observeWorkspacePrBindings(bindings, deps, options)`：
    - 从 scan 的 bindings 构造视图集：open 的绑定 PR 加上精简 listing 未返回的 closed PR；merged 按最新观测为终态。foreign-host 绑定在任何 `gh` 调用前跳过并记一行日志。
    - 将 host 限制在 allowed 集合（规范化小写、去 `www.`）：`github.com`、daemon `gh` 配置 host、以及托管的 GitHub channel 的 web host。
    - 按绑定 URL 跑 `fetchGitHubPullRequestView`，用 workspace 的 `effectiveEnv` 与 daemon 私有 watch 目录作 `cwd`，带轮转 offset 与 tick deadline。cap（30）约束实际发起的视图数而非轮转窗口：本 tick 已被另一 workspace view 的 PR 被跳过且不占 cap，故跳过前缀之后的独有 PR 仍被观测（主 §1「跳过的 view 不占 cap」）。返回另一 host 或 number 的视图记日志并丢弃，重命名/转移的仓库（同 host 同 number、不同 `owner/repo`）被接受并每 tick 记一次日志（跨 workspace 去重使每个 PR 每 tick 只 view 一次）。每次 view 前断言 workspace 的 generation guard，使退役 generation 不会拿陈旧 env 跑 `gh`。
@@ -99,4 +99,7 @@
 ## 开放问题
 
 - 继承自主设计（默认开启、`cancelled`/`stale` CI 谓词、`review_decision`、Aone parity、手动推送账本）；此处均不决定。
-- 内部开关的确切形状（模块常量 vs 注入标志）是实现选择；测试需要覆盖 on 路径，因此扫描函数被导出，常量仅门控 timer/refresh 钩子。
+
+## 已决实现选择
+
+- 内部开关是模块常量 `SESSION_PR_WATCH_OBSERVATION_ENABLED`（off），门控 timer 钩子；timer deps 带一个默认取该常量的 `observationEnabled` 测试接缝，使夹具能覆盖 on 路径。生产不传该接缝，故由常量决定。扫描函数被导出并直接测试。仅翻转常量仍会 no-op，直到 `getPrWatchDeps` 被填充（fail closed）。

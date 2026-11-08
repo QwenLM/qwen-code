@@ -557,7 +557,13 @@ export function startSessionPrRefreshTimer(deps: {
             });
           } catch (error) {
             if (error instanceof DaemonDrainingError) return;
-            // A failed observation tick must not starve the state refresh.
+            // A failed observation tick must not starve the state refresh,
+            // but log it: every other failure path in the watch logs, and a
+            // tick that throws every tick would otherwise be invisible while
+            // the switch is on.
+            process.stderr.write(
+              `[serve] PR watch observation tick failed: ${String(error)}\n`,
+            );
           }
           for (const cwd of [...githubSweepOffsets.keys()]) {
             if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
