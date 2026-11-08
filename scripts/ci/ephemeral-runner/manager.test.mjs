@@ -5,8 +5,10 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -50,6 +52,8 @@ async function fixture(t) {
   let loseJit = false;
   let failDelete = false;
   let deleteStatus = 422;
+  let extraRunners = [];
+  let rejectFirstDelete = false;
   let jitFailure = null;
   let listFailure = null;
   const labelsFromArgs = (args) => {
@@ -87,16 +91,24 @@ async function fixture(t) {
         return JSON.stringify({ runner, encoded_jit_config: 'jit-secret' });
       }
       if (args.includes('DELETE')) {
+        if (rejectFirstDelete) {
+          rejectFirstDelete = false;
+          const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
+          error.status = deleteStatus;
+          throw error;
+        }
         if (failDelete) {
           const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
           error.status = deleteStatus;
           throw error;
         }
-        runner = undefined;
+        const id = Number(path.split('/').pop());
+        if (runner?.id === id) runner = undefined;
+        extraRunners = extraRunners.filter((entry) => entry.id !== id);
         return '';
       }
       if (listFailure) throw listFailure();
-      return JSON.stringify(runner ? [runner] : []);
+      return JSON.stringify(runner ? [runner, ...extraRunners] : extraRunners);
     }
     if (args[0] === 'inspect') {
       const entry = containers.get(args[args.length - 1]);
@@ -189,7 +201,22 @@ async function fixture(t) {
         });
     },
     setRunner: (value) => {
-      runner = { status: 'offline', busy: false, ...value };
+      runner =
+        'status' in value
+          ? { busy: false, ...value }
+          : { status: 'offline', busy: false, ...value };
+    },
+    setExtraRunners: (values) => {
+      extraRunners = values.map((value) => ({
+        status: 'offline',
+        busy: false,
+        ...value,
+      }));
+    },
+    runnerList: () => [...(runner ? [runner] : []), ...extraRunners],
+    setRejectFirstDelete: (status = 422) => {
+      rejectFirstDelete = true;
+      deleteStatus = status;
     },
     addOrphanContainer(labels) {
       const id = `container-orphan-${containers.size}`;
@@ -715,6 +742,161 @@ test('the identity-less sweep keeps the HTTP status of a rejected deletion', asy
     (error) =>
       error.status === 429 && /deletion was rejected/.test(error.message),
   );
+});
+
+test('a rejected sweep deletion is retried on the next cycle before the pile is gone', async (t) => {
+  // The sweep runs while the leftovers still exist: a rejected DELETE
+  // must stay reachable next cycle. Sweeping after removal leaked the
+  // registration forever — no state and no leftovers means cleanup()
+  // never runs again.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef', busy: true });
+  f.setRejectFirstDelete(422);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /deletion was rejected/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+    'no replacement while the rejected registration survives',
+  );
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ).length,
+    2,
+    'the next cycle retries the same registration',
+  );
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [],
+    'the rejected registration is gone after the retry',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenishes in the retry cycle',
+  );
+});
+
+test('the identity-less sweep never deletes a registration without a status', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-deadbeef',
+    status: undefined,
+  });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'only registrations GitHub explicitly reports offline may be swept',
+  );
+});
+
+test('the identity-less sweep only deletes registrations under the slot naming scheme', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef' });
+  f.setExtraRunners([
+    { id: 78, name: 'ecs-qwen-trial-01-scratch' },
+    { id: 79, name: 'ecs-qwen-trial-02-abcdef12' },
+    { id: 80, name: 'shared-linux-runner' },
+  ]);
+  await createManager(f.config, { command: f.command }).cycle(1);
+  const deleted = f.calls
+    .filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+    .map((c) =>
+      c.args
+        .find((v) => v.startsWith('/'))
+        .split('/')
+        .pop(),
+    )
+    .filter((id) => ['77', '78', '79', '80'].includes(id));
+  assert.deepEqual(
+    deleted,
+    ['77'],
+    'prefix siblings, other slots, and unrelated runners are never swept',
+  );
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [78, 79, 80],
+  );
+});
+
+test('orphan log archives stay prunable by the log pruner', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const orphanLogs = (await readdir(f.config.logDir)).filter((name) =>
+    name.includes('-orphan-'),
+  );
+  assert.ok(orphanLogs.length >= 1, 'orphan logs are archived');
+  for (const name of orphanLogs) {
+    const past = new Date(Date.now() - 8 * 86400000);
+    await utimes(join(f.config.logDir, name), past, past);
+  }
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '2',
+    'qwen.instance': 'ecs-qwen-trial-2-cccccccc-cccc-4ccc-cccc-cccccccccccc',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '2',
+    'qwen.instance': 'ecs-qwen-trial-2-dddddddd-dddd-4ddd-dddd-dddddddddddd',
+  });
+  await manager.cycle(2);
+  const remaining = await readdir(f.config.logDir);
+  for (const name of orphanLogs)
+    assert.ok(
+      !remaining.includes(name),
+      `aged orphan archive ${name} is recognized and pruned`,
+    );
 });
 
 test('accepts immutable local image IDs and rejects mutable tags and invalid configuration', async (t) => {

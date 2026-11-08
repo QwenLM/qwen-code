@@ -419,6 +419,64 @@ export function createManager(config, dependencies = {}) {
         state = null;
       }
     }
+    let orphanSweepBlocked = false;
+    if (!state?.name && orphanLabels) {
+      // Sweep the registrations BEFORE removing the resources: a rejected
+      // DELETE must stay reachable on the next cycle, and the leftover
+      // pile is what keeps cleanup() running. After removal the slot has
+      // neither state nor leftovers, so a post-removal sweep would never
+      // retry a rejected deletion and would leak the registration.
+      const prefix = `qwen-${config.poolId}-${slot}-`;
+      const identifiable = (name) =>
+        typeof name === 'string' &&
+        name.replace(/^ecs-/, '').startsWith(prefix);
+      // Only sweep when every leftover carried this slot's identity
+      // prefix (the scheme assumes poolId is unique per host). A foreign
+      // or missing instance label means the pile may belong to another
+      // pool sharing the host; deleting our slot's registrations by name
+      // would then be guesswork, so stay blocked until the pile is gone.
+      if (!orphanLabels.every(identifiable)) orphanSweepBlocked = true;
+      else {
+        // A registration not reported offline may belong to a live runner
+        // outside this host's view; only sweep ones GitHub already reports
+        // offline.
+        const owned = (await listRunners()).filter(
+          (runner) =>
+            typeof runner.name === 'string' &&
+            runner.status === 'offline' &&
+            (runner.name === runnerName(slot) ||
+              (runner.name.startsWith(`${runnerName(slot)}-`) &&
+                /^[0-9a-f]{8}$/.test(
+                  runner.name.slice(runnerName(slot).length + 1),
+                ))),
+        );
+        for (const runner of owned) {
+          if (!Number.isSafeInteger(runner.id) || runner.id < 1)
+            throw new Error(
+              'Ambiguous runner identity; manual reconciliation required',
+            );
+          try {
+            await gh([
+              '-X',
+              'DELETE',
+              `/repos/${config.repo}/actions/runners/${runner.id}`,
+            ]);
+          } catch (error) {
+            if (error.status === 404) continue;
+            // Carry the status through the rewrap so a rate-limited sweep
+            // picks the same backoff ladder as any other 403/429.
+            const rejected = new Error(
+              `Runner ${runner.id} deletion was rejected${
+                error.status ? ` (HTTP ${error.status})` : ''
+              }; retrying on the next cycle`,
+              { cause: error },
+            );
+            rejected.status = error.status;
+            throw rejected;
+          }
+        }
+      }
+    }
     for (const id of containers) {
       try {
         const logs = await run('docker', ['logs', '--tail', '10000', id]);
@@ -461,61 +519,10 @@ export function createManager(config, dependencies = {}) {
     for (const id of networks) await run('docker', ['network', 'rm', id]);
     if ((await listNetworks(slot)).length)
       throw new Error('Network cleanup failed');
-    if (!state?.name && orphanLabels) {
-      // The identity-less sweep above removed the resources but could not
-      // target their registrations. Sweep every registration this slot's
-      // naming scheme owns so an orphan cannot block its replacement —
-      // but only when every removed resource carried this slot's identity
-      // prefix. A foreign or missing instance label means the pile may
-      // belong to another pool sharing the host; deleting our slot's
-      // registrations by name would then be guesswork, so stay blocked.
-      const prefix = `qwen-${config.poolId}-${slot}-`;
-      const identifiable = (name) =>
-        typeof name === 'string' &&
-        name.replace(/^ecs-/, '').startsWith(prefix);
-      if (!orphanLabels.every(identifiable))
-        throw new Error(
-          'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
-        );
-      // A registration still online may belong to a live runner outside
-      // this host's view; only sweep ones GitHub already reports offline.
-      const owned = (await listRunners()).filter(
-        (runner) =>
-          typeof runner.name === 'string' &&
-          runner.status !== 'online' &&
-          (runner.name === runnerName(slot) ||
-            (runner.name.startsWith(`${runnerName(slot)}-`) &&
-              /^[0-9a-f]{8}$/.test(
-                runner.name.slice(runnerName(slot).length + 1),
-              ))),
+    if (orphanSweepBlocked)
+      throw new Error(
+        'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
       );
-      for (const runner of owned) {
-        if (!Number.isSafeInteger(runner.id) || runner.id < 1)
-          throw new Error(
-            'Ambiguous runner identity; manual reconciliation required',
-          );
-        try {
-          await gh([
-            '-X',
-            'DELETE',
-            `/repos/${config.repo}/actions/runners/${runner.id}`,
-          ]);
-        } catch (error) {
-          if (error.status === 404) continue;
-          // Carry the status through the rewrap so a rate-limited sweep
-          // picks the same backoff ladder as any other 403/429 once the
-          // exponential-backoff change lands on main.
-          const rejected = new Error(
-            `Runner ${runner.id} deletion was rejected${
-              error.status ? ` (HTTP ${error.status})` : ''
-            }; retrying on the next cycle`,
-            { cause: error },
-          );
-          rejected.status = error.status;
-          throw rejected;
-        }
-      }
-    }
     if (state?.name) {
       const all = await listRunners();
       // A recorded runnerName is exact. A label-recovered identity carries
