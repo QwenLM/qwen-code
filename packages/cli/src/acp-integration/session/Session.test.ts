@@ -1670,6 +1670,110 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('un-seals notifications when a reversible close is rolled back', async () => {
+      // `closeStoredSession` can still throw after the flush — a `requireFlush`
+      // failure, or a recorder that kept write ownership — and its `finally`
+      // releases the close: `closing` goes false and the queues drain again, so
+      // the session is deliberately live. A seal left set diverts every later
+      // notification: a peer report is cold-stored and never delivered, any
+      // other kind is dropped without a record or a tally, and only a process
+      // restart recovers.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const releaseClose = session.beginClose();
+      session.flushPendingPeerNotifications();
+      vi.mocked(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).mockClear();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+
+      releaseClose();
+      // A peer report is the discriminator: the sealed branch's kind narrowing
+      // already rescues every other kind, so only a `peer` item proves the
+      // latch itself was cleared.
+      manager.leaderCallback?.('after rollback', 'after rollback', [
+        'security',
+      ]);
+      await session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'agent-after-rollback',
+        status: 'completed',
+        kind: 'agent',
+      });
+
+      // Both take the live path again — queued, accounted as completions, and
+      // drained to the leader — instead of being cold-stored or dropped.
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ displayText: 'after rollback' }),
+      );
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          backgroundTask: expect.objectContaining({
+            taskId: 'agent-after-rollback',
+            kind: 'agent',
+          }),
+        }),
+      );
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(vi.mocked(mockChat.sendMessageStream)).toHaveBeenCalled(),
+      );
+      session.dispose();
+    });
+
+    it('still records a non-peer completion that arrives inside the sealed window', async () => {
+      // The seal is about peer reports. `#landUndrainedPeerNotifications` skips
+      // every other kind, so routing an agent/shell/monitor/workflow/cron
+      // completion through that branch loses its transcript record, its display
+      // frame and its dropped tally at once — and during managed shutdown the
+      // window is wide enough for a background task to finish inside it.
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      session.flushPendingPeerNotifications();
+      vi.mocked(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).mockClear();
+
+      await session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'agent-in-sealed-window',
+        status: 'completed',
+        kind: 'agent',
+      });
+
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          backgroundTask: expect.objectContaining({
+            taskId: 'agent-in-sealed-window',
+            kind: 'agent',
+          }),
+        }),
+      );
+      session.dispose();
+    });
+
     it('coalesces a teardown burst into one automatic leader turn', async () => {
       // `cleanup()` publishes one exit per surviving teammate (up to ten). Each
       // queued peer item drains as its own automatic leader turn, so carrying

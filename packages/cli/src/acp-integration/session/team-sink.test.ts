@@ -272,10 +272,11 @@ describe('attachTeamSink', () => {
 
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
     expect(respond.mock.calls[0]![0]).toBe(ToolConfirmationOutcome.Cancel);
-    expect(deps.injectLeaderMessage).not.toHaveBeenCalledWith(
-      expect.stringContaining('could not answer'),
-      expect.anything(),
-    );
+    // Not `not.toHaveBeenCalledWith(stringContaining(...))`: that excludes one
+    // phrasing only, so a differently worded `<team_notice>` about a host that
+    // did answer would still pass. The sibling case below asserts the invariant
+    // this test is named for.
+    expect(deps.injectLeaderMessage).not.toHaveBeenCalled();
     detach();
   });
 

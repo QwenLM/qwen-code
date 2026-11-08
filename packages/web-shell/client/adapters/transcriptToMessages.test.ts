@@ -932,6 +932,80 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('names the teammate when the turn-started marker arrives before the display frame', () => {
+    // This is the live wire order: `_qwencode/start_turn` publishes the marker
+    // before `#emitBackgroundNotificationDisplay` emits the identity-carrying
+    // frame. Filling the task-id map inside the projection loop would leave
+    // this marker — the row the user sees — anonymous, which is why the
+    // correlation is a pre-pass over the whole block list.
+    const updates = [
+      {
+        text: '',
+        meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn: {
+            turnId: 'automatic-1',
+            taskId: 'teammate-message-3',
+            kind: 'peer',
+            startedAt: 1,
+          },
+        },
+      },
+      {
+        text: 'report text',
+        meta: {
+          source: 'background_task_completed',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'teammate-message-3',
+            status: 'message',
+            kind: 'peer',
+          },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      updates.flatMap(({ text, meta }, index) =>
+        normalizeDaemonEvent({
+          id: index + 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+              _meta: meta,
+            },
+          },
+        }),
+      ),
+    );
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'status',
+    ]);
+    const messages = transcriptBlocksToDaemonMessages(state.blocks);
+
+    // The point of the pre-pass: the marker row is named even though the
+    // identity-carrying frame only shows up later. (This fixture keeps both
+    // rows — the later display row is only consumed into the marker when it
+    // precedes it, as in the case above — so assert on the marker itself.)
+    const marker = messages.find(
+      (message) => message.source === 'background_notification_turn_started',
+    );
+    expect(marker).toMatchObject({
+      role: 'system',
+      source: 'background_notification_turn_started',
+      teammate: { name: 'correctness' },
+    });
+  });
+
   it('keeps vision bridge notices separate from assistant output', () => {
     const notice = {
       status: 'skipped',

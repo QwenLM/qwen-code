@@ -2873,6 +2873,11 @@ export class Session implements SessionContext {
    * Set once the pre-close flush has landed the queue. Nothing may be enqueued
    * after that point: the recorder stops accepting writes when the writer
    * terminals start, so a late arrival is neither drained nor durable.
+   *
+   * Scoped to the close that set it, not to the session: `beginClose`'s
+   * release clears it again, because a close that fails or is cancelled leaves
+   * the session live and a permanent seal would silently divert every later
+   * notification.
    */
   private peerNotificationsSealed = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
@@ -5300,6 +5305,13 @@ export class Session implements SessionContext {
       if (this.disposed) return;
       this.closing = false;
       this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
+      // The close was reversible and just got rolled back, so the session is
+      // live again: un-seal or every later notification takes the cold-copy
+      // branch below, never enters the queue and never reaches the leader or
+      // the client — while its mailbox row is already marked read. The
+      // irreversible managed-shutdown path never runs this closure, so its
+      // seal holds, and `disposed` returns above keep the terminal one.
+      this.peerNotificationsSealed = false;
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -13985,7 +13997,11 @@ export class Session implements SessionContext {
     // The pre-close flush already ran, so this queue will never be drained
     // again. Land the copy while the recorder still accepts writes rather than
     // parking it in a queue whose contents become unpersistable moments later.
-    if (this.peerNotificationsSealed) {
+    // Peer reports only: `#landUndrainedPeerNotifications` skips every other
+    // kind, so an agent/shell/monitor/workflow/cron completion taken through
+    // this branch would lose its transcript record, its display frame and its
+    // dropped tally at once.
+    if (this.peerNotificationsSealed && item.kind === 'peer') {
       this.#landUndrainedPeerNotifications([item]);
       return;
     }
