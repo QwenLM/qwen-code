@@ -157,9 +157,11 @@ Response format:
 The capital of France is Paris.
 ```
 
+After printing the response, the CLI may still wait for managed memory work before exiting. See [Managed Memory Completion](#managed-memory-completion).
+
 ### JSON Output
 
-Returns structured data as a JSON array. All messages are buffered and output together when the session completes. This format is ideal for programmatic processing and automation scripts.
+Returns structured data as a JSON array. All messages are buffered and output together with the terminal result. This format is ideal for programmatic processing and automation scripts.
 
 The JSON output is an array of message objects. The output includes multiple message types: system messages (session initialization), assistant messages (AI responses), and result messages (execution summary).
 
@@ -169,7 +171,7 @@ The JSON output is an array of message objects. The output includes multiple mes
 qwen -p "What is the capital of France?" --output-format json
 ```
 
-Output (at end of execution):
+Output (with the terminal result):
 
 ```json
 [
@@ -242,6 +244,16 @@ session, JSONL event, tool input, or partial message.
 ```bash
 qwen -p "Write a Python script" --output-format stream-json --include-partial-messages
 ```
+
+### Managed Memory Completion
+
+Pending managed memory work does not delay the terminal `result` message in JSON or stream-JSON output. After writing its terminal output (a result message in JSON formats, or the final response or error in text output), the CLI normally waits for tracked extraction, dreaming, and scheduled skill-review tasks before finishing the invocation. A one-shot process may therefore remain running after its output is written. In a reusable stream-JSON session, the next serialized turn can also wait for those tasks while stdin remains open.
+
+Normal EOF in `--input-format stream-json` releases the session's memory-wait grace signal: a wait already underway in the current turn stops waiting (its task stays tracked), and the remaining turns complete without a memory bound. When that work settles, the final retained-memory drain gets one fresh 5000 ms grace period; on expiry the CLI stops waiting for memory without cancelling foreground work or changing an already emitted result. The grace period is not measured from EOF and is not consumed by foreground work — a foreground turn still completes even if it runs past any fixed interval. This is not a 5-second limit on the whole shutdown: foreground work, output flushing, recording, and other cleanup can take longer. One-shot invocations have no session EOF moment. Their failure and cancellation terminals each get a 5000 ms window; a successful one-shot instead waits for the memory writes its turn started and is bounded only by the run's own abort, matching the base behavior. Sessions whose stdin remains open wait within their turns under the session's grace signal.
+
+Cancellation and run-budget aborts stop this wait, including when they arrive after terminal output has been written; session-turn-cap exits also do not wait. Stopping the wait does not cancel the underlying memory tasks. In a reusable session, unfinished tasks remain tracked for a later wait while the process is alive. This is best-effort completion: process exit may abandon unfinished memory updates, and they are not automatically resumed in a later process. Neither receiving a result nor reaching the EOF deadline guarantees that all memory writes have completed. No replacement result is emitted if one was already written, so consumers should also check the invocation outcome or process exit status. Independently scheduled memory metadata migration is outside this tracked task list and is cancelled when the invocation's `Config` shuts down.
+
+The result's `usage` in both JSON formats, and `stats` in successful JSON output, capture telemetry while the result is prepared and emitted. They can include managed-memory usage already recorded, but omit usage recorded afterward. Finishing pending memory work does not update the emitted result. These totals therefore do not guarantee complete token or API accounting for the invocation; an earlier result does not reduce actual model usage or cost.
 
 ### Input Format
 
