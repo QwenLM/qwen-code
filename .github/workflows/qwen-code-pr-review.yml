@@ -611,7 +611,10 @@ jobs:
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`),
       # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from
       # an interrupted review, or stale per-run capture-tools dirs under
-      # RUNNER_TEMP. Reset all of them per run; never fail the job.
+      # RUNNER_TEMP. Reset all of them per run. The sweeps are best-effort
+      # EXCEPT the agent home: a foreign-owned qwen-home that survives the
+      # reclaim fails the job here, before checkout — proceeding would only
+      # die later at the first settings write (PR #16610 incident).
       - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
@@ -637,14 +640,17 @@ jobs:
             exit 1
           fi
           mkdir -p "$QWEN_HOME"
-          # The sudo reclaim paths above can leave the home root-owned (sudo
-          # rm on some hosts, sudo chown to root by accident); mkdir -p on a
-          # root-owned leftover would "succeed" and re-arm the same fail-late
-          # bug one step later. Own the fresh home explicitly.
-          if [ ! -w "$QWEN_HOME" ]; then
+          # mkdir just created this dir as the runner user, so under a normal
+          # umask it is already usable. This check covers the residual races
+          # and environments: another process re-creating the path between
+          # the sweep and mkdir, or a hostile umask stripping owner bits.
+          # settings.json needs write AND traverse, so test both — -w alone
+          # passes a mode-0600 home that cannot hold the file.
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
             sudo -n chown "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            chmod u+rwx "$QWEN_HOME" 2>/dev/null || true
           fi
-          if [ ! -w "$QWEN_HOME" ]; then
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
             echo "::error::fresh qwen-home is not writable by the runner user: $QWEN_HOME"
             ls -ld "$QWEN_HOME" || true
             exit 1

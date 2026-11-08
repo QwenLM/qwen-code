@@ -1523,11 +1523,14 @@ jobs:
             # this pool. The context step chowned it to node (uid 1000); left
             # that way, the next host-user job (e.g. PR review) cannot rm it
             # and dies writing settings.json (PR #16610 incident). Hand it
-            # back too, not just the workspace.
+            # back too, not just the workspace — same for the draft/result
+            # dirs the context step chowned to node.
             QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
-            if [ -d "$QWEN_HOME" ]; then
-              chown -R "$RUNNER_UID:$RUNNER_GID" "$QWEN_HOME" 2>/dev/null || echo "::warning::could not restore qwen-home ownership; the next job on this runner may fail on EACCES"
-            fi
+            for handback in "$QWEN_HOME" "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results" "$RUNNER_TEMP/triage-context"; do
+              if [ -d "$handback" ]; then
+                chown -R "$RUNNER_UID:$RUNNER_GID" "$handback" 2>/dev/null || echo "::warning::could not restore ownership of $handback; the next job on this runner may fail on EACCES"
+              fi
+            done
           else
             echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
