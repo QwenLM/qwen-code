@@ -296,6 +296,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'model', key: 'catalogRefresh' },
   { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
+  { section: 'tools', key: 'lspEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   // A repository must not switch on the gate that authorizes its own hooks.
   { section: 'security', key: 'folderTrust' },

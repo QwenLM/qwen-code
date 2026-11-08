@@ -411,7 +411,6 @@ const SETTINGS_SCHEMA = {
     description:
       'Model providers configuration keyed by provider id (a built-in provider protocol such as "openai" or "gemini", or a custom id mapped via providerProtocol). Each entry is an array of model configurations. OpenAI-compatible models can select wireApi: "chat-completions" or "responses"; omitting wireApi keeps the declared protocol (Chat Completions under openai). Released openai-responses declarations remain readable; new setup writes openai plus wireApi.',
     showInDialog: false,
-    mergeStrategy: MergeStrategy.REPLACE,
   },
 
   // Maps a custom modelProviders provider id to its SDK protocol (AuthType).
@@ -424,7 +423,6 @@ const SETTINGS_SCHEMA = {
     description:
       'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry. New OpenAI configurations map to openai and select wireApi per model; released openai-responses mappings remain readable.',
     showInDialog: false,
-    mergeStrategy: MergeStrategy.REPLACE,
   },
 
   plansDirectory: {
@@ -3455,6 +3453,20 @@ const SETTINGS_SCHEMA = {
           'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
         showInDialog: true,
       },
+      lspEnabled: {
+        type: 'boolean',
+        label: 'LSP Code Intelligence',
+        category: 'Experimental',
+        // The native LSP service and its language-server subprocesses are built
+        // while the Config is constructed, and /lsp is gated when commands
+        // load, so a mid-session change cannot attach a client to a session
+        // that started without one.
+        requiresRestart: true,
+        default: false,
+        description:
+          'Experimental. Enable the LSP code-intelligence service without the `--experimental-lsp` flag: go-to-definition, find-references, hover, symbols, diagnostics and code actions. Off by default. Servers come from a workspace `.lsp.json` or an enabled extension and run with your permissions; a workspace-declared server needs an explicitly trusted folder — `security.folderTrust.enabled` with the folder trusted, or an IDE that reports the workspace as trusted — and is skipped otherwise. Refused at startup when `tools.executionSandbox` is set; `--safe-mode`, `QWEN_CODE_SAFE_MODE=1` and `--bare` start without LSP. `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override the setting (disable wins); a project `.env` or `settings.env` cannot set them.',
+        showInDialog: true,
+      },
       workflowSizeGuideline: {
         type: 'enum',
         label: 'Dynamic Workflow Size',
@@ -3967,6 +3979,16 @@ const SETTINGS_SCHEMA = {
           'Optional whitelist of model grade names the Agent tool may use.',
         showInDialog: false,
         items: { type: 'string' },
+      },
+      defaultBackground: {
+        type: 'boolean',
+        label: 'Default Background',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Run top-level regular subagents in the background by default. Set to false to return their results inline in the foreground. The explicit run_in_background argument and agent-definition background field take precedence over this setting.',
+        showInDialog: false,
       },
       maxParallelAgents: {
         type: 'number',

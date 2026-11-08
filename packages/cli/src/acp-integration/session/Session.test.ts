@@ -4855,6 +4855,8 @@ describe('Session', () => {
       expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       // The client runs its own tool-call guards for the shared tool batch.
       expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
+      // The person's own prompt keeps its memory extraction.
+      expect(send.mock.calls[0][3]).not.toHaveProperty('skipMemoryExtraction');
       expect(agentText()).toContain('Hello');
       // The session snapshots its user turn; the option keeps the client's off.
       expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledOnce();
@@ -4884,6 +4886,9 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
+        // A channel's turn runs no memory extraction, but still recalls.
+        skipMemoryExtraction: true,
+        memoryRecallQuery: 'hello',
       });
       expect(send.mock.calls[0][3]).not.toHaveProperty('submittedPrompt');
       expect(send.mock.calls[0][3]).not.toHaveProperty('humanInput');
@@ -5038,6 +5043,35 @@ describe('Session', () => {
       expect(
         (parts as Part[]).map((part) => part.functionResponse?.id),
       ).toContain('call-read');
+    });
+
+    it("skips memory extraction on every round of a channel's turn", async () => {
+      useTool(core.Kind.Read, 'read_file');
+      const send = useSharedRounds(
+        [
+          toolCall({
+            id: 'call-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/a.txt' },
+          }),
+          finished(),
+        ],
+        [text('Read it.'), finished()],
+      );
+
+      await prompt({ _meta: { [CHANNEL_PROMPT_META_KEY]: true } });
+
+      // The tool result's round is the one whose stop ends the turn.
+      expect(send.mock.calls.map((call) => call[3])).toEqual([
+        expect.objectContaining({
+          type: core.SendMessageType.UserQuery,
+          skipMemoryExtraction: true,
+        }),
+        expect.objectContaining({
+          type: core.SendMessageType.ToolResult,
+          skipMemoryExtraction: true,
+        }),
+      ]);
     });
 
     it('keeps its own tool step and tool-call guards in a session with live tools', async () => {
@@ -5411,36 +5445,44 @@ describe('Session', () => {
       ]);
     });
 
-    it('runs completion memory work when the client ends at the Stop hook cap', async () => {
-      const send = useSharedRounds();
-      send.mockImplementationOnce(
-        (
-          _parts: Part[],
-          _signal: AbortSignal,
-          _promptId: string,
-          options: { stopPolicies?: core.StopPolicy[] },
-        ) =>
-          (async function* () {
-            yield text('not done');
-            yield finished();
-            for (const policy of options.stopPolicies ?? []) {
-              policy.onStopHookCap?.();
-            }
-            // The client returns at the cap before scheduling memory tasks.
-            yield {
-              type: core.LlmEventType.HookSystemMessage,
-              value:
-                'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
-            };
-          })(),
-      );
+    it.each([false, true])(
+      'runs completion memory work when the client ends at the Stop hook cap (channel turn: %s)',
+      async (channel) => {
+        const send = useSharedRounds();
+        send.mockImplementationOnce(
+          (
+            _parts: Part[],
+            _signal: AbortSignal,
+            _promptId: string,
+            options: { stopPolicies?: core.StopPolicy[] },
+          ) =>
+            (async function* () {
+              yield text('not done');
+              yield finished();
+              for (const policy of options.stopPolicies ?? []) {
+                policy.onStopHookCap?.();
+              }
+              // The client returns at the cap before scheduling memory tasks.
+              yield {
+                type: core.LlmEventType.HookSystemMessage,
+                value:
+                  'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+              };
+            })(),
+        );
 
-      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+        await expect(
+          prompt(channel ? { _meta: { [CHANNEL_PROMPT_META_KEY]: true } } : {}),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
 
-      expect(
-        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-      ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
-    });
+        // A channel's turn has the client skip extraction and Dream.
+        expect(
+          mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+        ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery, {
+          skipMemoryExtraction: channel,
+        });
+      },
+    );
 
     it.each(['Stop hook', 'Todo Stop Guard'])(
       'records only the final answer after a %s continuation',
@@ -6573,6 +6615,36 @@ describe('Session', () => {
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
+    });
+
+    it("schedules no extraction or Dream after a channel's turn", async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'a comment' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'a comment' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // The metadata migration reads no turn: it still runs.
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      // Recall still serves the reply.
+      expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledWith(
+        'a comment',
+        expect.any(AbortSignal),
+      );
     });
 
     it('drives the prepared recall-mode transition before the per-turn reset on a fresh user turn', async () => {
@@ -31123,7 +31195,12 @@ describe('Session', () => {
               // The session runs the client's memory tasks once the turn ends.
               expect(
                 mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-              ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
+              ).toHaveBeenCalledExactlyOnceWith(
+                core.SendMessageType.UserQuery,
+                {
+                  skipMemoryExtraction: false,
+                },
+              );
             },
           );
 
@@ -37546,6 +37623,32 @@ describe('Session', () => {
         });
       });
 
+      it('tags the stacked-skill overflow notice for channel replies', async () => {
+        const notice =
+          'Only the first 5 skills were loaded. Additional /skill tokens were treated as prompt text.';
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded prompt' }],
+          stackedSkillOverflow: notice,
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/skill a /skill b' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: notice },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+      });
+
       it('forwards the structured compression result and records it for replay', async () => {
         const compression = {
           phase: 'done' as const,
@@ -39105,7 +39208,9 @@ describe('Session', () => {
           expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalled();
           expect(
             mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-          ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
+          ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery, {
+            skipMemoryExtraction: false,
+          });
         });
 
         it('marks a continuation delivered at its stop when no model event follows the request', async () => {
@@ -52797,6 +52902,34 @@ describe('Session', () => {
       );
     });
 
+    it('reports a returned interruption as interrupted and keeps its output', async () => {
+      const abortController = new AbortController();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'Below is the output before it was cancelled.\npartial',
+          returnDisplay: 'partial',
+          interruptedBeforeCompletion: true,
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('cancel_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-interrupted-cancel', [
+        { id: 'interrupted_cancel_call', name: 'cancel_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error:
+          'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.\n\nBelow is the output before it was cancelled.\npartial',
+      });
+    });
+
     it('does not execute after cancellation settles during PreToolUse', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
@@ -65851,6 +65984,30 @@ describe('Session', () => {
           ([method]) => method === 'qwen/notify/session/prompt-suggestion',
         ),
       ).toBeUndefined();
+    });
+
+    it("does not generate a suggestion after a channel's turn", async () => {
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      // It ends cleanly, so only the channel gate stops the suggestion.
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'a comment' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      // Give the (skipped) IIFE a chance to run.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(generateMock).not.toHaveBeenCalled();
+
+      // The next prompt of the person's own still gets one.
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() => expect(generateMock).toHaveBeenCalledOnce());
     });
 
     it('emits when the setting is unset (on by default)', async () => {

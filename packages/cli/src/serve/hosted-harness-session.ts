@@ -58,7 +58,16 @@ import {
 import {
   reconcileHostedTurnCleanup,
   hasHostedCleanupDebt,
+  hasBlockingHostedCleanupDebt,
+  oweHostedTurnCleanup,
+  type HostedCleanupHold,
+  type HostedCleanupResult,
 } from './hosted-turn-cleanup.js';
+import {
+  acquireHostedQuestionRuntime,
+  questionWaitDefinitionAdmitted,
+  waitForHostedQuestion,
+} from './hosted-question-wait.js';
 import { inspectHostedRecovery } from './hosted-recovery-status.js';
 import {
   HostedHarnessInstance,
@@ -752,6 +761,8 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  cleanupHolds?: Map<string, HostedCleanupHold>;
+  cleanupRetry?: Promise<void>;
   recoveryCleanupOnly?: boolean;
   lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
@@ -2551,23 +2562,65 @@ function runSettleProjection(
     });
 }
 
+function retainHostedCleanupHolds(
+  session: HostedSession,
+  result: HostedCleanupResult | undefined,
+): void {
+  if (!result) return;
+  session.cleanupHolds ??= new Map();
+  for (const promptId of result.states.keys())
+    session.cleanupHolds.delete(promptId);
+  for (const [promptId, hold] of result.held) {
+    session.cleanupHolds.set(promptId, hold);
+    session.heldRuntimeTurns.add(hold.runtimeSessionId);
+  }
+}
+
 async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
+  drain = false,
 ): Promise<void> {
-  if (unsettledPromptId(session)) return;
+  if (!drain && unsettledPromptId(session)) return;
+  // A load can overlap the wake pump's retry. Re-read the debt with each
+  // caller's authority after the previous attempt settles.
+  const retry = (session.cleanupRetry ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(async () => {
+      if (!drain && unsettledPromptId(session)) return;
+      try {
+        session.cleanupHolds?.clear();
+        if (hasHostedCleanupDebt(session.managed)) {
+          // Unsettled wake turns need their recovery pump to commit the terminal
+          // record before reconciliation can release their Runtime.
+          retainHostedCleanupHolds(
+            session,
+            await reconcileHostedTurnCleanup(
+              session.managed,
+              options,
+              undefined,
+              drain,
+            ),
+          );
+        }
+        if (session.cleanupBlocked) liftRecoveryBlock(session);
+        session.cleanupBlocked = false;
+      } catch (cause) {
+        if (!session.blocked) {
+          session.cleanupBlocked = true;
+          session.blocked = true;
+          session.monitorWake?.kick();
+        }
+        throw cause;
+      }
+    });
+  session.cleanupRetry = retry;
   try {
-    if (hasHostedCleanupDebt(session.managed))
-      await reconcileHostedTurnCleanup(session.managed, options);
-    if (session.cleanupBlocked) liftRecoveryBlock(session);
-    session.cleanupBlocked = false;
-  } catch (cause) {
-    if (!session.blocked) {
-      session.cleanupBlocked = true;
-      session.blocked = true;
-      session.monitorWake?.kick();
+    await retry;
+  } finally {
+    if (session.cleanupRetry === retry) {
+      session.cleanupRetry = undefined;
     }
-    throw cause;
   }
 }
 
@@ -2822,7 +2875,10 @@ async function verifyWorkspaceRestore(
       event.kind === 'domain.committed' &&
       ![
         'session_metadata',
-        ...(session.mcp ? ['config_install'] : []),
+        ...(session.mcp || session.extensions?.enabled
+          ? ['config_install']
+          : []),
+        ...(session.extensions?.enabled ? ['tool_stage'] : []),
         'hook_registration',
         'hook_execution',
         'file_history',
@@ -3560,6 +3616,7 @@ async function executeHostedTurn(
     ? { text, parts: [{ text }], attachments: [] }
     : await readHostedInput(session.managed, promptId, text);
   const harness = createManagedHarnessHandle(session.managed);
+  let questionRecoveryBroker: HostedWorkspaceBroker | undefined;
   if (resumeModel) {
     await harness.adoptPreparedContinuation(promptId, true);
     session.workspaceContext = resumeModel.workspaceContext ?? undefined;
@@ -3607,6 +3664,32 @@ async function executeHostedTurn(
   }
   if (resumeApproval) {
     const plan = resumeApproval.plan;
+    if (plan.runtime.provisionerKind) {
+      if (
+        !brokerOptions ||
+        session.mcp ||
+        session.hooks ||
+        session.foregroundOnly ||
+        (await ensureMemberPlanMode(session)) ||
+        !questionWaitDefinitionAdmitted(
+          session.definition,
+          session.childDepth ?? 0,
+        )
+      )
+        throw new HostedToolRecoveryRequiredError(
+          'Original question Session is not qualified.',
+        );
+      questionRecoveryBroker = new HostedWorkspaceBroker(
+        brokerOptions,
+        authority.sessionHeader.sessionKey,
+        plan.runtime.runtimeSessionId,
+      );
+      questionRecoveryBroker.runtime = {
+        bindingId: plan.runtime.bindingId,
+        generation: plan.runtime.generation,
+        workspaceGeneration: plan.runtime.workspaceGeneration,
+      };
+    }
     if (plan.stage === 'approval') {
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
@@ -3618,25 +3701,56 @@ async function executeHostedTurn(
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
         onResumeReady?.();
-        await session.waiters.wait(
-          actionId,
-          options.expiresAt,
-          abort.signal,
-          () =>
-            authority.action(actionId)?.state !== 'requested' ||
-            authority.writesStopped,
-          liveApproval?.readSettings
-            ? hostedLiveApprovalPoll(
-                session.managed,
-                session.waiters,
-                options,
-                liveApproval.readSettings,
-                abort.signal,
-                false,
-                liveApproval.isBlocked,
-              )
-            : undefined,
-        );
+        if (
+          questionRecoveryBroker &&
+          original.state === 'requested' &&
+          !abort.signal.aborted &&
+          Date.now() < options.expiresAt
+        ) {
+          const history = await readHostedFileHistory(session.managed);
+          if (history?.pendingTurn || history?.pendingUndo)
+            throw new Error('Question file history is still owed.');
+          await oweHostedTurnCleanup(
+            session.managed,
+            promptId,
+            questionRecoveryBroker,
+          );
+          const acquired = await acquireHostedQuestionRuntime(
+            questionRecoveryBroker,
+            plan.runtime,
+            abort.signal,
+            options.expiresAt,
+          );
+          if (acquired)
+            await waitForHostedQuestion({
+              session: session.managed,
+              broker: questionRecoveryBroker,
+              brokerOptions: brokerOptions!,
+              waiters: session.waiters,
+              requestId: actionId,
+              expiresAt: options.expiresAt,
+              signal: abort.signal,
+            });
+        } else
+          await session.waiters.wait(
+            actionId,
+            options.expiresAt,
+            abort.signal,
+            () =>
+              authority.action(actionId)?.state !== 'requested' ||
+              authority.writesStopped,
+            liveApproval?.readSettings
+              ? hostedLiveApprovalPoll(
+                  session.managed,
+                  session.waiters,
+                  options,
+                  liveApproval.readSettings,
+                  abort.signal,
+                  false,
+                  liveApproval.isBlocked,
+                )
+              : undefined,
+          );
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
       }
@@ -3867,6 +3981,7 @@ async function executeHostedTurn(
                 session.shell,
                 await hostedApprovalForTurn(session, promptId),
                 {
+                  recoveryBroker: questionRecoveryBroker,
                   mcp: session.mcp,
                   hooks: session.hooks,
                   skills: session.skills,
@@ -4144,7 +4259,9 @@ async function executeHostedTurn(
         onTurnResult?.(turnResult);
         await session.managed.sink.write(turnResult);
         try {
-          await toolTurn?.cleanup();
+          session.cleanupHolds?.delete(promptId);
+          retainHostedCleanupHolds(session, await toolTurn?.cleanup());
+          if (toolTurn?.runtimeHeld) session.heldRuntimeTurns.add(promptId);
         } catch (cause) {
           if (!session.blocked) {
             session.cleanupBlocked = true;
@@ -4572,16 +4689,21 @@ export function registerHostedHarnessSessionRoutes(
     if (session.fileHistoryOwed === promptId)
       session.fileHistoryOwed = undefined;
     if (brokerOptions) {
-      await reconcileHostedTurnCleanup(
-        session.managed,
-        brokerOptions,
-        promptId,
+      session.cleanupHolds?.delete(promptId);
+      retainHostedCleanupHolds(
+        session,
+        await reconcileHostedTurnCleanup(
+          session.managed,
+          brokerOptions,
+          promptId,
+        ),
       );
       const lease = session.runtimeLeaseHeld;
       if (
         lease?.promptId === promptId &&
         session.runtimeLeaseOwedByTerminalRoute &&
-        (await releaseHeldRuntime(session, brokerOptions, lease)) &&
+        (await releaseHeldRuntime(session, brokerOptions, lease)) !==
+          'pending' &&
         session.runtimeLeaseHeld === lease
       ) {
         session.runtimeLeaseHeld = undefined;
@@ -4595,7 +4717,10 @@ export function registerHostedHarnessSessionRoutes(
         .findLast((event) => event.kind === 'input.accepted')?.payload[
         'turnId'
       ] === promptId &&
-      !hasHostedCleanupDebt(session.managed) &&
+      !(await hasBlockingHostedCleanupDebt(
+        session.managed,
+        session.cleanupHolds,
+      )) &&
       !session.fileHistoryOwed &&
       !session.runtimeLeaseOwedByTerminalRoute
     )
@@ -6309,7 +6434,24 @@ export function registerHostedHarnessSessionRoutes(
         (effectiveMcpServers?.length || mcpSettings.length) &&
         brokerOptions &&
         !session.mcp
-      )
+      ) {
+        // A non-terminal discard can leave drained rows under a superseded
+        // owner; now that this bundle is durably active, release them so the
+        // constructor below does not see owners.size>1 (R15-3). The active
+        // owner's own drained rows stay for the reload to re-initialize, so a
+        // failed apply that kept the previous revision active is never stranded.
+        if (extensionBundle)
+          await HostedMcpSession.releaseSupersededDrained(
+            managed,
+            `extensions-components-${createHash('sha256')
+              .update(
+                JSON.stringify([
+                  managed.authority.sessionHeader.sessionKey,
+                  extensionBundle.configRevision,
+                ]),
+              )
+              .digest('hex')}`,
+          );
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
@@ -6318,6 +6460,7 @@ export function registerHostedHarnessSessionRoutes(
           undefined,
           extensionBundle !== undefined,
         );
+      }
       if (effectiveHookCatalog && brokerOptions && !session.hooks)
         session.hooks = new HostedHookSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
@@ -6325,6 +6468,16 @@ export function registerHostedHarnessSessionRoutes(
           effectiveHookCatalog,
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
+          extensionBundle
+            ? `extensions-components-${createHash('sha256')
+                .update(
+                  JSON.stringify([
+                    session.managed.authority.sessionHeader.sessionKey,
+                    extensionBundle.configRevision,
+                  ]),
+                )
+                .digest('hex')}`
+            : undefined,
         );
       if (extensionBundle && extensionManagement)
         selectExtensionCatalog(
@@ -6622,10 +6775,10 @@ export function registerHostedHarnessSessionRoutes(
             try {
               if (
                 runtime.broker &&
-                !(await releaseHeldRuntime(session, brokerOptions, {
+                (await releaseHeldRuntime(session, brokerOptions, {
                   promptId: turn.turnId,
                   runtimeSessionId: runtime.broker.runtimeSessionId,
-                }))
+                })) === 'pending'
               )
                 return 'busy';
               await retryHostedCleanup(session, brokerOptions);
@@ -6969,10 +7122,37 @@ export function registerHostedHarnessSessionRoutes(
       // A bare load of a parked Session keeps refusing with 409 so it never
       // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
+      const pendingCommandApproval =
+        session.extensions?.enabled && unsettled
+          ? await findHostedApprovalContinuation(managed, unsettled)
+          : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
+      // An extensions Session that also carries a Hook catalog never satisfies
+      // `takeover` (hooks set), yet a parked command-step approval is still
+      // recoverable by an explicit takeover load. Compute it once and use it
+      // for BOTH the file-history settle exemption and the resume arm below,
+      // so a batch that owes file history while a command step parks at
+      // await_action is resumed rather than 409'd on a settle it can never
+      // produce (R8-1 / R7-2).
+      const extensionsCommandStepTakeover =
+        takeoverFlags &&
+        !lifecycle &&
+        !!session.extensions?.enabled &&
+        pendingCommandApproval?.plan.commandStep !== undefined;
+      // A parked command-step round must never be answered by a cold load:
+      // answering writes a durable tool_result for the plan's own skill call,
+      // which permanently destroys the continuation. Both answer guards below
+      // key on this one predicate. pendingCommandApproval is computed
+      // unconditionally above; resumeApproval is only assigned inside the
+      // takeover arm, so on a bare load it is undefined and cannot be the key
+      // (R9-1).
+      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      const commandStepPark =
+        pendingCommandApproval?.plan.commandStep !== undefined ||
+        resumeApproval?.plan.commandStep !== undefined;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -6980,7 +7160,12 @@ export function registerHostedHarnessSessionRoutes(
       // committed, any other as never run — or the gate would refuse this
       // Session on every load. A failed answer leaves the gate's retriable
       // refusal.
-      if (session.hooks && !lifecycle && unsettled !== undefined) {
+      if (
+        session.hooks &&
+        !lifecycle &&
+        unsettled !== undefined &&
+        !commandStepPark
+      ) {
         try {
           await answerResumedTurnCalls({
             session: managed,
@@ -7044,7 +7229,8 @@ export function registerHostedHarnessSessionRoutes(
       // than by whichever conjunct of it the probe trips first.
       const settle: HostedFileHistorySettlement | null =
         !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !channelParked
-          ? takeover && unsettled !== undefined
+          ? (takeover || extensionsCommandStepTakeover) &&
+            unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
               ? null
               : { blocker: 'pending_turn_mismatch' }
@@ -7193,12 +7379,20 @@ export function registerHostedHarnessSessionRoutes(
           resume = { promptId: unsettled, text, parts: [] };
         }
       }
-      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      // The extensions arm reuses extensionsCommandStepTakeover (computed with
+      // the settle exemption above): an explicit, non-lifecycle takeover of an
+      // extensions Session's parked command-step plan, even when a Hook catalog
+      // makes `takeover` itself false. It is scoped to a command-step plan — a
+      // native approval on a hooks/MCP Session is refused by
+      // resumeSavedNativeBatch, so admitting it here would 503 the load instead
+      // of attaching (R7-2); native approvals stay on the no-hooks arm. Sharing
+      // the boolean with the settle exemption keeps a file-history-owing batch
+      // recoverable instead of 409'ing before this arm is consulted (R8-1).
       if (
-        takeover &&
         unsettled &&
         session.toolProfile &&
-        ((!session.hooks && !session.mcp) || session.extensions?.enabled) &&
+        ((takeover && !session.hooks && !session.mcp) ||
+          extensionsCommandStepTakeover) &&
         brokerOptions
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
@@ -7208,10 +7402,9 @@ export function registerHostedHarnessSessionRoutes(
             verdict.checkpoint.continuation.phase,
           )
         ) {
-          resumeApproval = await findHostedApprovalContinuation(
-            managed,
-            unsettled,
-          );
+          resumeApproval =
+            pendingCommandApproval ??
+            (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const user = (await managed.sink.project()).find(
               (item) =>
@@ -7523,7 +7716,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId)
+        if (promptId && !commandStepPark)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
@@ -7692,10 +7885,13 @@ export function registerHostedHarnessSessionRoutes(
       // rather than failing the load (the Workspace-level cascade stays
       // the backstop). The Broker answers Runtime Session ids, and
       // hostedRuntimeSessionId is idempotent, so the close's drain maps a
-      // restored entry back to itself. The set's only reader is the close's
-      // drain loop, which sits in the v1-only close block: a lifecycle-v2
-      // Session would restore an obligation its close never drains, so the
-      // restore stays off that load (#13986 R1-3).
+      // restored entry back to itself. The restore stays off a lifecycle-v2
+      // load (#13986 R1-3). Its original reason — v2 had no drain — is gone
+      // now that settle_resources drains the set too (R24-1), but the gate
+      // stays for a different one: a restored id can be a deterministic Hook
+      // owner, and the v2 drain releases it terminally, which would tombstone
+      // the id a reload recomputes (R13-1/R14-1). Re-enabling the restore for
+      // v2 belongs with the keep-READY drain, not ahead of it.
       if (
         !create &&
         brokerOptions &&
@@ -8110,7 +8306,12 @@ export function registerHostedHarnessSessionRoutes(
             ...brokerOptions,
             lifecycleAuthority: () => session.lifecycle,
           });
-        if (hasHostedCleanupDebt(session.managed))
+        if (
+          await hasBlockingHostedCleanupDebt(
+            session.managed,
+            session.cleanupHolds,
+          )
+        )
           throw new Error('Runtime cleanup remains owed.');
       }
       session.monitorWake?.close();
@@ -8137,16 +8338,95 @@ export function registerHostedHarnessSessionRoutes(
         });
         await session.automations?.reconcileRuns();
         if (phase === 'settle_resources') {
-          await session.hooks?.close();
+          // Stop what the turns still owe ahead of the owner close that asks
+          // for the mount back (R22-1, the order the v1 close already keeps for
+          // R14-2): a live background run keeps the release-mount guard
+          // refusing runtime_session_busy, so a handback issued first parks the
+          // detach on recovery-required for as long as the process lives. The
+          // stops also land their finalize through the still-open publisher
+          // closed below. Two drains because the debt is recorded in two places
+          // — a descriptor here, a held Runtime below (R24-1).
+          if (brokerOptions)
+            await retryHostedCleanup(
+              session,
+              {
+                ...brokerOptions,
+                lifecycleAuthority: () => session.lifecycle,
+              },
+              true,
+            );
+          else if (hasHostedCleanupDebt(session.managed))
+            throw new Error('Runtime cleanup remains owed after drain.');
+          // Drain the Runtimes a turn left held, where the v1 close already
+          // does, so a live background run stops before the handback asks for
+          // the mount back (R24-1). Scope: this reaches the obligations a wake
+          // turn's held aftermath and a cleanup hold register. A Hook-
+          // configured turn registers NEITHER — it acquires through
+          // hooks.acquire(), writes no cleanup descriptor, and finish() skips
+          // the broker.release() whose 409 catch is the only assignment of
+          // runtimeHeld — so for that shape this loop is empty and the close
+          // still parks on recovery-required below. That gap is pinned by
+          // 'never registers a held Runtime for a Hook-configured turn' and
+          // needs a keep-READY drain to close: the release used here would
+          // tombstone the deterministic Hook owner (R13-1/R14-1).
+          let heldDrainUnproven = false;
+          if (brokerOptions)
+            for (const heldTurn of [...session.heldRuntimeTurns]) {
+              try {
+                await new HostedWorkspaceBroker(
+                  brokerOptions,
+                  session.managed.authority.sessionHeader.sessionKey,
+                  hostedRuntimeSessionId(heldTurn),
+                ).release({ drain: true });
+                session.heldRuntimeTurns.delete(heldTurn);
+              } catch (cause) {
+                // Both tolerances the v1 drain carries (R25-1). A 404 means
+                // nothing remains to stop. A Broker that restarted beside the
+                // Harness holds no resident Session and answers the
+                // declared-retryable 503; throwing there would skip the owner
+                // close, the lease release, the loop stops and the publisher
+                // closes on every attempt while the reload re-seeds the same
+                // id, so the Session could never close. The Workspace cascade
+                // owns that Runtime instead — but the stop stays unproven, so
+                // the loops below must not settle it as confirmed.
+                if (
+                  cause instanceof HostedWorkspaceBrokerRejection &&
+                  ((cause.status === 404 &&
+                    cause.code === 'runtime_session_not_found') ||
+                    (cause.status === 503 &&
+                      cause.code === 'runtime_reconciliation_required'))
+                ) {
+                  session.heldRuntimeTurns.delete(heldTurn);
+                  if (cause.status === 503) heldDrainUnproven = true;
+                  continue;
+                }
+                // Any other refusal left the run unproven with no cascade to
+                // hand it to. Park rather than hand the mount back over a
+                // writer that may still live.
+                throw cause;
+              }
+            }
+          // Only a delete is terminal; a close keeps the deterministic owner
+          // re-acquirable across the reload (R14-1).
+          await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
+          // Neither an unprovable drain nor a Session whose own settlement
+          // already failed proved to the Runtime that anything stopped, so
+          // both settle on the runtime_lost line — the only state
+          // rebuildFromRuntimeLost accepts (R25-1/R26-1, matching the v1
+          // close). v2 has no heldDrainFailed: that arm throws above instead.
+          const stopSettle =
+            session.blocked || heldDrainUnproven
+              ? 'runtime_lost'
+              : 'stop_requested';
           for (const loop of session.shell?.monitorLoops?.values() ?? [])
-            await loop.stop('stop_requested');
+            await loop.stop(stopSettle);
           for (const loop of session.backgroundLane?.monitorLoops?.values() ??
             [])
-            await loop.stop('stop_requested');
+            await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources();
+          await session.mcp?.closeResources({ terminal: kind === 'delete' });
         }
         res.json({
           protocolVersion: 2,
@@ -9035,15 +9315,12 @@ export function registerHostedHarnessSessionRoutes(
       throw new Error('Hosted extension management is unavailable.');
     if (session.extensions) return session.extensions;
     const head = session.managed.authority.domainRecord('config_install');
-    const unified =
+    const config =
       head &&
-      isManagedExtensionConfig(
-        JSON.parse(
-          (await session.managed.resources.read(head.recordRef)).toString(
-            'utf8',
-          ),
-        ),
+      JSON.parse(
+        (await session.managed.resources.read(head.recordRef)).toString('utf8'),
       );
+    const unified = config && isManagedExtensionConfig(config);
     const legacy = unified ? [] : await readHostedMcpSettings(session.managed);
     const baseMcp = session.definition?.['mcpServers'];
     const options = {
@@ -9116,6 +9393,15 @@ export function registerHostedHarnessSessionRoutes(
                 session.managed.authority.sessionHeader.sessionKey,
                 ownerId,
               );
+            // A non-terminal discard can leave drained rows under a superseded
+            // owner; release them before constructing so a live off->on->off->on
+            // toggle does not accumulate owners.size>1 (R15-3, the live-path
+            // counterpart of the cold-load sweep). The active owner's own drained
+            // rows are untouched, so a failed apply is never stranded.
+            await HostedMcpSession.releaseSupersededDrained(
+              session.managed,
+              ownerId,
+            );
             session.mcp = new HostedMcpSession(
               options,
               session.managed,
@@ -9126,6 +9412,27 @@ export function registerHostedHarnessSessionRoutes(
             );
             if (session.hooks?.broker === broker)
               session.hooks.delegateBrokerToMcp();
+          }
+          const extensionBroker =
+            session.mcp?.broker ??
+            new HostedWorkspaceBroker(
+              options,
+              session.managed.authority.sessionHeader.sessionKey,
+              ownerId,
+            );
+          if (
+            session.hooks &&
+            session.hooks.broker.runtimeSessionId !==
+              extensionBroker.runtimeSessionId
+          ) {
+            // The owner moved (configRevision changed) while the Hook catalog
+            // pin stayed the same, so drain kept this session. Close it to
+            // release its mount claim and let the rebuild below bind the new
+            // owner. Swapping the broker under a held mount would orphan the
+            // claim, and refusing the swap would park a previously-valid apply
+            // at recovery_required.
+            await session.hooks.close();
+            session.hooks = undefined;
           }
           if (bundle.hookCatalog && !session.hooks) {
             session.hooks = new HostedHookSession(
@@ -9677,18 +9984,21 @@ export function registerHostedHarnessSessionRoutes(
     options: HostedWorkspaceBrokerOptions,
     lease: NonNullable<HostedSession['runtimeLeaseHeld']>,
     drain = false,
-  ): Promise<boolean> => {
+  ): Promise<'released' | 'held' | 'pending'> => {
     const { promptId, runtimeSessionId } = lease;
-    const states = await reconcileHostedTurnCleanup(
+    session.cleanupHolds?.delete(promptId);
+    const result = await reconcileHostedTurnCleanup(
       session.managed,
       options,
       promptId,
       drain,
     );
-    if (states.get(promptId) === 'owed') return false;
+    retainHostedCleanupHolds(session, result);
+    if (result.held.has(promptId)) return 'held';
+    if (result.states.get(promptId) === 'owed') return 'pending';
     if (
       runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
-      !states.has(promptId)
+      !result.states.has(promptId)
     ) {
       try {
         await new HostedWorkspaceBroker(
@@ -9707,7 +10017,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (!hasHostedCleanupDebt(session.managed))
       await retryHostedCleanup(session, options);
-    return true;
+    return 'released';
   };
 
   // A recovery load may hold the Runtime Session. On the cancellation
@@ -9727,8 +10037,8 @@ export function registerHostedHarnessSessionRoutes(
     )
       return;
     void releaseHeldRuntime(session, brokerOptions, lease).then(
-      (confirmed) => {
-        if (confirmed && session.runtimeLeaseHeld === lease) {
+      (outcome) => {
+        if (outcome !== 'pending' && session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
           session.runtimeLeaseOwedByTerminalRoute = false;
         }
@@ -9769,8 +10079,8 @@ export function registerHostedHarnessSessionRoutes(
       lease,
       true,
     ).then(
-      (confirmed) => {
-        if (!confirmed)
+      (outcome) => {
+        if (outcome !== 'released')
           throw new Error('Original Runtime cleanup is still owed.');
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
@@ -12759,19 +13069,8 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       if (session.lifecycleProtocolVersion !== 2) {
-        await session.hooks?.close();
-        // Deferred until the close is known terminal: a Hook fence refusal
-        // above keeps the Session attached and retryable, and its wake pump
-        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
-        // wake turn can start meanwhile; pending notifications settle below.
-        session.monitorWake?.close();
-        // A lease a recovery load acquired must go back with the Session, or
-        // the Workspace stays pinned after every later route is gone. The
-        // release retires a settled Turn's owed file-history marker first,
-        // ahead of the unguarded loop stop below so that a throw there
-        // cannot strand the retirement.
-        await releaseLeaseNow(session);
-        // #13856: drain every Runtime a turn left held, ahead of the loop
+        // #13856: drain every Runtime a turn left held, ahead of the owner
+        // close that asks for the mount back (R14-2) as well as the loop
         // stops and the publisher close. The drain's stops land their
         // finalize through the still-open publisher — the maintenance
         // answer rides the completion that carries the finalize — so the
@@ -12834,6 +13133,23 @@ export function registerHostedHarnessSessionRoutes(
             }
           }
         }
+        // A DELETE is terminal; a detach keeps the Session reloadable, so the
+        // deterministic config-scoped Hook owner must stay re-acquirable
+        // (R13-1) instead of being tombstoned under the id a reload recomputes.
+        // The held-Runtime drain above ran first so a turn's background run no
+        // longer fences the non-terminal mount handback (R14-2).
+        await session.hooks?.close({ terminal: req.method === 'DELETE' });
+        // Deferred until the close is known terminal: a Hook fence refusal
+        // above keeps the Session attached and retryable, and its wake pump
+        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
+        // wake turn can start meanwhile; pending notifications settle below.
+        session.monitorWake?.close();
+        // A lease a recovery load acquired must go back with the Session, or
+        // the Workspace stays pinned after every later route is gone. The
+        // release retires a settled Turn's owed file-history marker first,
+        // ahead of the unguarded loop stop below so that a throw there
+        // cannot strand the retirement.
+        await releaseLeaseNow(session);
         // A registered observation loop outlives its turn: only the Session
         // close ends it. Stop every live loop here, ahead of the publisher
         // close and the log close, so its settle write can still reach the
@@ -12852,13 +13168,21 @@ export function registerHostedHarnessSessionRoutes(
         for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
           await loop.stop(stopSettle);
         if (heldDrainFailed !== null) throw heldDrainFailed;
+        // Nonterminal owners keep their durable debt for replacement recovery.
+        // Every terminal owner must complete the actual drain before closing.
+        if (brokerOptions)
+          await retryHostedCleanup(session, brokerOptions, true);
+        else if (hasHostedCleanupDebt(session.managed))
+          throw new Error('Runtime cleanup remains owed after drain.');
         // The drains above stopped the Session's background Shells and
         // watches, and their exits settled through this publisher; it
         // closes last.
         await session.shell?.publisher?.close();
         await session.backgroundLane?.publisher?.close();
         const mcpLease = session.runtimeLeaseHeld;
-        await session.mcp?.close();
+        // Only a DELETE is terminal; a detach keeps the owner re-acquirable
+        // across the reload (R14-1), matching the Hook close above.
+        await session.mcp?.close({ terminal: req.method === 'DELETE' });
         if (
           session.mcp &&
           mcpLease !== undefined &&
