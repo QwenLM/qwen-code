@@ -881,9 +881,13 @@ describe('BaseJsonOutputAdapter', () => {
       });
     });
 
-    it('should emit a system message for MaxSessionTurns', () => {
+    it('should record a refused turn for MaxSessionTurns', () => {
       adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
 
+      expect(adapter.getRefusedTurn()).toEqual({
+        subtype: 'error_max_turns',
+        message: expect.stringContaining('Reached max session turns'),
+      });
       expect(adapter.emittedMessages).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -893,6 +897,41 @@ describe('BaseJsonOutputAdapter', () => {
           }),
         ]),
       );
+    });
+
+    it('should record a refused turn for SessionTokenLimitExceeded', () => {
+      adapter.processEvent({
+        type: LlmEventType.SessionTokenLimitExceeded,
+        value: {
+          currentTokens: 120_000,
+          limit: 100_000,
+          message: 'Session token limit exceeded: 120000 tokens > 100000.',
+        },
+      });
+
+      expect(adapter.getRefusedTurn()).toEqual({
+        subtype: 'error_during_execution',
+        message: 'Session token limit exceeded: 120000 tokens > 100000.',
+      });
+      expect(adapter.emittedMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'session_token_limit_exceeded',
+            data: {
+              currentTokens: 120_000,
+              limit: 100_000,
+              message: 'Session token limit exceeded: 120000 tokens > 100000.',
+            },
+          }),
+        ]),
+      );
+    });
+
+    it('should not record a refused turn for ordinary events', () => {
+      adapter.processEvent({ type: LlmEventType.Content, value: 'answer' });
+
+      expect(adapter.getRefusedTurn()).toBeNull();
     });
 
     it('should ignore events after finalization', () => {

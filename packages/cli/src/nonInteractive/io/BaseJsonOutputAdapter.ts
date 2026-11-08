@@ -45,6 +45,7 @@ import type {
   Usage,
 } from '../types.js';
 import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
+import { buildMaxTurnsExceededMessage } from '../../utils/errors.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
 import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
@@ -59,6 +60,17 @@ export interface MessageState {
   messageStarted: boolean;
   finalized: boolean;
   currentBlockType: ContentBlock['type'] | null;
+}
+
+/**
+ * A turn the client refused before sending any model request. Nothing else in
+ * the stream describes why, so the adapter records it here and the run loop
+ * reports it as an error result instead of a success that repeats the
+ * previous answer.
+ */
+export interface TurnRefusal {
+  readonly subtype: 'error_max_turns' | 'error_during_execution';
+  readonly message: string;
 }
 
 /**
@@ -127,6 +139,14 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
   processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): void;
+  /**
+   * The turn the client refused before any model request, if one was refused
+   * during the most recent turn. Optional so adapters that do not track
+   * refusals still satisfy the interface.
+   */
+  getRefusedTurn?(): TurnRefusal | null;
+  /** Forget the recorded refusal — the caller has reported it. */
+  clearRefusedTurn?(): void;
 
   startSubagentAssistantMessage?(parentToolUseId: string): void;
   processSubagentToolCall?(
@@ -165,9 +185,30 @@ export abstract class BaseJsonOutputAdapter {
   // Track permission denials (execution denied tool calls)
   protected permissionDenials: CLIPermissionDenial[] = [];
 
+  /**
+   * Set when the client refuses a turn before any model request, so the
+   * caller can turn the success-shaped result it would otherwise emit into an
+   * error result. Null when no turn was refused.
+   */
+  private refusedTurn: TurnRefusal | null = null;
+
   constructor(config: Config) {
     this.config = config;
     this.mainAgentMessageState = this.createMessageState();
+  }
+
+  /**
+   * The turn the client refused before any model request, if one was refused.
+   * The run loop reads this before emitting the terminal result so a refused
+   * turn never reports the previous answer as a successful result.
+   */
+  getRefusedTurn(): TurnRefusal | null {
+    return this.refusedTurn;
+  }
+
+  /** Forget the recorded refusal — the caller has reported it. */
+  clearRefusedTurn(): void {
+    this.refusedTurn = null;
   }
 
   /**
@@ -711,10 +752,29 @@ export abstract class BaseJsonOutputAdapter {
       }
       case LlmEventType.MaxSessionTurns:
         // The turn was refused before any model request, so nothing else in
-        // the stream says why. Without this marker a JSON consumer only sees
-        // the previous answer repeated under a successful result.
+        // the stream says why. Record the refusal so the run loop reports an
+        // error result, and still emit the marker: it names the limit while
+        // the result names the reason.
+        this.refusedTurn = {
+          subtype: 'error_max_turns',
+          message: buildMaxTurnsExceededMessage(this.config),
+        };
         this.emitSystemMessage('max_session_turns', {
           maxSessionTurns: this.config.getMaxSessionTurns(),
+        });
+        break;
+      case LlmEventType.SessionTokenLimitExceeded:
+        // Same shape as the turn cap above: a refusal with no model request.
+        // Without this the token cap reports the previous answer as success,
+        // and the event's own numbers are the only explanation available.
+        this.refusedTurn = {
+          subtype: 'error_during_execution',
+          message: event.value.message,
+        };
+        this.emitSystemMessage('session_token_limit_exceeded', {
+          currentTokens: event.value.currentTokens,
+          limit: event.value.limit,
+          message: event.value.message,
         });
         break;
       case LlmEventType.ModelFallback:

@@ -8861,7 +8861,7 @@ describe('runNonInteractive', () => {
   });
 
   it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
-    'emits a max_session_turns marker on the default loop, where the turn ends without a model request (#15325)',
+    'reports a refused turn on the default loop as an error result, not the previous answer (#15325)',
     async (format) => {
       vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
       setupMetricsMock();
@@ -8876,7 +8876,7 @@ describe('runNonInteractive', () => {
           'Second question',
           'prompt-turn-cap-marker',
         ),
-      ).resolves.toBe(0);
+      ).resolves.toBe(53);
 
       const stdout = processStdoutSpy.mock.calls
         .map((call) => String(call[0]))
@@ -8899,6 +8899,76 @@ describe('runNonInteractive', () => {
           }),
         ]),
       );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        subtype: 'error_max_turns',
+        is_error: true,
+        error: {
+          message: expect.stringContaining('Reached max session turns'),
+        },
+      });
+      // The refused turn made no model request, so there is no answer to
+      // repeat under the error envelope.
+      expect(messages.at(-1)).not.toHaveProperty('result');
+    },
+  );
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'reports a refused turn at the session token cap as an error result (%s)',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.SessionTokenLimitExceeded,
+            value: {
+              currentTokens: 120_000,
+              limit: 100_000,
+              message:
+                'Session token limit exceeded: 120000 tokens > 100000 limit.',
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Second question',
+          'prompt-token-cap',
+        ),
+      ).resolves.toBe(1);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'session_token_limit_exceeded',
+            data: expect.objectContaining({
+              currentTokens: 120_000,
+              limit: 100_000,
+            }),
+          }),
+        ]),
+      );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        error: { message: expect.stringContaining('Session token limit') },
+      });
     },
   );
 
