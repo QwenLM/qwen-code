@@ -26031,6 +26031,84 @@ describe('DaemonSessionProvider', () => {
       );
     });
 
+    it('automatically continues a recoverable session after load', async () => {
+      const sessionId = 'auto-continue-session';
+      const admission = createDeferred<{
+        accepted: true;
+        interruption: 'interrupted_prompt';
+        promptId: string;
+        lastEventId: number;
+      }>();
+      const terminal = createDeferred<void>();
+      const context = vi.fn(
+        async (): Promise<DaemonSessionContextStatus> => ({
+          v: 1,
+          sessionId,
+          workspaceCwd: '/mock-workspace',
+          state: {},
+          recovery: { kind: 'interrupted_prompt', canContinue: true },
+        }),
+      );
+      const continued = vi.fn(() => admission.promise);
+      const session = Object.assign(
+        createMockSession({
+          sessionId,
+          context,
+          async *events(opts) {
+            yield {
+              v: 1,
+              type: 'replay_complete',
+              data: { sessionId },
+            };
+            await terminal.promise;
+            if (opts?.signal?.aborted) return;
+            yield {
+              v: 1,
+              type: 'turn_complete',
+              data: {
+                sessionId,
+                promptId: 'auto-continue-prompt',
+                stopReason: 'end_turn',
+              },
+            };
+            yield* createIdleEvents()(opts);
+          },
+        }),
+        { continueSession: continued },
+      );
+      sdkMocks.sessions.push(session);
+
+      function Harness() {
+        useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoContinueInterruptedTurns: true,
+        sessionId,
+      });
+      await vi.waitFor(() => expect(continued).toHaveBeenCalledOnce());
+
+      admission.resolve({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+        promptId: 'auto-continue-prompt',
+        lastEventId: 0,
+      });
+      terminal.resolve();
+      await act(async () => {
+        await flushPromises();
+      });
+
+      // Re-renders and later metadata refreshes stay within the same load
+      // epoch and must not submit a second continuation.
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(continued).toHaveBeenCalledOnce();
+    });
+
     it.each([true, false])(
       'does not copy recovery from another session when a terminal races metadata (%s)',
       async (immediateTerminal) => {
@@ -27555,6 +27633,7 @@ describe('DaemonSessionProvider', () => {
       <DaemonSessionProvider
         baseUrl="http://127.0.0.1:4170"
         autoConnect={false}
+        autoContinueInterruptedTurns={false}
         {...(defaultSessionId ? { sessionId: defaultSessionId } : {})}
         {...props}
       >

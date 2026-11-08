@@ -296,6 +296,7 @@ export interface CreateDaemonSessionActionsArgs {
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
+  onSessionRestoreRequested?: (sessionId: string) => void;
   clearLiveJournalRepair?: () => void;
   onGeneratedUiInvalidated?: (
     owner: DaemonSessionClient,
@@ -500,6 +501,7 @@ export function createDaemonSessionActions({
   setRestoreSessionNonce,
   setAttachSessionNonce,
   setNewSessionNonce,
+  onSessionRestoreRequested,
   clearLiveJournalRepair = () => undefined,
   onGeneratedUiInvalidated,
   onPromptAdmitted,
@@ -2591,6 +2593,7 @@ export function createDaemonSessionActions({
     },
 
     async loadSession(sessionId, options) {
+      onSessionRestoreRequested?.(sessionId);
       return startSessionSwitch(sessionId, 'load', options);
     },
 
@@ -2615,6 +2618,7 @@ export function createDaemonSessionActions({
     },
 
     async resumeSession(sessionId, options) {
+      onSessionRestoreRequested?.(sessionId);
       return startSessionSwitch(sessionId, 'resume', options);
     },
 
