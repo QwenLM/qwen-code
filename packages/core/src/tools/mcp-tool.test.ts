@@ -2381,7 +2381,7 @@ describe('DiscoveredMCPTool', () => {
     // Every call fails with `error` under `status`; nothing reconnects.
     const expectNoRetry = async (status: MCPServerStatus, error: Error) => {
       const retryClient = okClient();
-      const { config, discoverToolsForServer } = registry({
+      const { config, discoverToolsForServer, ensureTool } = registry({
         ensured: mkTool({ client: retryClient }),
       });
       updateMCPServerStatus(serverName, status);
@@ -2394,6 +2394,7 @@ describe('DiscoveredMCPTool', () => {
       );
 
       expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(ensureTool).not.toHaveBeenCalled();
       expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(retryClient.callTool).not.toHaveBeenCalled();
     };
