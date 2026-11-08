@@ -124,6 +124,8 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  /** Report the resolved owners of mounted panes for the app-level poller. */
+  onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
   onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Report panes surfacing approvals, including hidden panes. Keep stable while
@@ -187,6 +189,7 @@ export function SplitView({
   sessionIds,
   showSessionDetails = true,
   onPanesChange,
+  onPaneWorkspacesChange,
   onAssistantTurnSettled,
   onPendingPanesChange,
   onExit,
@@ -555,6 +558,17 @@ export function SplitView({
     }
     return map;
   }, [allSessions, seedSessionId, connection.workspaceCwd, paneIds]);
+
+  useEffect(() => {
+    if (!onPaneWorkspacesChange) return;
+    const cwds = new Set<string>();
+    for (const id of paneIds) {
+      const cwd = workspaceCwdById.get(id) ?? workspaceCwd;
+      if (cwd) cwds.add(cwd);
+    }
+    onPaneWorkspacesChange([...cwds]);
+  }, [onPaneWorkspacesChange, paneIds, workspaceCwd, workspaceCwdById]);
+  useEffect(() => () => onPaneWorkspacesChange?.([]), [onPaneWorkspacesChange]);
 
   const addPane = useCallback(
     (sessionId: string) => {

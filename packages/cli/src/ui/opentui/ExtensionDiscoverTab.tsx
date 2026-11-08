@@ -741,9 +741,9 @@ export function OpenTuiExtensionDiscoverTab(
         <text fg={C.dim}>{'⌕ '}</text>
         {queryWidth > 0 ? (
           <>
-            <text fg={C.text}>{beforeCaret}</text>
+            {beforeCaret ? <text fg={C.text}>{beforeCaret}</text> : null}
             <text bg={C.accent}>{caret}</text>
-            <text fg={C.text}>{afterCaret}</text>
+            {afterCaret ? <text fg={C.text}>{afterCaret}</text> : null}
           </>
         ) : null}
       </box>

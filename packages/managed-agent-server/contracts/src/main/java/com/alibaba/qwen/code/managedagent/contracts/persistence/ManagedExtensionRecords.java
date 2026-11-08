@@ -2,11 +2,14 @@ package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -1004,7 +1007,7 @@ public final class ManagedExtensionRecords {
         require(resultVersion.isNumber()
                 && Double.isFinite(resultVersion.doubleValue())
                 && resultVersion.decimalValue()
-                        .compareTo(java.math.BigDecimal.ONE) == 0,
+                        .compareTo(BigDecimal.ONE) == 0,
                 "Child run resultVersion must be 1 in schema version 1");
         JsonNode resultRef = child.get("resultRef");
         if (!resultRef.isNull()) {
@@ -1239,7 +1242,7 @@ public final class ManagedExtensionRecords {
         require(resultVersion.isNumber()
                 && Double.isFinite(resultVersion.doubleValue())
                 && resultVersion.decimalValue()
-                        .compareTo(java.math.BigDecimal.ONE) == 0,
+                        .compareTo(BigDecimal.ONE) == 0,
                 "Child acceptance resultVersion must be 1 in schema version 1");
         id(acceptance.get("childRunId"), "childRunId");
         id(acceptance.get("parentScopeId"), "parentScopeId");
@@ -1462,7 +1465,7 @@ public final class ManagedExtensionRecords {
             return value;
         }
         if ("manual".equals(kind)) {
-            id(com.fasterxml.jackson.databind.node.TextNode
+            id(TextNode
                     .valueOf(valuePart),
                     "automationRun.occurrenceKey commandId");
             return value;
@@ -1553,8 +1556,8 @@ public final class ManagedExtensionRecords {
 
     private static boolean isCanonicalInstant(String value) {
         try {
-            return java.time.Instant.parse(value).toString().equals(value);
-        } catch (java.time.format.DateTimeParseException error) {
+            return Instant.parse(value).toString().equals(value);
+        } catch (DateTimeParseException error) {
             return false;
         }
     }

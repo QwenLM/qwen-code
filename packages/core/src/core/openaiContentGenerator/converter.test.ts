@@ -2419,6 +2419,61 @@ describe('OpenAIContentConverter', () => {
 
     it.each([
       [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+      ],
+      [
+        'streaming',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
+            .usageMetadata,
+      ],
+    ])(
+      'reports prompt_tokens_details.cache_write_tokens as cache creation (%s)',
+      (_title, convert) => {
+        const usageMetadata = convert({
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        });
+
+        // The provider's prompt_tokens already includes cache reads and
+        // writes, so the aggregate must not be reduced again.
+        expect(usageMetadata?.promptTokenCount).toBe(373);
+        expect(
+          getGenAiUsageProvenance(usageMetadata)?.cacheCreationInputTokens,
+        ).toBe(256);
+      },
+    );
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+      ],
+      [
+        'streaming',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
+            .usageMetadata,
+      ],
+    ])(
+      'distinguishes an absent cache write field from an explicitly reported zero (%s)',
+      (_title, convert) => {
+        const absent = convert({});
+        const zero = convert({
+          prompt_tokens_details: { cache_write_tokens: 0 },
+        });
+
+        expect(
+          getGenAiUsageProvenance(absent)?.cacheCreationInputTokens,
+        ).toBeUndefined();
+        expect(getGenAiUsageProvenance(zero)?.cacheCreationInputTokens).toBe(0);
+      },
+    );
+
+    it.each([
+      [
         'estimates missing reasoning tokens from non-streaming content',
         { reasoning_content: '先仔细想' },
         usage(1, 10, 11),
