@@ -1150,8 +1150,11 @@ describe('normalizeMonitorCommand', () => {
     expect(decodeAnsiCWord('a\\c\\tb')).toBe('a\u001ctb');
   });
 
-  // R1-7 (#16540 review): `sh -c --` with no script leaves the shell running a
-  // program the scan never reads, so the cron gate must refuse it.
+  // R1-7 (#16540 review): `sh -c --` with no script gives the shell nothing to
+  // run — it exits 2 with "option requires an argument" and runs no program at
+  // all (witnessed on bash 5.3.20) — so there is no payload to read and the cron
+  // gate must refuse it. R3-11 corrected the earlier rationale, which claimed the
+  // shell runs an empty program.
   it('flags a wrapper that carries no payload after --', () => {
     expect(normalizeMonitorCommand('sh -c --').wrapperPayloadUnresolved).toBe(
       true,

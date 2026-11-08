@@ -767,9 +767,11 @@ export function decodeAnsiCWord(body: string): string {
  * must fail closed rather than hand the token on as a program word.
  *
  * Locale quoting `$"…"` does NOT decode ANSI-C escapes: bash translates the
- * body but keeps `\x2d` from becoming `-` (witnessed: `sh -c $"\x2d\x2d"
- * 'echo ok'` runs a program named `x2dx2d`, not the payload), so it is
- * treated like a double-quoted word.
+ * body but keeps the backslashes, so `$"\x2d\x2d"` is the word `\x2d\x2d`
+ * and never the terminator `--`. Witnessed on bash 5.3.20: `printf '%s'
+ * $"\x2d\x2d"` prints `\x2d\x2d`, and `bash -c '$"\x2d\x2d"'` reports
+ * `\x2d\x2d: command not found` — the program name keeps the backslashes, so
+ * the word is treated like a double-quoted one (#16540 review, R3-12).
  */
 interface QuoteRemovedWord {
   /** The word with quoting removed; expansion syntax is kept as literal text. */
@@ -2282,9 +2284,11 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) {
-        // `sh -c --` with no script after it: the shell runs an empty program
-        // this scan cannot see, so the cron gate has to refuse it
-        // (#16540 review, R1-7).
+        // `sh -c --` with no script after it: the shell does not run an empty
+        // program, it refuses outright — `bash -c --` and `sh -c --` both exit 2
+        // with "option requires an argument" and run nothing (witnessed on bash
+        // 5.3.20). There is still no payload this scan can read, so the cron gate
+        // keeps refusing it (#16540 review, R1-7; rationale corrected by R3-11).
         return {
           innerCommand: trimmed,
           innerQuote: '',
