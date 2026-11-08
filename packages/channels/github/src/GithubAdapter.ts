@@ -612,6 +612,8 @@ interface PrWatchEntry {
   ci?: CiAggregate;
   mergeableState?: string;
   prState?: string;
+  /** Last observed PR title, so comment-watch prompts can render %title%. */
+  title?: string;
   /**
    * Last observed PR updated_at. An advance re-checks a settled head, but
    * it is NOT a reliable re-run signal: GitHub does not bump updated_at on
@@ -720,6 +722,7 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     stringOrUndef(entry.ci) &&
     stringOrUndef(entry.mergeableState) &&
     stringOrUndef(entry.prState) &&
+    stringOrUndef(entry.title) &&
     stringOrUndef(entry.prUpdatedAt) &&
     numberOrUndef(entry.headObservedAt) &&
     numberOrUndef(entry.lastCiFetchAt) &&
@@ -6905,6 +6908,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? { mergeableState: entry.mergeableState }
           : {}),
       ...(prState !== undefined ? { prState } : {}),
+      ...(pr.title !== undefined
+        ? { title: pr.title }
+        : entry.title !== undefined
+          ? { title: entry.title }
+          : {}),
       ...(prUpdatedAt !== undefined ? { prUpdatedAt } : {}),
       ...(firstObservation || headChanged
         ? { headObservedAt: Date.now() }
@@ -7209,7 +7217,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       envelope: Envelope;
     }> = [];
     const threadId = `pr:${number}`;
-    const metadata = `${this.buildMetadata(chatId, threadId, '')}\nTrigger: comment.`;
+    const metadata = `${this.buildMetadata(chatId, threadId, entry.title ?? '')}\nTrigger: comment.`;
     const renderBody = (body: string | undefined): string => {
       const display = sanitizeDisplayText((body ?? '').trim());
       const total = Array.from(display).length;
@@ -7350,9 +7358,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // comments would re-fill every batch and the capped cursor would never reach
     // the tail. Filtering them out keeps the cap and the cursor progressing over
     // deliverable comments; the excluded ones are simply advanced past.
-    const deliverable = candidates.filter((candidate) =>
-      targets.some((target) => !excludeFor(candidate).has(target.sessionId)),
-    );
+    const deliverable: typeof candidates = [];
+    for (const candidate of candidates) {
+      const exclude = excludeFor(candidate);
+      if (targets.some((target) => !exclude.has(target.sessionId))) {
+        deliverable.push(candidate);
+        continue;
+      }
+      // Every bound target authored this same-account comment itself, so no
+      // session is left to receive it. The notification lanes cannot see it
+      // either (same account => no notification), so this skip row is the
+      // comment's only journal trace — record it instead of consuming silently.
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'comment_watch_no_target',
+        repository: chatId,
+        thread: threadId,
+        number,
+        messageId: candidate.key,
+      });
+    }
     if (deliverable.length === 0) {
       commitCursor(nowIso);
       return;

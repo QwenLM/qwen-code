@@ -22785,6 +22785,32 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(prompt).toContain('please fix the overflow');
       });
 
+      it('renders the observed PR title in the comment prompt metadata', async () => {
+        // The watch carries the last observed title so %title% is not empty.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            title: 'Fix the overflow',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          },
+        });
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
+        expect(prompt).toContain('Title: Fix the overflow');
+      });
+
       it('leaves other-account comments to the notification lanes (no consumption)', async () => {
         // A comment by a different account produces a GitHub notification and is
         // delivered by the notification lanes under the thread's reason/roles.
@@ -22888,6 +22914,20 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
         await pollOnce();
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // No target is left to receive it and the notification lanes cannot see
+        // a same-account comment, so the skip row is its only journal trace.
+        const rows = readChannelEvents().filter(
+          (event) => event['reason'] === 'comment_watch_no_target',
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          type: 'inbound',
+          outcome: 'skipped',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+          messageId: 'IC_555',
+        });
       });
 
       it('delivers a same-account comment posted by a different session', async () => {
