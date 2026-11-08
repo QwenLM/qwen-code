@@ -11,7 +11,11 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { command as runCommand, createManager } from './manager.mjs';
+import {
+  backoffDelay,
+  command as runCommand,
+  createManager,
+} from './manager.mjs';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'runner-manager-'));
@@ -44,6 +48,10 @@ async function fixture(t) {
   let failNetworkRemove = false;
   let keepContainerAfterRemove = false;
   let loseJit = false;
+  let failDelete = false;
+  let deleteStatus = 422;
+  let jitFailure = null;
+  let listFailure = null;
   const labelsFromArgs = (args) => {
     const labels = {};
     for (let i = 0; i < args.length; i += 1) {
@@ -74,14 +82,25 @@ async function fixture(t) {
       if (path.includes('generate-jitconfig')) {
         const body = JSON.parse(options.input);
         runner = { id: ++counter, name: body.name };
+        if (jitFailure) throw jitFailure();
         if (loseJit) throw new Error('network failure');
         return JSON.stringify({ runner, encoded_jit_config: 'jit-secret' });
       }
       if (args.includes('DELETE')) {
+        if (failDelete) {
+          const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
+          error.status = deleteStatus;
+          throw error;
+        }
         runner = undefined;
         return '';
       }
+      if (listFailure) throw listFailure();
       return JSON.stringify(runner ? [runner] : []);
+    }
+    if (args[0] === 'inspect') {
+      const entry = containers.get(args[args.length - 1]);
+      return `${entry?.labels['qwen.instance'] ?? ''}\n`;
     }
     if (args[0] === 'ps') {
       const matched = [...containers.entries()].filter(([, entry]) =>
@@ -110,6 +129,8 @@ async function fixture(t) {
     }
     if (args[0] === 'network' && args[1] === 'inspect') {
       const entry = networks.get(args[args.length - 1]);
+      if (args.some((value) => String(value).includes('qwen.instance')))
+        return `${entry?.labels['qwen.instance'] ?? ''}\n`;
       return `${entry?.labels['qwen.slot'] ?? ''}\n`;
     }
     if (args[0] === 'info') return `${dir}\n`;
@@ -151,6 +172,30 @@ async function fixture(t) {
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
     },
+    setFailDelete: (v, status = 422) => {
+      failDelete = v;
+      deleteStatus = status;
+    },
+    setJitStatus: (status) => {
+      jitFailure = () =>
+        Object.assign(new Error('gh failed (exit 1)'), {
+          status,
+        });
+    },
+    setListStatus: (status) => {
+      listFailure = () =>
+        Object.assign(new Error('gh failed (exit 1)'), {
+          status,
+        });
+    },
+    setRunner: (value) => {
+      runner = value;
+    },
+    addOrphanContainer(labels) {
+      const id = `container-orphan-${containers.size}`;
+      containers.set(id, { labels });
+      return id;
+    },
   };
 }
 
@@ -189,8 +234,13 @@ test('creates a new runner and container per job and keeps GitHub token out of D
       '/repos/owner/repo/actions/runners/2',
     ],
   );
-  assert.equal(JSON.parse(requests[0].options.input).name, 'ecs-qwen-trial-01');
-  assert.equal(JSON.parse(requests[1].options.input).name, 'ecs-qwen-trial-01');
+  const registeredNames = requests.map((c) => JSON.parse(c.options.input).name);
+  assert.ok(
+    registeredNames.every((name) =>
+      /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name),
+    ),
+  );
+  assert.notEqual(registeredNames[0], registeredNames[1]);
   assert.notEqual(
     creates[0].args.find((arg) => arg.startsWith('qwen.instance=')),
     creates[1].args.find((arg) => arg.startsWith('qwen.instance=')),
@@ -225,6 +275,86 @@ test('creates a new runner and container per job and keeps GitHub token out of D
   assert.equal(
     f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
     2,
+  );
+});
+
+test('passes proxy configuration to container environment', async (t) => {
+  const f = await fixture(t);
+  f.config.proxy = {
+    http: 'http://172.27.32.1:7890',
+    https: 'http://172.27.32.1:7890',
+    noProxy: 'localhost,127.0.0.1,100.100.100.200',
+  };
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const creates = f.calls.filter(
+    (c) => c.program === 'docker' && c.args[0] === 'create',
+  );
+  assert.equal(creates.length, 1);
+  const args = creates[0].args;
+  // Proxy values are passed via the docker CLI env whitelist, not argv,
+  // so they do not appear in `ps` output.
+  const envPairs = [];
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (args[i] === '--env') envPairs.push(args[i + 1]);
+  }
+  assert.ok(envPairs.includes('HTTP_PROXY'));
+  assert.ok(envPairs.includes('HTTPS_PROXY'));
+  assert.ok(envPairs.includes('NO_PROXY'));
+  assert.ok(!args.some((a) => a.includes('HTTP_PROXY=')));
+  assert.equal(creates[0].options.env.HTTP_PROXY, 'http://172.27.32.1:7890');
+  assert.equal(creates[0].options.env.HTTPS_PROXY, 'http://172.27.32.1:7890');
+  assert.equal(
+    creates[0].options.env.NO_PROXY,
+    'localhost,127.0.0.1,100.100.100.200',
+  );
+});
+
+test('omits proxy env when proxy is not configured', async (t) => {
+  const f = await fixture(t);
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const creates = f.calls.filter(
+    (c) => c.program === 'docker' && c.args[0] === 'create',
+  );
+  assert.equal(creates.length, 1);
+  assert.ok(!creates[0].args.includes('HTTP_PROXY'));
+  assert.ok(!creates[0].options.env.HTTP_PROXY);
+  assert.ok(!creates[0].options.env.HTTPS_PROXY);
+  assert.ok(!creates[0].options.env.NO_PROXY);
+});
+
+test('rejects invalid proxy configuration', async (t) => {
+  const f = await fixture(t);
+  f.config.proxy = { http: 123 };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = 'not-an-object';
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy configuration/,
+  );
+  f.config.proxy = ['not-an-object'];
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy configuration/,
+  );
+  f.config.proxy = { http: '' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = { http: 'http://user:pass@proxy.example:7890' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = { https: 'http://user@proxy.example:7890' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.https/,
   );
 });
 
@@ -345,7 +475,7 @@ test('rejects same-name runner with a different ID without deleting it', async (
   const f = await fixture(t);
   const state = {
     name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
-    runnerName: 'ecs-qwen-trial-01',
+    runnerName: 'ecs-qwen-trial-01-deadbeef',
     runnerId: 42,
     uncertain: false,
   };
@@ -494,6 +624,11 @@ test('accepts immutable local image IDs and rejects mutable tags and invalid con
     () => createManager({ ...f.config, cpus: Infinity }),
     /Invalid manager configuration/,
   );
+  assert.doesNotThrow(() => createManager({ ...f.config, slots: 30 }));
+  assert.throws(
+    () => createManager({ ...f.config, slots: 65 }),
+    /Invalid manager configuration/,
+  );
 });
 
 test('does not expose malformed GitHub responses in errors', async (t) => {
@@ -570,6 +705,35 @@ test('network cleanup failure prevents new runner and is reconciled on the next 
       .length,
     2,
   );
+});
+
+test('backoffDelay escalates exponentially within jittered bounds', (t) => {
+  const assertBounds = (failures, isRateLimited, ceiling) => {
+    const delay = backoffDelay(failures, isRateLimited);
+    assert.ok(
+      delay >= ceiling / 2 && delay <= ceiling,
+      `${delay} outside [${ceiling / 2}, ${ceiling}]`,
+    );
+  };
+  // Rate-limited: 30s base, 300s cap
+  assertBounds(1, true, 30000);
+  assertBounds(2, true, 60000);
+  assertBounds(3, true, 120000);
+  assertBounds(4, true, 240000);
+  assertBounds(5, true, 300000);
+  assertBounds(6, true, 300000);
+  assertBounds(100, true, 300000);
+  // Non-rate-limited: 10s base, 60s cap
+  assertBounds(1, false, 10000);
+  assertBounds(2, false, 20000);
+  assertBounds(3, false, 40000);
+  assertBounds(4, false, 60000);
+  assertBounds(5, false, 60000);
+  // Jitter spreads simultaneous sleepers instead of waking them in lockstep.
+  t.mock.method(Math, 'random', () => 0);
+  assert.equal(backoffDelay(1, true), 15000);
+  t.mock.method(Math, 'random', () => 0.999999);
+  assert.ok(backoffDelay(1, true) > 29990);
 });
 
 test('a lost network create response is recovered using labels', async (t) => {
@@ -735,6 +899,15 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
       },
     },
     {
+      label: 'malformed name suffix',
+      state: {
+        name: validName,
+        runnerName: 'ecs-qwen-trial-01-not-hex!',
+        runnerId: 42,
+        uncertain: false,
+      },
+    },
+    {
       label: 'zero runner id',
       state: { name: validName, runnerId: 0, uncertain: false },
     },
@@ -755,6 +928,40 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
       item.label,
     );
   }
+});
+
+test('loads the bare runnerName that main wrote before the suffix', async (t) => {
+  const f = await fixture(t);
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+      runnerName: 'ecs-qwen-trial-01',
+      runnerId: 42,
+      uncertain: false,
+    }),
+  );
+  f.setRunner({ id: 42, name: 'ecs-qwen-trial-01' });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/42'),
+    ),
+    'the legacy registration is deleted, not wedged by validation',
+  );
+  const request = f.calls.find(
+    (c) =>
+      c.program === 'gh' &&
+      c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+  );
+  assert.match(
+    JSON.parse(request.options.input).name,
+    /^ecs-qwen-trial-01-[0-9a-f]{8}$/,
+    'the replacement registers under a suffixed name',
+  );
 });
 
 test('backs off on a failed container even after the startup window', async (t) => {
@@ -804,10 +1011,11 @@ test('backs off before the next JIT request after a failed container', async (t)
     },
   });
   await manager.start();
-  // The 1 s poll that races `docker wait` also goes through the injected sleep;
-  // the replenishment backoff is the 60 s entry.
-  assert.equal(sleeps.filter((ms) => ms === 60000).length, 1);
-  assert.equal(sleeps.at(-1), 60000);
+  // The 1 s poll that races `docker wait` also goes through the injected
+  // sleep; the replenishment backoff is a run of sixty 1 s slices ending
+  // the log, and it must stay sliced so stop() can interrupt it.
+  assert.equal(sleeps.filter((ms) => ms === 60000).length, 0);
+  assert.deepEqual(sleeps.slice(-60), Array(60).fill(1000));
   assert.equal(jitRequests, 2);
 });
 
@@ -842,4 +1050,504 @@ test('starts through a symlink and reports invalid configuration', async (t) => 
   );
   assert.equal(result.status, 1);
   assert.match(result.stderr, /^manager: /);
+});
+
+test('an orphaned container is reclaimed from its instance label', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'replenishes instead of wedging on the orphan',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+  );
+});
+
+test('an orphaned container with an unidentifiable label still blocks replacement', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-other-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /manual reconciliation/);
+  await assert.rejects(manager.cycle(1), /manual reconciliation/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+  );
+});
+
+test('label recovery deletes the orphaned suffixed registration', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'the registration is deleted even though its display name is suffixed',
+  );
+});
+
+test('disagreeing resource labels are reported as ambiguous, not missing', async (t) => {
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /labels disagree/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    0,
+    'an ambiguous identity still deletes nothing',
+  );
+});
+
+test('a rejected runner deletion keeps slot state so the next cycle retries it', async (t) => {
+  const f = await fixture(t);
+  const manager = createManager(f.config, { command: f.command });
+  f.setFailDelete(true);
+  await assert.rejects(manager.cycle(1), /deletion was rejected/);
+  const state = JSON.parse(
+    await readFile(join(f.config.stateDir, 'slot-1.json'), 'utf8'),
+  );
+  assert.equal(state.runnerId, 1, 'retains the identity that must be deleted');
+  await assert.rejects(manager.cycle(1), /deletion was rejected/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'does not register a replacement while the old registration survives',
+  );
+  f.setFailDelete(false);
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    2,
+  );
+});
+
+test('a rejected JIT request reconciles a leftover registration instead of orphaning it', async (t) => {
+  const f = await fixture(t);
+  let rejectedName;
+  let rejected = false;
+  const command = (program, args, options) => {
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig') &&
+      !rejected
+    ) {
+      rejected = true;
+      rejectedName = JSON.parse(options.input).name;
+      f.setRunner({ id: 77, name: rejectedName });
+      const error = new Error('gh failed (exit 1, HTTP 422)');
+      error.status = 422;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, { command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 422);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'deletes the registration that would reject every later request',
+  );
+  await manager.cycle(1);
+});
+
+test('a registration retry uses a fresh unique name untouched by a leftover', async (t) => {
+  const f = await fixture(t);
+  const names = [];
+  let rejections = 0;
+  const command = (program, args, options) => {
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      const name = JSON.parse(options.input).name;
+      names.push(name);
+      if (rejections === 0) {
+        rejections += 1;
+        // A leftover registration still owns the previous display name; the
+        // rejected request cannot delete it, so it stays on GitHub.
+        f.setRunner({ id: 77, name });
+        const error = new Error('gh failed (exit 1, HTTP 422)');
+        error.status = 422;
+        return Promise.reject(error);
+      }
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, { command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 422);
+  await manager.cycle(1);
+  assert.equal(names.length, 2);
+  assert.ok(
+    names.every((name) => /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name)),
+  );
+  assert.notEqual(
+    names[0],
+    names[1],
+    'retry must not reuse the name a leftover registration still owns',
+  );
+});
+
+test('identical failures past the time threshold raise one stall alert; recovery resets it', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  // The threshold is wall-clock, so drive the clock through the injected
+  // sleep. Jitter is pinned to its floor: delays 5+10+20+40 s carry the
+  // fifth identical failure past a 60 s threshold, and the alert fires
+  // when that failure is observed.
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  let failures = 0;
+  let recovered = false;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info' && failures < 5) {
+      failures += 1;
+      return Promise.reject(new Error('docker unavailable'));
+    }
+    // The recovery cycle's own 1 s polls also advance the mock clock; stop
+    // once it is actually replenishing so the run cannot loop forever.
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      if (recovered) manager.stop();
+      recovered = true;
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 60 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+      },
+    },
+  );
+  await manager.start();
+  const alerts = messages.filter((message) => message.includes('STALL ALERT'));
+  // The episode alerts once; the recovery cycle then resets the clock (a
+  // later identical stall would be a new episode with its own alert).
+  assert.equal(alerts.length, 1);
+  assert.match(
+    alerts[0],
+    /slot 1: .*for \d+s across 5 consecutive identical failures/,
+  );
+  assert.match(alerts[0], /docker unavailable/);
+  assert.ok(
+    messages.some(
+      (message) =>
+        message.includes('started runner') &&
+        messages.indexOf(message) >
+          messages.findIndex((m) => m.includes('STALL ALERT')),
+    ),
+    'the slot recovers after the alert',
+  );
+});
+
+test('a changing error restarts the stall clock instead of alerting early', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0.5);
+  let failures = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info' && failures < 6) {
+      failures += 1;
+      return Promise.reject(new Error(`docker unavailable ${failures}`));
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 25 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+        if (failures >= 6) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  assert.equal(
+    messages.filter((message) => message.includes('STALL ALERT')).length,
+    0,
+    'no identical failure ever reached the threshold',
+  );
+});
+
+// Both threshold tests below drive the wall clock through the injected sleep
+// (the manager reads Date.now()), pin Math.random to the jitter floor so the
+// ladder is exact, and stop as soon as the alert lands.
+async function stallThresholdRun(t, { rateLimited, config }) {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  let failures = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      failures += 1;
+      const error = new Error('docker unavailable');
+      if (rateLimited) error.status = 429;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(config ?? f.config, {
+    command,
+    sleep: async (ms) => {
+      now += ms;
+      if (messages.some((message) => message.includes('STALL ALERT')))
+        manager.stop();
+    },
+  });
+  await manager.start();
+  const alerts = messages.filter((message) => message.includes('STALL ALERT'));
+  assert.equal(alerts.length, 1, 'one alert per stall episode');
+  return {
+    alerts,
+    failures,
+    durationSeconds: Number(/for (\d+)s across/.exec(alerts[0])[1]),
+    failureCount: Number(/across (\d+) consecutive/.exec(alerts[0])[1]),
+  };
+}
+
+test('the stall alert defaults to a thirty-minute wall-clock threshold', async (t) => {
+  // Ordinary ladder at the jitter floor: 5 + 10 + 20 + 30 + 30 … s, so the
+  // identical failures land at 0, 5, 15, 35, 65, 95 … and the 63rd is the
+  // first one at or past the 1800 s default (1805 s).
+  const result = await stallThresholdRun(t, { rateLimited: false });
+  assert.equal(result.failureCount, 63);
+  assert.equal(result.failures, 63);
+  assert.ok(
+    result.durationSeconds >= 1800 && result.durationSeconds <= 1830,
+    `the default is a 1800 s wall clock, but the alert reported ${result.durationSeconds}s`,
+  );
+  assert.match(result.alerts[0], /docker unavailable/);
+});
+
+test('the stall threshold tracks wall clock, not the retry count', async (t) => {
+  // Rate-limited ladder at the jitter floor: 15 + 30 + 60 + 120 + 150 … s, so
+  // the identical failures land at 0, 15, 45, 105, 225, 375, 525 … and the
+  // 16th is the first past 1800 s (1875 s). Same threshold as the ordinary
+  // cadence, a quarter of the retries — that is what wall-clock buys.
+  const result = await stallThresholdRun(t, { rateLimited: true });
+  assert.equal(result.failureCount, 16);
+  assert.ok(
+    result.durationSeconds >= 1800 && result.durationSeconds <= 1950,
+    `the alert must land on the first failure past 1800 s, got ${result.durationSeconds}s`,
+  );
+  assert.ok(
+    result.failureCount < 20,
+    `a count-based threshold would need the same retries at any cadence, got ${result.failureCount}`,
+  );
+});
+
+test('stop() interrupts a long backoff sleep instead of waiting it out', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  t.mock.method(Math, 'random', () => 0.999999);
+  const sleeps = [];
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      const error = new Error('gh failed (exit 1, HTTP 403)');
+      error.status = 403;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      manager.stop();
+    },
+  });
+  await manager.start();
+  // Exactly one slice: stop() fires inside the first 1 s chunk, and the
+  // guard must cut the wait there. >= 1 would also pass on a vacuous
+  // empty array if the loop never ran a slice at all.
+  assert.equal(sleeps.length, 1);
+  assert.ok(
+    sleeps.every((ms) => ms <= 1000),
+    `backoff slept in unsliced chunks: ${sleeps.join(', ')}`,
+  );
+});
+
+test('rejects an invalid stall alert threshold', async (t) => {
+  const f = await fixture(t);
+  for (const stallAlertSeconds of [0, -1, '3', 0.5, 1e-9])
+    assert.throws(
+      () => createManager({ ...f.config, stallAlertSeconds }),
+      /Invalid manager configuration/,
+    );
+});
+
+test('a rate-limited runner deletion backs off on the 15-300 s ladder', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  // A persisted slot makes the preflight cleanup the first and only failure:
+  // no JIT request is issued before the DELETE is rejected, which is the shape
+  // wenshao measured as 5, 10, 20 … s before the status was preserved.
+  const persisted = `ecs-qwen-trial-01-${'a'.repeat(8)}`;
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+      runnerName: persisted,
+      createdAt: new Date().toISOString(),
+      runnerId: 7,
+      uncertain: false,
+    }),
+  );
+  f.setRunner({ id: 7, name: persisted });
+  f.setFailDelete(true, 403);
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  const deletions = [];
+  const command = (program, args, options) => {
+    if (program === 'gh' && args.includes('DELETE')) deletions.push(now);
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      now += ms;
+      if (deletions.length >= 4) manager.stop();
+    },
+  });
+  await manager.start();
+  const intervals = deletions
+    .slice(1)
+    .map((stamp, index) => (stamp - deletions[index]) / 1000);
+  assert.deepEqual(
+    intervals.slice(0, 3),
+    [15, 30, 60],
+    `a rate-limited deletion must back off on the 15-300 s ladder, got ${intervals.join(', ')}`,
+  );
+});
+
+test('a rate-limited JIT failure keeps its status when cleanup fails too', async (t) => {
+  const f = await fixture(t);
+  f.setJitStatus(403);
+  // The cleanup that follows the rejected JIT fails for a different reason, so
+  // its status must not replace the rate-limit signal of the original error.
+  f.setListStatus(500);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 403);
+});
+
+test('the shipped example config pins the documented stall threshold', async () => {
+  // config.example.json is what an operator copies to
+  // /etc/qwen-ephemeral-runner/config.json, and an explicit value there
+  // overrides the code default — so a stale example quietly replaces the
+  // threshold the docs promise. The default lives in manager.mjs as
+  // `config.stallAlertSeconds ?? 1800`; change one, change both.
+  const example = JSON.parse(
+    await readFile(new URL('./config.example.json', import.meta.url), 'utf8'),
+  );
+  assert.equal(example.stallAlertSeconds, 1800);
+  // The example is also the only config most operators ever load, so it has to
+  // keep passing the manager's own validation.
+  assert.doesNotThrow(() => createManager(example));
 });
