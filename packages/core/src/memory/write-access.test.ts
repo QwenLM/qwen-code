@@ -5,7 +5,28 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { blocksAllMemoryWrites } from './write-access.js';
+import type { Config } from '../config/config.js';
+import {
+  blocksAllMemoryWrites,
+  blocksAllMemoryWritesForConfig,
+} from './write-access.js';
+
+const denyEntry = (raw: string) => ({
+  rule: { raw } as never,
+  type: 'deny' as const,
+  scope: 'user' as const,
+});
+
+const configWith = (opts: {
+  snapshot?: string[];
+  denyRules?: string[];
+}): Config =>
+  ({
+    getPermissionsDeny: () => opts.snapshot ?? [],
+    getPermissionManager: () => ({
+      listRules: () => (opts.denyRules ?? []).map((raw) => denyEntry(raw)),
+    }),
+  }) as unknown as Config;
 
 describe('blocksAllMemoryWrites', () => {
   it('reports a blanket deny on both write tools', () => {
@@ -44,5 +65,27 @@ describe('blocksAllMemoryWrites', () => {
     ).toBe(false);
     expect(blocksAllMemoryWrites([])).toBe(false);
     expect(blocksAllMemoryWrites(undefined)).toBe(false);
+  });
+});
+
+describe('blocksAllMemoryWritesForConfig', () => {
+  it('reads the live deny rules, not the config snapshot', () => {
+    // `/permissions` removes a rule from the manager only; the snapshot the
+    // Config captured at construction still lists it.
+    const config = configWith({ snapshot: ['edit'], denyRules: [] });
+    expect(blocksAllMemoryWritesForConfig(config)).toBe(false);
+  });
+
+  it('still reports a deny the manager holds', () => {
+    const config = configWith({
+      snapshot: [],
+      denyRules: ['write_file', 'edit'],
+    });
+    expect(blocksAllMemoryWritesForConfig(config)).toBe(true);
+  });
+
+  it('falls back to the snapshot when no manager exists', () => {
+    const config = { getPermissionsDeny: () => ['edit'] } as unknown as Config;
+    expect(blocksAllMemoryWritesForConfig(config)).toBe(true);
   });
 });

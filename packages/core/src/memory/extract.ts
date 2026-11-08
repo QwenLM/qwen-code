@@ -19,7 +19,7 @@ import {
   ensureUserAutoMemoryScaffold,
 } from './store.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
-import { blocksAllMemoryWrites } from './write-access.js';
+import { blocksAllMemoryWritesForConfig } from './write-access.js';
 import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
@@ -165,7 +165,7 @@ export async function runAutoMemoryExtract(params: {
   // refused after the fork has already run. Report the skip instead of paying
   // for a run that is guaranteed to save nothing. The cursor stays put, so the
   // turns stay owed if the caller later allows writes.
-  if (blocksAllMemoryWrites(params.config.getPermissionsDeny?.())) {
+  if (blocksAllMemoryWritesForConfig(params.config)) {
     debugLogger.debug('Skipping auto-memory extract: writes_denied.');
     return {
       touchedTopics: [],

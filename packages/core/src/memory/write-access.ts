@@ -8,6 +8,7 @@ import {
   parseRule,
   toolMatchesRuleToolName,
 } from '../permissions/rule-parser.js';
+import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 /**
@@ -56,4 +57,26 @@ export function blocksAllMemoryWrites(
   return WRITE_TOOLS.every((tool) =>
     denyRules.some((rule) => isBlanketDenyOf(tool, rule)),
   );
+}
+
+/**
+ * {@link blocksAllMemoryWrites} for a live session.
+ *
+ * `Config.getPermissionsDeny()` returns the list captured when the `Config`
+ * was constructed. The memory agent is evaluated against the live
+ * `PermissionManager`, and `/permissions` mutates only the manager, so the
+ * snapshot diverges from what the fork will actually hit: a `deny: ["Edit"]`
+ * removed through the dialog would keep this check reporting `writes_denied`
+ * and never fork again.
+ */
+export function blocksAllMemoryWritesForConfig(config: Config): boolean {
+  const permissionManager = config.getPermissionManager?.();
+  if (!permissionManager) {
+    return blocksAllMemoryWrites(config.getPermissionsDeny?.());
+  }
+  const denyRules = permissionManager
+    .listRules()
+    .filter((entry) => entry.type === 'deny')
+    .map((entry) => entry.rule.raw);
+  return blocksAllMemoryWrites(denyRules);
 }
