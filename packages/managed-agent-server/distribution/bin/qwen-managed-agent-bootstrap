@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+base="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+exec node "$base/bin/qwen-managed-agent-bootstrap.mjs" "$@"

@@ -29,7 +29,7 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 // `kind: "child_agent"` (H4a) and `kind: "workflow"` (H4c), one child
 // Session per record under one shared shape. The shared fixtures in
 // contracts/managed-child-run-record-v1.fixtures.json pin every shape, and
-// ManagedExtensionRecords in packages/sdk-java/managed-agent-server replays
+// ManagedExtensionRecords in packages/managed-agent-server replays
 // the same cases. See docs/design/2026-10-03-managed-shell-monitor-runtime.md,
 // docs/design/2026-10-06-managed-child-agent-runtime.md and
 // docs/design/2026-10-09-managed-workflow-child-kind.md.

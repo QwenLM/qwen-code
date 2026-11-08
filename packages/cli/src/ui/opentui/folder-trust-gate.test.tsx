@@ -73,7 +73,10 @@ const trust = vi.hoisted(() => ({
   relaunchApp: vi.fn(),
 }));
 
-vi.mock('@opentui/react', () => ({
+vi.mock('@opentui/react', async () => ({
+  useAppContext: (
+    await import('../../test-utils/opentui-catalog.js')
+  ).catalogAppContext(mocks.state.keyboardHandlers),
   useKeyboard: (handler: (key: unknown) => void) => {
     mocks.state.keyboardHandlers.push(handler);
   },
@@ -135,16 +138,10 @@ function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function lastKeyboardHandler(): (key: unknown) => void {
-  const handler = mocks.state.keyboardHandlers.at(-1);
-  if (!handler) throw new Error('no keyboard handler registered');
-  return handler;
-}
-
 async function press(name: string): Promise<void> {
-  const handler = lastKeyboardHandler();
+  const handler = mocks.state.keyboardHandlers.at(-1);
   await act(async () => {
-    handler(baseKeyEvent({ name, sequence: name }));
+    handler?.(baseKeyEvent({ name, sequence: name }));
   });
 }
 

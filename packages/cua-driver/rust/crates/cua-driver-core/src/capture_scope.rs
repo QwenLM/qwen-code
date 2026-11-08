@@ -172,6 +172,8 @@ fn is_scoped_action(tool_name: &str) -> bool {
             | "type_text"
             | "type_text_chars"
             | "press_key"
+            | "key_down"
+            | "key_up"
             | "hotkey"
             | "set_value"
             | "paste"

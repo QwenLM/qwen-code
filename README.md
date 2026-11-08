@@ -73,7 +73,7 @@ cd /path/to/your-project
 qwen
 ```
 
-Inside the session, run `/auth` to configure your provider and API key. Then try:
+Inside the session, run `/auth` and choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) to sign in with your **Plus or Pro subscription**, or configure a provider with an API key. Then try:
 
 ```text
 Explain this repository and show me where to start.
@@ -105,6 +105,7 @@ For automation and custom integrations:
 - **Headless** — Run `qwen -p "..."` in scripts, CI/CD, or batch jobs.
 - **SDKs** — Build with [TypeScript](./packages/sdk-typescript/README.md), [Python](./packages/sdk-python/README.md), or [Java](./packages/sdk-java/qwencode/README.md).
 - **Daemon** — Run `qwen serve` to connect clients over HTTP + SSE (ACP). _(experimental)_ [Daemon guide](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve/).
+- **Computer Use** — Set up [native MCP tools](./packages/cua-driver/README.md#agent-integration) or [Node REPL + SDK](./packages/node-repl/README.md#usage) in Qwen Code, Claude Code, or Codex.
 
 <details>
 <summary>SDK example (Python)</summary>
@@ -133,6 +134,27 @@ asyncio.run(main())
 ```
 
 </details>
+
+## Daemon Mode
+
+Run Qwen Code as a long-lived service when you want browser, editor, SDK, and automation clients to share agent sessions without each starting a separate process. The daemon provides the built-in Web Shell and an HTTP + SSE API, supports multiple workspaces, and lets clients reconnect to active sessions.
+
+Start it in the foreground and open the Web Shell:
+
+```bash
+qwen serve --open
+```
+
+The default address is `http://127.0.0.1:4170`. To run and manage it in the background instead:
+
+```bash
+qwen daemon start
+qwen daemon status
+qwen daemon logs -f
+qwen daemon stop
+```
+
+By default, the daemon listens on loopback without bearer authentication; any local process that can reach it can use the full API, including code execution. On shared or untrusted hosts, set `QWEN_SERVER_TOKEN` and use `--require-auth`. See the [Daemon guide](./docs/users/qwen-serve.md) for workspaces, authentication, remote access, and the API.
 
 ## Capabilities
 
@@ -168,6 +190,7 @@ On **SWE-bench Verified**, seven Qwen Code versions scored **76.40%–77.80%** o
 - [**Qwen Code Desktop**](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — Official desktop app for macOS, Windows, and Linux
 - [**AionUi**](https://github.com/iOfficeAI/AionUi) — A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) — A cross-platform desktop/web/mobile UI for Qwen Code
+- [**qwen-audio-agent**](https://github.com/QwenAudio/qwen-audio-agent) — Realtime full-duplex voice frontend for Qwen Code over ACP — talk hands-free with barge-in and a local wake word
 
 - [**🦞 Qwen Code Claw**](https://github.com/openclaw/acpx) — Let other agents (Claude, Codex, etc.) delegate coding tasks to Qwen Code via ACP. Paste this prompt into your agent:
 

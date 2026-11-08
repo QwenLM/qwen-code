@@ -45,6 +45,7 @@ import {
   tmuxPadsWithCaptureN,
 } from './lib/tui-capture.js';
 import { validateAssetContent } from './lib/assets.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const tmuxVersionProbe = spawnSync('tmux', ['-V'], {
   encoding: 'utf8',
@@ -2313,7 +2314,9 @@ exit 0
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
+  // Where permission bits do not bind, the r-x directory still takes the
+  // link and the staging failure this test needs never happens.
+  it.skipIf(!arePermissionBitsEnforced())(
     'degrades rather than falsely claiming a swap when staging itself fails',
     async () => {
       // R20-2 set `ansLost` unconditionally in the staging catch, conflating
@@ -5477,7 +5480,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(stderr).not.toContain('may still be running');
   }, 15_000);
 
-  it.skipIf(process.getuid?.() === 0 || process.platform === 'win32')(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a FAILED .ans write after capture — contract, not stack trace',
     async () => {
       // The capture window legally runs up to an hour; the disk can fill
@@ -6885,7 +6888,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBe(3);
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses an unwritable existing --out dir BEFORE the capture runs',
     async () => {
       // mkdirSync({recursive}) does no permission check on an existing dir:
@@ -6904,7 +6907,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     },
   );
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a --cwd the process cannot ENTER, not just a missing one',
     async () => {
       // statSync alone passes a mode-644 directory; entering it needs +x —
@@ -7094,45 +7097,51 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // session dies with the server. The detached arm is the limit: it
       // setsids into its own session, its parent is init before the reap
       // even runs, and nothing portable reaches it.
-      // The tag has to ride on the LONG-LIVED process itself. Two earlier
-      // shapes did not: a bare `sleep 41` matched any concurrent run of
-      // this suite on a shared host (and its pkill reached into them), and
-      // `sh -c 'sleep N; : <tag>'` tagged only the WRAPPER — sh forks an
-      // untagged sleep and waits, so pgrep found the wrapper, pkill killed
-      // it, and the sleep survived reparented to init: an orphan per run,
-      // from the test that exists to pin orphans. A per-run symlink to the
-      // real sleep puts the tag in argv[0] of the process that actually
-      // lives.
+      // The tag has to ride on the LONG-LIVED process itself, as an ordinary
+      // argument rather than argv[0]. Earlier shapes did not survive contact:
+      // a bare `sleep 41` matched any concurrent run of this suite on a
+      // shared host (and its pkill reached into them); `sh -c 'sleep N; :
+      // <tag>'` tagged only the WRAPPER — sh forks an untagged sleep and
+      // waits, so pgrep found the wrapper, pkill killed it, and the sleep
+      // survived reparented to init: an orphan per run, from the test that
+      // exists to pin orphans; a per-run symlink to `sleep` assumes the
+      // resolved binary ignores argv[0], which uutils coreutils' multicall
+      // build does NOT — it reads argv[0] as the applet name, finds the tag
+      // there instead of `sleep`, and exits before pgrep can ever see it
+      // (measured on the ARM64 runners, where PATH resolves sleep to
+      // /usr/lib/cargo/bin/coreutils/sleep, which is that multicall build).
+      // A Node waiter keeps the tag in a plain argument of the process that
+      // actually lives, and Node is guaranteed present wherever this suite
+      // runs.
       const tag = (arm: string): string =>
         `capture-tui-orphan-${process.pid}-${arm}`;
-      // Resolved, never the literal /bin/sleep: NixOS keeps sleep off /bin
-      // entirely, and a dangling link fails the detached arm RED against
-      // healthy code (spawn ENOENT before any sleeper exists) while the
-      // attached arm passes vacuously.
-      const sleepTarget = probes.sleepBin();
-      if (sleepTarget === undefined) {
-        throw new Error(
-          'sleep is not resolvable to an executable on PATH — the per-run ' +
-            'symlink needs a real target',
-        );
-      }
-      const sleeper = (arm: string): string => {
-        const link = join(dir, tag(arm));
-        symlinkSync(sleepTarget, link);
-        return link;
-      };
+      const waiter = join(dir, 'capture-tui-waiter.cjs');
+      writeFileSync(waiter, 'setTimeout(() => {}, 60_000);\n');
+      const detach = join(dir, 'capture-tui-detach.cjs');
+      writeFileSync(
+        detach,
+        [
+          "const { spawn } = require('node:child_process');",
+          'spawn(process.execPath, [process.argv[2], process.argv[3]], {',
+          '  detached: true,',
+          "  stdio: 'ignore',",
+          '}).unref();',
+          '',
+        ].join('\n'),
+      );
+      const node = JSON.stringify(process.execPath);
       const arms: Array<[string, string, boolean]> = [
         // A child in the pane's session: dies with the server. The guarantee.
         [
           'attached',
-          `${sleeper('attached')} 41 & printf 'MARK\\n'; sleep 20`,
+          `${node} ${JSON.stringify(waiter)} ${tag('attached')} & printf 'MARK\\n'; sleep 20`,
           false,
         ],
         // setsid'd into its own session, parent already init before the reap
         // runs: nothing portable reaches it. The documented limit.
         [
           'detached',
-          `node -e "require('child_process').spawn('${sleeper('detached')}',['42'],{detached:true,stdio:'ignore'}).unref()"; printf 'MARK\\n'; sleep 20`,
+          `${node} ${JSON.stringify(detach)} ${JSON.stringify(waiter)} ${tag('detached')}; printf 'MARK\\n'; sleep 20`,
           true,
         ],
       ];

@@ -107,10 +107,13 @@ describe('historyCommand', () => {
     const result = await expandNowCommand.action!(mockContext, '');
 
     expect(result).toBeUndefined();
-    expect(mockLoadHistory).toHaveBeenCalledWith([
-      expect.objectContaining({ id: 1, display: undefined }),
-      expect.objectContaining({ id: 2, display: undefined }),
-    ]);
+    expect(mockLoadHistory).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({ id: 1, display: undefined }),
+        expect.objectContaining({ id: 2, display: undefined }),
+      ],
+      'expand',
+    );
     expect(mockRefreshStatic).toHaveBeenCalled();
   });
 

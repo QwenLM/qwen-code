@@ -4,6 +4,7 @@ import katex from 'katex';
 import {
   getReplySelectionRange,
   getSelectedReplyContent,
+  getSelectedReplyText,
 } from './selectionClipboard';
 
 const bodies: HTMLElement[] = [];
@@ -247,6 +248,22 @@ describe('selected reply clipboard content', () => {
     expect(getReplySelectionRange(body)).toBeNull();
     window.getSelection()!.removeAllRanges();
     expect(getReplySelectionRange(body)).toBeNull();
+  });
+});
+
+describe('selected reply plain text', () => {
+  it('returns rendered text without converting Markdown', () => {
+    const body = fixture('<p>Before <strong>bold</strong> after.</p>');
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyText(body, range)).toBe('Before bold after.');
+  });
+
+  it('returns null when the selection has no copyable text', () => {
+    const body = fixture('<p><img src="https://example.com/a.png" alt=""></p>');
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyText(body, range)).toBeNull();
   });
 });
 

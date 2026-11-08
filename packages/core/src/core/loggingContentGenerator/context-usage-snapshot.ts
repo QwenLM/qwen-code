@@ -23,6 +23,10 @@ import {
 } from '../../services/tokenEstimation.js';
 import { buildSkillLlmContent } from '../../tools/skill-utils.js';
 import { DiscoveredMCPTool } from '../../tools/mcp-tool.js';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  withoutAutoMemorySnapshots,
+} from '../../memory/request-context.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
   isValidContextUsage,
@@ -263,9 +267,24 @@ export function createContextUsageSnapshot(
     catalog.length > 0 &&
     last?.role === 'user' &&
     last.parts?.at(-1)?.text === catalog;
-  const conversation = hasCatalog
-    ? [...contents.slice(0, -1), { ...last, parts: last.parts!.slice(0, -1) }]
-    : contents;
+  const snapshotTokens = contents.reduce(
+    (total, content) =>
+      total +
+      (content.parts ?? []).reduce(
+        (tokens, part) =>
+          tokens +
+          (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true
+            ? estimateContextTextTokens(part.text ?? '')
+            : 0),
+        0,
+      ),
+    0,
+  );
+  const conversation = withoutAutoMemorySnapshots(
+    hasCatalog
+      ? [...contents.slice(0, -1), { ...last, parts: last.parts!.slice(0, -1) }]
+      : contents,
+  );
   const attributedSkills = attributeLoadedSkillBodies(
     conversation,
     loadedSkillBodies(config),
@@ -283,6 +302,7 @@ export function createContextUsageSnapshot(
       mcp_tools_tokens: tools.mcpTools,
       memory_files_tokens:
         memory.memoryTokens +
+        snapshotTokens +
         (hasCatalog ? estimateContextTextTokens(catalog) : 0),
       skills_tokens: tools.skillTool + attributedSkills.skillBodyTokens,
       messages_tokens: estimateContentTokens(attributedSkills.contents),

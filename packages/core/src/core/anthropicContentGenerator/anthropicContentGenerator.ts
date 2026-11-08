@@ -272,6 +272,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
       'anthropic',
       this.cliConfig.getProxy(),
     );
+    const sessionFetch = buildSessionAwareFetch(
+      runtimeOptions.fetch,
+      this.cliConfig,
+      this.contentGeneratorConfig.customHeaders,
+    );
+    // SDK 0.36 ignores fetchOptions, so bind the dispatcher at the fetch boundary.
+    const fetchWithDispatcher: typeof globalThis.fetch = (input, init) =>
+      sessionFetch(input, { ...init, ...runtimeOptions.fetchOptions });
     // IdeaLab-style Anthropic proxies expect `Authorization: Bearer <token>`
     // instead of the SDK-default `x-api-key` header. Use the SDK's
     // `authToken` parameter (sends `Authorization: Bearer` natively) only
@@ -299,11 +307,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
-      fetch: buildSessionAwareFetch(
-        runtimeOptions.fetch,
-        this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
-      ) as unknown as AnthropicFetch,
+      fetch: fetchWithDispatcher as unknown as AnthropicFetch,
     });
 
     this.converter = new AnthropicContentConverter(
@@ -539,7 +543,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // entry. The converter emits those entries on the system text block
     // (the static-prefix block when the system prompt is split)
     // and the last tool entry when `useGlobalCacheScope` is true (gated
-    // on `enableCacheControl !== false` AND (Anthropic-native baseURL OR `forceGlobalCacheScope`)).
+    // on `enableCacheControl !== false` AND `forceGlobalCacheScope`).
     // Scan the assembled request body for that field rather than
     // re-deriving the gate here, so:
     //   1. The beta and the body-side field share a single source of
@@ -604,9 +608,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
   /**
    * Whether to ATTACH the body-side `scope: 'global'` field on
    * `cache_control` entries this request. Requires
-   * `enableCacheControl !== false` AND either an Anthropic-native baseURL
-   * OR `forceGlobalCacheScope` (opt-in for proxy providers that forward
-   * the `prompt-caching-scope-2026-01-05` beta; see issue #6642).
+   * `enableCacheControl !== false` AND an explicit
+   * `forceGlobalCacheScope: true` opt-in.
+   *
+   * Global scope is opt-in for EVERY baseURL, Anthropic-native included
+   * (issue #15039). The API rejects a global breakpoint unless every
+   * preceding block is globally scoped too, and this converter can only
+   * afford one breakpoint on the tool list — Anthropic caps a request at
+   * four cache breakpoints, so marking each of the dozens of tools a real
+   * session sends is not available. With two or more tools the mixed
+   * shape therefore 400s on the first prompt of every session, which is
+   * worse than no cross-session caching: session-scoped breakpoints keep
+   * working and still cache the tool and system prefixes within a
+   * session. `forceGlobalCacheScope` stays as the escape hatch for
+   * backends whose validation differs (issue #6642).
+   *
    * Computed per request: `Config.handleModelChange()` hot-updates
    * `enableCacheControl` in-place on the qwen-oauth path (without
    * recreating the ContentGenerator); non-qwen-oauth providers refresh
@@ -626,10 +642,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (this.contentGeneratorConfig.enableCacheControl === false) {
       return false;
     }
-    return (
-      isAnthropicNativeBaseUrl(this.contentGeneratorConfig) ||
-      this.contentGeneratorConfig.forceGlobalCacheScope === true
-    );
+    return this.contentGeneratorConfig.forceGlobalCacheScope === true;
   }
 
   /**
@@ -773,11 +786,33 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    // Proxy-hosted Claude: a non-DeepSeek backend on a non-native base URL.
+    // Its wire shape is Anthropic's, while its history may carry thinking
+    // blocks recorded by another provider without a signature.
+    const isProxyHostedClaude =
+      !isDeepSeek && !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
     const dropUnsignedAssistantThinking =
-      !isDeepSeek &&
+      isProxyHostedClaude &&
       !!thinking &&
-      this.modelSupportsAdaptiveThinking(true) &&
-      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+      this.modelSupportsAdaptiveThinking(true);
+    // Strict Anthropic-compatible proxies (verified against SGLang v0.5.19,
+    // #11772; llama.cpp/vLLM expected to behave the same but untested)
+    // reject a `thinking` block with no `signature` field at all (HTTP 400,
+    // e.g. SGLang `thinking.signature`) while accepting an empty signature.
+    // The repaired blocks come from HISTORY, not the outgoing request, so
+    // this is deliberately not gated on `thinking`: the #11772 consumers
+    // (auto-memory extraction, prompt suggestions, skill review) fork with
+    // `includeThoughts: false` and still replay unsigned blocks. 4.6+
+    // adaptive models are excluded — that quadrant is owned by
+    // `dropUnsignedAssistantThinking` (an empty string cannot stand in for
+    // the native API's opaque signature), and the two passes must stay
+    // disjoint so the 4.6+ wire shape never changes. Unknown or unversioned
+    // model ids parse as non-adaptive and keep the fill — that is exactly
+    // what a custom SGLang model id needs. The native API's history is left
+    // untouched.
+    // https://github.com/QwenLM/qwen-code/issues/11772
+    const fillUnsignedThinkingSignature =
+      isProxyHostedClaude && !this.modelSupportsAdaptiveThinking(true);
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
     // hard 400 — per Anthropic's own migration guidance this is a
@@ -796,8 +831,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // recreation, so `baseUrl` is captured fresh at construct time, not
     // mutated mid-session — defensive per-request reads on both fields
     // cover both paths.) `useGlobalCacheScope` requires
-    // `enableCacheControl` (true only when caching is on AND either the resolved
-    // baseURL is Anthropic-native OR `forceGlobalCacheScope` is set) and governs whether the body's
+    // `enableCacheControl` (true only when caching is on AND
+    // `forceGlobalCacheScope` is set) and governs whether the body's
     // `cache_control` entries carry `scope: 'global'`. The matching
     // `prompt-caching-scope-2026-01-05` beta isn't passed through this
     // sample — `buildPerRequestHeaders` instead scans the assembled body
@@ -814,11 +849,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
-        // Claude uses the separate unsigned-thinking cleanup below because an
-        // empty string cannot replace Claude's opaque signature.
+        // Claude is split two ways: non-4.6 models fill `signature: ''`
+        // (strict serde only requires the key to be present), while 4.6+
+        // adaptive models drop unsigned blocks, since an empty string
+        // cannot stand in for the native API's opaque signature. The two
+        // quadrants are disjoint by construction.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
+        fillUnsignedThinkingSignature,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
         // Manual (non-adaptive) extended thinking requires an assistant
@@ -856,7 +895,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // the model must emit a tool call. Adaptive-thinking models (Claude
     // 4.6+) compound this by consuming output budget on server-driven
     // thinking before any tool_use, making forced tool_choice essential.
+    // Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject type "any" and
+    // "tool" with a 400, so those ids fall back to auto plus an explicit
+    // instruction. Callers already read either the tool arguments or JSON
+    // text (BaseLlmClient.generateJson).
     const toolChoice = this.resolveToolChoice(request, tools);
+    if (
+      toolChoice?.type === 'auto' &&
+      request.config?.toolConfig?.functionCallingConfig?.mode === 'ANY' &&
+      tools
+    ) {
+      this.appendSchemaToolInstruction(
+        messages,
+        this.schemaToolNames(request, tools),
+      );
+    }
 
     const modelVersion = parseClaudeModelVersion(
       this.contentGeneratorConfig.model,
@@ -1006,19 +1059,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
     if (this.getReasoningCapabilities()?.profile) return effort;
     if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
-      // DeepSeek's anthropic-compatible output_config.effort accepts only
-      // high/max. Mirror the DeepSeek OpenAI adapter (deepseek.ts): low/medium
-      // lift to high and xhigh groups to max, so a low/medium request is not
-      // passed through verbatim (which the endpoint would 400 on). Warn once
-      // when the requested tier is remapped — mirroring the real-Anthropic
-      // clamp path below — so a `/effort low` silently running at `high` is
-      // visible in debug logs.
+      // DeepSeek's anthropic-compatible output_config.effort runs low, high
+      // and max, folding medium and xhigh into high. Map on the client too so
+      // the debug log names the tier that actually runs; warn once when the
+      // requested tier is remapped — mirroring the real-Anthropic clamp path
+      // below.
       const mapped: ReasoningEffort =
-        effort === 'xhigh' || effort === 'max' ? 'max' : 'high';
+        effort === 'low' || effort === 'max' ? effort : 'high';
       if (mapped !== effort && !this.effortClampWarned) {
         debugLogger.warn(
-          `reasoning.effort='${effort}' is not accepted by the DeepSeek ` +
-            `anthropic-compatible endpoint; using '${mapped}'.`,
+          `reasoning.effort='${effort}' runs as '${mapped}' on the DeepSeek ` +
+            `anthropic-compatible endpoint.`,
         );
         this.effortClampWarned = true;
       }
@@ -1233,7 +1284,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * the request into an Anthropic `tool_choice` value.
    *
    * Mapping:
-   *   mode 'ANY'  → `{ type: 'any' }`   (model must call at least one tool)
+   *   mode 'ANY' on a model that accepts forced tool use → `{ type: 'any' }`
+   *   mode 'ANY' on Opus 5.5 / Sonnet 5.5 / Fable 5.1 / Mythos 5.1 →
+   *     `{ type: 'auto' }` (those ids 400 on "any" and "tool")
    *   mode 'NONE' or 'AUTO' or absent → undefined (Anthropic has no
    *     `tool_choice: { type: 'none' }`; to prevent tool calls the caller
    *     should omit `tools` entirely)
@@ -1248,9 +1301,74 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (!tools || tools.length === 0) return undefined;
     const mode = request.config?.toolConfig?.functionCallingConfig?.mode;
     if (mode === 'ANY') {
+      if (this.modelRejectsForcedToolChoice()) {
+        return { type: 'auto' };
+      }
       return { type: 'any' };
     }
     return undefined;
+  }
+
+  /**
+   * Exact ids that reject `tool_choice` type "any" and "tool". Haiku 5.5,
+   * Opus 5, Sonnet 5, Fable 5 and Mythos 5 stay on the historical mapping.
+   * Unknown ids do too. Reseller prefixes and dotted aliases parse through
+   * `parseClaudeModelVersion`.
+   */
+  private modelRejectsForcedToolChoice(): boolean {
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed || parsed.major !== 5) return false;
+    const { family, minor } = parsed;
+    if ((family === 'opus' || family === 'sonnet') && minor === 5) return true;
+    if ((family === 'fable' || family === 'mythos') && minor === 1) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Names declared tools permitted by the caller. Without an allowlist, every
+   * declared tool is in scope.
+   */
+  private schemaToolNames(
+    request: GenerateContentParameters,
+    tools: Anthropic.Tool[],
+  ): string[] {
+    const declared = tools
+      .map((tool) => tool.name)
+      .filter((name) => name.length > 0);
+    const allowed =
+      request.config?.toolConfig?.functionCallingConfig?.allowedFunctionNames;
+    if (!allowed || allowed.length === 0) return declared;
+    const allowedSet = new Set(allowed);
+    return declared.filter((name) => allowedSet.has(name));
+  }
+
+  private appendSchemaToolInstruction(
+    messages: Anthropic.MessageParam[],
+    names: string[],
+  ): void {
+    if (names.length === 0) return;
+    const text =
+      'Answer by calling one of these tools and placing the structured ' +
+      `result in its arguments, matching that tool's input schema: ${names.join(
+        ', ',
+      )}.` +
+      (names.length === 1 && names[0] === 'respond_in_schema'
+        ? ' If you do not call a tool, reply with only a raw JSON object of that same shape, with no Markdown fences or prose.'
+        : '');
+    const last = messages.at(-1);
+    if (!last || last.role !== 'user') {
+      messages.push({ role: 'user', content: [{ type: 'text', text }] });
+      return;
+    }
+    if (typeof last.content === 'string') {
+      last.content = last.content ? `${last.content}\n\n${text}` : text;
+      return;
+    }
+    last.content = [...last.content, { type: 'text', text }];
   }
 
   private async *redactStreamErrors(
@@ -1296,6 +1414,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let completionTokens = 0;
     let completionTokensReported = false;
     let finishReason: string | undefined;
+    let finishMessage: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
     const deferredToolCalls: GenerateContentResponse[] = [];
@@ -1502,6 +1621,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
         }
         case 'message_delta': {
           const stopReasonValue = event.delta.stop_reason;
+          finishMessage ??=
+            this.converter.mapAnthropicStopDetailsToFinishMessage(
+              (event.delta as { stop_details?: unknown }).stop_details,
+            );
           if (stopReasonValue) {
             finishReason = stopReasonValue;
             const hasOpenToolCall = [...blocks.values()].some(
@@ -1601,6 +1724,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1630,6 +1754,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1777,6 +1902,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     model?: string,
     finishReason?: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
+    finishMessage?: string,
   ): GenerateContentResponse {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
@@ -1798,6 +1924,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         index: 0,
         safetyRatings: [],
         ...(mappedFinishReason ? { finishReason: mappedFinishReason } : {}),
+        ...(finishMessage ? { finishMessage } : {}),
       },
     ];
 

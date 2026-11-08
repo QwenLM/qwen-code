@@ -61,6 +61,10 @@ import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
   buildAgentTranscriptAttach,
+  getAgentMetaPath,
+  readAgentMeta,
+  writeAgentMeta,
+  type AgentMeta,
 } from '../agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -87,7 +91,12 @@ import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
-import { runWithAgentContext } from './agent-context.js';
+import {
+  backgroundFixAt,
+  backgroundFixHolding,
+  settleBackgroundFix,
+} from '../../tools/autofix-pr-grants.js';
+import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import {
   canonicalAgentToolName,
@@ -564,6 +573,13 @@ export function createProductionDispatch(
    * tree or host.
    */
   refuseSubagentTools?: boolean,
+  /**
+   * The Workflow tool call that started this run. Suffixed onto each
+   * subagent id the way the Agent tool suffixes its own call id, so readers
+   * that resolve a subagent's spawning call from its id (the trajectory)
+   * can nest workflow agents under this call.
+   */
+  parentToolCallId?: string,
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -602,7 +618,9 @@ export function createProductionDispatch(
     // Minted per `agent()` call rather than per attempt, so a stall-retried
     // dispatch appends to ONE transcript instead of presenting as two agents
     // to every reader of the subagent transcript dir.
-    const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+    const workflowAgentId =
+      `workflow-agent-${randomBytes(8).toString('hex')}` +
+      (parentToolCallId ? `-${parentToolCallId}` : '');
     // Resolved once and handed to both the runtime and the transcript so
     // the on-disk records name the same agent that ran. The resolved
     // agentType definition rides along so the override path reuses it
@@ -627,48 +645,59 @@ export function createProductionDispatch(
       );
     }
     let attempt = 0;
-    return runStallResilient(
-      async (attemptSignal, emitter) => {
-        attempt += 1;
-        const cleanupApprovalBridge = bridgeApprovalEvents?.(
-          emitter,
-          dispatchId,
-        );
-        const cleanupTranscript = attachDispatchTranscript(
-          config,
-          workflowAgentId,
-          prompt,
-          agentIdentity.name,
-          emitter,
-          attempt,
-        );
-        try {
-          return await runSingleDispatch(
-            config,
-            prompt,
-            opts,
-            attemptSignal,
+    let finishTranscript: (status: AgentMeta['status']) => void = () => {};
+    let status: AgentMeta['status'] = 'failed';
+    try {
+      const result = await runStallResilient(
+        async (attemptSignal, emitter) => {
+          attempt += 1;
+          const cleanupApprovalBridge = bridgeApprovalEvents?.(
             emitter,
-            workflowAgentId,
-            agentIdentity,
-            onTokens,
-            subagentBounds,
-            refuseSubagentTools,
+            dispatchId,
           );
-        } finally {
-          cleanupTranscript();
-          cleanupApprovalBridge?.();
-        }
-      },
-      {
-        stallMs,
-        signal,
-        // The name can carry a model-authored agentType spelling — keep
-        // the stall log / abandoned error single-line the same way the
-        // "not found" throw site sanitizes it.
-        label: sanitizeForErrorMessage(agentIdentity.name),
-      },
-    );
+          const cleanupTranscript = attachDispatchTranscript(
+            config,
+            workflowAgentId,
+            prompt,
+            agentIdentity.name,
+            emitter,
+            attempt,
+          );
+          finishTranscript = cleanupTranscript;
+          try {
+            return await runSingleDispatch(
+              config,
+              prompt,
+              opts,
+              attemptSignal,
+              emitter,
+              workflowAgentId,
+              agentIdentity,
+              onTokens,
+              subagentBounds,
+              refuseSubagentTools,
+            );
+          } finally {
+            cleanupTranscript('running');
+            cleanupApprovalBridge?.();
+          }
+        },
+        {
+          stallMs,
+          signal,
+          // The name can carry a model-authored agentType spelling — keep
+          // the stall log / abandoned error single-line the same way the
+          // "not found" throw site sanitizes it.
+          label: sanitizeForErrorMessage(agentIdentity.name),
+        },
+      );
+      status = 'completed';
+      return result;
+    } finally {
+      finishTranscript(
+        status === 'failed' && signal?.aborted ? 'cancelled' : status,
+      );
+    }
   };
 }
 
@@ -748,7 +777,7 @@ function attachDispatchTranscript(
   emitter: AgentEventEmitter,
   /** 1-based attempt; retries append to the transcript attempt 1 opened. */
   attempt: number,
-): () => void {
+): (status: AgentMeta['status']) => void {
   const append = attempt > 1;
   try {
     const { jsonlPath, options } = buildAgentTranscriptAttach(config, agentId, {
@@ -762,7 +791,36 @@ function attachDispatchTranscript(
       appendToExisting: append,
       retryAttempt: append ? attempt : undefined,
     });
-    return attachJsonlTranscriptWriter(emitter, jsonlPath, options).cleanup;
+    const writer = attachJsonlTranscriptWriter(emitter, jsonlPath, options);
+    const metaPath = getAgentMetaPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      agentId,
+    );
+    const now = new Date().toISOString();
+    const meta: AgentMeta = {
+      agentId,
+      agentType:
+        stripAnsiAndControl(agentName).slice(0, 200) || 'workflow-agent',
+      description: stripAnsiAndControl(prompt).slice(0, 4_096),
+      parentSessionId: options.sessionId,
+      parentAgentId: getCurrentAgentId() ?? null,
+      createdAt:
+        (append ? readAgentMeta(metaPath)?.createdAt : undefined) ?? now,
+      lastUpdatedAt: now,
+      status: 'running',
+      isBackgrounded: false,
+      workflowOwner: { pid: process.pid, hostname: os.hostname() },
+    };
+    writeAgentMeta(metaPath, meta);
+    return (status) => {
+      writer.cleanup();
+      writeAgentMeta(metaPath, {
+        ...meta,
+        status,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    };
   } catch (error) {
     debugLogger.warn(
       `[Workflow] failed to attach transcript for ${agentId}: ${error}`,
@@ -829,6 +887,22 @@ async function runSingleDispatch(
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
+
+  // In the session's own directory, after a `/cd` into the worktree of a
+  // background fix of /autofix-pr: beside it, on either path below.
+  const ownDir = config.getTargetDir?.();
+  if (opts.workingDir === undefined && ownDir) {
+    await settleBackgroundFix({ within: ownDir });
+  }
+  if (
+    opts.workingDir === undefined &&
+    ownDir &&
+    backgroundFixHolding(ownDir, getCurrentAgentId())
+  ) {
+    throw new Error(
+      `agent(): a background fix agent of /autofix-pr is working in ${ownDir}; its round goes on when it ends.`,
+    );
+  }
 
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
@@ -1372,6 +1446,15 @@ async function runOverridePath(
       // the same threat the agentType SECURITY note above names.
       throw new Error(
         `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
+      );
+    }
+    // Not beside a background fix agent of /autofix-pr, as the agent tool
+    // refuses too. (Only the top-level session dispatches: no subagent runs
+    // a workflow.)
+    await settleBackgroundFix({ worktree: resolved.path });
+    if (backgroundFixAt(resolved.path)) {
+      throw new Error(
+        `agent({workingDir}): a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
       );
     }
     effectiveContext = deriveWorktreeConfig(config, resolved.path, {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -30,16 +31,21 @@ const sessionKey = {
 const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 
 const temporaryDirectories = new Set<string>();
+const activeRigs = new Set<Rig>();
 
-afterEach(async () => {
+async function cleanupFixtures(): Promise<void> {
+  for (const rig of activeRigs) await closeLoop(rig);
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
   temporaryDirectories.clear();
-});
+}
+
+afterEach(cleanupFixtures);
 
 class ManualClock implements MonitorLoopClock {
   time = 0;
+  readonly executions: Array<Promise<unknown>> = [];
   private seq = 0;
   private readonly pending = new Map<
     number,
@@ -60,8 +66,18 @@ class ManualClock implements MonitorLoopClock {
     this.pending.delete(handle as unknown as number);
   }
 
+  advance(ms: number): Promise<void> {
+    return this.track(this.advanceOnce(ms));
+  }
+
+  track<T>(execution: Promise<T>): Promise<T> {
+    this.executions.push(execution);
+    void execution.catch(() => undefined);
+    return execution;
+  }
+
   /** Runs every handler due by then, in due order, awaiting each. */
-  async advance(ms: number): Promise<void> {
+  private async advanceOnce(ms: number): Promise<void> {
     const until = this.time + ms;
     for (;;) {
       const next = [...this.pending.entries()]
@@ -82,7 +98,7 @@ class ManualClock implements MonitorLoopClock {
       .filter(([, entry]) => entry.at <= this.time)
       .sort((a, b) => a[1].at - b[1].at);
     for (const [handle] of due) this.pending.delete(handle);
-    return Promise.all(due.map(([, entry]) => entry.handler()));
+    return this.track(Promise.all(due.map(([, entry]) => entry.handler())));
   }
 }
 
@@ -97,6 +113,7 @@ class FakeExecutor {
   /** Holds each terminate open until the case answers it. */
   holdStop = false;
   private readonly heldStops: Array<(proven: boolean) => void> = [];
+  private readonly stopWaiters = new Map<number, () => void>();
   commands: Array<Readonly<Record<string, unknown>>> = [];
   failStart: Error | undefined;
 
@@ -113,6 +130,8 @@ class FakeExecutor {
       receipt: { watch: 'started' },
       terminate: async () => {
         this.terminateCalls += 1;
+        this.stopWaiters.get(this.terminateCalls)?.();
+        this.stopWaiters.delete(this.terminateCalls);
         if (this.holdStop)
           return new Promise<boolean>((resolve) =>
             this.heldStops.push(resolve),
@@ -127,6 +146,17 @@ class FakeExecutor {
 
   answerStop(proven: boolean): void {
     this.heldStops.shift()?.(proven);
+  }
+
+  // A stop can follow durable I/O; wait for the request, not a polling deadline.
+  waitForStop(calls: number): Promise<void> {
+    if (this.terminateCalls >= calls) return Promise.resolve();
+    return new Promise((resolve) => this.stopWaiters.set(calls, resolve));
+  }
+
+  releaseStops(): void {
+    this.holdStop = false;
+    while (this.heldStops.length > 0) this.answerStop(false);
   }
 
   exitNaturally(): Promise<void> {
@@ -190,7 +220,7 @@ async function openLoop(harness: Harness): Promise<Rig> {
     transcriptPath: harness.transcriptPath,
   });
   const authority = await LocalManagedSessionAuthority.open({
-    lease,
+    journal: LocalJsonlManagedSessionJournalStore.fromLease(lease, sessionKey),
     sessionKey,
     cwd: '/workspace',
     version: 'test',
@@ -215,11 +245,25 @@ async function openLoop(harness: Harness): Promise<Rig> {
   const executor = new FakeExecutor();
   const clock = new ManualClock();
   const loop = new HostedMonitorLoop(session, 'monitor-1', executor, clock);
-  return { authority, session, executor, clock, loop, lease };
+  const stop = loop.stop.bind(loop);
+  vi.spyOn(loop, 'stop').mockImplementation((...args) =>
+    clock.track(stop(...args)),
+  );
+  const rig = { authority, session, executor, clock, loop, lease };
+  activeRigs.add(rig);
+  return rig;
 }
 
 async function closeLoop(rig: Rig): Promise<void> {
+  rig.loop.prepareLifecycle();
+  rig.executor.releaseStops();
+  await Promise.allSettled(rig.clock.executions);
+  await rig.loop.done.catch(() => undefined);
+  if (rig.session.record('monitor-1')?.stopReason === null) {
+    await rig.loop.stop();
+  }
   await rig.lease.release().catch(() => undefined);
+  activeRigs.delete(rig);
 }
 
 function params(overrides: Record<string, unknown> = {}) {
@@ -244,6 +288,24 @@ function committed(
 }
 
 describe('HostedMonitorLoop', () => {
+  it('drains an abandoned quota stop before removing its transcript', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.holdStop = true;
+    await rig.loop.start(params({ maxEvents: 1 }));
+    rig.executor.onLine?.('one');
+    const fired = rig.clock.advance(1_000);
+    await rig.executor.waitForStop(1);
+    expect(rig.executor.terminateCalls).toBe(1);
+
+    await cleanupFixtures();
+    rig.executor.answerStop(false);
+    await expect(fired).resolves.toBeUndefined();
+    await expect(fs.stat(harness.transcriptPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('keeps observations but suppresses wakes and premature stop during lifecycle drain', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
@@ -295,6 +357,29 @@ describe('HostedMonitorLoop', () => {
     expect(rig.executor.commands).toEqual([]);
     await closeLoop(rig);
   });
+
+  it.each(['stop_requested', 'runtime_lost'] as const)(
+    'close stop after a resume that found the record settled (%s)',
+    async (settle) => {
+      const harness = await createHarness();
+      const rig = await openLoop(harness);
+      await rig.session.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-monitor-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await rig.session.dispatchStarted('monitor-1', BINDING);
+      await rig.session.attach('monitor-1', BINDING, { watch: 'started' });
+      await rig.session.settleQuiet('monitor-1', 'exited'); // the publisher's no-observer settle
+      await rig.loop.resumeAttached(params()); // returns early, as designed
+      await rig.loop.stop(settle); // what the Session close does next
+      await closeLoop(rig);
+    },
+  );
 
   it('aggregates lines into one observation per floored debounce window', async () => {
     const harness = await createHarness();
@@ -580,7 +665,8 @@ describe('HostedMonitorLoop', () => {
 
       if (reason === 'max_events') rig.executor.onLine?.('one');
       const fired = rig.clock.advance(firing);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await rig.executor.waitForStop(1);
+      expect(rig.executor.terminateCalls).toBe(1);
       // The worker finalizes before it answers, so the exit is this stop's
       // own evidence: its stop marker does not override the loop's reason.
       await rig.executor.exitStopped();
@@ -614,7 +700,8 @@ describe('HostedMonitorLoop', () => {
 
       rig.executor.onLine?.('one');
       const fired = rig.clock.advance(1_000);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await rig.executor.waitForStop(1);
+      expect(rig.executor.terminateCalls).toBe(1);
       const stopped = rig.loop.stop('stop_requested');
       // The close's stop issues nothing while the auto-stop still waits.
       expect(rig.executor.terminateCalls).toBe(1);
@@ -626,7 +713,8 @@ describe('HostedMonitorLoop', () => {
       if (!proven) {
         // Only the auto-stop's park leaves the record to the close's own
         // proven stop.
-        await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(2));
+        await rig.executor.waitForStop(2);
+        expect(rig.executor.terminateCalls).toBe(2);
         rig.executor.answerStop(true);
       }
       await stopped;
@@ -653,7 +741,8 @@ describe('HostedMonitorLoop', () => {
 
       if (reason === 'max_events') rig.executor.onLine?.('one');
       const fired = rig.clock.advance(firing);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await rig.executor.waitForStop(1);
+      expect(rig.executor.terminateCalls).toBe(1);
       // The worker proved the end, but the publisher refused the finalize
       // that carries it: the sealed output has not reached the record, and
       // a terminal record would refuse it.
@@ -686,7 +775,8 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.onLine?.('one');
     const fired = rig.clock.advance(1_000);
-    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+    await rig.executor.waitForStop(1);
+    expect(rig.executor.terminateCalls).toBe(1);
     // An end without evidence proves no stop: it reports the failed watch,
     // never the stop's reason, and the answer that follows changes nothing.
     await rig.executor.fail();
@@ -739,6 +829,14 @@ describe('HostedMonitorLoop', () => {
   it('issues one auto-stop when the idle window fires inside the quota flush (#13896)', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
+    const observe = rig.session.observe.bind(rig.session);
+    const observed = new Promise<void>((resolve, reject) => {
+      vi.spyOn(rig.session, 'observe').mockImplementationOnce((...args) => {
+        const committed = observe(...args);
+        void committed.then(resolve, reject);
+        return committed;
+      });
+    });
     rig.executor.holdStop = true;
     await rig.loop.start(params({ maxEvents: 1, idleTimeoutMs: 1_000 }));
 
@@ -747,9 +845,8 @@ describe('HostedMonitorLoop', () => {
     // has nothing left to stop.
     rig.executor.onLine?.('one');
     const fired = rig.clock.fireTogether(1_000);
-    await vi.waitFor(() =>
-      expect(committed(rig.authority).observationSequence).toBe(1),
-    );
+    await observed;
+    expect(committed(rig.authority).observationSequence).toBe(1);
     expect(rig.executor.terminateCalls).toBe(1);
 
     await rig.executor.exitStopped();
