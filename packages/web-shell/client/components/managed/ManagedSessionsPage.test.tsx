@@ -5286,6 +5286,82 @@ describe('ManagedSessionsPage', () => {
     expect(document.activeElement).toBe(refresh);
   });
 
+  it('leaves focus alone when the user moved on to a host-page control during a discard in a shadow root', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const shadowContainer = document.createElement('div');
+    shadow.appendChild(shadowContainer);
+    const navigationTarget = document.createElement('nav');
+    document.body.appendChild(navigationTarget);
+    const hostButton = document.createElement('button');
+    hostButton.textContent = 'Host toolbar';
+    document.body.appendChild(hostButton);
+    const shadowRoot = createRoot(shadowContainer);
+    let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          releaseSummary = resolve;
+        }),
+    );
+    try {
+      seedPending({
+        idempotencyKey: 'key-1',
+        text: 'Session draft',
+        sessionId: 's1',
+      });
+      await act(async () => {
+        shadowRoot.render(
+          <I18nProvider language="en">
+            <ManagedSessionsPage
+              sessionId="s1"
+              onSelectSession={onSelect}
+              managedAgentProvider={provider}
+              navigationTarget={navigationTarget}
+              interactive={true}
+            />
+          </I18nProvider>,
+        );
+        await flush();
+      });
+      const discard = [...shadowContainer.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Discard this request',
+      );
+      expect(discard).toBeDefined();
+      discard!.focus();
+      await act(async () => {
+        discard!.click();
+        await flush();
+      });
+
+      // The user moves on to a control in the host page — outside the shadow
+      // root — while the summary is still loading.
+      await act(async () => {
+        hostButton.focus();
+        await flush();
+      });
+
+      await act(async () => {
+        releaseSummary(summary('s1'));
+        await flush();
+      });
+      // ShadowRoot.activeElement is null both for "nothing focused inside"
+      // and "focus outside the root"; the composer must not steal focus from
+      // a host-page element the user demonstrably moved to.
+      expect(shadowContainer.querySelector('textarea')?.disabled).toBe(false);
+      expect(shadow.activeElement).not.toBe(
+        shadowContainer.querySelector('textarea'),
+      );
+      expect(document.activeElement).toBe(hostButton);
+    } finally {
+      await act(async () => shadowRoot.unmount());
+      hostButton.remove();
+      navigationTarget.remove();
+      host.remove();
+    }
+  });
+
   it('moves focus to the composer when a later summary lifts the send gate', async () => {
     let releaseStream!: () => void;
     mocks.client.getSession.mockImplementationOnce(async (id: string) =>

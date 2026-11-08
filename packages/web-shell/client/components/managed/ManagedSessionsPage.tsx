@@ -864,11 +864,12 @@ function ManagedSessionsContent({
       '[contenteditable="true"], textarea:not([disabled])',
     );
     // document.activeElement retargets to the shadow host in portal mode; read
-    // the focused node from the page wrapper's own root instead.
-    const parked = getShadowAwareActiveElement(pageRef.current);
-    // A shadow root with nothing focused reports null here, not body, so a
-    // shadow-root mount whose discard dropped focus to the outer document
-    // body must still be recognised as unclaimed.
+    // the focused node from the page wrapper's own root instead. A shadow root
+    // with nothing focused reports null there — but so does a shadow root
+    // whose user's focus sits on a host-page element outside the root, so fall
+    // through to the document's active element to tell those states apart.
+    const parked =
+      getShadowAwareActiveElement(pageRef.current) ?? document.activeElement;
     const unclaimed = parked === null || parked === document.body;
     // hostSessionOnly renders no list, so the fallback below parks focus on the
     // page wrapper; the latch accepts the node it parked on itself, so a user
