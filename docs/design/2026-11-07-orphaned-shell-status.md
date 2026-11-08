@@ -66,11 +66,13 @@ automatic settling is skipped and the sidecar stays `running`.
 ### B. Settling function
 
 `settleOrphanedShellStatusFiles(dir)` reads every `*.status` file in a
-session's `background-shells` directory. It opens each without following a
-symlink or waiting on a FIFO, and reads it only when it is a regular file of
-at most 1 MiB. Reads are bounded to 1 MiB plus one overflow-detection byte,
-including when the same file grows after the size check. Short reads are
-continued until EOF or that bound; overflowing files are left untouched.
+session's `background-shells` directory. It opens each through
+`openSyncNoFollow(path, { nonBlocking: true })`, so it neither follows a
+symlink nor waits on a FIFO, and reads it only when `fstat` reports a regular
+file of at most 1 MiB. The read buffer is that size plus one byte, so a file
+that grew after the size check is detected and left untouched;
+`writeStatusFile()` replaces sidecars rather than appending to them. Short
+reads are continued until EOF or that bound.
 A sidecar whose `status` is `running`, whose recorded `pid` is a positive
 safe integer, whose `pidScope` matches, and whose process
 `isPidAlive` reports gone is rewritten with `status: 'unknown'` and a new
@@ -86,11 +88,14 @@ and sidecars whose pid is alive. One
 sidecar that fails does not stop the others.
 
 The function returns the sidecars it left `running` that may need settling
-later: those whose process is alive, and those whose rewrite failed.
-`watchOrphanedShellStatusFiles(orphans)` checks them every two seconds. Once a
-process is gone it settles the sidecar the same way, and keeps it watched
-until that succeeds or the sidecar no longer needs settling, so a failed read
-or write is retried and logged once. Its timer does not keep the process
+later: those whose process is alive, whose rewrite failed, or that could not
+be read, which have no pid yet. `watchOrphanedShellStatusFiles(orphans)`
+checks them every two seconds. Each attempt reads the sidecar again and checks
+its scope and process before writing, so a pid from an earlier read only
+saves a read while that process is alive. Once a process is gone it settles
+the sidecar the same way, and keeps it watched until that succeeds or the
+sidecar no longer needs settling, so a failed read or write is retried and
+logged once. Its timer does not keep the process
 alive, and it returns a function that stops it.
 
 ### C. When it runs
@@ -116,7 +121,11 @@ no-op. A Config with an execution environment skips it.
 ### D. Guidance
 
 The model guidance lists `unknown` and says it means the session that started
-the process ended without recording how it finished.
+the process ended without recording how it finished. It also says a `running`
+value can outlive the session that wrote it, and that if that session ended
+without shutting down, the recorded pid should be checked before the process
+is treated as running. This covers the sidecars the scope check keeps
+`running`: those on macOS and Windows, and those written by older versions.
 
 ## Key design decisions
 
@@ -163,20 +172,24 @@ the process ended without recording how it finished.
   namespace, boot or host, a missing or incomplete scope, other statuses, no pid,
   invalid pids, malformed JSON, a status-shaped non-status file, a FIFO, an oversized
   file, post-stat growth, exactly-at-limit and one-byte-over files, short reads
-  through multibyte text, one sidecar whose check throws, a missing directory,
-  a real exited process through the default `isPidAlive`, and a registry-written
-  sidecar settled only when the native scope identities are available.
+  through multibyte text, a symlinked sidecar, one sidecar whose check throws,
+  a missing directory, a real exited process through the default `isPidAlive`,
+  and a registry-written sidecar: settled with the native scope on Linux, kept
+  `running` where the platform cannot prove the scope.
 - Watcher tests: a watched sidecar is settled once its process exits and not
   after the watch is stopped; a failed rewrite is retried until it lands while
-  a sibling settles; the timer is unref'd; and, with a real child, a process
+  a sibling settles; a sidecar unreadable at takeover is watched and settled
+  once it can be read; the timer is unref'd; and, with a real child, a process
   alive at takeover that exits later is settled with no second takeover.
 - `Config` tests: initialization settles the session it starts with; switching
   settles the new session; resuming the current one does not; unsettled
   sidecars are watched until a switch or shutdown; a Config with an execution
   environment does not settle; a settle that throws does not stop
   initialization.
-- Guidance tests assert `unknown` and its meaning in both the launch and the
-  promote messages.
+- Guidance tests assert `unknown`, its meaning and the stale-`running`
+  cross-check in both the launch and the promote messages.
+- `openSyncNoFollow` tests: `nonBlocking` opens a FIFO without waiting, on
+  the native path and on the fallback.
 - Mutation checks: removing each of these guards turns a test red.
 - On Ubuntu 24.04 with Node 22, and on macOS: drive the bundled CLI with the
   repo's fake OpenAI server, kill it with SIGKILL and with SIGHUP to its

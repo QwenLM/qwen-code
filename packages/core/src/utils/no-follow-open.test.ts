@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import {
   closeSync,
+  fstatSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -97,6 +99,23 @@ afterEach(() => {
 // other symlink planting tests in this repo.
 const itNoSymlink = process.platform === 'win32' ? it.skip : it;
 
+/** A FIFO in a fresh temp dir; POSIX only, like the tests that use it. */
+function plantFifo(): string {
+  const fifoPath = join(makeTempDir(), 'pipe');
+  expect(spawnSync('mkfifo', [fifoPath]).status).toBe(0);
+  return fifoPath;
+}
+
+/** Opening a FIFO without O_NONBLOCK would hang the test instead of failing. */
+function expectOpensFifoWithoutWaiting(open: (path: string) => number): void {
+  const fd = open(plantFifo());
+  try {
+    expect(fstatSync(fd).isFIFO()).toBe(true);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // Copy a Stats object with identity fields patched, keeping the prototype
 // so isSymbolicLink()/isFile() keep working on the perturbed result.
 function perturbedStats<T extends BigIntStats | Stats>(
@@ -160,6 +179,12 @@ describe('openNoFollow (native O_NOFOLLOW available)', () => {
     expectThrowsCode(() => openSyncNoFollow(linkPath), 'ELOOP');
   });
 
+  itNoSymlink('opens a FIFO without waiting when nonBlocking is set', () => {
+    expectOpensFifoWithoutWaiting((fifoPath) =>
+      openSyncNoFollow(fifoPath, { nonBlocking: true }),
+    );
+  });
+
   it('propagates ENOENT for missing paths', async () => {
     const dir = makeTempDir();
     expect(await rejectionCode(openNoFollow(join(dir, 'missing.txt')))).toBe(
@@ -199,6 +224,13 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     const { openFallback, openSyncFallback } = await importWithoutNoFollow();
     expect(await rejectionCode(openFallback(linkPath))).toBe('ELOOP');
     expectThrowsCode(() => openSyncFallback(linkPath), 'ELOOP');
+  });
+
+  itNoSymlink('passes nonBlocking through the fallback open', async () => {
+    const { openSyncFallback } = await importWithoutNoFollow();
+    expectOpensFifoWithoutWaiting((fifoPath) =>
+      openSyncFallback(fifoPath, { nonBlocking: true }),
+    );
   });
 
   it('refuses when the file identity changes between lstat and open', async () => {

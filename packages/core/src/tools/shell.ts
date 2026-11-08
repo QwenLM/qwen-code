@@ -137,6 +137,7 @@ function statusFileGuidance(outputPath: string): string {
     `status file: ${statusFilePathFor(outputPath)}\n` +
     `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled|unknown). ` +
     `unknown means the session that started it ended without recording how the process finished. ` +
+    `A running value can outlive the session that wrote it: if that session ended without shutting down, check whether the recorded pid is still alive (e.g. \`ps -p <pid>\`) before treating the process as running. ` +
     `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive (for live output, re-run with e.g. \`python -u\` or \`stdbuf -oL\`).`
   );
 }

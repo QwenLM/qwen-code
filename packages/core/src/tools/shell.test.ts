@@ -3719,6 +3719,8 @@ describe('ShellTool', () => {
         expectText(text, [
           'running|completed|failed|cancelled|unknown',
           'unknown means the session that started it ended',
+          'A running value can outlive the session that wrote it',
+          'check whether the recorded pid is still alive',
           'Do NOT infer liveness from the output file',
           'block-buffer',
           'python -u',
@@ -4312,6 +4314,8 @@ describe('ShellTool', () => {
           `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
           'running|completed|failed|cancelled|unknown',
           'unknown means the session that started it ended',
+          'A running value can outlive the session that wrote it',
+          'check whether the recorded pid is still alive',
           'Do NOT infer liveness from the output file',
           'python -u',
           'stdbuf -oL',

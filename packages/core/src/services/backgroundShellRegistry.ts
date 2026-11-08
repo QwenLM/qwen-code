@@ -298,27 +298,11 @@ function isSamePidScope(recorded: unknown, current: ShellPidScope): boolean {
   );
 }
 
-const O_NOFOLLOW = fs.constants.O_NOFOLLOW as number | undefined;
-
-/**
- * Opens a sidecar without following a symlink or waiting on a FIFO, the way
- * `git-worktrees.ts` opens pointer files. Windows has no `O_NOFOLLOW`, so it
- * goes through the shared helper's verified fallback; a FIFO cannot sit at a
- * path there.
- */
-function openStatusFileSync(statusPath: string): number {
-  return O_NOFOLLOW === undefined
-    ? openSyncNoFollow(statusPath)
-    : fs.openSync(
-        statusPath,
-        fs.constants.O_RDONLY | O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0),
-      );
-}
-
 /** A sidecar that still says `running` and has not been settled. */
 export interface OrphanedShellStatusFile {
   statusPath: string;
-  pid: number;
+  /** The recorded pid; absent when the sidecar could not be read. */
+  pid?: number;
 }
 
 type StatusFileOutcome =
@@ -350,12 +334,14 @@ function settleShellStatusFile(
   let text: string;
   let fd: number | undefined;
   try {
-    fd = openStatusFileSync(statusPath);
+    // Never follows a symlink, and never waits on a FIFO.
+    fd = openSyncNoFollow(statusPath, { nonBlocking: true });
     const stats = fs.fstatSync(fd);
     if (!stats.isFile() || stats.size > MAX_STATUS_FILE_BYTES) {
       return { kind: 'skipped' };
     }
-    const buffer = Buffer.allocUnsafe(MAX_STATUS_FILE_BYTES + 1);
+    // One byte more than `fstat` reported shows whether the file grew since.
+    const buffer = Buffer.allocUnsafe(stats.size + 1);
     let bytesRead = 0;
     while (bytesRead < buffer.length) {
       const count = fs.readSync(
@@ -368,7 +354,9 @@ function settleShellStatusFile(
       if (count === 0) break;
       bytesRead += count;
     }
-    if (bytesRead > MAX_STATUS_FILE_BYTES) return { kind: 'skipped' };
+    // `writeStatusFile()` replaces a sidecar instead of appending to it, so
+    // one that grew while open was written by something else.
+    if (bytesRead > stats.size) return { kind: 'skipped' };
     text = buffer.toString('utf8', 0, bytesRead);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -441,9 +429,9 @@ function settleShellStatusFile(
  * A reused pid can at worst keep a sidecar `running`.
  *
  * Returns the sidecars still `running` that may need settling later: those
- * whose process is alive and those whose rewrite failed. Nothing will update
- * them unless {@link watchOrphanedShellStatusFiles} does. Only call this for
- * a session that no live process owns.
+ * whose process is alive, whose rewrite failed, or that could not be read.
+ * Nothing will update them unless {@link watchOrphanedShellStatusFiles} does.
+ * Only call this for a session that no live process owns.
  */
 export function settleOrphanedShellStatusFiles(
   dir: string,
@@ -493,6 +481,7 @@ export function settleOrphanedShellStatusFiles(
         debugLogger.warn(
           `could not read status sidecar ${statusPath}: ${describeError(outcome.error)}`,
         );
+        unsettled.push({ statusPath });
         break;
       case 'skipped':
         break;
@@ -509,8 +498,10 @@ export function settleOrphanedShellStatusFiles(
  * Keeps checking sidecars that {@link settleOrphanedShellStatusFiles} left
  * `running` and settles each one once its process is gone. A sidecar stays
  * watched until it is settled or no longer needs settling, so a failed read
- * or write is retried on the next check and logged once. The timer does not
- * keep the process alive. Returns a function that stops watching.
+ * or write is retried on the next check and logged once. Each attempt reads
+ * the sidecar again, so a pid recorded earlier only saves a read while that
+ * process is alive. The timer does not keep the process alive. Returns a
+ * function that stops watching.
  */
 export function watchOrphanedShellStatusFiles(
   orphans: readonly OrphanedShellStatusFile[],
@@ -537,10 +528,12 @@ export function watchOrphanedShellStatusFiles(
   const timer = setInterval(() => {
     for (const [statusPath, pid] of pending) {
       try {
-        if (isAlive(pid)) continue;
+        if (pid !== undefined && isAlive(pid)) continue;
         const outcome = settleShellStatusFile(statusPath, isAlive, scope);
         if (outcome.kind === 'settled' || outcome.kind === 'skipped') {
           pending.delete(statusPath);
+        } else if (outcome.kind === 'alive') {
+          pending.set(statusPath, outcome.pid);
         } else if (
           outcome.kind === 'unreadable' ||
           outcome.kind === 'unwritten'

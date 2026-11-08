@@ -6651,9 +6651,9 @@ export class Config {
    * Settles the status sidecars a previous process left `running` for this
    * session (#15800). This Config has just taken the session and tracks none of
    * its shells yet. A sidecar left `running`, because its process is still
-   * alive or its rewrite failed, is watched for as long as this Config holds
-   * the session. Shells of an execution environment may not run on this host,
-   * so their pids cannot be checked here.
+   * alive or it could not be read or rewritten, is watched for as long as
+   * this Config holds the session. Shells of an execution environment may not
+   * run on this host, so their pids cannot be checked here.
    */
   private settleOrphanedBackgroundShells(): void {
     this.stopOrphanedShellWatch?.();

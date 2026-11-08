@@ -30,9 +30,12 @@ import {
   settleOrphanedShellStatusFiles,
   statusFilePathFor,
   watchOrphanedShellStatusFiles,
-  type ShellPidScope,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
+import {
+  readLocalBootId,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -1200,7 +1203,8 @@ describe('settleOrphanedShellStatusFiles', () => {
         settled: 0,
         unsettled: [],
       });
-      expect(bytesRead).toBe(1024 * 1024 + 1);
+      // One byte past the size `fstat` reported, not the 1 MiB cap.
+      expect(bytesRead).toBe(Buffer.byteLength(JSON.stringify(running)) + 1);
       expect(grew).toBe(true);
       expect(read('shell-bg_1.status')['status']).toBe('running');
     } finally {
@@ -1328,7 +1332,7 @@ describe('settleOrphanedShellStatusFiles', () => {
     expect(read('shell-bg_1.status')['status']).toBe('unknown');
   });
 
-  it('settles a registry-written sidecar only when native scope identities are available', () => {
+  const registerExitedShell = () => {
     const { pid } = spawnSync(process.execPath, ['-e', '']);
     new BackgroundShellRegistry().register(
       makeEntry({
@@ -1337,20 +1341,101 @@ describe('settleOrphanedShellStatusFiles', () => {
         outputPath: join(dir, 'shell-bg_1.output'),
       }),
     );
-    const pidScope = read('shell-bg_1.status')['pidScope'] as ShellPidScope;
-    expect(pidScope).toMatchObject({
-      hostname: hostname(),
-    });
-    const canProveScope =
-      pidScope.bootId !== null && pidScope.pidNamespace !== null;
-    expect(settleOrphanedShellStatusFiles(dir)).toEqual({
-      settled: canProveScope ? 1 : 0,
-      unsettled: [],
-    });
-    expect(read('shell-bg_1.status')['status']).toBe(
-      canProveScope ? 'unknown' : 'running',
-    );
-  });
+    return read('shell-bg_1.status')['pidScope'];
+  };
+
+  it.skipIf(process.platform !== 'linux')(
+    'settles a sidecar the registry wrote, with the native pid scope',
+    () => {
+      const pidScope = registerExitedShell();
+      expect(readLocalBootId()).not.toBeNull();
+      expect(readPidNamespaceId()).not.toBeNull();
+      expect(pidScope).toEqual({
+        hostname: hostname(),
+        bootId: readLocalBootId(),
+        pidNamespace: readPidNamespaceId(),
+      });
+      expect(settleOrphanedShellStatusFiles(dir)).toEqual({
+        settled: 1,
+        unsettled: [],
+      });
+      expect(read('shell-bg_1.status')['status']).toBe('unknown');
+    },
+  );
+
+  it.skipIf(process.platform === 'linux')(
+    'keeps a sidecar the registry wrote running where the pid scope cannot be proven',
+    () => {
+      expect(registerExitedShell()).toEqual({
+        hostname: hostname(),
+        bootId: null,
+        pidNamespace: null,
+      });
+      expect(settleOrphanedShellStatusFiles(dir)).toEqual({
+        settled: 0,
+        unsettled: [],
+      });
+      expect(read('shell-bg_1.status')['status']).toBe('running');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'skips a symlinked sidecar and leaves its target alone',
+    () => {
+      const target = join(
+        mkdtempSync(join(tmpdir(), 'qwen-shell-status-')),
+        'shell-bg_1.status',
+      );
+      writeFileSync(target, JSON.stringify(running));
+      const link = join(dir, 'shell-link.status');
+      symlinkSync(target, link);
+      try {
+        expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+          settled: 0,
+          unsettled: [],
+        });
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(target, 'utf8')).toBe(JSON.stringify(running));
+      } finally {
+        rmSync(dirname(target), { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(cannotDenyWrites)(
+    'watches a sidecar it could not read and settles it once it can',
+    () => {
+      vi.useFakeTimers();
+      const statusPath = join(dir, 'shell-bg_1.status');
+      try {
+        write('shell-bg_1.status', running);
+        chmodSync(statusPath, 0o000);
+        const { settled, unsettled } = settleOrphanedShellStatusFiles(
+          dir,
+          dead,
+        );
+        expect({ settled, unsettled }).toEqual({
+          settled: 0,
+          unsettled: [{ statusPath }],
+        });
+        const stop = watchOrphanedShellStatusFiles(unsettled, {
+          intervalMs: 100,
+          ...dead,
+        });
+        try {
+          vi.advanceTimersByTime(100);
+          chmodSync(statusPath, 0o600);
+          expect(read('shell-bg_1.status')['status']).toBe('running');
+          vi.advanceTimersByTime(100);
+          expect(read('shell-bg_1.status')['status']).toBe('unknown');
+        } finally {
+          stop();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('settles a watched sidecar once its process exits, until stopped', () => {
     vi.useFakeTimers();
