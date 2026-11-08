@@ -791,6 +791,55 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it.each(['notes.md', 'notes.markdown'])(
+    'labels a rendered Markdown artifact Preview (%s)',
+    (workspacePath) => {
+      // Markdown reaches `rendered` only through isRenderedFilePath, so pin the
+      // label itself: dropping .md/.markdown from that predicate must red this.
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-markdown"
+              workspaceCwd="/primary"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'markdown-artifact',
+                  kind: 'file',
+                  storage: 'workspace',
+                  status: 'available',
+                  title: workspacePath,
+                  workspacePath,
+                } as DaemonSessionArtifact,
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const buttons = Array.from(container.querySelectorAll('button'));
+      const preview = buttons.find(
+        (button) => button.textContent?.trim() === 'Preview',
+      );
+      expect(preview).toBeDefined();
+      expect(preview?.querySelector('svg.lucide-eye')).not.toBeNull();
+      expect(
+        buttons.find((button) => button.textContent?.trim() === 'Open'),
+      ).toBeUndefined();
+
+      act(() => root.unmount());
+    },
+  );
+
   it('disables Preview for a missing HTML artifact', () => {
     const onOpenRequest = vi.fn();
     const container = document.createElement('div');

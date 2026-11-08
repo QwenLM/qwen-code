@@ -762,16 +762,24 @@ it.each([
   [
     'en',
     'every heading, body sentence, list item, and label must be in English',
+    'self-contained single-file HTML (inline CSS, no external resources). Language requirement: write the entire page in English',
   ],
-  ['zh-CN', '整页必须用简体中文写作'],
+  [
+    'zh-CN',
+    '整页必须用简体中文写作',
+    '（内联 CSS，不引用外部资源）。语言要求：整页必须用简体中文写作',
+  ],
 ])(
   'details prompt carries a whole-page language requirement (%s)',
-  (language, requirement) => {
+  (language, requirement, placement) => {
     const prompt = getTranslator(language as 'en' | 'zh-CN')(
       'askUser.detailsPrompt',
       { questions: '1. Which cache backend?' },
     );
     expect(prompt).toContain(requirement);
+    // Pin placement, not just presence: the language requirement must sit
+    // immediately after the HTML instruction, not buried late in the prompt.
+    expect(prompt).toContain(placement);
     // The question snapshot still leads (question-derived naming) and the
     // instruction tokens survive the language strengthening.
     expect(prompt.startsWith('1. Which cache backend?')).toBe(true);
