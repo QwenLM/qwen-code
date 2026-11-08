@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -262,6 +270,52 @@ describe('ci flaky rerun patrol', () => {
       rmSync(dir, { recursive: true });
     }
   });
+
+  // Windows cannot express this fixture: chmodSync sets no executable bit and
+  // execFile cannot run an extensionless #!/bin/sh script (no PATHEXT match),
+  // and the PATH join below is the POSIX spelling. Gate the case rather than
+  // the file, so the rest of the driver suite still runs on the Windows lane —
+  // which downgrades a test:scripts failure to a warning and would otherwise
+  // deposit a permanent silent failure in its log.
+  it.skipIf(process.platform === 'win32')(
+    'spawns the pinned gh, never a bare name from PATH',
+    async () => {
+      // Every other GhClient test stubs api.gh, so none of them exercise the
+      // spawn. On the shared pool a bare `gh` resolves through a PATH whose
+      // directories the job uid can write, and this client runs with the bot PAT
+      // in its environment — a co-tenant's gh would receive it.
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-gh-'));
+      const planted = join(dir, 'planted');
+      const trusted = join(dir, 'trusted');
+      mkdirSync(planted);
+      mkdirSync(trusted);
+      const leaked = join(dir, 'LEAKED');
+      writeFileSync(
+        join(planted, 'gh'),
+        `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-}" > '${leaked}'\necho planted\n`,
+      );
+      writeFileSync(join(trusted, 'gh'), '#!/bin/sh\necho trusted\n');
+      for (const d of [planted, trusted]) chmodSync(join(d, 'gh'), 0o755);
+      const prevPath = process.env.PATH;
+      const prevGh = process.env.PATROL_GH;
+      const prevToken = process.env.GH_TOKEN;
+      try {
+        process.env.PATH = `${planted}:${prevPath}`;
+        process.env.GH_TOKEN = 'SENTINEL-PAT-VALUE';
+        process.env.PATROL_GH = join(trusted, 'gh');
+        const api = new GhClient('QwenLM/qwen-code');
+        await expect(api.gh(['api', 'user'])).resolves.toBe('trusted\n');
+        expect(existsSync(leaked)).toBe(false);
+      } finally {
+        if (prevGh === undefined) delete process.env.PATROL_GH;
+        else process.env.PATROL_GH = prevGh;
+        if (prevToken === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = prevToken;
+        process.env.PATH = prevPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('ignores empty lines in paginated comment output', async () => {
     const api = new GhClient('QwenLM/qwen-code');
@@ -545,13 +599,35 @@ describe('ci flaky rerun patrol', () => {
     expect(kinds).toContain('comment');
   });
 
-  it('reruns before recording the hidden action marker', async () => {
+  it('reruns before posting the visible rerun notice', async () => {
     const c = client();
     await actOnDecision(c, target(), decision());
-    expect(c.calls).toEqual([
-      ['rerunFailedJobs', 123],
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=rerun.* -->$/)],
+    expect(c.calls.map((call) => call[0])).toEqual([
+      'rerunFailedJobs',
+      'comment',
     ]);
+    const body = c.calls[1][2];
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('re-run on the same commit');
+    expect(body).toContain('No Update Branch');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('runner 超时');
+    expect(body.split('</details>').length - 1).toBe(1);
+    expect(body).toMatch(/<!-- .*action=rerun.* -->$/);
+  });
+
+  it('keeps markers parseable inside the visible notices', async () => {
+    // The visible text must not break dedup or the per-head action count:
+    // both read the marker back out of the posted comment body.
+    const c = client();
+    await actOnDecision(c, target(), decision());
+    const posted = {
+      body: c.calls.find((call) => call[0] === 'comment')[2],
+      createdAt: '2026-07-12T07:25:00.000Z',
+      author: { login: 'patrol-bot' },
+    };
+    expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
+    expect(currentActionCount(pr(), [posted], 'patrol-bot')).toBe(1);
   });
 
   it('posts deterministic failures in English with folded Chinese', async () => {
@@ -566,22 +642,36 @@ describe('ci flaky rerun patrol', () => {
       }),
     );
     expect(c.calls).toHaveLength(1);
-    expect(c.calls[0][2]).toContain('TypeScript cannot resolve');
-    expect(c.calls[0][2]).toContain('<details>');
-    expect(c.calls[0][2]).toContain('TypeScript 无法解析');
-    expect(c.calls[0][2]).toContain('action=comment');
+    const body = c.calls[0][2];
+    expect(body).toContain('TypeScript cannot resolve');
+    expect(body).toContain('<details>');
+    expect(body).toContain('TypeScript 无法解析');
+    expect(body).toContain('action=comment');
+    // Pin the bilingual placement, not just the presence of both strings:
+    // English before the fold, Chinese inside it.
+    const enIndex = body.indexOf('TypeScript cannot resolve');
+    const foldIndex = body.indexOf('<summary>中文说明</summary>');
+    const zhIndex = body.indexOf('TypeScript 无法解析');
+    expect(enIndex).toBeLessThan(foldIndex);
+    expect(foldIndex).toBeLessThan(zhIndex);
+    expect(body.split('</details>').length - 1).toBe(1);
   });
 
-  it('records no_action without a visible comment', async () => {
+  it('records no_action with a visible manual-review notice', async () => {
     const c = client();
     await actOnDecision(
       c,
       target(),
       decision({ action: 'no_action', confidence: 'low' }),
     );
-    expect(c.calls).toEqual([
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=no_action.* -->$/)],
-    ]);
+    expect(c.calls).toHaveLength(1);
+    const body = c.calls[0][2];
+    expect(body).toContain('could not be confidently classified');
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('未采取自动动作');
+    expect(body.split('</details>').length - 1).toBe(1);
+    expect(body).toMatch(/<!-- .*action=no_action.* -->$/);
   });
 
   it('rejects malformed, unsafe, or mismatched decisions', async () => {
@@ -604,19 +694,110 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('neutralizes mentions and markup copied into visible reasons', async () => {
-    const c = client();
-    await actOnDecision(
-      c,
-      target(),
-      decision({
-        action: 'comment',
-        reason_en: '@qwen-maintainers <script>alert(1)</script>',
-        reason_zh: '@全体成员 </details>',
-      }),
-    );
-    expect(c.calls[0][2]).toContain('@\u200bqwen-maintainers');
-    expect(c.calls[0][2]).toContain('&lt;script&gt;');
-    expect(c.calls[0][2]).toContain('@\u200b全体成员 &lt;/details&gt;');
+    // All three actions now surface the reason in a visible comment, so the
+    // escaping must hold for every action, not just `comment`.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: '@qwen-maintainers <script>alert(1)</script>',
+          reason_zh: '@全体成员 </details>',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).toContain('@\u200bqwen-maintainers');
+      expect(body).toContain('&lt;script&gt;');
+      expect(body).toContain('@\u200b全体成员 &lt;/details&gt;');
+    }
+  });
+
+  it('strips bidi overrides that could visually rewrite a notice', async () => {
+    // The reason is classifier output derived from untrusted logs; a bidi
+    // override could make "no Update Branch needed" read as its opposite.
+    // Every member of the Unicode Bidi_Control set is also fed individually
+    // so narrowing the strip class cannot survive this pin.
+    const bidiControls = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const confidence = action === 'no_action' ? 'low' : 'high';
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence,
+          reason_en: 'safe \u202Ereversed\u202C text',
+          reason_zh: '安全 \u2066隔离\u2069 \u061C文本',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(
+        /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/,
+      );
+      expect(body).toContain('safe reversed text');
+      expect(body).toContain('安全 隔离 文本');
+      for (const ch of bidiControls) {
+        const cc = client();
+        await actOnDecision(
+          cc,
+          target(),
+          decision({
+            action,
+            confidence,
+            reason_en: `a${ch}b`,
+            reason_zh: `a${ch}b`,
+          }),
+        );
+        const single = cc.calls.find((call) => call[0] === 'comment')[2];
+        expect(single).not.toContain(ch);
+        expect(single).toContain('ab');
+      }
+    }
+  });
+
+  it('collapses newlines so a reason cannot open a block-level fence', async () => {
+    // A line-start fence in a reason swallows the folded Chinese block and
+    // renders the tracking marker as visible code; keep reasons single-line.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: 'npm error:\n```\nnpm error code ETIMEDOUT',
+          reason_zh: 'npm 错误：\n```\nnpm error code ETIMEDOUT',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(/^```/m);
+      expect(body).toContain('npm error: ``` npm error code ETIMEDOUT');
+      expect(body.split('</details>').length - 1).toBe(1);
+      const posted = {
+        body,
+        createdAt: '2026-07-12T07:25:00.000Z',
+        author: { login: 'patrol-bot' },
+      };
+      expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
+    }
   });
 
   it('stops after three actions on the same head', async () => {
@@ -721,6 +902,72 @@ describe('ci flaky rerun patrol', () => {
       ['rerunFailedJobs', 124],
     ]);
     expect(c.calls.filter((call) => call[0] === 'comment')).toHaveLength(1);
+  });
+
+  it('fails the round when a non-empty decision list matches no candidate', async () => {
+    // The hollow-green shape the workflow's verdict step cannot catch: validate
+    // sees a non-empty array and sets has_decisions=true, so the verdict step is
+    // skipped, act prints "no candidate" per entry and exits 0. The consumer has
+    // to close the loop. `{"pr":123,"action":"rerun"}` is exactly the shape a
+    // model emits when it ignores the five-field key.
+    const c = client();
+    await expect(
+      actOnDecisions(c, [target()], [{ pr: 123, action: 'rerun' }]),
+    ).rejects.toThrow(/addressed no actionable candidate/);
+    expect(c.calls).toEqual([]);
+
+    // A mistyped headSha is the same failure, not a per-decision skip.
+    const c2 = client();
+    await expect(
+      actOnDecisions(c2, [target()], [decision({ headSha: 'f'.repeat(40) })]),
+    ).rejects.toThrow(/addressed no actionable candidate/);
+    expect(c2.calls).toEqual([]);
+
+    // Keys can all match while the schema rejects every entry. actOnDecision
+    // returns silently on that check, so counting key resolution would report
+    // success on a round that acted on nothing.
+    for (const invalid of [
+      decision({ action: 'rerun', confidence: 'low' }),
+      decision({ reason_en: 'x'.repeat(240) }),
+      decision({ runId: String(target().runId) }),
+    ]) {
+      const cx = client();
+      await expect(actOnDecisions(cx, [target()], [invalid])).rejects.toThrow(
+        /addressed no actionable candidate/,
+      );
+      expect(cx.calls).toEqual([]);
+    }
+
+    // no_action IS an act: it posts the "could not be confidently classified"
+    // marker, so it must not be counted as nothing done.
+    const cNoAction = client();
+    await expect(
+      actOnDecisions(
+        cNoAction,
+        [target()],
+        [decision({ action: 'no_action', confidence: 'low' })],
+      ),
+    ).resolves.toBeUndefined();
+    expect(cNoAction.calls.some((call) => call[0] === 'comment')).toBe(true);
+
+    // An empty list is still a legitimate no-op: the workflow's verdict step
+    // owns that case, and the consumer must not throw on it.
+    const c3 = client();
+    await expect(actOnDecisions(c3, [target()], [])).resolves.toBeUndefined();
+    expect(c3.calls).toEqual([]);
+  });
+
+  it('keeps a matched decision that failed per-target from failing the round', async () => {
+    // A candidate superseded between scan and act must not fail the round. It
+    // still counts as matched, because the decision addressed a real target.
+    const c = client({
+      async rerunFailedJobs() {
+        throw new Error('temporary API failure');
+      },
+    });
+    await expect(
+      actOnDecisions(c, [target()], [decision()]),
+    ).resolves.toBeUndefined();
   });
 
   it('persists a zero-count reset marker after success', async () => {

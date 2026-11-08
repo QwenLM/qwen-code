@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { describePromptTurnFailure } from './session.js';
+import { describePromptTurnFailure } from './session-prompt-admission.js';
 
 describe('describePromptTurnFailure', () => {
   it('keeps Error name and message', () => {

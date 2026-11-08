@@ -63,6 +63,7 @@ import type { HarnessChannel } from './channel-lifecycle.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
+  normalizeMaxRingBytes,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type LiveReplayMode,
@@ -2706,6 +2707,7 @@ export function createSessionControlPlane(
         `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
+  const eventRingMaxBytes = normalizeMaxRingBytes(opts.eventRingMaxBytes);
   const compactedReplayMaxBytes = normalizeCompactedReplayMaxBytes(
     opts.compactedReplayMaxBytes,
   );
@@ -3112,9 +3114,24 @@ export function createSessionControlPlane(
   /**
    * The additional policy guards shared by automatic teardown paths.
    */
-  function entryIsAutoCloseCandidate(entry: SessionEntry): boolean {
+  function entryIsAutoCloseCandidate(
+    entry: SessionEntry,
+    opts?: { allowChannelSubscribers?: boolean },
+  ): boolean {
     if (!entryCanStartConditionalClose(entry, true)) return false;
-    if (entry.events.subscriberCount > 0) return false;
+    // A channel worker keeps one SSE pump per cached route open. That pump is
+    // not a user watching the session; letting it pin the entry keeps the
+    // workspace at maxSessions after the channel has stopped using it. The
+    // reaper may look past it; the remaining guards below and the child's
+    // conditional-close probe still authorize teardown.
+    if (
+      entry.events.subscriberCount > 0 &&
+      !(
+        opts?.allowChannelSubscribers === true && entry.sourceType === 'channel'
+      )
+    ) {
+      return false;
+    }
     const owner = channelInfoForEntry(entry);
     // A probe the child could not answer is retried on the next snapshot, but
     // not on every snapshot forever: a Session the child can never settle
@@ -4347,7 +4364,13 @@ export function createSessionControlPlane(
         // Shared guards first (`pendingPromptCount` rather than `promptActive`,
         // so queued prompts and the FIFO hand-off gap between two prompts also
         // block the reap), then the reaper's own TTL policy on top.
-        if (!entryIsAutoCloseCandidate(entry)) continue;
+        if (
+          !entryIsAutoCloseCandidate(entry, {
+            allowChannelSubscribers: true,
+          })
+        ) {
+          continue;
+        }
         // Note: clientIds.size is NOT checked here. Close-on-last-detach
         // handles the normal path (client sends detach → immediate close).
         // The reaper covers the crash path where detach was never sent —
@@ -7262,6 +7285,7 @@ export function createSessionControlPlane(
           : {}),
       }),
       {
+        maxRingBytes: eventRingMaxBytes,
         // Fired once, on the FIRST ingest/seed failure (the bus keeps the
         // degraded flag set silently afterwards). The bus doesn't know its
         // session, so the sessionId context is injected here.
@@ -10590,6 +10614,7 @@ export function createSessionControlPlane(
               ? null
               : maxPendingPromptsPerSession,
           eventRingSize,
+          eventRingMaxBytes,
           compactedReplayMaxBytes,
           maxJournalEvents,
           maxJournalBytes,
@@ -10610,6 +10635,7 @@ export function createSessionControlPlane(
         permissionPolicy: permissionMediator.policy,
         sessions: [...byId.values()].map((entry) => {
           const journalLimits = entry.events.journalLimits();
+          const retention = entry.events.retentionSnapshot();
           return {
             sessionId: entry.sessionId,
             workspaceCwd: entry.workspaceCwd,
@@ -10626,6 +10652,15 @@ export function createSessionControlPlane(
               ? { backgroundTurn: entry.backgroundTurn }
               : {}),
             lastEventId: entry.events.lastEventId,
+            eventRingCount: retention.ringCount,
+            eventRingBytes: retention.ringBytes,
+            ...(retention.earliestEventId !== undefined
+              ? { eventRingEarliestEventId: retention.earliestEventId }
+              : {}),
+            eventRingEvictedEvents: retention.evictedEvents,
+            eventRingEvictedBytes: retention.evictedBytes,
+            availableCommandsSnapshotBytes:
+              retention.availableCommandsSnapshotBytes,
             ...(entry.sessionLastSeenAt !== undefined
               ? { lastSeenAt: entry.sessionLastSeenAt }
               : {}),
