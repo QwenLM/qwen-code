@@ -109,12 +109,15 @@ jobs:
       # One best-effort apt step supplies both: without the fonts the shots
       # would render in a fallback family, without ffmpeg the inline GIFs
       # degrade to .webm-only. A blocked Debian mirror warns and degrades
-      # instead of sinking the preview.
+      # instead of sinking the preview. (fonts-dejavu-mono must not be
+      # added: it does not exist on the pool image's Debian 12 (bookworm);
+      # fonts-dejavu-core already ships DejaVuSansMono.ttf, and one unknown
+      # package would fail the whole apt transaction — including ffmpeg.)
       - name: 'Install font baseline and ffmpeg (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           if sudo -n apt-get update -qq \
-            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-dejavu-core fonts-dejavu-mono ffmpeg; then
+            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-dejavu-core ffmpeg; then
             sudo -n fc-cache -f >/dev/null 2>&1 || true
           else
             echo "::warning::could not install fonts-dejavu/ffmpeg from the Debian archive; screenshots may use a fallback font and flow recordings stay .webm-only (no inline GIFs)."

@@ -191,10 +191,12 @@ model exactly (untrusted PR code, read-only token, only the event-scoped
 `GITHUB_TOKEN`), which supersedes the browser-dependency exclusion above for
 this one job: it reuses the image's Node behind the self-hosted preflight,
 gates on the disk floor, and installs the DejaVu font baseline plus ffmpeg
-best-effort at runtime — a blocked Debian archive degrades to fallback fonts
-and .webm-only recordings instead of failing the preview. The first pooled
-render still needs acceptance for cold-install duration, apt egress and font
-metrics. Both jobs revert to hosted under `MAINTAINER_ECS_RUNNER_DISABLED`.
+best-effort at runtime — apt egress and the Debian archive stay hard
+requirements because the earlier `playwright install --with-deps` step needs
+the same archive; the best-effort step degrades only its own extra
+font/ffmpeg install failure to fallback fonts and .webm-only recordings
+instead of failing the preview. The first pooled render still needs
+acceptance for cold-install duration, apt egress and font metrics. Both jobs revert to hosted under `MAINTAINER_ECS_RUNNER_DISABLED`.
 The E2E OpenTUI leg deliberately stays hosted: it injects long-lived model
 secrets, which this pool's boundary forbids until a separate trusted pool
 exists. The aggregate gate no longer follows the `linux_runner` dispatch

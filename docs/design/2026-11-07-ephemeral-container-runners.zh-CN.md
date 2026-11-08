@@ -150,8 +150,10 @@ shell 比较，不依赖镜像里任何未验证的依赖。Web-shell Visuals �
 任务与本池安全模型完全一致（不可信 PR 代码、只读 token、仅事件级
 `GITHUB_TOKEN`），因此上面「不迁浏览器依赖」的排除对这一个任务不再适用：
 它在 self-hosted 前置检查后复用镜像自带 Node，先过磁盘水位门禁，并在
-运行时尽力安装 DejaVu 字体基线和 ffmpeg——Debian 归档出口受阻时降级为
-回退字体和仅 .webm 录制，而不是让预览失败。首次池上渲染仍需验收冷装
+运行时尽力安装 DejaVu 字体基线和 ffmpeg——apt 出口与 Debian 归档仍是硬性前提
+（前面的 `playwright install --with-deps` 步骤依赖同一归档）；best-effort 仅
+覆盖这一步自身额外字体/ffmpeg 安装失败的情况，降级为回退字体和仅 .webm
+录制，而不是让预览失败。首次池上渲染仍需验收冷装
 耗时、apt 出口和字体度量。两个任务在 `MAINTAINER_ECS_RUNNER_DISABLED`
 下均回退托管。E2E OpenTUI 泳道刻意留在托管：它注入长期模型 secrets，
 本池边界禁止，需等独立受信池。聚合门禁不再跟随 `linux_runner` dispatch
