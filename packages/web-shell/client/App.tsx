@@ -100,6 +100,7 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
   DaemonSessionAttachmentReference,
+  DaemonSessionClient,
   DaemonSkillToggleMutation,
   DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlock,
@@ -1835,6 +1836,17 @@ type NewSessionIntent =
    */
   | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
+
+/**
+ * Result of creating the session a submitted prompt owns. `detachedSession`
+ * is set when the user navigated away during creation: the connection was
+ * never bound, so the prompt must be dispatched through this client without
+ * touching the current transcript.
+ */
+type PromptSessionAllocation = {
+  sessionId: string;
+  detachedSession?: DaemonSessionClient;
+};
 
 type StandaloneRecoveryResolution =
   | 'idle'
@@ -4217,12 +4229,85 @@ export function App({
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
   );
+  // Daemon-authoritative "turn is running" signal for the connected session:
+  // keeps the conversation indicator (and its cancel affordances) alive
+  // through >3s silent tool gaps where streamingState drops to idle (#9487).
+  const trustedLiveWorkspaces = useMemo(
+    () =>
+      workspaces.filter(
+        (entry) =>
+          entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+      ),
+    [workspaces],
+  );
+  // A cleared session leaves connection.workspaceCwd set; without the
+  // sessionId gate the activity bridge would keep arming its full-catalog
+  // fallback for that cwd on the welcome view, issuing one idle catalog
+  // fetch for a result it then discards (#16355).
+  const activePromptWorkspaceCwd = !connection.sessionId
+    ? undefined
+    : connection.sessionContext?.kind === 'live'
+      ? trustedLiveWorkspaces.length === 1
+        ? trustedLiveWorkspaces[0]?.cwd
+        : undefined
+      : connection.workspaceCwd;
+  const [splitPaneWorkspaces, setSplitPaneWorkspaces] = useState<
+    readonly string[]
+  >([]);
+  const reportSplitPaneWorkspaces = useCallback((cwds: readonly string[]) => {
+    setSplitPaneWorkspaces((current) =>
+      current.length === cwds.length &&
+      current.every((cwd, index) => cwd === cwds[index])
+        ? current
+        : cwds,
+    );
+  }, []);
+  const [overviewLiveStateWorkspaceCwds, setOverviewLiveStateWorkspaceCwds] =
+    useState<readonly string[]>([]);
+  const reportOverviewLiveStateWorkspaceCwds = useCallback(
+    (cwds: readonly string[]) => {
+      setOverviewLiveStateWorkspaceCwds((current) =>
+        current.length === cwds.length &&
+        current.every((cwd, index) => cwd === cwds[index])
+          ? current
+          : cwds,
+      );
+    },
+    [],
+  );
+  // Without the sidebar the app-level poller covers exactly the workspaces
+  // the shell is attached to: the connected session's workspace (every
+  // trusted live workspace for a Live session), the mounted split panes, and
+  // the session overview's displayed set (#16355).
   const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
     if (sidebarOptions.enabled) return [];
+    const targets = new Set<string>([
+      ...splitPaneWorkspaces,
+      ...overviewLiveStateWorkspaceCwds,
+    ]);
+    if (connection.sessionId) {
+      if (connection.sessionContext?.kind === 'live') {
+        for (const entry of trustedLiveWorkspaces) targets.add(entry.cwd);
+      } else if (connection.workspaceCwd) {
+        targets.add(connection.workspaceCwd);
+      }
+    }
     return workspaces
-      .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+      .filter(
+        (entry) =>
+          targets.has(entry.cwd) && entry.trusted && isAbsolutePath(entry.cwd),
+      )
       .map((entry) => entry.cwd);
-  }, [sidebarOptions.enabled, workspaces]);
+  }, [
+    sidebarOptions.enabled,
+    splitPaneWorkspaces,
+    overviewLiveStateWorkspaceCwds,
+    connection.sessionId,
+    connection.sessionContext?.kind,
+    connection.workspaceCwd,
+    trustedLiveWorkspaces,
+    workspaces,
+  ]);
   useWorkspaceSessionLiveState(workspace.client, {
     pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
@@ -4235,19 +4320,6 @@ export function App({
     workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });
-  // Daemon-authoritative "turn is running" signal for the connected session:
-  // keeps the conversation indicator (and its cancel affordances) alive
-  // through >3s silent tool gaps where streamingState drops to idle (#9487).
-  const trustedLiveWorkspaces = workspaces.filter(
-    (entry) =>
-      entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
-  );
-  const activePromptWorkspaceCwd =
-    connection.sessionContext?.kind === 'live'
-      ? trustedLiveWorkspaces.length === 1
-        ? trustedLiveWorkspaces[0]?.cwd
-        : undefined
-      : connection.workspaceCwd;
   const {
     hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
@@ -12035,10 +12107,13 @@ export function App({
     promptPreparationOwnerRef.current = null;
     setIsPreparingPrompt(false);
   }, [logicalSessionKey]);
-  const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
-    null,
-  );
+  const createSessionPromiseRef = useRef<Promise<
+    PromptSessionAllocation | undefined
+  > | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
+  // The composer source generation that started the pending creation: a
+  // different draft (New session bumps the generation) must not reuse it.
+  const preparingSessionSourceVersionRef = useRef<number | null>(null);
   useEffect(() => {
     if (
       connection.sessionId &&
@@ -12109,17 +12184,24 @@ export function App({
       const currentSessionId = connectionRef.current.sessionId;
       if (createSessionPromiseRef.current) {
         if (
-          !currentSessionId ||
-          currentSessionId === preparingSessionIdRef.current
+          (!currentSessionId ||
+            currentSessionId === preparingSessionIdRef.current) &&
+          composerSourceVersionRef.current ===
+            preparingSessionSourceVersionRef.current
         ) {
           return createSessionPromiseRef.current;
         }
-        return Promise.resolve(undefined);
+        if (currentSessionId) return Promise.resolve(undefined);
+        // A new draft started while another draft's creation is in flight:
+        // this submission owns a fresh session, not the pending allocation.
+        // Fall through to create it; the pending creation keeps running for
+        // its own submitter.
       }
       if (currentSessionId) return Promise.resolve(undefined);
       const pendingManualTitle = pendingManualTitleRef.current;
       const promise = (async () => {
         let allocatedSessionId: string | undefined;
+        let detachedSessionResult: DaemonSessionClient | undefined;
         const modelId =
           currentModelRef.current || connectionRef.current.currentModel;
         const reasoningIntent = pendingReasoningIntentRef.current;
@@ -12213,15 +12295,19 @@ export function App({
                 ? { name: gitModeIntentRef.current.name }
                 : undefined,
             sessionSourceType: sessionSourceTypeRef.current,
-            onSessionCreated: async (sessionId) => {
+            onSessionCreated: async (sessionId, detachedSession) => {
+              // A detached creation never bound the connection: rename
+              // through the created client, not the current-session action.
+              const rename = (displayName: string) =>
+                detachedSession
+                  ? detachedSession.updateMetadata({ displayName })
+                  : sessionActions.renameSession(displayName);
               if (
                 pendingManualTitle &&
                 pendingManualTitleRef.current === pendingManualTitle
               ) {
                 try {
-                  await sessionActions.renameSession(
-                    pendingManualTitle.displayName,
-                  );
+                  await rename(pendingManualTitle.displayName);
                   if (catalogWorkspaceCwd) {
                     sessionCatalogController.renamed(
                       catalogWorkspaceCwd,
@@ -12238,7 +12324,7 @@ export function App({
                 // fallback. Best-effort: on failure the daemon's first-prompt
                 // label still names it.
                 try {
-                  await sessionActions.renameSession(initialTitle);
+                  await rename(initialTitle);
                   if (catalogWorkspaceCwd) {
                     sessionCatalogController.renamed(
                       catalogWorkspaceCwd,
@@ -12300,15 +12386,23 @@ export function App({
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
             getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
+            sourceVersion: composerSourceVersionRef.current,
+            getCurrentSourceVersion: () => composerSourceVersionRef.current,
           }).then((result) => {
             if (pendingManualTitleRef.current === pendingManualTitle) {
               pendingManualTitleRef.current = undefined;
             }
-            if (result.worktree) {
-              setSessionWorktree(result.worktree);
-            }
-            if (result.branch) {
-              setSessionBranch(result.branch);
+            detachedSessionResult = result.detachedSession;
+            // Worktree/branch state describes the connected session; a
+            // detached creation belongs to a session the user left, so it
+            // must not overwrite the current session's chips.
+            if (!result.detachedSession) {
+              if (result.worktree) {
+                setSessionWorktree(result.worktree);
+              }
+              if (result.branch) {
+                setSessionBranch(result.branch);
+              }
             }
             // Clear the pending intent only on success. On failure the
             // composer chip stays in the selected mode so the user knows
@@ -12333,13 +12427,22 @@ export function App({
         if (creationSessionContext?.kind === 'workspace') {
           setSelectedWorkspaceCwd(undefined);
         }
-        return allocatedSessionId;
+        if (!allocatedSessionId) return undefined;
+        return {
+          sessionId: allocatedSessionId,
+          ...(detachedSessionResult
+            ? { detachedSession: detachedSessionResult }
+            : {}),
+        };
       })();
       createSessionPromiseRef.current = promise;
+      preparingSessionSourceVersionRef.current =
+        composerSourceVersionRef.current;
       const clearPreparation = () => {
         if (createSessionPromiseRef.current === promise) {
           createSessionPromiseRef.current = null;
           preparingSessionIdRef.current = null;
+          preparingSessionSourceVersionRef.current = null;
         }
       };
       void promise.then(clearPreparation, clearPreparation);
@@ -12787,18 +12890,25 @@ export function App({
       }
       const existingSessionWorkspaceCwd = getComposerWorkspaceCwd();
       let allocatedSessionId: string | undefined;
+      let detachedSession: DaemonSessionClient | undefined;
       try {
-        allocatedSessionId = await ensureSessionForPrompt(
+        const allocation = await ensureSessionForPrompt(
           opts?.onSessionAllocated,
           opts?.suppressSessionTitle
             ? undefined
             : titleFromPrompt(preparedPrompt),
         );
-        if (!admissionSourceIsCurrent(allocatedSessionId)) {
+        allocatedSessionId = allocation?.sessionId;
+        detachedSession = allocation?.detachedSession;
+        // A detached allocation is dispatched to its own session below; the
+        // current-connection guards only apply to the attached path.
+        if (!detachedSession && !admissionSourceIsCurrent(allocatedSessionId)) {
           restoreCancelledSubmitState();
           return;
         }
-        if (opts?.beforeAdmission) await opts.beforeAdmission();
+        if (!detachedSession && opts?.beforeAdmission) {
+          await opts.beforeAdmission();
+        }
       } finally {
         if (
           appMountedRef.current &&
@@ -12806,6 +12916,74 @@ export function App({
         ) {
           finishPreparing();
         }
+      }
+      if (detachedSession && allocatedSessionId) {
+        // The user navigated away while the session was being created. The
+        // submitted prompt still owns that session: dispatch admission-only
+        // through the created client. The transcript store, prompt status,
+        // and composer belong to the session the user opened — never touch
+        // them here. The daemon runs the turn in the background.
+        const detachedSessionId = allocatedSessionId;
+        const detachedOwner = allocatedSessionCatalogOwnerRef.current;
+        const detachedWorkspaceCwd =
+          detachedOwner?.sessionId === detachedSessionId
+            ? detachedOwner.workspaceCwd
+            : undefined;
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId: detachedSessionId,
+          prompt: preparedPrompt,
+          queued: false,
+        });
+        try {
+          await sessionActions.sendDetachedPrompt(
+            detachedSession,
+            preparedPrompt,
+            {
+              ...(opts?.submittedPrompt !== undefined
+                ? { submittedPrompt: opts.submittedPrompt }
+                : {}),
+              images,
+              files,
+              inputAnnotations:
+                preparedInputAnnotations.length > 0
+                  ? preparedInputAnnotations
+                  : undefined,
+              retry: opts?.retry,
+              onAdmissionStarted: () => {
+                opts?.onAdmissionStarted?.(detachedSessionId);
+              },
+              onAdmitted: (admission) => {
+                if (detachedWorkspaceCwd) {
+                  sessionCatalogController.promptAdmitted(
+                    detachedWorkspaceCwd,
+                    detachedSessionId,
+                  );
+                }
+                opts?.onAdmitted?.(admission);
+              },
+            },
+          );
+          if (!preserveComposer) {
+            // Navigation-safe: commitAccepted's sourceChanged branch clears
+            // the original draft without touching the current composer. On
+            // failure the draft text stays so the user can resend it.
+            opts?.commitComposerAccepted?.();
+          }
+        } catch (error) {
+          if (
+            detachedWorkspaceCwd &&
+            !isDefinitelyRejectedPromptAdmission(error)
+          ) {
+            sessionCatalogController.promptAdmissionUncertain(
+              detachedWorkspaceCwd,
+            );
+          }
+          if (appMountedRef.current) {
+            reportError(error, 'Failed to send message');
+          }
+        }
+        return;
       }
       if (!appMountedRef.current) return;
       if (!admissionSourceIsCurrent(allocatedSessionId)) {
@@ -18179,7 +18357,11 @@ export function App({
   );
 
   const createGoalForAllocatedSession = useCallback(
-    async (sessionId: string, objective: string) => {
+    async (
+      sessionId: string,
+      objective: string,
+      opts?: { detached?: boolean },
+    ) => {
       const opId = ++goalControlOpSeqRef.current;
       goalControlOwnerRef.current = { opId, sessionId };
       setGoalControlBusy(true);
@@ -18192,9 +18374,14 @@ export function App({
         // the way `sessionActions.controlGoal` does, so install the create
         // response directly to keep the Goal strip and controls authoritative.
         sessionActions.applyGoalSnapshot(sessionId, response.snapshot);
+        // A detached allocation belongs to a session the user left: the
+        // current view — possibly an unrelated new draft — must not receive
+        // its goal strip. The missing-session publication below is only for
+        // the attached flow, where the draft is becoming this session.
         if (
-          !connectionRef.current.sessionId ||
-          connectionRef.current.sessionId === sessionId
+          !opts?.detached &&
+          (!connectionRef.current.sessionId ||
+            connectionRef.current.sessionId === sessionId)
         ) {
           setGoalSnapshot(response.snapshot);
         }
@@ -18549,49 +18736,70 @@ export function App({
         const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
         let allocatedSessionId: string | undefined;
+        let detachedGoalSession = false;
+        let detachedGoalClient: DaemonSessionClient | undefined;
         if (!connectionRef.current.sessionId) {
           if (operation.kind !== 'set') {
             throw new Error(t('localCommand.noSession'));
           }
-          allocatedSessionId = await ensureSessionForPrompt();
+          const allocation = await ensureSessionForPrompt();
+          allocatedSessionId = allocation?.sessionId;
+          detachedGoalSession = allocation?.detachedSession !== undefined;
+          detachedGoalClient = allocation?.detachedSession;
         }
-        const currentSessionId = connectionRef.current.sessionId;
-        const ownAllocationSucceeded =
-          sourceSessionId === undefined &&
-          allocatedSessionId !== undefined &&
-          (currentSessionId === undefined ||
-            currentSessionId === allocatedSessionId);
-        if (
-          (!sourceOwner.isCurrent() && !ownAllocationSucceeded) ||
-          (sourceSessionId !== undefined
-            ? currentSessionId !== sourceSessionId
-            : currentSessionId !== undefined &&
-              currentSessionId !== allocatedSessionId)
-        ) {
-          return;
-        }
-        if (!connectionRef.current.sessionId && !allocatedSessionId) {
-          throw new Error(t('localCommand.noSession'));
+        if (!detachedGoalSession) {
+          const currentSessionId = connectionRef.current.sessionId;
+          const ownAllocationSucceeded =
+            sourceSessionId === undefined &&
+            allocatedSessionId !== undefined &&
+            (currentSessionId === undefined ||
+              currentSessionId === allocatedSessionId);
+          if (
+            (!sourceOwner.isCurrent() && !ownAllocationSucceeded) ||
+            (sourceSessionId !== undefined
+              ? currentSessionId !== sourceSessionId
+              : currentSessionId !== undefined &&
+                currentSessionId !== allocatedSessionId)
+          ) {
+            return;
+          }
+          if (!connectionRef.current.sessionId && !allocatedSessionId) {
+            throw new Error(t('localCommand.noSession'));
+          }
         }
         if (needsSession) {
           if (commitComposerAccepted) commitComposerAccepted();
-          else editorRef.current?.clear();
+          else if (!detachedGoalSession) editorRef.current?.clear();
         }
-        store.appendLocalUserMessage(text, undefined, {
-          localCommandId: `local-command:${crypto.randomUUID()}`,
-        });
+        // A detached goal targets its own session by id; the visible
+        // transcript belongs to the session the user navigated to.
+        if (!detachedGoalSession) {
+          store.appendLocalUserMessage(text, undefined, {
+            localCommandId: `local-command:${crypto.randomUUID()}`,
+          });
+        }
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        if (allocatedSessionId && operation.kind === 'set') {
-          await createGoalForAllocatedSession(
-            allocatedSessionId,
-            operation.objective,
-          );
-        } else {
-          await controlCurrentGoal(action, objective);
+        try {
+          if (allocatedSessionId && operation.kind === 'set') {
+            await createGoalForAllocatedSession(
+              allocatedSessionId,
+              operation.objective,
+              { detached: detachedGoalSession },
+            );
+          } else {
+            await controlCurrentGoal(action, objective);
+          }
+        } finally {
+          // Release only after the dispatch settles: the daemon closes an
+          // idle session when its last client detaches, and goal control
+          // resolves live sessions only.
+          if (detachedGoalClient) {
+            void detachedGoalClient.detach().catch(() => undefined);
+          }
         }
       })()
         .catch((error: unknown) => {
@@ -19973,13 +20181,22 @@ export function App({
               shellSubmitInFlightRef.current = false;
             }
           })
-          .then((createdSessionId) => {
-            if (drainGenerationRef.current !== generationAtSubmit) return;
+          .then((allocation) => {
+            const createdSessionId = allocation?.sessionId;
+            const detachedShellSession = allocation?.detachedSession;
+            // A detached command owns its session: a navigation bump of the
+            // drain generation cancels only current-session queue work.
+            if (
+              !detachedShellSession &&
+              drainGenerationRef.current !== generationAtSubmit
+            ) {
+              return;
+            }
             if (needsSession && createdSessionId) {
               sessionCreated = true;
               if (commitComposerAccepted) {
                 commitComposerAccepted();
-              } else {
+              } else if (!detachedShellSession) {
                 editorRef.current?.clear();
               }
               dispatchSessionChangeRef.current?.({
@@ -19995,7 +20212,15 @@ export function App({
                 ? allocatedOwner.workspaceCwd
                 : undefined
               : getComposerWorkspaceCwd();
-            return sessionActions.sendShellCommand(cmd).finally(() => {
+            const run = detachedShellSession
+              ? detachedShellSession
+                  .shellCommand(cmd)
+                  .then(() => undefined)
+                  .finally(() => {
+                    void detachedShellSession.detach().catch(() => undefined);
+                  })
+              : sessionActions.sendShellCommand(cmd);
+            return run.finally(() => {
               if (workspaceCwd) {
                 sessionCatalogController.invalidateWorkspace(workspaceCwd);
               }
@@ -21810,14 +22035,28 @@ export function App({
   const ensureAgentMentionSession = useCallback(async () => {
     const existing = connectionRef.current.sessionId;
     const allocated = existing ? undefined : await ensureSessionForPrompt();
-    const sessionId = existing ?? allocated ?? connectionRef.current.sessionId;
+    const sessionId =
+      existing ?? allocated?.sessionId ?? connectionRef.current.sessionId;
     if (!sessionId) return undefined;
     const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
     const workspaceCwd =
       allocatedOwner?.sessionId === sessionId
         ? allocatedOwner.workspaceCwd
         : getComposerWorkspaceCwd();
-    return { sessionId, ...(workspaceCwd ? { workspaceCwd } : {}) };
+    const detachedClient = allocated?.detachedSession;
+    return {
+      sessionId,
+      ...(workspaceCwd ? { workspaceCwd } : {}),
+      // The daemon closes an idle session when its last client detaches;
+      // the hook releases only after the mention posts.
+      ...(detachedClient
+        ? {
+            release: () => {
+              void detachedClient.detach().catch(() => undefined);
+            },
+          }
+        : {}),
+    };
   }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
   const settledAgentRunsKey = useMemo(
     () => settledAgentRunKey(blocks),
@@ -24148,6 +24387,11 @@ export function App({
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         manageLiveState={false}
+                        onLiveStateWorkspaceCwdsChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportOverviewLiveStateWorkspaceCwds
+                        }
                       />
                     )}
                     </ShadowDomBoundary>
@@ -24190,14 +24434,15 @@ export function App({
                   <div className={styles.fullPageBody}>
                     <ScheduledTasksDialog
                       onRunPrompt={runTaskManually}
-                      // Registered workspaces (multi-workspace daemons only) so
-                      // the page aggregates every project's schedule and the New
-                      // form can target one; absent/single → primary-only view.
+                      // Registered workspaces let the page aggregate schedules
+                      // and the New form target a project; absent/single →
+                      // primary-only view.
                       workspaces={
                         lockedWorkspaceCwd
                           ? visibleWorkspaces
                           : ordinaryWorkspaces
                       }
+                      primaryWorkspaceCwd={workspace.capabilities?.workspaceCwd}
                       lockedWorkspace={lockedWorkspaceCapability}
                       currentSession={
                         currentSessionSummary
@@ -24214,6 +24459,12 @@ export function App({
                       )}
                       gateAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_gate',
+                      )}
+                      deliveryAvailable={workspace.capabilities?.features?.includes(
+                        'channel_delivery',
+                      )}
+                      observedContactsAvailable={workspace.capabilities?.features?.includes(
+                        'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
                       onCreateViaChat={() => {
@@ -24430,30 +24681,34 @@ export function App({
                         const allocationOwner = sessionOwnerGuard.capture();
                         const sourceSessionId =
                           connectionRef.current.sessionId;
-                        const allocatedSessionId =
-                          await ensureSessionForPrompt();
-                        const currentSessionId =
-                          connectionRef.current.sessionId;
-                        const ownAllocationSucceeded =
-                          sourceSessionId === undefined &&
-                          allocatedSessionId !== undefined &&
-                          (currentSessionId === undefined ||
-                            currentSessionId === allocatedSessionId);
-                        if (
-                          (!allocationOwner.isCurrent() &&
-                            !ownAllocationSucceeded) ||
-                          (sourceSessionId !== undefined
-                            ? currentSessionId !== sourceSessionId
-                            : currentSessionId !== undefined &&
-                              currentSessionId !== allocatedSessionId)
-                        ) {
-                          return false;
-                        }
-                        if (
-                          !connectionRef.current.sessionId &&
-                          !allocatedSessionId
-                        ) {
-                          return false;
+                        const allocation = await ensureSessionForPrompt();
+                        const allocatedSessionId = allocation?.sessionId;
+                        const detachedGoalSession =
+                          allocation?.detachedSession !== undefined;
+                        if (!detachedGoalSession) {
+                          const currentSessionId =
+                            connectionRef.current.sessionId;
+                          const ownAllocationSucceeded =
+                            sourceSessionId === undefined &&
+                            allocatedSessionId !== undefined &&
+                            (currentSessionId === undefined ||
+                              currentSessionId === allocatedSessionId);
+                          if (
+                            (!allocationOwner.isCurrent() &&
+                              !ownAllocationSucceeded) ||
+                            (sourceSessionId !== undefined
+                              ? currentSessionId !== sourceSessionId
+                              : currentSessionId !== undefined &&
+                                currentSessionId !== allocatedSessionId)
+                          ) {
+                            return false;
+                          }
+                          if (
+                            !connectionRef.current.sessionId &&
+                            !allocatedSessionId
+                          ) {
+                            return false;
+                          }
                         }
                         const owner = sessionOwnerGuard.capture();
                         try {
@@ -24461,6 +24716,7 @@ export function App({
                             await createGoalForAllocatedSession(
                               allocatedSessionId,
                               condition,
+                              { detached: detachedGoalSession },
                             );
                           } else {
                             await controlCurrentGoal('create', condition);
@@ -24475,6 +24731,21 @@ export function App({
                               connectionRef.current.sessionId;
                           }
                           throw error;
+                        } finally {
+                          // Same release rule as the /goal command: after
+                          // the dispatch settles, never at allocation.
+                          if (allocation?.detachedSession) {
+                            void allocation.detachedSession
+                              .detach()
+                              .catch(() => undefined);
+                          }
+                        }
+                        if (detachedGoalSession) {
+                          // The goal landed in its own session; the user
+                          // already navigated away, so do not pull the view
+                          // back to chat.
+                          strandedGoalSessionRef.current = undefined;
+                          return true;
                         }
                         if (!owner.isCurrent()) return false;
                         strandedGoalSessionRef.current = undefined;
@@ -24560,6 +24831,11 @@ export function App({
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPaneWorkspacesChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportSplitPaneWorkspaces
+                        }
                         onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
