@@ -49,6 +49,9 @@ async function fixture(t) {
   let keepContainerAfterRemove = false;
   let loseJit = false;
   let failDelete = false;
+  let deleteStatus = 422;
+  let jitFailure = null;
+  let listFailure = null;
   const labelsFromArgs = (args) => {
     const labels = {};
     for (let i = 0; i < args.length; i += 1) {
@@ -79,18 +82,20 @@ async function fixture(t) {
       if (path.includes('generate-jitconfig')) {
         const body = JSON.parse(options.input);
         runner = { id: ++counter, name: body.name };
+        if (jitFailure) throw jitFailure();
         if (loseJit) throw new Error('network failure');
         return JSON.stringify({ runner, encoded_jit_config: 'jit-secret' });
       }
       if (args.includes('DELETE')) {
         if (failDelete) {
-          const error = new Error('gh failed (exit 1, HTTP 422)');
-          error.status = 422;
+          const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
+          error.status = deleteStatus;
           throw error;
         }
         runner = undefined;
         return '';
       }
+      if (listFailure) throw listFailure();
       return JSON.stringify(runner ? [runner] : []);
     }
     if (args[0] === 'inspect') {
@@ -167,8 +172,21 @@ async function fixture(t) {
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
     },
-    setFailDelete: (v) => {
+    setFailDelete: (v, status = 422) => {
       failDelete = v;
+      deleteStatus = status;
+    },
+    setJitStatus: (status) => {
+      jitFailure = () =>
+        Object.assign(new Error('gh failed (exit 1)'), {
+          status,
+        });
+    },
+    setListStatus: (status) => {
+      listFailure = () =>
+        Object.assign(new Error('gh failed (exit 1)'), {
+          status,
+        });
     },
     setRunner: (value) => {
       runner = value;
@@ -1452,4 +1470,66 @@ test('rejects an invalid stall alert threshold', async (t) => {
       () => createManager({ ...f.config, stallAlertSeconds }),
       /Invalid manager configuration/,
     );
+});
+
+test('a rate-limited runner deletion backs off on the 15-300 s ladder', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  // A persisted slot makes the preflight cleanup the first and only failure:
+  // no JIT request is issued before the DELETE is rejected, which is the shape
+  // wenshao measured as 5, 10, 20 … s before the status was preserved.
+  const persisted = `ecs-qwen-trial-01-${'a'.repeat(8)}`;
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+      runnerName: persisted,
+      createdAt: new Date().toISOString(),
+      runnerId: 7,
+      uncertain: false,
+    }),
+  );
+  f.setRunner({ id: 7, name: persisted });
+  f.setFailDelete(true, 403);
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  const deletions = [];
+  const command = (program, args, options) => {
+    if (program === 'gh' && args.includes('DELETE')) deletions.push(now);
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      now += ms;
+      if (deletions.length >= 4) manager.stop();
+    },
+  });
+  await manager.start();
+  const intervals = deletions
+    .slice(1)
+    .map((stamp, index) => (stamp - deletions[index]) / 1000);
+  assert.deepEqual(
+    intervals.slice(0, 3),
+    [15, 30, 60],
+    `a rate-limited deletion must back off on the 15-300 s ladder, got ${intervals.join(', ')}`,
+  );
+});
+
+test('a rate-limited JIT failure keeps its status when cleanup fails too', async (t) => {
+  const f = await fixture(t);
+  f.setJitStatus(403);
+  // The cleanup that follows the rejected JIT fails for a different reason, so
+  // its status must not replace the rate-limit signal of the original error.
+  f.setListStatus(500);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 403);
 });

@@ -485,11 +485,17 @@ export function createManager(config, dependencies = {}) {
           // GitHub rejects deletion while it still considers the runner busy.
           // Keep the state so the next cycle retries the same identity instead
           // of orphaning a registration that blocks its own replacement.
-          throw new Error(
+          // Carry the status through the rewrap: the retry loop picks the
+          // rate-limit ladder from it, and a 403/429 DELETE is exactly the
+          // shape a rate-limit storm produces here.
+          const rejected = new Error(
             `Runner ${runner.id} deletion was rejected${
               error.status ? ` (HTTP ${error.status})` : ''
             }; retaining slot state to retry`,
+            { cause: error },
           );
+          rejected.status = error.status;
+          throw rejected;
         }
       }
     }
@@ -542,14 +548,27 @@ export function createManager(config, dependencies = {}) {
         ),
       );
     } catch (error) {
-      if (error.status >= 400 && error.status < 500 && error.status !== 408) {
-        // The request was definitively rejected, so it created no runner, but a
-        // registration left by an earlier failed cleanup still owns this display
-        // name and would reject every retry. Reconcile it instead of dropping
-        // the only state that can still delete it.
-        await cleanup(slot, { ...state, uncertain: false });
-      } else {
-        await cleanup(slot, state);
+      // A rejected JIT request ends the cycle, but cleanup can fail as well —
+      // during a rate-limit storm that is the expected second failure. The
+      // escaped error is what the retry loop reads its backoff ladder from, so
+      // a cleanup failure must not downgrade a rate-limited request to the
+      // ordinary ladder.
+      const rateLimited = error.status === 403 || error.status === 429;
+      try {
+        if (error.status >= 400 && error.status < 500 && error.status !== 408) {
+          // The request was definitively rejected, so it created no runner, but a
+          // registration left by an earlier failed cleanup still owns this display
+          // name and would reject every retry. Reconcile it instead of dropping
+          // the only state that can still delete it.
+          await cleanup(slot, { ...state, uncertain: false });
+        } else {
+          await cleanup(slot, state);
+        }
+      } catch (cleanupError) {
+        if (!rateLimited) throw cleanupError;
+        log(
+          `slot ${slot}: cleanup after a rate-limited JIT failure also failed (${cleanupError.message}); keeping the rate-limit backoff`,
+        );
       }
       throw error;
     }
