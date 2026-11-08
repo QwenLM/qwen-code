@@ -499,6 +499,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
     if (signal.aborted) {
+      // The cancelled call itself must not be replayed, but an abort can tear
+      // the transport down: the SDK's `onerror` fires and `McpClient` flips
+      // the server to `DISCONNECTED`. Left alone, every later call in a
+      // session that survives the cancel inherits the dead connection until
+      // the health monitor's budget expires (issue #12160). Repair without
+      // replaying — the retry path below would replay it.
+      if (
+        getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED
+      ) {
+        await this.attemptReconnect();
+      }
       throw error;
     }
 
