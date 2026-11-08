@@ -2330,6 +2330,38 @@ describe('ModelsConfig', () => {
 
       expect(openaiIds(modelsConfig)).toContain('qwen3.7-max');
     });
+
+    it('finds the second entry when one id and baseUrl serve two wires', () => {
+      // The documented dual-wire config declares the same `id` and `baseUrl`
+      // twice, once per wire; only `wireApi` tells them apart. Matching the
+      // endpoint first would never reach the second entry.
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            entry('dual-wire', 'Dual Wire', API_URL, 'DUAL_KEY', {
+              timeout: 111,
+            }),
+            {
+              ...entry('dual-wire', 'Dual Wire', API_URL, 'DUAL_KEY', {
+                timeout: 222,
+              }),
+              wireApi: 'responses',
+            },
+          ],
+        },
+      });
+
+      modelsConfig.syncAfterAuthRefresh(
+        AuthType.USE_OPENAI_RESPONSES,
+        'dual-wire',
+      );
+
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.timeout).toBe(222);
+      expect(modelsConfig.getGenerationConfigSources()['timeout']?.kind).toBe(
+        'modelProviders',
+      );
+    });
   });
 });
 

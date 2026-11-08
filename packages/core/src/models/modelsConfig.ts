@@ -1092,18 +1092,19 @@ export class ModelsConfig {
     if (!providers) return undefined;
     for (const [providerId, entries] of Object.entries(providers)) {
       if (!Array.isArray(entries)) continue;
+      // One `id` + `baseUrl` can be declared twice to serve two wires, and
+      // only the protocol tells the entries apart; testing the protocol after
+      // picking the first match would never reach the second entry.
       const entry = entries.find(
         (candidate) =>
           candidate.id === model.id &&
-          (candidate.baseUrl || undefined) === model.registryBaseUrl,
+          (candidate.baseUrl || undefined) === model.registryBaseUrl &&
+          // Several provider ids can resolve to one protocol, so the declared
+          // endpoint above is what keeps the match on the right provider.
+          tryResolveModelProtocol(providerId, candidate, protocols) ===
+            model.authType,
       );
-      if (!entry) continue;
-      // Several provider ids can resolve to one protocol, so the declared
-      // endpoint above is what keeps the match on the right provider.
-      if (
-        tryResolveModelProtocol(providerId, entry, protocols) === model.authType
-      )
-        return entry;
+      if (entry) return entry;
     }
     return undefined;
   }
