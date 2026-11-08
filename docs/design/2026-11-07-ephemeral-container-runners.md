@@ -131,9 +131,10 @@ reconciles the name instead of discarding the state, and a runner deletion
 GitHub rejects retains the state for the next attempt.
 
 Because these faults leave the process alive, systemd supervision cannot detect
-them. A slot that repeats the same failure for `stallAlertSeconds` (default 300) logs a `STALL ALERT` naming the slot, the duration, the count and the
-error; the clock resets on any successful cycle or changed error and each
-stall episode alerts once. The threshold is wall-clock because failed cycles
+them. A slot that repeats the same failure for `stallAlertSeconds` (default
+1800, thirty minutes) logs a `STALL ALERT` naming the slot, the duration, the
+count and the error; the clock resets on any successful cycle or changed error
+and each stall episode alerts once. The threshold is wall-clock because failed cycles
 retry with jittered exponential backoff (10 s to 60 s, or 30 s to 300 s under
 HTTP 403/429), so a retry count no longer maps to a fixed delay. The backoff
 sleep is sliced and ends early on shutdown. This is the operator signal for a

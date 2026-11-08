@@ -1328,6 +1328,88 @@ test('a changing error restarts the stall clock instead of alerting early', asyn
   );
 });
 
+// Both threshold tests below drive the wall clock through the injected sleep
+// (the manager reads Date.now()), pin Math.random to the jitter floor so the
+// ladder is exact, and stop as soon as the alert lands.
+async function stallThresholdRun(t, { rateLimited, config }) {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  let failures = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      failures += 1;
+      const error = new Error('docker unavailable');
+      if (rateLimited) error.status = 429;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(config ?? f.config, {
+    command,
+    sleep: async (ms) => {
+      now += ms;
+      if (messages.some((message) => message.includes('STALL ALERT')))
+        manager.stop();
+    },
+  });
+  await manager.start();
+  const alerts = messages.filter((message) => message.includes('STALL ALERT'));
+  assert.equal(alerts.length, 1, 'one alert per stall episode');
+  return {
+    alerts,
+    failures,
+    durationSeconds: Number(/for (\d+)s across/.exec(alerts[0])[1]),
+    failureCount: Number(/across (\d+) consecutive/.exec(alerts[0])[1]),
+  };
+}
+
+test('the stall alert defaults to a thirty-minute wall-clock threshold', async (t) => {
+  // Ordinary ladder at the jitter floor: 5 + 10 + 20 + 30 + 30 … s, so the
+  // identical failures land at 0, 5, 15, 35, 65, 95 … and the 63rd is the
+  // first one at or past the 1800 s default (1805 s).
+  const result = await stallThresholdRun(t, { rateLimited: false });
+  assert.equal(result.failureCount, 63);
+  assert.equal(result.failures, 63);
+  assert.ok(
+    result.durationSeconds >= 1800 && result.durationSeconds <= 1830,
+    `the default is a 1800 s wall clock, but the alert reported ${result.durationSeconds}s`,
+  );
+  assert.match(result.alerts[0], /docker unavailable/);
+});
+
+test('the stall threshold tracks wall clock, not the retry count', async (t) => {
+  // Rate-limited ladder at the jitter floor: 15 + 30 + 60 + 120 + 150 … s, so
+  // the identical failures land at 0, 15, 45, 105, 225, 375, 525 … and the
+  // 16th is the first past 1800 s (1875 s). Same threshold as the ordinary
+  // cadence, a quarter of the retries — that is what wall-clock buys.
+  const result = await stallThresholdRun(t, { rateLimited: true });
+  assert.equal(result.failureCount, 16);
+  assert.ok(
+    result.durationSeconds >= 1800 && result.durationSeconds <= 1950,
+    `the alert must land on the first failure past 1800 s, got ${result.durationSeconds}s`,
+  );
+  assert.ok(
+    result.failureCount < 20,
+    `a count-based threshold would need the same retries at any cadence, got ${result.failureCount}`,
+  );
+});
+
 test('stop() interrupts a long backoff sleep instead of waiting it out', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {

@@ -123,14 +123,19 @@ Failed cycles retry with jittered exponential backoff: 10 s doubling to a
 so a rate-limited pool stops sustaining its own rate limit. The backoff
 sleep stays interruptible and a shutdown cuts it short.
 
-`stallAlertSeconds` (default 300, roughly five minutes) sets how long a slot
-may repeat the same failure before the manager logs `STALL ALERT` instead of
-the ordinary retry line. The threshold is wall-clock, so it holds under any
-retry cadence. The clock resets whenever a cycle succeeds or the failure
-changes, and each stall episode alerts once. A stall alert
-means the slot is serving no jobs and needs reconciliation; the manager keeps
-retrying and never exits on its own, so systemd does not restart it. Alert on
-that journal marker rather than on service state.
+`stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
+repeat the same failure before the manager logs `STALL ALERT` instead of the
+ordinary retry line. The threshold is wall-clock, so it holds under any retry
+cadence, and the default sits well above the 300 s backoff ceiling on purpose:
+a pool-wide rate-limit storm stalls every slot at once, and a threshold shorter
+than the cadence would put one alert per slot in the journal simultaneously.
+The clock resets whenever a cycle succeeds or the failure changes, and each
+stall episode alerts once. Because the check happens when a failure is
+observed, the alert lands on the first failure at or after the threshold, so
+the reported duration is the threshold rounded up to the current cadence. A
+stall alert means the slot is serving no jobs and needs reconciliation; the
+manager keeps retrying and never exits on its own, so systemd does not restart
+it. Alert on that journal marker rather than on service state.
 
 ## Install and operate
 

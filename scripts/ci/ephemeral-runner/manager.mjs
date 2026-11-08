@@ -181,11 +181,13 @@ export function createManager(config, dependencies = {}) {
   const lockPath = join(stateDir, 'manager.lock');
   const slotPath = (slot) => join(stateDir, `slot-${slot}.json`);
   const log = (message) => console.log(`[${config.poolId}] ${message}`);
-  // Time-based, not retry-count-based: with exponential backoff a count no
-  // longer maps to a fixed wall-clock SLA (30 retries span ~27 minutes, or
-  // hours under rate limiting). Default 300 s preserves the documented
-  // roughly-five-minutes alert.
-  const stallAlertMs = (config.stallAlertSeconds ?? 300) * 1000;
+  // Time-based, not retry-count-based: with jittered exponential backoff a
+  // retry count no longer maps to a fixed wall-clock delay. Half an hour is
+  // long enough that a pool-wide rate-limit storm — every slot backing off on
+  // the same 300 s ceiling — does not put one alert per slot in the journal at
+  // once, and short enough that a genuinely wedged slot is still surfaced
+  // within a shift.
+  const stallAlertMs = (config.stallAlertSeconds ?? 1800) * 1000;
   // A backoff sleep must stay interruptible: the service gives the manager
   // TimeoutStopSec to exit, and an unsliced five-minute sleep would have
   // systemd SIGKILL it mid-cycle. Wake at least once a second and cut the
