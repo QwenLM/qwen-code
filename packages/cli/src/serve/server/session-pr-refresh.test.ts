@@ -2035,6 +2035,32 @@ describe('startSessionPrRefreshTimer', () => {
     handle?.dispose();
   });
 
+  it('never reads the PR-drain deps while the observation switch is off', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'open')],
+    });
+    const getPrDrainDeps = vi.fn(() => undefined);
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getPrDrainDeps,
+    });
+    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+    await vi.waitFor(() => {
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+    });
+    // The switch is off: the drain seam is never read (no drain, no admission,
+    // no restore, no deletion), exactly like the observation seam.
+    expect(getPrDrainDeps).not.toHaveBeenCalled();
+    handle?.dispose();
+  });
+
   it('observes before a slow refresh consumes the tick deadline', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
