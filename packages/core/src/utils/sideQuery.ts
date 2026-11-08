@@ -129,6 +129,8 @@ export interface SideQueryTextOptions {
 export interface SideQueryTextResult {
   text: string;
   usage: GenerateContentResponseUsageMetadata | undefined;
+  /** Provider stop reason, such as `STOP` or `MAX_TOKENS`, when available. */
+  finishReason?: string;
 }
 
 export type SideQueryOptions<TResponse> = SideQueryJsonOptions<TResponse>;
