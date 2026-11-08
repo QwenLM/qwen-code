@@ -1257,7 +1257,9 @@ describe('HTTP Managed Session store', () => {
   // joinOriginalCsiWriter refuses while an acquire is parked: it stops the
   // renewal timer and joins the current one, so handing back a writer it
   // never joined would let the retirement fence a lease that is still being
-  // minted.
+  // minted. Nor may the refusal be permanent: once the acquire answers, the
+  // client holds its grant and the join must report the real reason the late
+  // grant cannot retire instead of the stale "unresolved authority".
   it('refuses the original CSI writer join while a deferred acquire is in flight', async () => {
     vi.useFakeTimers();
     const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
@@ -1269,6 +1271,15 @@ describe('HTTP Managed Session store', () => {
       expect(rig.observed.acquiresAfterBoot).toBe(1);
       await expect(rig.stores.csiRetirement.joinWriter()).rejects.toThrow(
         'unresolved authority',
+      );
+      rig.releaseAcquire();
+      await renewal?.catch(() => undefined);
+      // The deferred acquire bumped the writer generation, so the client now
+      // holds a grant retirement cannot prepare. Asserting the re-join
+      // rejects on that reason proves the refusal above did not latch a
+      // permanently poisoned join.
+      await expect(rig.stores.csiRetirement.joinWriter()).rejects.toThrow(
+        'original CSI writer cannot prepare retirement',
       );
     } finally {
       rig.releaseAcquire();
