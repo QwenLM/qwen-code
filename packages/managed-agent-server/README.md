@@ -405,7 +405,7 @@ not maintain a separate public-to-Harness Session mapping.
 ## Personal memory (opt-in)
 
 Personal memory is disabled by default. Enable it only after qualifying a
-dedicated Holo Mem0 service with cross-service sharing disabled. Configure the
+dedicated Mem0 service with cross-service sharing disabled. Configure the
 control plane with `qwen.managed-agent.memory.enabled=true`,
 `qwen.managed-agent.memory.endpoint` and `qwen.managed-agent.memory.api-key`.
 Session Store must also be enabled, and the Hosted Harness must advertise

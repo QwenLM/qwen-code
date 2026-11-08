@@ -33,8 +33,8 @@ recorded history or prepared model requests.
 accepts tenant or owner selectors. Public and WebShell creation carry the optional
 binding. OpenAPI, SurfaceRegistry and generated WebShell types change together.
 
-SQL stores Store ownership and its opaque Holo namespace, entry IDs and deletion
-markers, Session bindings and owner-only visibility. Holo owns memory bodies.
+SQL stores Store ownership and its opaque Mem0 namespace, entry IDs and deletion
+markers, Session bindings and owner-only visibility. Mem0 owns memory bodies.
 The existing request receipt table gains a memory namespace: Session, accepted
 input and tool call identify an operation, and its request digest rejects
 conflicting retries. Receipt results also retain bounded recall context for
@@ -51,8 +51,8 @@ boundaries stay at their existing entry points.
 
 Hosted calls a controlled Memory Service through the internal Session Store
 channel using writer credentials. Authorization, writer-generation validation
-and receipt admission are one short transaction. Holo HTTP calls run outside
-transactions and Session locks. A deployment-configured, dedicated Holo service
+and receipt admission are one short transaction. Mem0 HTTP calls run outside
+transactions and Session locks. A deployment-configured, dedicated Mem0 service
 has cross-service sharing disabled. Its endpoint and API key never reach the
 model, sandbox or MCP configuration. Managed injects the Store's opaque `user_id`;
 provider filters are not an authorization boundary.
@@ -97,7 +97,7 @@ Bound Sessions expose `context_search`, `context_remember`, `context_get` and
 `context_forget`. Their arguments contain no identity, namespace or endpoint.
 Only an explicit user request permits remembering or forgetting, subject to
 existing tool approval and Plan Mode. Remember uses `infer:false` and exact
-requested content. Forget verifies the entry's SQL ownership, authoritative Holo
+requested content. Forget verifies the entry's SQL ownership, authoritative Mem0
 scope and complete expected content before deletion. Successful deletion records
 a marker that suppresses stale search hits. No update or bulk deletion API is
 introduced.
@@ -115,7 +115,7 @@ two tenants and two users including forged Store and entry IDs; same-user
 cross-Workspace access; owner-only lists, SSE, artifacts, mutations, children and
 relay; approval and Plan Mode; queued inputs and recovery; response loss, restart,
 writer replacement and conflicting retries; changed-content deletion and stale
-search suppression. Real Holo conformance must prove synchronous entry IDs,
+search suppression. Real Mem0 conformance must prove synchronous entry IDs,
 exact-read scope and deletion using isolated disposable namespaces with cleanup.
 Historical single-user results do not establish these guarantees.
 
@@ -130,5 +130,5 @@ not a separate memory-management UI.
 
 No team sharing, automatic extraction, Dream, directory mounts, memory versioning
 or implicit child binding. No open product decisions remain. Deployment-specific
-Holo conformance and unavailable test infrastructure are acceptance gates, not
+Mem0 conformance and unavailable test infrastructure are acceptance gates, not
 permission to weaken isolation or silently fall back to local memory.

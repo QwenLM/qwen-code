@@ -25,14 +25,14 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 
-public final class HoloMemoryProvider implements MemoryProvider {
+public final class Mem0MemoryProvider implements MemoryProvider {
     private static final int MAX_RESPONSE_BYTES = 64 * 1024;
     private final URI endpoint;
     private final String apiKey;
     private final ObjectMapper json;
     private final HttpClient client;
 
-    public HoloMemoryProvider(String endpoint, String apiKey, ObjectMapper json) {
+    public Mem0MemoryProvider(String endpoint, String apiKey, ObjectMapper json) {
         this.endpoint = URI.create(endpoint.endsWith("/") ? endpoint : endpoint + "/");
         if (this.endpoint.getHost() == null || this.endpoint.getUserInfo() != null
                 || this.endpoint.getQuery() != null || this.endpoint.getFragment() != null

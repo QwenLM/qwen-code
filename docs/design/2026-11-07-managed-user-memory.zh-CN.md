@@ -28,8 +28,8 @@ Session 创建接受可选 `memory_store_id`（WebShell 为 `memoryStoreId`）�
 所属用户选择参数。公开接口和 WebShell 创建请求透传可选绑定。OpenAPI、
 SurfaceRegistry 和 WebShell 生成类型同步更新。
 
-SQL 保存 Store 归属及其不透明 Holo namespace、条目 ID 与删除标记、Session 绑定和
-仅所属用户可见属性。Holo 保存记忆正文。现有请求 receipt 表增加记忆 namespace：
+SQL 保存 Store 归属及其不透明 Mem0 namespace、条目 ID 与删除标记、Session 绑定和
+仅所属用户可见属性。Mem0 保存记忆正文。现有请求 receipt 表增加记忆 namespace：
 Session、已接收输入和 tool call 标识操作，请求摘要拒绝冲突重试。Receipt 结果还保存
 有界的召回上下文用于恢复。首次正式发布前直接修改共享 V1 schema baseline，并重建
 开发数据库。
@@ -41,8 +41,8 @@ Session、已接收输入和 tool call 标识操作，请求摘要拒绝冲突�
 ## 执行与恢复
 
 Hosted 使用 writer 凭据，通过内部 Session Store 通道调用受控 Memory Service。
-鉴权、writer generation 校验及 receipt 受理在同一个短事务内完成。Holo HTTP 调用
-在事务和 Session 锁之外执行。部署配置使用专用 Holo 服务并关闭跨服务共享，地址和
+鉴权、writer generation 校验及 receipt 受理在同一个短事务内完成。Mem0 HTTP 调用
+在事务和 Session 锁之外执行。部署配置使用专用 Mem0 服务并关闭跨服务共享，地址和
 API Key 不进入模型、沙箱或 MCP 配置。Managed 注入 Store 的不透明 `user_id`；
 provider 过滤条件不是鉴权边界。
 
@@ -74,7 +74,7 @@ Basic 请求头与裸编码的用户名/密码、带密码 URI（含协议相对
 绑定后的 Session 提供 `context_search`、`context_remember`、`context_get` 和
 `context_forget`，参数不含身份、namespace 或 endpoint。仅用户明确请求时允许记住或
 删除，并遵循现有工具审批及 Plan Mode。保存使用 `infer:false` 和用户要求的准确内容。
-删除先验证 SQL 条目归属、Holo 权威 scope 及完整预期内容，再执行删除。成功后保存
+删除先验证 SQL 条目归属、Mem0 权威 scope 及完整预期内容，再执行删除。成功后保存
 删除标记，屏蔽搜索索引的残留命中。不增加更新或批量删除 API。
 
 成功结果先持久化，再返回工具结果。已发出写入但丢失结果时标记 `unknown`，不自动
@@ -86,7 +86,7 @@ Session 输出。适配器沿用现有 Mem0 协议语义，不引入通用 provi
 覆盖不绑定时零请求及零工具、显式保存及跨 Session 召回、两租户两用户和伪造 Store/
 条目 ID、同用户跨 Workspace、列表/SSE/产物/修改/子 Session/转发的个人可见性、
 审批和 Plan Mode、排队输入与恢复、响应丢失/重启/writer 替换/冲突重试、内容变化时
-拒绝删除以及屏蔽残留命中。真实 Holo 契约测试使用隔离的临时 namespace，验证同步
+拒绝删除以及屏蔽残留命中。真实 Mem0 契约测试使用隔离的临时 namespace，验证同步
 条目 ID、精确读取 scope 和删除，并完成清理。历史单用户结果不能证明这些保证。
 
 在模块共享本地验证预算内执行相关 Java 契约、MySQL 和真实 Hosted 恢复用例，完整
@@ -97,5 +97,5 @@ Session 输出。适配器沿用现有 Mem0 协议语义，不引入通用 provi
 ## 边界
 
 不包含团队共享、自动抽取、Dream、目录挂载、记忆版本管理或隐式子 Session 绑定。
-没有待定产品决策。部署对应的 Holo 契约和不可用测试基础设施是验收门禁，不能据此
+没有待定产品决策。部署对应的 Mem0 契约和不可用测试基础设施是验收门禁，不能据此
 削弱隔离或静默回退到本地记忆。

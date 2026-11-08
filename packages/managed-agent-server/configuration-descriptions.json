@@ -53,8 +53,8 @@
       "zh": "在 Workspace Runtime worker 中按托管扩展执行配置运行所选扩展包的进程。"
     },
     "qwen.managed-agent.memory": {
-      "en": "Opt-in personal MemoryStores: server-side Holo access for explicitly bound, owner-only Sessions.",
-      "zh": "显式启用的个人 MemoryStore：由服务端访问 Holo，供明确绑定且仅所属用户可见的 Session 使用。"
+      "en": "Opt-in personal MemoryStores: server-side Mem0 access for explicitly bound, owner-only Sessions.",
+      "zh": "显式启用的个人 MemoryStore：由服务端访问 Mem0，供明确绑定且仅所属用户可见的 Session 使用。"
     },
     "qwen.managed-agent.runtime-broker": {
       "en": "The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.",
@@ -455,16 +455,16 @@
       "zh": "扩展执行模式：`linux-cgroup` 将扩展进程限制在已委派的 cgroup v2 子树中；`developer-process-group` 是面向原生 macOS 开发、隔离较弱的进程组模式。Linux worker 始终使用 `linux-cgroup`；macOS worker 只有在该值为 `developer-process-group` 时才被接受。"
     },
     "qwen.managed-agent.memory.api-key": {
-      "en": "Service credential used by the control plane for Holo requests when memory is enabled. Required, nonblank and without CR or LF. Keep it in server-side secret configuration; it is not forwarded to the model, Hosted Harness, sandbox or MCP configuration.",
-      "zh": "开启记忆时，Control Plane 调用 Holo 使用的服务凭据。必填、非空且不能含 CR 或 LF。应保存在服务端密钥配置中，不传入模型、Hosted Harness、沙箱或 MCP 配置。"
+      "en": "Service credential used by the control plane for Mem0 requests when memory is enabled. Required, nonblank and without CR or LF. Keep it in server-side secret configuration; it is not forwarded to the model, Hosted Harness, sandbox or MCP configuration.",
+      "zh": "开启记忆时，Control Plane 调用 Mem0 使用的服务凭据。必填、非空且不能含 CR 或 LF。应保存在服务端密钥配置中，不传入模型、Hosted Harness、沙箱或 MCP 配置。"
     },
     "qwen.managed-agent.memory.enabled": {
-      "en": "Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Holo Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation.",
-      "zh": "是否提供个人记忆，默认为 false。仅在验证专用 Holo Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。"
+      "en": "Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation.",
+      "zh": "是否提供个人记忆，默认为 false。仅在验证专用 Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。"
     },
     "qwen.managed-agent.memory.endpoint": {
-      "en": "Base URL of the dedicated Holo Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane.",
-      "zh": "专用 Holo Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。"
+      "en": "Base URL of the dedicated Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane.",
+      "zh": "专用 Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。"
     },
     "qwen.managed-agent.message-relay.scan-delay": {
       "en": "How long the Session message relay waits between passes; each pass moves pending messages between Sessions (handover, receipt, acceptance) and settles those that cannot be delivered. Skipped on a node without an available Hosted Harness. Accepts a duration such as `2s`; a plain number is milliseconds.",

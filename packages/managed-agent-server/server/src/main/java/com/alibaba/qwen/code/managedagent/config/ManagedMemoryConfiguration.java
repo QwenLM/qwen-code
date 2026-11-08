@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.adapter.memory.HoloMemoryProvider;
+import com.alibaba.qwen.code.managedagent.adapter.memory.Mem0MemoryProvider;
 import com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.Result;
 import com.alibaba.qwen.code.managedagent.contracts.memory.MemoryProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,8 +18,8 @@ public class ManagedMemoryConfiguration {
             return (namespace, query) -> Result.status("unavailable");
         }
         if (!properties.getSessionStore().isEnabled() || memory.getEndpoint() == null) {
-            throw new IllegalArgumentException("Personal memory requires Session Store and a Holo endpoint.");
+            throw new IllegalArgumentException("Personal memory requires Session Store and a Mem0 endpoint.");
         }
-        return new HoloMemoryProvider(memory.getEndpoint(), memory.getApiKey(), json);
+        return new Mem0MemoryProvider(memory.getEndpoint(), memory.getApiKey(), json);
     }
 }

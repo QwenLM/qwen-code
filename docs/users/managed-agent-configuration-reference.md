@@ -220,13 +220,13 @@ Running the processes of selected extension packages inside Workspace Runtime wo
 
 ## `qwen.managed-agent.memory`
 
-Opt-in personal MemoryStores: server-side Holo access for explicitly bound, owner-only Sessions.
+Opt-in personal MemoryStores: server-side Mem0 access for explicitly bound, owner-only Sessions.
 
 | Property | Variable | Type | Default | Description |
 | --- | --- | --- | --- | --- |
-| `api-key` | — | string | — | Service credential used by the control plane for Holo requests when memory is enabled. Required, nonblank and without CR or LF. Keep it in server-side secret configuration; it is not forwarded to the model, Hosted Harness, sandbox or MCP configuration. |
-| `enabled` | — | boolean | `false` | Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Holo Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation. |
-| `endpoint` | — | string | — | Base URL of the dedicated Holo Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane. |
+| `api-key` | — | string | — | Service credential used by the control plane for Mem0 requests when memory is enabled. Required, nonblank and without CR or LF. Keep it in server-side secret configuration; it is not forwarded to the model, Hosted Harness, sandbox or MCP configuration. |
+| `enabled` | — | boolean | `false` | Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation. |
+| `endpoint` | — | string | — | Base URL of the dedicated Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane. |
 
 ## `qwen.managed-agent.runtime-broker`
 

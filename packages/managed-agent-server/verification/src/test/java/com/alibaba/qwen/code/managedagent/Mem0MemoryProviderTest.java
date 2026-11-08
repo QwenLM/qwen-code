@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.adapter.memory.HoloMemoryProvider;
+import com.alibaba.qwen.code.managedagent.adapter.memory.Mem0MemoryProvider;
 import com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.Query;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,12 +24,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class HoloMemoryProviderTest {
+class Mem0MemoryProviderTest {
     private final ObjectMapper json = new ObjectMapper();
     private final Map<String, Map<String, Object>> entries = new LinkedHashMap<>();
     private final AtomicInteger deletes = new AtomicInteger();
     private HttpServer server;
-    private HoloMemoryProvider provider;
+    private Mem0MemoryProvider provider;
     private JsonNode lastWrite;
     private JsonNode lastSearch;
     private boolean wrongScope;
@@ -43,7 +43,7 @@ class HoloMemoryProviderTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", this::handle);
         server.start();
-        provider = new HoloMemoryProvider("http://127.0.0.1:" + server.getAddress().getPort(), "synthetic-key", json);
+        provider = new Mem0MemoryProvider("http://127.0.0.1:" + server.getAddress().getPort(), "synthetic-key", json);
     }
 
     @AfterEach
@@ -56,10 +56,10 @@ class HoloMemoryProviderTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"http://holo.internal", "ftp://127.0.0.1", "https:/missing-host",
-            "https://u:p@holo.internal/", "https://holo.internal/?tenant=x", "https://holo.internal/#fragment", " "})
+    @ValueSource(strings = {"http://mem0.internal", "ftp://127.0.0.1", "https:/missing-host",
+            "https://u:p@mem0.internal/", "https://mem0.internal/?tenant=x", "https://mem0.internal/#fragment", " "})
     void rejectsUnsafeEndpoints(String endpoint) {
-        assertThatThrownBy(() -> new HoloMemoryProvider(endpoint, "synthetic-key", json))
+        assertThatThrownBy(() -> new Mem0MemoryProvider(endpoint, "synthetic-key", json))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -67,18 +67,18 @@ class HoloMemoryProviderTest {
     @NullAndEmptySource
     @ValueSource(strings = {" ", "synthetic\rkey", "synthetic\nkey"})
     void rejectsInvalidServiceCredentials(String key) {
-        assertThatThrownBy(() -> new HoloMemoryProvider("https://holo.internal", key, json))
+        assertThatThrownBy(() -> new Mem0MemoryProvider("https://mem0.internal", key, json))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"https://holo.internal", "http://localhost", "http://127.0.0.1", "http://[::1]"})
+    @ValueSource(strings = {"https://mem0.internal", "http://localhost", "http://127.0.0.1", "http://[::1]"})
     void acceptsHttpsAndLoopbackHttp(String endpoint) {
-        assertThat(new HoloMemoryProvider(endpoint, "synthetic-key", json)).isNotNull();
+        assertThat(new Mem0MemoryProvider(endpoint, "synthetic-key", json)).isNotNull();
     }
 
     @Test
-    void usesVerifiedHoloProtocolAndExactScopeForWriteReadSearchAndDelete() {
+    void usesVerifiedMem0ProtocolAndExactScopeForWriteReadSearchAndDelete() {
         var stored = provider.execute("scope-a", query("remember", "Use concise replies", null));
         assertThat(stored.status()).isEqualTo("stored");
         assertThat(lastWrite.path("infer").booleanValue()).isFalse();
