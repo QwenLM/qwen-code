@@ -41,6 +41,10 @@ export type PrTransitionType =
 export type PrWatchRoleGroup = 'review' | 'verify' | 'fix' | 'untyped';
 
 export interface PrWatchIdentity {
+  /**
+   * API host, already normalised by the caller (design §1's `pullRequestKey`
+   * strips `www.` and drops the port). See {@link prWatchFileKey}.
+   */
   host: string;
   /** `owner/repo`, without the host. */
   repo: string;
@@ -91,6 +95,12 @@ export function defaultPrWatchDir(): string {
   return path.join(Storage.getGlobalQwenDir(), 'serve', 'pr-watch');
 }
 
+/**
+ * Lowercased `host/owner/repo#number` file key. This only lowercases: the
+ * caller must pass a host already normalised by `pullRequestKey` (design §1),
+ * or `www.github.com` and `github.com` would split one PR across two files —
+ * two baselines and a double delivery.
+ */
 export function prWatchFileKey(identity: PrWatchIdentity): string {
   return `${identity.host}/${identity.repo}#${identity.number}`.toLowerCase();
 }
