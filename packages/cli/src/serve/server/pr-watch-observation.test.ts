@@ -17,7 +17,10 @@ import {
   scanWorkspaceBindings,
   type SessionPrBindingSummary,
 } from '../routes/session-pr-bindings.js';
-import type { WorkspaceRuntime } from '../workspace-registry.js';
+import {
+  createWorkspaceGenerationGuard,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
 import {
   detectPrTransitions,
   normalizeWatchHost,
@@ -443,16 +446,30 @@ describe('detectPrTransitions', () => {
 
   it('caps pending at the limit, dropping the oldest', () => {
     let state = detectPrTransitions(identity, undefined, obs(), T0).state;
+    const total = PR_WATCH_PENDING_CAP + 4;
+    const at = (i: number) =>
+      new Date(Date.parse(T0) + i * 60_000).toISOString();
     // Each head change appends a pending transition; nothing drains here.
-    for (let i = 0; i < PR_WATCH_PENDING_CAP + 4; i += 1) {
+    for (let i = 0; i < total; i += 1) {
       state = detectPrTransitions(
         identity,
         state,
         obs({ headSha: `${i}`.padStart(40, '0') }),
-        new Date(Date.parse(T0) + (i + 1) * 60_000).toISOString(),
+        at(i + 1),
       ).state;
     }
     expect(state.pending).toHaveLength(PR_WATCH_PENDING_CAP);
+    // Pin the direction, not just the length: the newest entries survive.
+    // The oldest surviving transition is iteration (total - cap), stamped
+    // total - cap + 1; the newest is the final iteration, stamped total. A
+    // slice(0, cap) that keeps the oldest would pass the length assertion
+    // but fail both endpoints.
+    expect(state.pending?.[0]?.detectedAt).toBe(
+      at(total - PR_WATCH_PENDING_CAP + 1),
+    );
+    expect(state.pending?.[PR_WATCH_PENDING_CAP - 1]?.detectedAt).toBe(
+      at(total),
+    );
   });
 
   it('preserves lastBoundAt and delivered across observations', () => {
@@ -708,16 +725,88 @@ describe('observeWorkspacePrBindings', () => {
     expect(view).not.toHaveBeenCalled();
   });
 
-  it('fails closed when the watch path is not a regular file', async () => {
-    const id = prWatchIdentityFromUrl(prUrl(42))!;
-    mkdirSync(prWatchFilePath(dir, id));
+  it('records a viewed PR in the shared per-tick set so the next workspace skips it', async () => {
     const view = vi.fn(async (url: string) => okResult(url));
-    const result = await observeWorkspacePrBindings(
+    // One Set per tick, shared across workspaces — the shape the tick uses.
+    const viewedThisTick = new Set<string>();
+    const first = await observeWorkspacePrBindings(
       [binding(42)],
       makeDeps(view),
+      { viewedThisTick },
     );
-    expect(result.observed).toBe(0);
-    expect(result.failed).toBe(1);
+    expect(first).toEqual({ consumed: 1, observed: 1, failed: 0 });
+    // A second workspace bound to the same PR must find it already recorded
+    // by the first workspace's write and spend no second view.
+    const second = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view),
+      { viewedThisTick },
+    );
+    expect(second).toEqual({ consumed: 0, observed: 0, failed: 0 });
+    expect(view).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the watch path is not a regular file', async () => {
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const filePath = prWatchFilePath(dir, id);
+    mkdirSync(filePath);
+    const view = vi.fn(async (url: string) => okResult(url));
+    const log = vi.fn();
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, { log }),
+    );
+    // The pre-check skips the PR before spending a view (master §2): no
+    // view, no write, and the read error is logged once.
+    expect(result).toEqual({ consumed: 0, observed: 0, failed: 0 });
+    expect(view).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0][0]).toContain('read error');
+    expect(log.mock.calls[0][0]).toContain(filePath);
+  });
+
+  it('still fails closed when the watch path turns unreadable after the pre-check', async () => {
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const filePath = prWatchFilePath(dir, id);
+    // The pre-check sees no file; the view's side effect plants a directory
+    // at the watch path, so the in-lock read errors (the TOCTOU window the
+    // in-lock error branch still covers).
+    const view = vi.fn(async (url: string) => {
+      mkdirSync(filePath);
+      return okResult(url);
+    });
+    const log = vi.fn();
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, { log }),
+    );
+    expect(result).toEqual({ consumed: 1, observed: 0, failed: 1 });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('read error'));
+  });
+
+  it('logs an invalid watch file and re-initialises it silently', async () => {
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const filePath = prWatchFilePath(dir, id);
+    writeFileSync(filePath, '{');
+    const view = vi.fn(async (url: string) => okResult(url));
+    const log = vi.fn();
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, { log }),
+    );
+    // Master §2: an invalid file initialises silently but logs, so a lost
+    // baseline is distinguishable from a PR with no transitions. The view
+    // is accepted, no transition fires, and the file becomes a valid state.
+    expect(result).toEqual({ consumed: 1, observed: 1, failed: 0 });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0][0]).toContain('invalid watch file');
+    expect(log.mock.calls[0][0]).toContain(filePath);
+    const stored = readPrWatchStateSync(dir, id);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') {
+      expect(stored.state.headSha).toBe('a'.repeat(40));
+      expect(stored.state.pending).toBeUndefined();
+    }
   });
 
   it('does not view a merged binding', async () => {
@@ -878,12 +967,23 @@ describe('runPrWatchObservationTick', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function runtime(cwd: string): WorkspaceRuntime {
+  function runtime(
+    cwd: string,
+    overrides: {
+      trusted?: boolean;
+      primary?: boolean;
+      effectiveEnv?: Record<string, string>;
+      generationGuard?: WorkspaceRuntime['generationGuard'];
+    } = {},
+  ): WorkspaceRuntime {
     return {
       workspaceCwd: cwd,
-      trusted: true,
-      primary: false,
-      env: { effectiveEnv: {} },
+      trusted: overrides.trusted ?? true,
+      primary: overrides.primary ?? false,
+      env: { effectiveEnv: overrides.effectiveEnv ?? {} },
+      ...(overrides.generationGuard !== undefined
+        ? { generationGuard: overrides.generationGuard }
+        : {}),
     } as unknown as WorkspaceRuntime;
   }
 
@@ -931,5 +1031,79 @@ describe('runPrWatchObservationTick', () => {
     expect(result).toEqual({ claimed: false, observed: 0 });
     expect(view).not.toHaveBeenCalled();
     expect(scanMock).not.toHaveBeenCalled();
+  });
+
+  it('hands each workspace its own env and the private watch dir as the view cwd', async () => {
+    const envA = { GH_TOKEN: 'token-a' };
+    const envB = { GH_TOKEN: 'token-b' };
+    scanMock.mockImplementation(async (runtime, out) => {
+      out.push(binding(runtime.workspaceCwd === '/ws-a' ? 42 : 43));
+      return false;
+    });
+    const view = vi.fn(async (url: string) => okResult(url));
+    const result = await runPrWatchObservationTick(
+      [
+        runtime('/ws-a', { effectiveEnv: envA }),
+        runtime('/ws-b', { effectiveEnv: envB }),
+      ],
+      {
+        watchDir: dir,
+        locks,
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now: () => Date.parse(T1),
+      },
+      { intervalMs: 300_000, sweepOffsets: new Map() },
+    );
+    expect(result).toEqual({ claimed: true, observed: 2 });
+    // The cwd is the daemon-private watch dir (never the workspace checkout,
+    // where a planted gh could be resolved), and each workspace's own
+    // effectiveEnv applies to its PRs (master §1).
+    expect(view).toHaveBeenCalledWith(prUrl(42), dir, envA);
+    expect(view).toHaveBeenCalledWith(prUrl(43), dir, envB);
+  });
+
+  it('runs the untrusted primary views with the daemon environment, not its checkout env', async () => {
+    const view = vi.fn(async (url: string) => okResult(url));
+    const result = await runPrWatchObservationTick(
+      [
+        runtime('/ws-primary', {
+          primary: true,
+          trusted: false,
+          effectiveEnv: { GH_TOKEN: 'planted-in-untrusted-checkout' },
+        }),
+      ],
+      {
+        watchDir: dir,
+        locks,
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now: () => Date.parse(T1),
+      },
+      { intervalMs: 300_000, sweepOffsets: new Map() },
+    );
+    expect(result).toEqual({ claimed: true, observed: 1 });
+    // undefined env → ghEnv falls back to the daemon's process.env; the
+    // untrusted checkout's credential must not reach the view (master §1).
+    expect(view).toHaveBeenCalledWith(prUrl(42), dir, undefined);
+  });
+
+  it('does not view a workspace whose generation guard is closed', async () => {
+    const guard = createWorkspaceGenerationGuard();
+    guard.close();
+    const view = vi.fn(async (url: string) => okResult(url));
+    const result = await runPrWatchObservationTick(
+      [runtime('/ws', { generationGuard: guard })],
+      {
+        watchDir: dir,
+        locks,
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now: () => Date.parse(T1),
+      },
+      { intervalMs: 300_000, sweepOffsets: new Map() },
+    );
+    expect(result).toEqual({ claimed: true, observed: 0 });
+    expect(view).not.toHaveBeenCalled();
   });
 });

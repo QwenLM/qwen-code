@@ -276,7 +276,6 @@ export interface ObserveWorkspacePrBindingsOptions {
   listedKeys?: ReadonlySet<string>;
   /** PR keys already viewed this tick, for cross-workspace dedup. */
   viewedThisTick?: Set<string>;
-  cap?: number;
 }
 
 export interface ObserveWorkspacePrBindingsResult {
@@ -322,7 +321,6 @@ export async function observeWorkspacePrBindings(
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const view = deps.viewPullRequest ?? fetchGitHubPullRequestView;
-  const cap = options.cap ?? PR_WATCH_VIEW_CAP;
 
   // Build the unique view set: open bound PRs plus closed PRs the listing
   // did not return; merged is terminal by the newest observation.
@@ -340,6 +338,15 @@ export async function observeWorkspacePrBindings(
         continue;
       }
       const existing = readPrWatchStateSync(deps.watchDir, identity);
+      if (existing.kind === 'error') {
+        // Fail closed before spending a view: master §2 skips a PR whose
+        // watch file cannot be read for the whole tick — no view, no write —
+        // so a corrupt path cannot burn a view slot on every sweep.
+        log(
+          `PR watch: read error for ${existing.filePath}; skipping this tick: ${String(existing.error)}`,
+        );
+        continue;
+      }
       const effectiveState =
         existing.kind === 'state' ? existing.state.state : entry.state;
       if (effectiveState === 'merged') continue;
@@ -363,7 +370,7 @@ export async function observeWorkspacePrBindings(
     // The cap bounds views actually started, not the rotated window: a PR
     // already viewed by another workspace this tick is skipped without
     // consuming the cap (master §1), so unique PRs past it are still observed.
-    if (consumed >= cap) break;
+    if (consumed >= PR_WATCH_VIEW_CAP) break;
     if (options.deadline !== undefined && now() > options.deadline) break;
     if (options.viewedThisTick?.has(target.key)) continue;
     const startedAt = now();
@@ -422,6 +429,13 @@ export async function observeWorkspacePrBindings(
           );
           return;
         }
+        if (read.kind === 'invalid') {
+          // Master §2: an invalid file initialises silently, but log it so a
+          // lost baseline is distinguishable from a PR with no transitions.
+          log(
+            `PR watch: invalid watch file ${read.filePath}; re-initialising it`,
+          );
+        }
         const previous = read.kind === 'state' ? read.state : undefined;
         // A slow view can never roll the baseline back.
         if (
@@ -462,14 +476,6 @@ export interface PrWatchObservationTickDeps {
   watchDir: string;
   locks: PathMutexRegistry;
   allowedHosts: ReadonlySet<string>;
-  /**
-   * Per-workspace view environment. Trusted workspaces use their own
-   * effectiveEnv; the untrusted primary uses the daemon's own environment
-   * (no gh runs in its checkout). Defaults to the workspace's effectiveEnv.
-   */
-  envForWorkspace?: (
-    runtime: WorkspaceRuntime,
-  ) => Readonly<Record<string, string | undefined>>;
   viewPullRequest?: typeof fetchGitHubPullRequestView;
   now?: () => number;
   log?: (message: string) => void;
@@ -535,9 +541,14 @@ export async function runPrWatchObservationTick(
         watchDir: deps.watchDir,
         locks: deps.locks,
         allowedHosts: deps.allowedHosts,
-        env: deps.envForWorkspace
-          ? deps.envForWorkspace(runtime)
-          : runtime.env.effectiveEnv,
+        // Master §1: a workspace's own GH_TOKEN/GH_CONFIG_DIR applies to its
+        // PRs, but the untrusted primary's views run with the daemon's own
+        // environment (undefined → ghEnv falls back to process.env), so a
+        // credential planted in its checkout never authenticates a request.
+        env:
+          runtime.primary && !runtime.trusted
+            ? undefined
+            : runtime.env.effectiveEnv,
         viewPullRequest: deps.viewPullRequest,
         assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
         now,

@@ -48,7 +48,7 @@
 2. **观测扫描** — `observeWorkspacePrBindings(bindings, deps, options)`：
    - 从 scan 的 bindings 构造视图集：open 的绑定 PR 加上精简 listing 未返回的 closed PR；merged 按最新观测为终态。foreign-host 绑定在任何 `gh` 调用前跳过并记一行日志。
    - 将 host 限制在 allowed 集合（规范化小写、去 `www.`）：`github.com`、daemon `gh` 配置 host、以及托管的 GitHub channel 的 web host。
-   - 按绑定 URL 跑 `fetchGitHubPullRequestView`，用 workspace 的 `effectiveEnv` 与 daemon 私有 watch 目录作 `cwd`，带轮转 offset 与 tick deadline。cap（30）约束实际发起的视图数而非轮转窗口：本 tick 已被另一 workspace view 的 PR 被跳过且不占 cap，故跳过前缀之后的独有 PR 仍被观测（主 §1「跳过的 view 不占 cap」）。返回另一 host 或 number 的视图记日志并丢弃，重命名/转移的仓库（同 host 同 number、不同 `owner/repo`）被接受并每 tick 记一次日志（跨 workspace 去重使每个 PR 每 tick 只 view 一次）。每次 view 前断言 workspace 的 generation guard，使退役 generation 不会拿陈旧 env 跑 `gh`。
+   - 按绑定 URL 跑 `fetchGitHubPullRequestView`，用 workspace 的 `effectiveEnv` 与 daemon 私有 watch 目录作 `cwd`，带轮转 offset 与 tick deadline；untrusted primary 的视图改用 daemon 自身环境（主 §1），使其检出里植入的凭据无法为 daemon 请求鉴权。cap（30）约束实际发起的视图数而非轮转窗口：本 tick 已被另一 workspace view 的 PR 被跳过且不占 cap，故跳过前缀之后的独有 PR 仍被观测（主 §1「跳过的 view 不占 cap」）。返回另一 host 或 number 的视图记日志并丢弃，重命名/转移的仓库（同 host 同 number、不同 `owner/repo`）被接受并每 tick 记一次日志（跨 workspace 去重使每个 PR 每 tick 只 view 一次）。每次 view 前断言 workspace 的 generation guard，使退役 generation 不会拿陈旧 env 跑 `gh`。
    - 对每个被接受的视图，在该 PR 的 `PathMutexRegistry` 锁内：读 watch 文件，丢弃起始早于文件 `observedAt` 的观测，跑检测，原子写下一个 state。absent/invalid 以外的读错使该 PR 本 tick 跳过（fail closed）。
    - 返回消耗的视图数（供 timer 轮转）与每 PR 失败隔离。
 

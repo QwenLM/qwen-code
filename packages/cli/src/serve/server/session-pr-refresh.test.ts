@@ -1950,12 +1950,13 @@ describe('startSessionPrRefreshTimer', () => {
     workspaceId: string,
     workspaceCwd: string,
     trusted: boolean,
+    primary: boolean = trusted,
   ): WorkspaceRuntime {
     return {
       workspaceId,
       workspaceCwd,
       sessionRuntimeBaseDir: baseDir,
-      primary: trusted,
+      primary,
       trusted,
       env: { mode: 'parent-process', overlayKeys: [] },
       bridge: { markSessionCatalogChanged: vi.fn() },
@@ -1965,6 +1966,7 @@ describe('startSessionPrRefreshTimer', () => {
   async function seedPendingBinding(
     runtime: WorkspaceRuntime,
     sessionId: string,
+    prNumber = 42,
   ): Promise<string> {
     const service = createWorkspaceRuntimeSessionService(runtime);
     const chatsDir = path.join(
@@ -1987,8 +1989,8 @@ describe('startSessionPrRefreshTimer', () => {
     );
     const prPath = service.getPrSessionPathForArchiveState(sessionId, 'active');
     await upsertSessionPr(prPath, {
-      number: 42,
-      url: 'https://github.com/o/r/pull/42',
+      number: prNumber,
+      url: `https://github.com/o/r/pull/${prNumber}`,
       state: 'open',
     });
     return prPath;
@@ -2083,6 +2085,89 @@ describe('startSessionPrRefreshTimer', () => {
     } finally {
       handle?.dispose();
       await removeTempTree(watchDir);
+    }
+  });
+
+  it('sweeps trusted workspaces and the untrusted primary, never the untrusted non-primary, and rotates the order each tick', async () => {
+    // One primary (untrusted), a trusted non-primary, and an untrusted
+    // non-primary. The filter `trusted || primary` must admit the first two
+    // and exclude the third; each disjunct is load-bearing.
+    const untrustedPrimary = timerRuntime('up', untrustedCwd, false, true);
+    const trustedNonPrimary = timerRuntime('tn', trustedCwd, true, false);
+    const unCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-timer-un-'),
+    );
+    const untrustedNonPrimary = timerRuntime('un', unCwd, false, false);
+    const registry = createWorkspaceRegistry([
+      untrustedPrimary,
+      trustedNonPrimary,
+      untrustedNonPrimary,
+    ]);
+    // Distinct PRs so the per-tick dedup does not collapse the workspaces.
+    await seedPendingBinding(untrustedPrimary, SESSION_A, 42);
+    await seedPendingBinding(trustedNonPrimary, SESSION_B, 43);
+    await seedPendingBinding(untrustedNonPrimary, SESSION_A, 44);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-rotate-'),
+    );
+    let clock = 0;
+    const now = () => clock;
+    // Each view burns 40s, past the 30s half-interval deadline, so only the
+    // FIRST workspace in the rotated order is viewed per tick. Rotation then
+    // decides which workspace that is.
+    const view = vi.fn(async (url: string) => {
+      clock += 40_000;
+      return {
+        kind: 'ok' as const,
+        view: {
+          url,
+          title: 'PR',
+          headSha: 'a'.repeat(40),
+          state: 'open' as const,
+          checks: 'passing' as const,
+          failingChecks: [] as string[],
+        },
+      };
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now,
+      }),
+    });
+    try {
+      // Tick 1: rotation 0 → untrusted primary first, views PR 42.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(1);
+      });
+      // Tick 2: rotation 1 → trusted non-primary first, views PR 43.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(2);
+      });
+      expect(view.mock.calls.map((call) => call[0])).toEqual([
+        'https://github.com/o/r/pull/42',
+        'https://github.com/o/r/pull/43',
+      ]);
+      // The untrusted non-primary's PR 44 is never viewed.
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+      await removeTempTree(unCwd);
     }
   });
 
