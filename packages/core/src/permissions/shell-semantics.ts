@@ -162,10 +162,17 @@ function tokenize(
   let ansiCTruncated = false;
   // Set by the `\c\` case: the next character of the ANSI-C word is literal.
   let ansiCLiteralNext = false;
+  // The second `$` of `$$` (the PID) cannot open `$'…'` or `$"…"`: the quote
+  // after it is an ordinary quote. rule-parser.ts pins the same rule for
+  // segment boundaries, so the tokenizer must agree rather than add a second
+  // reading (#16540 review, R3-1).
+  let dollarPending = false;
   let escaped = false;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
+    const dollarIntroducer: boolean = dollarPending;
+    dollarPending = false;
 
     if (inAnsiC) {
       // The character after a `\c\` operand is literal text: it is neither a
@@ -251,17 +258,18 @@ function tokenize(
     // runs the `commit` subcommand (#16075 review, R8-11).
     if (ch === '$' && !inSingle && !inDouble) {
       const next = nextSignificantIndex(command, i + 1);
-      if (command[next] === "'") {
+      if (command[next] === "'" && !dollarIntroducer) {
         inAnsiC = true;
         ansiCBytes = [];
         i = next;
         continue;
       }
-      if (command[next] === '"') {
+      if (command[next] === '"' && !dollarIntroducer) {
         inDouble = true;
         i = next;
         continue;
       }
+      dollarPending = !dollarIntroducer;
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
@@ -2347,6 +2355,11 @@ function resolveCdTargetCwd(
   const fdCloses = new Set<number>();
   const bares: string[] = [];
   const words = tokenize(command, fdRedirects, fdCloses, bares);
+  // `bares` is index-parallel to the tokens as tokenized, and extractRedirects
+  // filters `words` in place, so read the cd target and its marking from a
+  // snapshot taken first (#16540 review, R3-2).
+  const shellWords = words.slice();
+  const shellBares = bares.slice();
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
 
   if (words[0] === 'popd') return { kind: 'dynamic', redirects };
@@ -2362,26 +2375,35 @@ function resolveCdTargetCwd(
   // `cd -` (previous directory) which is non-static and should bail out.
   let targetIndex = 1;
   while (
-    targetIndex < words.length &&
-    words[targetIndex]!.startsWith('-') &&
-    words[targetIndex] !== '-' &&
-    words[targetIndex] !== '--'
+    targetIndex < shellWords.length &&
+    shellWords[targetIndex]!.startsWith('-') &&
+    shellWords[targetIndex] !== '-' &&
+    shellWords[targetIndex] !== '--'
   ) {
     targetIndex++;
   }
-  if (words[targetIndex] === '--') {
+  if (shellWords[targetIndex] === '--') {
     targetIndex++;
   }
 
-  const target = words[targetIndex] ?? process.env['HOME'];
+  const target = shellWords[targetIndex] ?? process.env['HOME'];
   if (!target || target === '-' || isDynamicShellPath(target)) {
     return { kind: 'dynamic', redirects };
   }
+  const targetBare = shellBares[targetIndex];
+  // A target the shell had to decode (`cd $'\x7e'` is the literal directory
+  // `~`, never $HOME) may not exist at all — bash then fails the cd and the
+  // rest of the segment runs where it already was — so resolve it without
+  // tilde expansion and keep the fail-closed marking.
+  const targetIsDecoded =
+    targetBare !== undefined &&
+    targetBare.length === target.length &&
+    !targetBare.includes('1');
 
   return {
     kind: 'static',
-    cwd: resolvePath(target, cwd),
-    cwdUnknown: cwdUnknown && !isShellAbsolutePath(target),
+    cwd: resolvePath(target, cwd, targetBare),
+    cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
     redirects,
   };
 }

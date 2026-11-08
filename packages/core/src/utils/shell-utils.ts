@@ -2223,7 +2223,19 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
       // fails closed instead of being analysed as literal text
       // (#16540 review, R1-2).
       const payloadRemoval = shellWordQuoteRemoval(commandToken.token);
-      const payloadIsAnsiC = commandToken.token.includes("$'");
+      // Read the resolved word, not the spelling: `$"…"` (locale) and
+      // `$\<newline>'…'` decode to the script bash runs exactly like `$'…'`,
+      // and a substring test on `$'` left those two as raw text, so the writes
+      // bash performs never reached analysisCommand / safetyCommand
+      // (#16540 review, R2-4). A payload that already starts with a plain quote
+      // keeps the path below: quote removal and stripSymmetricQuotes agree on
+      // it and its spawn needs no override.
+      const payloadIsAnsiC =
+        payloadRemoval !== null &&
+        !payloadRemoval.hasExpansion &&
+        payloadRemoval.fullyQuoted &&
+        payloadRemoval.text !== commandToken.token &&
+        !/^["']/.test(commandToken.token);
       if (payloadRemoval?.hasExpansion) {
         if (payloadRemoval.fullyQuoted) {
           return {

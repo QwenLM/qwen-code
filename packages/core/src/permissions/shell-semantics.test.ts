@@ -917,6 +917,44 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
 // ANSI-C content is data. Its operator characters are not operators, its tilde
 // does not expand, its astral characters stay whole, and both permission paths
 // read `\c\` the same way.
+describe('round-3 lexing regressions', () => {
+  it('reads $$ as the PID, so the quote after it is an ordinary quote', () => {
+    // `$$` is the PID: bash closes the word at the second `'` and the `>` is a
+    // real redirect (witnessed with bash 5.3.20 — `echo x $$'a\' > motd1`
+    // exits 0 and the file holds `x <pid>a\`). Lexing `$$'…'` as an ANSI-C
+    // word kept it open through the rest of the line, so the write vanished
+    // (#16540 review, R3-1). Whether the word decodes is not observable here:
+    // `$$` keeps it dynamic either way.
+    expect(across(`echo x $$'a\\' > /etc/motd`)).toEqual([write('/etc/motd')]);
+    expect(across(`cat $$'\\x41' > /tmp/out`)).toEqual([write('/tmp/out')]);
+    // A single `$` still opens the ANSI-C word, and an unterminated one still
+    // swallows the line: bash reports an unexpected EOF and creates nothing.
+    expect(across(`cat $'\\x41' > /tmp/out`)).toEqual([
+      read('/repo/A'),
+      write('/tmp/out'),
+    ]);
+    expect(across(`echo x $'a\\' > /etc/motd`)).toEqual([]);
+  });
+
+  it('resolves a decoded cd target without tilde expansion, and stays uncertain', () => {
+    // bash does not expand a tilde it had to decode: `cd $'\x7e'` fails with
+    // "cd: ~: No such file or directory" and the next command writes into the
+    // ORIGINAL cwd; when a literal ./~ does exist, the write lands inside it
+    // (both witnessed). Reading $HOME into the path was wrong in both cases and
+    // dropped the fail-closed marking the merge base kept (#16540 review, R3-2).
+    expect(across(`cd $'\\x7e' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+    expect(across(`cd '~' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+    // A plain absolute target is still certain.
+    expect(across('cd /tmp ; cat > settings.json')).toEqual([
+      write('/tmp/settings.json'),
+    ]);
+  });
+});
+
 describe('decoded ANSI-C words stay data', () => {
   it('does not read a decoded operator as a redirect', () => {
     // bash creates /tmp/t and cat opens a file literally named `>`, so the write

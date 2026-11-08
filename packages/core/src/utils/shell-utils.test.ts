@@ -1104,6 +1104,28 @@ describe('normalizeMonitorCommand', () => {
     );
   });
 
+  // R2-4 (#16540 review, round 3): the monitor projection kept its own spelling
+  // test, so the same two forms came back RAW as analysisCommand/safetyCommand
+  // and op extraction on them returned nothing — the write bash performs was
+  // invisible to the rule engine (witnessed: `sh -c $"cat > /tmp/…"` and
+  // `bash -c $\<newline>'cat > /tmp/…'` both create the file, rc 0).
+  it('projects a split or locale payload into the monitor commands', () => {
+    for (const command of [
+      "bash -c $\\\n'cat > /etc/motd'",
+      'sh -c $"cat > /etc/motd"',
+    ]) {
+      const normalized = normalizeMonitorCommand(command);
+      expect(normalized.safetyCommand).toBe('cat > /etc/motd');
+      expect(normalized.analysisCommand).toBe('cat > /etc/motd');
+      // The spawn stays exactly as written.
+      expect(normalized.spawnCommand).toBe(command);
+    }
+    // A locale word is still never read as the `--` terminator.
+    expect(
+      normalizeMonitorCommand(`sh -c $"\\x2d\\x2d" 'ls -l'`).analysisCommand,
+    ).not.toBe('--');
+  });
+
   // R2-3 (#16540 review): inside `$'…'` a backslash escapes the next character,
   // so `\'` does not close the payload word.
   it('unwraps an ANSI-C payload that contains an escaped quote', () => {
