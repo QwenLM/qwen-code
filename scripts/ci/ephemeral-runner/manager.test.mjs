@@ -214,7 +214,9 @@ test('creates a new runner and container per job and keeps GitHub token out of D
   );
   const registeredNames = requests.map((c) => JSON.parse(c.options.input).name);
   assert.ok(
-    registeredNames.every((name) => /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name)),
+    registeredNames.every((name) =>
+      /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name),
+    ),
   );
   assert.notEqual(registeredNames[0], registeredNames[1]);
   assert.notEqual(
@@ -1082,7 +1084,9 @@ test('a registration retry uses a fresh unique name untouched by a leftover', as
   await assert.rejects(manager.cycle(1), (error) => error.status === 422);
   await manager.cycle(1);
   assert.equal(names.length, 2);
-  assert.ok(names.every((name) => /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name)));
+  assert.ok(
+    names.every((name) => /^ecs-qwen-trial-01-[0-9a-f]{8}$/.test(name)),
+  );
   assert.notEqual(
     names[0],
     names[1],
