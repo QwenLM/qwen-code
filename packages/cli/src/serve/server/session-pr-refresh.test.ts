@@ -38,6 +38,7 @@ import {
   SessionArchiveCoordinator,
 } from './session-archive.js';
 import * as sessionListModule from './session-list.js';
+import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   refreshWorkspaceSessionPrStates,
   resolveSessionPrRefreshIntervalMs,
@@ -2030,6 +2031,59 @@ describe('startSessionPrRefreshTimer', () => {
     // PR-watch seam (no claim, no view, no watch-file write).
     expect(getPrWatchDeps).not.toHaveBeenCalled();
     handle?.dispose();
+  });
+
+  it('observes before a slow refresh consumes the tick deadline', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-timer-'),
+    );
+    let clock = 0;
+    const now = () => clock;
+    const view = vi.fn(async (url: string) => ({
+      kind: 'ok' as const,
+      view: {
+        url,
+        title: 'PR 42',
+        headSha: 'a'.repeat(40),
+        state: 'open' as const,
+        checks: 'passing' as const,
+        failingChecks: [] as string[],
+      },
+    }));
+    // The old refresh's slim listing burns 40s, past the 30s observation
+    // deadline (1-minute interval). Observation must run first to get views.
+    fetchGitHubPullRequestsMock.mockImplementation(async () => {
+      clock += 40_000;
+      return { kind: 'ok', pullRequests: [] };
+    });
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalled();
+      });
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
   });
 
   it('sweeps only trusted workspaces after the first-run delay', async () => {

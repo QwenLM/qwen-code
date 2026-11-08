@@ -493,10 +493,16 @@ export function startSessionPrRefreshTimer(deps: {
   now?: () => number;
   /**
    * Resolved per tick for the daemon PR-state watch observation. Only read
-   * when {@link SESSION_PR_WATCH_OBSERVATION_ENABLED} is on; the daemon parks
-   * the watch dir, lock registry and allowed hosts on the serve app.
+   * when the observation switch is on; the daemon parks the watch dir, lock
+   * registry and allowed hosts on the serve app.
    */
   getPrWatchDeps?: () => PrWatchObservationTickDeps | undefined;
+  /**
+   * Test seam overriding {@link SESSION_PR_WATCH_OBSERVATION_ENABLED} so a
+   * fixture can exercise the on path. The daemon omits it, so production
+   * stays governed by the internal constant (off).
+   */
+  observationEnabled?: boolean;
 }): { dispose(): void } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
@@ -518,11 +524,46 @@ export function startSessionPrRefreshTimer(deps: {
     if (running) return;
     running = true;
     try {
-      // Anchor the watch deadline at the tick start (master §1), before the
-      // state refresh, so a slow refresh cannot push it past the interval.
+      // Anchor the watch deadline at the tick start (master §1).
       const tickStart = (deps.now ?? Date.now)();
       const archiveCoordinator = deps.getArchiveCoordinator?.();
       const live = deps.workspaceRegistry.listAll();
+      const liveCwds = new Set(live.map((r) => r.workspaceCwd));
+      // Daemon PR-state watch observation (master design §1), gated off in
+      // this increment. It runs BEFORE the state refresh so the observation
+      // gets the tick-start deadline window even when the refresh is slow:
+      // a refresh that outruns half the interval would otherwise leave the
+      // observation no time and starve every workspace's views. With the
+      // switch off this block is inert — no gh pr view, no watch-file write,
+      // no ownership claim — and the refresh below is unchanged. The
+      // workspace order rotates per tick so a persistent deadline overrun
+      // starves no workspace; the untrusted primary is included for views
+      // only (its env resolver runs no gh in the checkout).
+      if (deps.observationEnabled ?? SESSION_PR_WATCH_OBSERVATION_ENABLED) {
+        const watchDeps = deps.getPrWatchDeps?.();
+        if (watchDeps) {
+          const watchWorkspaces = live.filter((r) => r.trusted || r.primary);
+          const rotation = watchTickCount % Math.max(watchWorkspaces.length, 1);
+          const ordered = [
+            ...watchWorkspaces.slice(rotation),
+            ...watchWorkspaces.slice(0, rotation),
+          ];
+          watchTickCount += 1;
+          try {
+            await runPrWatchObservationTick(ordered, watchDeps, {
+              intervalMs,
+              sweepOffsets: githubSweepOffsets,
+              deadline: tickStart + intervalMs / 2,
+            });
+          } catch (error) {
+            if (error instanceof DaemonDrainingError) return;
+            // A failed observation tick must not starve the state refresh.
+          }
+          for (const cwd of [...githubSweepOffsets.keys()]) {
+            if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
+          }
+        }
+      }
       for (const runtime of live) {
         if (!runtime.trusted) continue;
         const sweepStart = aoneSweepOffsets.get(runtime.workspaceCwd) ?? 0;
@@ -556,40 +597,8 @@ export function startSessionPrRefreshTimer(deps: {
       // Prune offsets for workspaces no longer in the registry (removed or
       // never Aone): the daemon runs indefinitely, so an entry per
       // ever-seen cwd would grow without bound.
-      const liveCwds = new Set(live.map((r) => r.workspaceCwd));
       for (const cwd of [...aoneSweepOffsets.keys()]) {
         if (!liveCwds.has(cwd)) aoneSweepOffsets.delete(cwd);
-      }
-      // Daemon PR-state watch observation (master design §1), gated off in
-      // this increment. With the switch off this block is inert: no gh pr
-      // view, no watch-file write, no ownership claim, and the refresh above
-      // is unchanged. The workspace order rotates per tick so a persistent
-      // deadline overrun starves no workspace; the untrusted primary is
-      // included for views only (its env resolver runs no gh in the checkout).
-      if (SESSION_PR_WATCH_OBSERVATION_ENABLED) {
-        const watchDeps = deps.getPrWatchDeps?.();
-        if (watchDeps) {
-          const watchWorkspaces = live.filter((r) => r.trusted || r.primary);
-          const rotation = watchTickCount % Math.max(watchWorkspaces.length, 1);
-          const ordered = [
-            ...watchWorkspaces.slice(rotation),
-            ...watchWorkspaces.slice(0, rotation),
-          ];
-          watchTickCount += 1;
-          try {
-            await runPrWatchObservationTick(ordered, watchDeps, {
-              intervalMs,
-              sweepOffsets: githubSweepOffsets,
-              deadline: tickStart + intervalMs / 2,
-            });
-          } catch (error) {
-            if (error instanceof DaemonDrainingError) return;
-            // A failed observation tick must not starve the state refresh.
-          }
-          for (const cwd of [...githubSweepOffsets.keys()]) {
-            if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
-          }
-        }
       }
     } finally {
       running = false;

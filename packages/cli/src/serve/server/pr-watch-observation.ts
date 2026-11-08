@@ -354,14 +354,17 @@ export async function observeWorkspacePrBindings(
 
   const all = [...targets.values()];
   const start = all.length === 0 ? 0 : (options.sweepStart ?? 0) % all.length;
-  const window = [...all.slice(start), ...all.slice(0, start)].slice(0, cap);
+  const rotated = [...all.slice(start), ...all.slice(0, start)];
 
   let consumed = 0;
   let observed = 0;
   let failed = 0;
-  for (const target of window) {
+  for (const target of rotated) {
+    // The cap bounds views actually started, not the rotated window: a PR
+    // already viewed by another workspace this tick is skipped without
+    // consuming the cap (master §1), so unique PRs past it are still observed.
+    if (consumed >= cap) break;
     if (options.deadline !== undefined && now() > options.deadline) break;
-    // A PR viewed by another workspace's sweep this tick is not viewed again.
     if (options.viewedThisTick?.has(target.key)) continue;
     consumed += 1;
     const startedAt = now();

@@ -48,14 +48,14 @@
 2. **观测扫描** — `observeWorkspacePrBindings(runtime, bindings, deps)`：
    - 从 scan 的 bindings 构造视图集：open 的绑定 PR 加上精简 listing 未返回的 closed PR；merged 按最新观测为终态。foreign-host 绑定在任何 `gh` 调用前跳过并记一行日志。
    - 将 host 限制在 allowed 集合（规范化小写、去 `www.`）：`github.com`、daemon `gh` 配置 host、以及托管的 GitHub channel 的 web host。
-   - 按绑定 URL 跑 `fetchGitHubPullRequestView`，用 workspace 的 `effectiveEnv` 与 daemon 私有 watch 目录作 `cwd`，cap 30 带轮转 offset 与 tick deadline；返回另一 host 或 number 的视图记日志并丢弃，重命名/转移的仓库（同 host 同 number、不同 `owner/repo`）被接受并每 tick 记一次日志（跨 workspace 去重使每个 PR 每 tick 只 view 一次）。每次 view 前断言 workspace 的 generation guard，使退役 generation 不会拿陈旧 env 跑 `gh`。
+   - 按绑定 URL 跑 `fetchGitHubPullRequestView`，用 workspace 的 `effectiveEnv` 与 daemon 私有 watch 目录作 `cwd`，带轮转 offset 与 tick deadline。cap（30）约束实际发起的视图数而非轮转窗口：本 tick 已被另一 workspace view 的 PR 被跳过且不占 cap，故跳过前缀之后的独有 PR 仍被观测（主 §1「跳过的 view 不占 cap」）。返回另一 host 或 number 的视图记日志并丢弃，重命名/转移的仓库（同 host 同 number、不同 `owner/repo`）被接受并每 tick 记一次日志（跨 workspace 去重使每个 PR 每 tick 只 view 一次）。每次 view 前断言 workspace 的 generation guard，使退役 generation 不会拿陈旧 env 跑 `gh`。
    - 对每个被接受的视图，在该 PR 的 `PathMutexRegistry` 锁内：读 watch 文件，丢弃起始早于文件 `observedAt` 的观测，跑检测，原子写下一个 state。absent/invalid 以外的读错使该 PR 本 tick 跳过（fail closed）。
    - 返回消耗的视图数（供 timer 轮转）与每 PR 失败隔离。
 
 ### `session-pr-refresh.ts` 与 timer 的接线
 
 - 一个内部常量开关（off）门控观测路径；关闭时 `refreshWorkspaceSessionPrStates` 与 timer 的行为逐字节不变。
-- timer 计算一个锚定在 tick 起点的 tick 级 deadline（refresh interval 的一半）、每 tick 轮转 workspace 顺序、按消耗视图数推进每 workspace 的 GitHub offset、并仅以视图扫描 untrusted primary。这些仅在开关开启时生效。
+- timer 计算一个锚定在 tick 起点的 tick 级 deadline（refresh interval 的一半），并在状态 refresh 之前跑观测阶段，使耗时超过半个 interval 的 refresh 无法饿死观测的 deadline 窗口。它每 tick 轮转 workspace 顺序、按消耗视图数推进每 workspace 的 GitHub offset、并仅以视图扫描 untrusted primary。这些仅在开关开启时生效。
 - 开关开启时跑 owner-record claim（从 config 读取有效事件集延后）；不持有 record 的 daemon 不观测任何东西。开关关闭时不尝试 claim。
 
 ### 涉及文件

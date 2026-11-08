@@ -779,6 +779,26 @@ describe('observeWorkspacePrBindings', () => {
       expect.stringContaining('pending overflow'),
     );
   });
+
+  it('does not let dedup-skipped PRs consume the view cap', async () => {
+    const bindings = Array.from({ length: 40 }, (_, i) => binding(i + 1));
+    const view = vi.fn(async (url: string) => okResult(url));
+    // The first 30 PRs were already viewed by another workspace this tick.
+    const viewedThisTick = new Set<string>();
+    for (let n = 1; n <= 30; n += 1) {
+      const id = prWatchIdentityFromUrl(prUrl(n))!;
+      viewedThisTick.add(`${id.host}/${id.repo}#${id.number}`);
+    }
+    const result = await observeWorkspacePrBindings(bindings, makeDeps(view), {
+      viewedThisTick,
+      sweepStart: 0,
+    });
+    // The 10 unique PRs past the skipped prefix are still observed; the
+    // skipped views do not count against the cap (master §1).
+    expect(result.consumed).toBe(10);
+    expect(result.observed).toBe(10);
+    expect(view).toHaveBeenCalledTimes(10);
+  });
 });
 
 describe('runPrWatchObservationTick', () => {
