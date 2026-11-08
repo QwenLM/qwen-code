@@ -7,6 +7,83 @@
 import { describe, expect, it } from 'vitest';
 import { safeTarget } from './paths.js';
 
+describe('safeTarget — the length cap', () => {
+  it('caps a legal-but-deep path instead of throwing ENAMETOOLONG', () => {
+    // Every component here is well under NAME_MAX; only the FLATTENED
+    // spelling is long. Uncapped it became a 268-character filename once
+    // `tmpFile` wrapped it, so `writeFileSync` threw and the capture died
+    // before it wrote the plan — every round, for that target and no other.
+    // The class is new to the repo-relative target: a basename never got
+    // near the ceiling.
+    const deep = `${'d'.repeat(230)}/x.ts`;
+    const stem = safeTarget(deep);
+    expect(stem.length).toBe(64);
+    // The wrapped filename clears NAME_MAX with room to spare.
+    expect(`qwen-review-${stem}-cache-candidate.json`.length).toBeLessThan(255);
+  });
+
+  it('keeps two deep paths with a shared head apart', () => {
+    // Ordinary in a monorepo, and a bare cut would give them one cache, one
+    // set of artifacts, and each other's anchor.
+    const head = 'a'.repeat(200);
+    expect(safeTarget(`${head}/one.ts`)).not.toBe(safeTarget(`${head}/two.ts`));
+  });
+
+  it('is deterministic, and leaves a short target byte-identical', () => {
+    // The naming is a two-sided contract — the parent polls for a name the
+    // child writes — so the cap must not move any slug that was not broken.
+    expect(safeTarget('src/foo.ts')).toBe('src_foo.ts');
+    const deep = `${'d'.repeat(230)}/x.ts`;
+    expect(safeTarget(deep)).toBe(safeTarget(deep));
+  });
+
+  it('leaves capped stems mutually prefix-free, for the cleanup sweep', () => {
+    // `cleanup` filters `startsWith(tmpPrefix(target))`. Every capped stem is
+    // exactly 64 characters, so none can be a strict prefix of another.
+    const a = safeTarget('x'.repeat(300));
+    const b = safeTarget('y'.repeat(300));
+    expect(a.length).toBe(b.length);
+    expect(a.startsWith(b)).toBe(false);
+    expect(b.startsWith(a)).toBe(false);
+  });
+
+  it('keeps capped stems prefix-free against UNCAPPED stems too', () => {
+    // R17-6 entrance 2: with `-` as the cap joiner, every exactly-55-char
+    // uncapped stem was a strict sweep-prefix of every capped stem sharing
+    // its head — `qwen-review-<head55>-` matched the capped twin's whole
+    // family and cleanup deleted its live artifacts mid-round. The joiner is
+    // `~`, which sits OUTSIDE the token alphabet (the flatten maps a literal
+    // `~` in the input to `_`), so no uncapped stem can spell a capped
+    // stem's head-plus-joiner.
+    const head = 'h'.repeat(55);
+    const capped = safeTarget(`${head}${'x'.repeat(300)}`);
+    expect(capped.length).toBe(64);
+    expect(capped.charAt(55)).toBe('~');
+    const uncapped = safeTarget(head);
+    expect(uncapped).toBe(head);
+    expect(capped.startsWith(`${uncapped}-`)).toBe(false);
+    // A literal `~` in the INPUT cannot forge the joiner — unless it spells
+    // the full capped shape, which the idempotence check below accepts on
+    // purpose.
+    expect(safeTarget(`${head}~nothexy!`)).toBe(`${head}_nothexy_`);
+  });
+
+  it('is idempotent over its own outputs — tmpFile applies it a second time', () => {
+    // R18-1: `tmpFile`/`tmpPrefix` re-apply safeTarget to already-derived
+    // tokens, and the second flatten rewrote the capped `~` to `_` while
+    // run.ts's pins interpolated the single-flatten token raw — the child
+    // wrote `<head>_<digest>-stop.json`, the parent polled `<head>~<digest>`
+    // and every deep-path round exited 1 "Review did not complete": the
+    // exact never-matching-poll regression this PR exists to kill.
+    const deep = `${'d'.repeat(230)}/x.ts`;
+    const once = safeTarget(deep);
+    expect(once).toContain('~');
+    expect(safeTarget(once)).toBe(once);
+    // Short tokens were always idempotent; the cap must not change that.
+    expect(safeTarget(safeTarget('src/foo.ts'))).toBe(safeTarget('src/foo.ts'));
+  });
+});
+
 describe('safeTarget', () => {
   it('flattens separators but preserves dotted slugs', () => {
     expect(safeTarget('src/foo.ts')).toBe('src_foo.ts');

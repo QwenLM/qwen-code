@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { sessionIdContext, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 
 const mocks = vi.hoisted(() => ({
@@ -40,11 +40,15 @@ import {
 const MS_PER_MINUTE = 60 * 1000;
 const MS_PER_HOUR = 60 * MS_PER_MINUTE;
 
-function makeConfig(logDir: string): Config {
+function makeConfig(
+  logDir: string,
+  sessionId = 'housekeeping-session',
+): Config {
   return {
     getContentGeneratorConfig: () => ({ openAILoggingDir: logDir }),
     getModelsConfig: () => ({ getGenerationConfig: () => ({}) }),
     getWorkingDir: () => process.cwd(),
+    getSessionId: () => sessionId,
   } as unknown as Config;
 }
 
@@ -144,6 +148,56 @@ describe('non-interactive OpenAI log housekeeping', () => {
     expect(mocks.cleanupOldOpenAILogs.mock.calls[1]?.[0].logDir).toBe(
       secondDir,
     );
+  });
+
+  it('keeps process-scoped cleanup outside session contexts', async () => {
+    const firstDir = path.join(qwenHome, 'first');
+    const secondDir = path.join(qwenHome, 'second');
+    const observedContexts: Array<string | undefined> = [];
+    mocks.cleanupOldOpenAILogs.mockImplementation(async () => {
+      observedContexts.push(sessionIdContext.getStore());
+      return { removed: 0, errors: 0, completed: true };
+    });
+
+    sessionIdContext.run('session-a', () => {
+      startNonInteractiveOpenAILogHousekeeping(
+        makeConfig(firstDir, 'session-a'),
+        makeSettings(),
+      );
+    });
+    sessionIdContext.run('session-b', () => {
+      startNonInteractiveOpenAILogHousekeeping(
+        makeConfig(secondDir, 'session-b'),
+        makeSettings(),
+      );
+    });
+
+    await vi.waitFor(() => expect(observedContexts).toHaveLength(2));
+    expect(observedContexts).toEqual([undefined, undefined]);
+  });
+
+  it('keeps a failing start outside the spawning session context', async () => {
+    // Pins the START-side sessionIdContext.exit: production starts
+    // housekeeping from inside a session's context, and a target-resolution
+    // failure there logs through the module debugLogger — that error line
+    // must not route into the spawning session's debug file.
+    const observed: Array<string | undefined> = [];
+    const throwingConfig = {
+      getContentGeneratorConfig: () => {
+        observed.push(sessionIdContext.getStore());
+        throw new Error('target resolution failed');
+      },
+      getModelsConfig: () => ({ getGenerationConfig: () => ({}) }),
+      getWorkingDir: () => process.cwd(),
+      getSessionId: () => 'session-a',
+    } as unknown as Config;
+
+    sessionIdContext.run('session-a', () => {
+      startNonInteractiveOpenAILogHousekeeping(throwingConfig, makeSettings());
+    });
+
+    expect(observed).toEqual([undefined]);
+    expect(mocks.cleanupOldOpenAILogs).not.toHaveBeenCalled();
   });
 
   it('uses ModelsConfig as the fallback for the CLI logging directory', async () => {

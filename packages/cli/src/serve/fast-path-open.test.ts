@@ -17,6 +17,7 @@ const originalSystemDefaultsPath =
 const originalTrustedFoldersPath =
   process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
 const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+const originalSettingsMarker = process.env['FAST_PATH_OPEN_SETTINGS_MARKER'];
 
 describe('serve fast path --open import boundary', () => {
   let tempQwenHome: string | undefined;
@@ -74,6 +75,11 @@ describe('serve fast path --open import boundary', () => {
     } else {
       process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
     }
+    if (originalSettingsMarker === undefined) {
+      delete process.env['FAST_PATH_OPEN_SETTINGS_MARKER'];
+    } else {
+      process.env['FAST_PATH_OPEN_SETTINGS_MARKER'] = originalSettingsMarker;
+    }
     if (tempQwenHome) {
       fs.rmSync(tempQwenHome, { recursive: true, force: true });
       tempQwenHome = undefined;
@@ -110,7 +116,13 @@ describe('serve fast path --open import boundary', () => {
       '--no-web',
     ]);
 
-    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    // The chain before runQwenServe is called spans dynamic imports
+    // (fast-path-settings.js, run-qwen-serve.js) and fs-bound settings/trust
+    // bootstrap; vi.waitFor's 1s default expires under CI contention before
+    // the chain reaches the call. Give the poll a real wall-clock budget.
+    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
     expect(runQwenServe).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ deferRuntimeUntilFirstHealth: false }),
@@ -119,7 +131,9 @@ describe('serve fast path --open import boundary', () => {
     expect(serveCommandImported).toBe(false);
 
     resolveRuntime?.();
-    await vi.waitFor(() => expect(openBrowser).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(openBrowser).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
     expect(serveCommandImported).toBe(true);
   });
 
@@ -185,9 +199,11 @@ describe('serve fast path --open import boundary', () => {
     useTempQwenHome();
     fs.writeFileSync(
       path.join(tempQwenHome!, 'settings.json'),
-      JSON.stringify({ env: { QWEN_SERVER_TOKEN: 'from-settings' } }),
+      JSON.stringify({
+        env: { FAST_PATH_OPEN_SETTINGS_MARKER: 'from-settings' },
+      }),
     );
-    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_OPEN_SETTINGS_MARKER'];
 
     const runtimeReady = new Promise<void>(() => undefined);
     const runQwenServe = vi.fn(
@@ -197,7 +213,9 @@ describe('serve fast path --open import boundary', () => {
       }),
     );
     const applyOpenWithAuth = vi.fn(() => {
-      expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-settings');
+      expect(process.env['FAST_PATH_OPEN_SETTINGS_MARKER']).toBe(
+        'from-settings',
+      );
     });
     vi.doMock('./run-qwen-serve.js', () => ({ runQwenServe }));
     vi.doMock('./open-with-auth.js', () => ({
@@ -300,7 +318,9 @@ describe('serve fast path --open import boundary', () => {
       '--no-web',
     ]);
 
-    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
     expect(runQwenServe).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ deferRuntimeUntilFirstHealth: false }),

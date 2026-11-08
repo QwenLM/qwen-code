@@ -18,6 +18,7 @@ import { createServeApp } from '../server.js';
 import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
+  type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
@@ -32,12 +33,14 @@ interface Harness {
   workspace: string;
   scratch: string;
   events: BridgeEvent[];
+  fsFactory: WorkspaceFileSystemFactory;
   app: ReturnType<typeof createServeApp>;
 }
 
 async function makeHarness(opts?: {
   trusted?: boolean;
   token?: string;
+  hostname?: string;
   generationGuard?: { assertOpen(): void };
   workspaceName?: string;
 }): Promise<Harness> {
@@ -58,11 +61,16 @@ async function makeHarness(opts?: {
     ...(opts?.generationGuard ? { generationGuard: opts.generationGuard } : {}),
   });
   const app = createServeApp(
-    { ...baseOpts, workspace, token: opts?.token },
+    {
+      ...baseOpts,
+      workspace,
+      token: opts?.token,
+      hostname: opts?.hostname ?? baseOpts.hostname,
+    },
     undefined,
-    { fsFactory },
+    { fsFactory, primaryWorkspaceTrusted: opts?.trusted ?? true },
   );
-  return { workspace, scratch, events, app };
+  return { workspace, scratch, events, app, fsFactory };
 }
 
 async function teardown(h: Harness): Promise<void> {
@@ -160,15 +168,36 @@ describe('POST /file/write', () => {
   });
   afterEach(async () => teardown(h));
 
-  it('requires a token even on loopback no-token defaults', async () => {
+  it('writes through the trusted-loopback primary listener without a token', async () => {
     await teardown(h);
     h = await makeHarness();
     const res = await request(h.app)
       .post('/file/write')
       .set('Host', loopbackHost())
       .send({ path: 'a.txt', content: 'x', mode: 'create' });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      kind: 'file_write',
+      path: 'a.txt',
+      created: true,
+      hash: rawHash('x'),
+    });
+    expect(await fsp.readFile(path.join(h.workspace, 'a.txt'), 'utf8')).toBe(
+      'x',
+    );
+  });
+
+  it('denies a non-trusted tokenless embed before writing', async () => {
+    await teardown(h);
+    h = await makeHarness({ hostname: '192.0.2.1' });
+    const res = await request(h.app)
+      .post('/file/write')
+      .send({ path: 'denied.txt', content: 'x', mode: 'create' });
     expect(res.status).toBe(401);
     expect(res.body.code).toBe('token_required');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'denied.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('creates a text file with no-store headers', async () => {
@@ -262,6 +291,66 @@ describe('POST /file/write', () => {
     expect(ok.body.hash).toBe(rawHash('new'));
     expect(await fsp.readFile(target, 'utf-8')).toBe('new');
   });
+
+  it.each([false, true])(
+    'refuses create through a symlink when its target exists=%s',
+    async (targetExists) => {
+      const target = path.join(h.workspace, 'fresh.txt');
+      const alias = path.join(h.workspace, 'alias.txt');
+      if (targetExists) await fsp.writeFile(target, 'keep');
+      await fsp.symlink('fresh.txt', alias, 'file');
+      const result = await request(h.app)
+        .post('/file/write')
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: 'alias.txt', content: '', mode: 'create' });
+      expect(result.status).toBe(400);
+      expect(result.body.errorKind).toBe('symlink_escape');
+      expect((await fsp.lstat(alias)).isSymbolicLink()).toBe(true);
+      expect(await fsp.readlink(alias)).toBe('fresh.txt');
+      if (targetExists) expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+      else
+        await expect(fsp.stat(target)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+    },
+  );
+
+  it('retains replace-mode resolution through an existing in-workspace symlink', async () => {
+    const target = path.join(h.workspace, 'original.txt');
+    const alias = path.join(h.workspace, 'alias.txt');
+    await fsp.writeFile(target, 'old');
+    await fsp.symlink('original.txt', alias, 'file');
+    const result = await request(h.app)
+      .post('/file/write')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({
+        path: 'alias.txt',
+        content: 'new',
+        mode: 'replace',
+        expectedHash: rawHash('old'),
+      });
+    expect(result.status).toBe(200);
+    expect(result.body.path).toBe('original.txt');
+    expect(await fsp.readFile(target, 'utf8')).toBe('new');
+    expect((await fsp.lstat(alias)).isSymbolicLink()).toBe(true);
+  });
+
+  it.each(['.', 'folder/', 'name\0', 'bad.../file.txt'])(
+    'rejects raw invalid create path %j',
+    async (input) => {
+      const result = await request(h.app)
+        .post('/file/write')
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: input, content: '', mode: 'create' });
+      expect(result.status).toBe(400);
+      await expect(
+        fsp.stat(path.join(h.workspace, 'folder')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
 
   it('returns parse_error for malformed bodies', async () => {
     const res = await request(h.app)
@@ -804,7 +893,7 @@ describe('POST /file/upload', () => {
     expect(res.body.errorKind).toBe('untrusted_workspace');
   });
 
-  it('requires a token', async () => {
+  it('uploads through trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness();
     const res = await request(h.app)
@@ -813,7 +902,29 @@ describe('POST /file/upload', () => {
       .set('Content-Type', 'application/octet-stream')
       .query({ path: 'a.bin' })
       .send(Buffer.from('x'));
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      kind: 'file_upload',
+      path: 'a.bin',
+    });
+    expect(await fsp.readFile(path.join(h.workspace, 'a.bin'), 'utf8')).toBe(
+      'x',
+    );
+  });
+
+  it('denies a non-trusted tokenless embed before uploading', async () => {
+    await teardown(h);
+    h = await makeHarness({ hostname: '192.0.2.1' });
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Content-Type', 'application/octet-stream')
+      .query({ path: 'denied.bin' })
+      .send(Buffer.from('x'));
     expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'denied.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('rejects "." and ".." basenames with parse_error', async () => {
@@ -1455,5 +1566,95 @@ describe('fileUploadBodyParser 413 (oversized buffered body)', () => {
       .send(Buffer.from('x'));
     expect(res.status).toBe(415);
     expect(res.text).not.toContain('file_too_large');
+  });
+});
+
+describe('POST /workspaces/:workspace/file/delete', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness({ token: 'secret' });
+  });
+  afterEach(async () => teardown(h));
+  const endpoint = (workspace: string) =>
+    `/workspaces/${encodeURIComponent(workspace)}/file/delete`;
+
+  it('deletes a regular file through the qualified runtime', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file.txt'), 'delete me');
+    const res = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'file.txt' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ kind: 'file_delete', path: 'file.txt' });
+    expect(
+      await fsp.stat(path.join(h.workspace, 'file.txt')).catch(() => null),
+    ).toBeNull();
+  });
+
+  it('requires mutation auth and never deletes on an unknown workspace', async () => {
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    const denied = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .send({ path: 'keep.txt' });
+    expect(denied.status).toBe(401);
+    const unknown = await request(h.app)
+      .post(endpoint('unknown'))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'keep.txt' });
+    expect(unknown.status).toBe(400);
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('returns 422 without deleting when the runtime factory lacks delete support', async () => {
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    const fs = h.fsFactory.forRequest({ route: 'TEST /unsupported' });
+    fs.deleteFile = undefined;
+    h.fsFactory.forRequest = () => fs;
+    const res = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'keep.txt' });
+    expect(res.status).toBe(422);
+    expect(res.body.errorKind).toBe('parse_error');
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('rejects invalid bodies, directories and symlinks', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'folder'));
+    await fsp.writeFile(path.join(h.workspace, 'keep.txt'), 'keep');
+    await fsp.symlink(
+      path.join(h.workspace, 'keep.txt'),
+      path.join(h.workspace, 'link'),
+    );
+    for (const [filePath, status, errorKind] of [
+      [null, 400, 'parse_error'],
+      ['', 400, 'parse_error'],
+      ['.', 400, 'parse_error'],
+      ['folder', 400, 'parse_error'],
+      ['link', 400, 'symlink_escape'],
+      ['a\0b.txt', 400, 'parse_error'],
+      ['file.', 400, 'parse_error'],
+      ['missing.txt', 404, 'path_not_found'],
+    ]) {
+      const res = await request(h.app)
+        .post(endpoint(h.workspace))
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: filePath });
+      expect(res.status).toBe(status);
+      expect(res.body.errorKind).toBe(errorKind);
+    }
+    expect(await fsp.readFile(path.join(h.workspace, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(
+      (await fsp.lstat(path.join(h.workspace, 'link'))).isSymbolicLink(),
+    ).toBe(true);
   });
 });

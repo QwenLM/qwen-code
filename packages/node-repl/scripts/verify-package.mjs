@@ -48,6 +48,12 @@ function run(command, args, options = {}) {
 }
 
 const outputDirectory = path.resolve(valueAfter('--output-dir'));
+const localDependencies = ['--sdk-tarball', '--browser-tarball'].flatMap(
+  (flag) => {
+    const index = process.argv.indexOf(flag);
+    return index < 0 ? [] : [path.resolve(valueAfter(flag))];
+  },
+);
 const manifest = JSON.parse(
   readFileSync(path.join(packageRoot, 'package.json'), 'utf8'),
 );
@@ -156,6 +162,7 @@ try {
     [
       'install',
       tarball,
+      ...localDependencies,
       '--no-audit',
       '--no-fund',
       `--registry=${npmRegistry}`,
@@ -182,7 +189,6 @@ try {
   if (!existsSync(serverEntry)) {
     throw new Error('clean install is missing the Node REPL entry point');
   }
-
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverEntry],
@@ -194,30 +200,42 @@ try {
   });
   try {
     await client.connect(transport);
+    const instructions = client.getInstructions() ?? '';
+    if (
+      instructions.length === 0 ||
+      instructions.length >= 256 ||
+      !instructions.includes('runtime documentation') ||
+      instructions.includes('Computer Use')
+    ) {
+      throw new Error(
+        'MCP initialize instructions are not the minimal Node REPL contract',
+      );
+    }
     const tools = await client.listTools();
     const names = tools.tools.map((tool) => tool.name).sort();
-    if (
-      names.join(',') !==
-      'node_repl,node_repl_add_node_module_dir,node_repl_reset'
-    ) {
+    if (names.join(',') !== 'js,js_reset') {
       throw new Error(`unexpected MCP tools: ${names.join(',')}`);
     }
 
-    await client.callTool({
-      name: 'node_repl',
+    const initial = await client.callTool({
+      name: 'js',
       arguments: { code: 'const releaseValue = 40;' },
     });
+    if (initial.isError || !textOf(initial).includes('cua.desktop'))
+      throw new Error(
+        'clean package did not preload matching runtime documentation',
+      );
     const persisted = await client.callTool({
-      name: 'node_repl',
+      name: 'js',
       arguments: { code: 'nodeRepl.write(String(releaseValue + 2));' },
     });
     if (!textOf(persisted).includes('42')) {
       throw new Error('packed MCP server did not preserve cell bindings');
     }
 
-    await client.callTool({ name: 'node_repl_reset', arguments: {} });
+    await client.callTool({ name: 'js_reset', arguments: {} });
     const reset = await client.callTool({
-      name: 'node_repl',
+      name: 'js',
       arguments: { code: 'nodeRepl.write(typeof releaseValue);' },
     });
     if (!textOf(reset).includes('undefined')) {

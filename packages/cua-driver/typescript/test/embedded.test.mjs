@@ -20,6 +20,10 @@ const nativeKey =
 const library = process.env.QWEN_CUA_SDK_NATIVE_DIR
   ? path.resolve(process.env.QWEN_CUA_SDK_NATIVE_DIR, libraryName)
   : path.resolve(testDirectory, "../.native", nativeKey, libraryName)
+const exampleBinaryPath =
+  process.platform === "win32"
+    ? "C:\\example\\cua-driver.exe"
+    : "/example/cua-driver"
 
 test(
   "embedded subpath is the same generated Rust host as the SDK root",
@@ -40,7 +44,7 @@ test(
       () =>
         embedded.EmbeddedCuaDriverHost.withOptions(
           embedded.EmbeddedDriverHostOptions.new({
-            binaryPath: "/example/cua-driver",
+            binaryPath: exampleBinaryPath,
             hostBundleId: "com.example.host",
             approveSessionPolicy: false,
             dangerouslyBypassApprovals: false,

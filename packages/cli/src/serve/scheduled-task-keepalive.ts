@@ -100,8 +100,34 @@ export interface KeepaliveBridge {
   markSessionCatalogChanged?(): void;
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    },
   ): unknown;
+}
+
+export interface KeepaliveSessionResumeRequest {
+  sessionId: string;
+  workspaceCwd: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
+export function beginKeepaliveSessionResume(
+  bridge: Pick<KeepaliveBridge, 'resumeSession'>,
+  request: KeepaliveSessionResumeRequest,
+  timeoutMs: number,
+): { completion: Promise<unknown>; deadline: Promise<unknown> } {
+  const completion = bridge.resumeSession(request);
+  return {
+    completion,
+    deadline: withTimeout(
+      completion,
+      timeoutMs,
+      `resumeSession(${request.sessionId})`,
+    ),
+  };
 }
 
 /** Default caller headroom above the bridge's 60-second restore deadline. */
@@ -115,14 +141,14 @@ const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
  * Bind unbound durable tasks to dedicated sessions, and rename bound
- * task-owned sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
+ * task-owned sessions that have not yet been named. The cron_create tool leaves
  * durable tasks unbound so they stay pickable by any lock owner (CLI/ACP
  * /headless). In daemon mode this keepalive mints a dedicated session per
  * task and names it — binding is a daemon-only concern.
  *
- * For unbound tasks: mints a dedicated session, names it `⏰ prompt`,
+ * For unbound tasks: mints a dedicated session, names it after the prompt,
  * writes sessionId to disk.
- * For task-owned bound tasks without ⏰ name: renames the session to `⏰ prompt`.
+ * For task-owned bound tasks not yet named: renames the session after the prompt.
  *
  * A Set tracks renamed sessions so we don't call updateSessionMetadata
  * every tick. Best-effort — failures are logged and retried next tick.
@@ -194,6 +220,7 @@ async function bindAndNameSessions(
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: scheduledTaskSessionName(task.prompt),
+          titleSource: 'auto',
         });
         renamed.add(sessionId);
       } catch {
@@ -243,6 +270,7 @@ async function bindAndNameSessions(
     try {
       bridge.updateSessionMetadata(sessionId, {
         displayName: scheduledTaskSessionName(task.prompt),
+        titleSource: 'auto',
       });
       renamed.add(sessionId);
     } catch (err) {
@@ -252,6 +280,7 @@ async function bindAndNameSessions(
 }
 
 export interface ScheduledTaskKeepalive {
+  readonly activeWork: boolean;
   /** Stops the periodic heartbeat. Idempotent. */
   stop(): void;
   /** Runs one heartbeat pass immediately. Exposed for tests / eager warm-up. */
@@ -305,7 +334,7 @@ export function startScheduledTaskKeepalive(
   // until the raw spawn settles.
   const binding = new Set<string>();
 
-  // Tracks sessions the keepalive has already named with ⏰ prefix,
+  // Tracks sessions the keepalive has already named,
   // so updateSessionMetadata isn't called every tick.
   const renamed = new Set<string>();
 
@@ -347,11 +376,15 @@ export function startScheduledTaskKeepalive(
         const metadata = await new SessionService(
           boundWorkspace,
         ).readCreationMetadata(sessionId);
-        const resume = bridge.resumeSession({
-          sessionId,
-          workspaceCwd: boundWorkspace,
-          ...metadata,
-        });
+        const { completion: resume, deadline } = beginKeepaliveSessionResume(
+          bridge,
+          {
+            sessionId,
+            workspaceCwd: boundWorkspace,
+            ...metadata,
+          },
+          reviveTimeoutMs,
+        );
         // Clear the in-flight guard on the resume's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
         void resume
@@ -360,11 +393,7 @@ export function startScheduledTaskKeepalive(
             reviving.delete(sessionId);
           });
         try {
-          await withTimeout(
-            resume,
-            reviveTimeoutMs,
-            `resumeSession(${sessionId})`,
-          );
+          await deadline;
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {
@@ -409,13 +438,20 @@ export function startScheduledTaskKeepalive(
       cleanupSession,
     );
   };
-  const tick = (): Promise<void> =>
-    opts.runtimeBaseDir === undefined
-      ? tickInRuntime()
-      : Storage.runWithResolvedRuntimeBaseDir(
-          opts.runtimeBaseDir,
-          tickInRuntime,
-        );
+  let activeTicks = 0;
+  const tick = async (): Promise<void> => {
+    activeTicks++;
+    try {
+      await (opts.runtimeBaseDir === undefined
+        ? tickInRuntime()
+        : Storage.runWithResolvedRuntimeBaseDir(
+            opts.runtimeBaseDir,
+            tickInRuntime,
+          ));
+    } finally {
+      activeTicks--;
+    }
+  };
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
   // the revive timeout), so skip a tick while the previous is still running —
@@ -474,6 +510,9 @@ export function startScheduledTaskKeepalive(
 
   let stopped = false;
   return {
+    get activeWork() {
+      return activeTicks > 0 || reviving.size > 0 || binding.size > 0;
+    },
     stop: () => {
       if (stopped) return;
       stopped = true;

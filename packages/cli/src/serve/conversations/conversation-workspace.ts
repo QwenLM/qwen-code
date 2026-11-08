@@ -4,25 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readdir, rmdir } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { open, readdir, rename, rm, rmdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   assertExactConversationRootIdentity,
   ConversationDirectoryIdentityError,
   createConversationRootIdentity,
+  getConversationDirectoryName,
+  getConversationStagedDirectoryName,
   inspectConversationDirectoryIdentity,
+  inspectConversationStagedDirectoryIdentity,
+  isSameConversationDirectoryObject,
   materializeConversationDirectoryIdentity,
   revalidateConversationRootIdentity,
   type ConversationDirectoryIdentity,
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { isFullyQualifiedPath } from '../../config/storage-paths-lite.js';
 
 export type { ConversationRootIdentity } from '../../utils/conversation-directory-identity.js';
 
 export interface ConversationWorkspaceOptions {
   homeDir?: string;
+  rootPath?: string;
 }
 
 export type StandaloneDirectoryInspection =
@@ -42,8 +49,18 @@ export type StandaloneDirectoryEnsureResult =
       error: ConversationDirectoryIdentityError;
     };
 
+export type StandaloneDeletionPathsInspection =
+  | { status: 'absent' }
+  | { status: 'normal'; identity: ConversationDirectoryIdentity }
+  | { status: 'staged'; identity: ConversationDirectoryIdentity }
+  | {
+      status: 'compromised';
+      error: ConversationDirectoryIdentityError;
+    };
+
 function liveIdentityError(
   error: unknown,
+  rootPath: string,
   exactRoot = false,
   creatingRoot = false,
 ): never {
@@ -55,15 +72,15 @@ function liveIdentityError(
     switch (error.reason) {
       case 'not_directory':
         throw new Error(
-          'Live conversation root must be a non-symlink directory',
+          `Live conversation root ${JSON.stringify(rootPath)} must be a non-symlink directory; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'wrong_owner':
         throw new Error(
-          'Live conversation root must be owned by the daemon user',
+          `Live conversation root ${JSON.stringify(rootPath)} must be owned by the daemon user; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'wrong_mode':
         throw new Error(
-          'Live conversation root must be accessible only to its owner',
+          `Live conversation root ${JSON.stringify(rootPath)} must be accessible only to its owner; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'canonical_path_changed':
         throw new Error('Live conversation root canonical path changed');
@@ -114,7 +131,7 @@ export async function revalidateConversationRoot(
   try {
     return await revalidateConversationRootIdentity(root);
   } catch (error) {
-    liveIdentityError(error);
+    liveIdentityError(error, root.configuredRoot);
   }
 }
 
@@ -125,7 +142,7 @@ export async function assertExactConversationRoot(
   try {
     return await assertExactConversationRootIdentity(root, candidate);
   } catch (error) {
-    liveIdentityError(error, true);
+    liveIdentityError(error, root.configuredRoot, true);
   }
 }
 
@@ -134,7 +151,20 @@ export class ConversationWorkspace {
   private rootPromise?: Promise<ConversationRootIdentity>;
 
   constructor(options: ConversationWorkspaceOptions = {}) {
-    this.rootPath = getConversationRootPath(options.homeDir);
+    if (options.rootPath === undefined) {
+      this.rootPath = getConversationRootPath(options.homeDir);
+    } else {
+      if (
+        typeof options.rootPath !== 'string' ||
+        !isFullyQualifiedPath(options.rootPath) ||
+        options.rootPath.includes('\0')
+      ) {
+        throw new TypeError(
+          'Invalid Conversations directory (--conversations-dir / QWEN_CONVERSATIONS_DIR): expected a nonempty, fully qualified absolute path without NUL.',
+        );
+      }
+      this.rootPath = resolve(options.rootPath);
+    }
   }
 
   private getRootIdentity(): Promise<ConversationRootIdentity> {
@@ -152,7 +182,7 @@ export class ConversationWorkspace {
     try {
       return await this.getRootIdentity();
     } catch (error) {
-      liveIdentityError(error, false, true);
+      liveIdentityError(error, this.rootPath, false, true);
     }
   }
 
@@ -191,7 +221,7 @@ export class ConversationWorkspace {
         )
       ).identity.canonicalPath;
     } catch (error) {
-      liveIdentityError(error);
+      liveIdentityError(error, this.rootPath);
     }
   }
 
@@ -214,7 +244,7 @@ export class ConversationWorkspace {
       ) {
         return false;
       }
-      liveIdentityError(error);
+      liveIdentityError(error, this.rootPath);
     }
     if (!identity) return false;
     try {
@@ -338,5 +368,227 @@ export class ConversationWorkspace {
       }
       throw error;
     }
+  }
+
+  async inspectStandaloneDeletionPaths(
+    storageSessionId: string,
+    expected?: ConversationDirectoryIdentity,
+  ): Promise<StandaloneDeletionPathsInspection> {
+    const root = await this.revalidateStandaloneRoot();
+    try {
+      const normal = await inspectConversationDirectoryIdentity(
+        root,
+        storageSessionId,
+      );
+      const staged = await inspectConversationStagedDirectoryIdentity(
+        root,
+        storageSessionId,
+      );
+      if (normal && staged) {
+        throw new ConversationDirectoryIdentityError(
+          'child',
+          'unexpected_identity',
+        );
+      }
+      const identity = normal ?? staged;
+      if (
+        identity &&
+        expected &&
+        !isSameConversationDirectoryObject(identity, expected)
+      ) {
+        throw new ConversationDirectoryIdentityError(
+          'child',
+          'unexpected_identity',
+        );
+      }
+      if (normal) return { status: 'normal', identity: normal };
+      if (staged) return { status: 'staged', identity: staged };
+      return { status: 'absent' };
+    } catch (error) {
+      if (
+        error instanceof ConversationDirectoryIdentityError &&
+        error.scope === 'child'
+      ) {
+        return { status: 'compromised', error };
+      }
+      throw error;
+    }
+  }
+
+  async createStandaloneDeletionExpectation(
+    storageSessionId: string,
+    recorded: { device: number; inode: number; inodeVerifiable: boolean },
+  ): Promise<ConversationDirectoryIdentity> {
+    if (recorded.inodeVerifiable !== (recorded.inode !== 0)) {
+      throw new ConversationDirectoryIdentityError(
+        'child',
+        'unexpected_identity',
+      );
+    }
+    const root = await this.revalidateStandaloneRoot();
+    const name = getConversationDirectoryName(storageSessionId);
+    return {
+      root,
+      storageSessionId,
+      name,
+      canonicalPath: join(root.canonicalRoot, name),
+      device: recorded.device,
+      inode: recorded.inode,
+    };
+  }
+
+  async stageStandaloneDirectory(
+    storageSessionId: string,
+    expected: ConversationDirectoryIdentity,
+  ): Promise<ConversationDirectoryIdentity> {
+    const inspected = await this.inspectStandaloneDeletionPaths(
+      storageSessionId,
+      expected,
+    );
+    if (inspected.status === 'compromised') throw inspected.error;
+    if (inspected.status !== 'normal') {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    const root = await this.revalidateStandaloneRoot();
+    await rename(
+      inspected.identity.canonicalPath,
+      join(
+        root.canonicalRoot,
+        getConversationStagedDirectoryName(storageSessionId),
+      ),
+    );
+    await revalidateConversationRootIdentity(root);
+    const staged = await inspectConversationStagedDirectoryIdentity(
+      root,
+      storageSessionId,
+    );
+    if (
+      !staged ||
+      !isSameConversationDirectoryObject(staged, inspected.identity)
+    ) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    await this.syncStandaloneRoot(root);
+    return staged;
+  }
+
+  async restoreStagedStandaloneDirectory(
+    storageSessionId: string,
+    expected: ConversationDirectoryIdentity,
+  ): Promise<ConversationDirectoryIdentity> {
+    const inspected = await this.inspectStandaloneDeletionPaths(
+      storageSessionId,
+      expected,
+    );
+    if (inspected.status === 'compromised') throw inspected.error;
+    if (inspected.status !== 'staged') {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    const root = await this.revalidateStandaloneRoot();
+    await rename(
+      inspected.identity.canonicalPath,
+      join(root.canonicalRoot, getConversationDirectoryName(storageSessionId)),
+    );
+    await revalidateConversationRootIdentity(root);
+    const restored = await inspectConversationDirectoryIdentity(
+      root,
+      storageSessionId,
+    );
+    if (
+      !restored ||
+      !isSameConversationDirectoryObject(restored, inspected.identity)
+    ) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    await this.syncStandaloneRoot(root);
+    return restored;
+  }
+
+  async removeStagedStandaloneDirectory(
+    storageSessionId: string,
+    expected: ConversationDirectoryIdentity,
+  ): Promise<void> {
+    const inspected = await this.inspectStandaloneDeletionPaths(
+      storageSessionId,
+      expected,
+    );
+    if (inspected.status === 'compromised') throw inspected.error;
+    if (inspected.status !== 'staged') {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    const confirmed = await inspectConversationStagedDirectoryIdentity(
+      inspected.identity.root,
+      storageSessionId,
+    );
+    if (
+      !confirmed ||
+      !isSameConversationDirectoryObject(confirmed, inspected.identity)
+    ) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    await rm(confirmed.canonicalPath, { recursive: true });
+    await this.syncStandaloneRoot(confirmed.root);
+  }
+
+  async confirmStandaloneRootDurability(
+    root: ConversationRootIdentity,
+  ): Promise<void> {
+    await this.syncStandaloneRoot(root);
+  }
+
+  private async syncStandaloneRoot(
+    root: ConversationRootIdentity,
+  ): Promise<void> {
+    await revalidateConversationRootIdentity(root);
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(
+        root.canonicalRoot,
+        fsConstants.O_RDONLY |
+          (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
+      );
+      const stats = await handle.stat();
+      const inodeVerifiable = Number.isSafeInteger(stats.ino) && stats.ino > 0;
+      if (
+        !stats.isDirectory() ||
+        stats.dev !== root.device ||
+        inodeVerifiable !== root.inodeVerifiable ||
+        (root.inodeVerifiable && stats.ino !== root.inode)
+      ) {
+        throw new ConversationDirectoryIdentityError(
+          'root',
+          'identity_changed',
+        );
+      }
+      try {
+        await handle.sync();
+      } catch (error) {
+        if (
+          process.platform !== 'win32' ||
+          !['EACCES', 'EINVAL', 'EPERM'].includes(
+            (error as NodeJS.ErrnoException).code ?? '',
+          )
+        ) {
+          throw error;
+        }
+      }
+      const current = await stat(root.canonicalRoot);
+      const currentInodeVerifiable =
+        Number.isSafeInteger(current.ino) && current.ino > 0;
+      if (
+        !current.isDirectory() ||
+        current.dev !== root.device ||
+        currentInodeVerifiable !== root.inodeVerifiable ||
+        (root.inodeVerifiable && current.ino !== root.inode)
+      ) {
+        throw new ConversationDirectoryIdentityError(
+          'root',
+          'identity_changed',
+        );
+      }
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+    await revalidateConversationRootIdentity(root);
   }
 }

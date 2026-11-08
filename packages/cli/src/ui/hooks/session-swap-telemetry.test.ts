@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Regression tests for #9833: a /resume or /branch that fails AFTER the
@@ -10,7 +11,7 @@
  * must not leave that replay in the process-wide usage aggregate (and must
  * not let the rollback's own re-initialize add a second copy on top).
  *
- * These tests drive the REAL hooks against the REAL GeminiClient and the
+ * These tests drive the REAL hooks against the REAL LlmClient and the
  * REAL UiTelemetryService singleton — only the startChat side of the client
  * and the session-service I/O are stubbed — so the assertions observe the
  * actual aggregate the /stats display and persistSessionUsage read.
@@ -23,7 +24,7 @@ import { useBranchCommand } from './useBranchCommand.js';
 import { useResumeCommand } from './useResumeCommand.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
-// Replace only SessionService (file I/O); keep GeminiClient and the real
+// Replace only SessionService (file I/O); keep LlmClient and the real
 // uiTelemetryService singleton intact.
 const sessionServiceMocks = vi.hoisted(() => ({
   sessions: new Map<string, { conversation: unknown }>(),
@@ -58,6 +59,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   class SessionService {
     constructor(_cwd: string) {}
+    assertLegacySessionExecution = vi.fn();
     async loadSession(sessionId: string) {
       return sessionServiceMocks.sessions.get(sessionId);
     }
@@ -72,7 +74,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 import {
-  GeminiClient,
+  LlmClient,
   uiTelemetryService,
   EVENT_API_RESPONSE,
   type Config,
@@ -158,7 +160,7 @@ function promptTokens(): number {
 }
 
 /**
- * A stateful fake Config wired to a REAL GeminiClient. Tracks the live
+ * A stateful fake Config wired to a REAL LlmClient. Tracks the live
  * session id + resumed data exactly like Config.startNewSession does, so
  * client.initialize() sees the same facts the hooks set.
  */
@@ -169,6 +171,7 @@ function makeFakeEnv() {
   const fakeChat = {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
+    setCompletedToolCallIds: vi.fn(),
   };
 
   // One shared session-service object: every getSessionService() call sees
@@ -183,7 +186,6 @@ function makeFakeEnv() {
         return { filePath: `/tmp/${to}.jsonl`, copiedCount: 2 };
       }),
     loadSession: async (id: string) => sessionServiceMocks.sessions.get(id),
-    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
     // Realistic like SessionService.removeSession (deletes the fork JSONL):
     // the branch hook calls it in exactly the failure path these tests
     // drive (forkCreated && !uiSwapped), so the fork must not survive in
@@ -194,6 +196,12 @@ function makeFakeEnv() {
     }),
     renameSession: vi.fn().mockResolvedValue(true),
     findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    // Exactly ONE copy, deliberately: the duplicate-key cleanup (#10022 on
+    // main, its twin on this branch) each removed a DIFFERENT copy of this
+    // member, and the clean merge of the two resolved to zero — the /branch
+    // hook then TypeError'd on the absent method and three tests here went
+    // red (R17-1).
+    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -252,12 +260,12 @@ function makeFakeEnv() {
     }),
   };
 
-  const client = new GeminiClient(config as Config);
-  config.getGeminiClient = () => client;
+  const client = new LlmClient(config as Config);
+  config.getLlmClient = () => client;
   // initialize() rebuilds the chat through startChat; stub only that side
   // effect so the replay path (the unit under test) stays real.
   vi.spyOn(client, 'startChat').mockImplementation(async function (
-    this: GeminiClient,
+    this: LlmClient,
   ) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (this as any).chat = fakeChat;
@@ -320,6 +328,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           addItem,
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -392,6 +401,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -435,6 +445,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           addItem: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -475,6 +486,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           addItem,
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -525,6 +537,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -589,6 +602,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             loadHistory: vi.fn(),
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -688,6 +702,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             loadHistory: vi.fn(),
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -706,6 +721,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             addItem: addItemMock,
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -794,6 +810,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             loadHistory: vi.fn(),
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -856,6 +873,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -902,6 +920,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),

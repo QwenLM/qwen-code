@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
+import { LlmEventType } from '@qwen-code/qwen-code-core';
 import { StreamJsonOutputAdapter } from './StreamJsonOutputAdapter.js';
 
 /**
@@ -56,7 +56,7 @@ describe('StreamJsonOutputAdapter — dual-output extensions', () => {
       );
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'sidecar',
       });
       adapter.finalizeAssistantMessage();

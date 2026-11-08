@@ -5,12 +5,22 @@
  */
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { isLoopbackBind } from './loopback-binds.js';
+import { formatHostForAuthority, isLoopbackBind } from './loopback-binds.js';
 import {
   singleTokenCredentials,
   type ListenerScopedCredentials,
 } from './local-control/credentials.js';
 import { listenerIdentityOf } from './local-control/listener-identity.js';
+import { ACCESS_LOG_REJECT_LOCAL } from './server/access-log.js';
+
+/**
+ * Stamp the access-log reject marker so the line is charged to the
+ * pre-authentication budget, not the operator one. res.locals is an
+ * Express convenience that embedded shims may not provide.
+ */
+function markPreAuthReject(res: Response): void {
+  (res.locals ??= {})[ACCESS_LOG_REJECT_LOCAL] = true;
+}
 
 /**
  * Reject any request that carries an `Origin` header. CLI/SDK clients never
@@ -27,6 +37,7 @@ export const denyBrowserOriginCors: RequestHandler = (
 ) => {
   if (req.headers.origin) {
     res.setHeader('Vary', 'Origin');
+    markPreAuthReject(res);
     res.status(403).json({ error: 'Request denied by CORS policy' });
     return;
   }
@@ -34,14 +45,30 @@ export const denyBrowserOriginCors: RequestHandler = (
 };
 
 /**
+ * A loopback host admitted on any port, written `<scheme>://<host>:*`.
+ *
+ * The desktop client loads its own Web Shell from
+ * `http://127.0.0.1:<OS-assigned>` and the port changes on every launch, so
+ * no fixed-port origin can match it. The wildcard is deliberately limited to
+ * a loopback host: the host still has to match exactly, and the `*` literal
+ * keeps its own meaning (any origin, REST only).
+ */
+export interface LoopbackPortWildcard {
+  protocol: string;
+  hostname: string;
+}
+
+/**
  * Parsed shape of `--allow-origin <pattern>...`. The
  * literal `*` collapses into a single boolean flag; explicit origin
  * strings live in a Set keyed by the lowercased origin (RFC 6454 §4
- * scheme/host case-insensitivity, port-sensitive).
+ * scheme/host case-insensitivity, port-sensitive). Loopback hosts may
+ * instead opt into any port through `loopbackPortWildcards`.
  */
 export interface ParsedAllowOriginPatterns {
   allowAny: boolean;
   origins: Set<string>;
+  loopbackPortWildcards?: LoopbackPortWildcard[];
 }
 
 /**
@@ -60,8 +87,10 @@ export class InvalidAllowOriginPatternError extends Error {
   constructor(pattern: string, reason: string) {
     super(
       `Invalid --allow-origin pattern ${JSON.stringify(pattern)}: ${reason}. ` +
-        'Expected `*` or a URL origin of the form `<scheme>://<host>[:<port>]` ' +
-        '(no trailing slash, no path, no userinfo, no query).',
+        'Expected `*`, a URL origin of the form ' +
+        '`<scheme>://<host>[:<port>]`, or a loopback port wildcard ' +
+        '`<scheme>://<loopback-host>:*` (no trailing slash, no path, no ' +
+        'userinfo, no query).',
     );
     this.name = 'InvalidAllowOriginPatternError';
     this.pattern = pattern;
@@ -82,10 +111,50 @@ export function parseAllowOriginPatterns(
   raw: readonly string[],
 ): ParsedAllowOriginPatterns {
   const origins = new Set<string>();
+  const loopbackPortWildcards: LoopbackPortWildcard[] = [];
   let allowAny = false;
   for (const entry of raw) {
     if (entry === '*') {
       allowAny = true;
+      continue;
+    }
+    if (entry.endsWith(':*')) {
+      const base = entry.slice(0, -2);
+      let parsed: URL;
+      try {
+        parsed = new URL(base);
+      } catch {
+        throw new InvalidAllowOriginPatternError(entry, 'not a parseable URL');
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          'port wildcards are only supported for http and https origins',
+        );
+      }
+      if (parsed.origin !== base) {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          `expected the canonical origin ${JSON.stringify(parsed.origin)} ` +
+            'without trailing slash, path, userinfo, or query',
+        );
+      }
+      if (parsed.port !== '') {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          'a port wildcard replaces the port; do not name one before `:*`',
+        );
+      }
+      if (!isLoopbackBind(parsed.hostname)) {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          'port wildcards are only supported for loopback hosts',
+        );
+      }
+      loopbackPortWildcards.push({
+        protocol: parsed.protocol,
+        hostname: parsed.hostname.toLowerCase(),
+      });
       continue;
     }
     let parsed: URL;
@@ -112,7 +181,22 @@ export function parseAllowOriginPatterns(
     }
     origins.add(canonical.toLowerCase());
   }
-  return { allowAny, origins };
+  return { allowAny, origins, loopbackPortWildcards };
+}
+
+export function findNonLoopbackHttpOrigin(
+  patterns: ParsedAllowOriginPatterns,
+): string | undefined {
+  for (const origin of patterns.origins) {
+    const parsed = new URL(origin);
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      !isLoopbackBind(parsed.hostname)
+    ) {
+      return origin;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -121,6 +205,57 @@ export function parseAllowOriginPatterns(
  */
 export interface OriginMatcher {
   allows(origin: string): boolean;
+}
+
+function matchesLoopbackPortWildcard(
+  origin: string,
+  wildcards: readonly LoopbackPortWildcard[] | undefined,
+): boolean {
+  if (!wildcards || wildcards.length === 0) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  // An Origin header carries no path. Accept the canonical serialization,
+  // which drops a scheme-default port (`http://127.0.0.1:80` becomes
+  // `http://127.0.0.1`), so a non-browser client that spells that port still
+  // matches the "any port" contract.
+  if (parsed.origin !== origin) {
+    const defaultPort = parsed.protocol === 'http:' ? '80' : '443';
+    if (origin !== `${parsed.origin}:${defaultPort}`) return false;
+  }
+  return wildcards.some(
+    (wildcard) =>
+      wildcard.protocol === parsed.protocol &&
+      wildcard.hostname === parsed.hostname,
+  );
+}
+
+/**
+ * Match an origin against the explicitly listed entries: static origins and
+ * loopback port wildcards. `*` is intentionally excluded so callers such as
+ * the WebSocket CSRF gate can keep a tighter policy than REST CORS.
+ */
+export function originIsExplicitlyAllowed(
+  patterns: ParsedAllowOriginPatterns,
+  origin: string,
+): boolean {
+  const normalized = origin.toLowerCase();
+  if (patterns.origins.has(normalized)) return true;
+  return matchesLoopbackPortWildcard(
+    normalized,
+    patterns.loopbackPortWildcards,
+  );
+}
+
+/** Match an origin the way the REST CORS middleware does, including `*`. */
+export function allowOriginMatches(
+  patterns: ParsedAllowOriginPatterns,
+  origin: string,
+): boolean {
+  return patterns.allowAny || originIsExplicitlyAllowed(patterns, origin);
 }
 
 /**
@@ -140,17 +275,20 @@ export interface OriginMatcher {
 export class MutableOriginAllowlist implements OriginMatcher {
   readonly #allowAny: boolean;
   readonly #static: ReadonlySet<string>;
+  readonly #wildcards: readonly LoopbackPortWildcard[];
   readonly #dynamic = new Map<string, string>();
 
   constructor(base: ParsedAllowOriginPatterns) {
     this.#allowAny = base.allowAny;
     this.#static = new Set(base.origins);
+    this.#wildcards = base.loopbackPortWildcards ?? [];
   }
 
   allows(origin: string): boolean {
     if (this.#allowAny) return true;
     const normalized = origin.toLowerCase();
     if (this.#static.has(normalized)) return true;
+    if (matchesLoopbackPortWildcard(normalized, this.#wildcards)) return true;
     for (const value of this.#dynamic.values()) {
       if (value === normalized) return true;
     }
@@ -173,8 +311,7 @@ function toMatcher(
   return 'allows' in patterns
     ? patterns
     : {
-        allows: (origin: string) =>
-          patterns.allowAny || patterns.origins.has(origin.toLowerCase()),
+        allows: (origin: string) => allowOriginMatches(patterns, origin),
       };
 }
 
@@ -203,7 +340,7 @@ export function allowOriginCors(
   patterns: ParsedAllowOriginPatterns | OriginMatcher,
 ): RequestHandler {
   const matcher = toMatcher(patterns);
-  const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
+  const allowedMethods = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
   // `X-Qwen-Event-Epoch` pairs with `Last-Event-ID` on SSE reconnects
   // (DAEMON-001): it must survive preflight AND be readable from the
   // response, or cross-origin clients silently lose stale-cursor detection.
@@ -228,10 +365,15 @@ export function allowOriginCors(
     // flag if/when that materializes.
     if (origin === 'null') {
       res.setHeader('Vary', 'Origin');
+      markPreAuthReject(res);
       res.status(403).json({ error: 'Request denied by CORS policy' });
       return;
     }
-    const matched = matcher.allows(origin);
+    const listener = listenerIdentityOf(req);
+    const matched =
+      listener.kind === 'remote-access'
+        ? listener.allowedOrigins?.allows(origin) === true
+        : matcher.allows(origin);
     if (matched) {
       // Echo the request's origin verbatim (not literal `*`) even under
       // the any-origin pattern. Browser caches use the echo paired with
@@ -240,10 +382,25 @@ export function allowOriginCors(
       // a schema change (the CORS spec forbids `*` with credentials).
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', allowedMethods);
-      res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
+      res.setHeader(
+        'Access-Control-Allow-Methods',
+        listener.kind === 'remote-access'
+          ? `${allowedMethods}, PUT`
+          : allowedMethods,
+      );
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        listener.kind === 'remote-access'
+          ? `${allowedHeaders}, Acp-Connection-Id, Acp-Session-Id`
+          : allowedHeaders,
+      );
       res.setHeader('Access-Control-Max-Age', maxAgeSeconds);
-      res.setHeader('Access-Control-Expose-Headers', exposedHeaders);
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        listener.kind === 'remote-access'
+          ? `${exposedHeaders}, Acp-Connection-Id`
+          : exposedHeaders,
+      );
       if (
         req.method === 'OPTIONS' &&
         (req.headers['access-control-request-method'] ||
@@ -261,6 +418,7 @@ export function allowOriginCors(
     // awareness could otherwise serve a stale 403 to a different
     // origin. The match path sets the same header for symmetry.
     res.setHeader('Vary', 'Origin');
+    markPreAuthReject(res);
     res.status(403).json({ error: 'Request denied by CORS policy' });
   };
 }
@@ -280,7 +438,7 @@ export function hostAllowlist(
   const primaryGate = buildPrimaryHostGate(bind, getPort);
   return (req: Request, res: Response, next: NextFunction) => {
     const listener = listenerIdentityOf(req);
-    if (listener.kind !== 'local-control') {
+    if (listener.kind === 'primary') {
       primaryGate(req, res, next);
       return;
     }
@@ -301,6 +459,7 @@ export function hostAllowlist(
       listener.authority === undefined ||
       (host !== listener.authority && host !== browserHost)
     ) {
+      markPreAuthReject(res);
       res.status(403).json({ error: 'Invalid Host header' });
       return;
     }
@@ -326,6 +485,7 @@ function buildPrimaryHostGate(
   // is wasted work. Rebuild only when the port changes.
   let cachedPort = -1;
   let cachedAllowed: Set<string> = new Set();
+  const boundHost = formatHostForAuthority(bind);
   const allowedFor = (port: number): Set<string> => {
     if (port === cachedPort) return cachedAllowed;
     cachedPort = port;
@@ -334,6 +494,7 @@ function buildPrimaryHostGate(
       `127.0.0.1:${port}`,
       `[::1]:${port}`,
       `host.docker.internal:${port}`,
+      `${boundHost}:${port}`,
     ]);
     // RFC 7230 §5.4: clients may omit the port suffix when it matches
     // the URI scheme's default. http → 80, https → 443. Accept the
@@ -345,6 +506,7 @@ function buildPrimaryHostGate(
       cachedAllowed.add('127.0.0.1');
       cachedAllowed.add('[::1]');
       cachedAllowed.add('host.docker.internal');
+      cachedAllowed.add(boundHost);
     }
     return cachedAllowed;
   };
@@ -357,6 +519,7 @@ function buildPrimaryHostGate(
     // get 403 with an exact-string compare. Lowercase both sides.
     const host = (req.headers.host || '').toLowerCase();
     if (!allowedFor(port).has(host)) {
+      markPreAuthReject(res);
       res.status(403).json({ error: 'Invalid Host header' });
       return;
     }
@@ -449,9 +612,8 @@ export const AUTHENTICATED_REQUEST = Symbol('qwen.serve.authenticatedRequest');
 /**
  * Whether the request presented credentials that `bearerAuth` verified.
  * NOTE: "open" loopback requests on a no-token daemon pass `bearerAuth`
- * without being authenticated — this helper tells the two apart, which is
- * what the Local Control routes use to decide whether a response may carry
- * the pairing secret (#9106).
+ * without being authenticated. Keep that distinction intact: deployment
+ * authority is evaluated separately by `requestHasOperatorAuthority`.
  */
 export function requestWasAuthenticated(req: Request): boolean {
   return (
@@ -461,34 +623,61 @@ export function requestWasAuthenticated(req: Request): boolean {
   );
 }
 
+export interface TrustedLoopbackModeInput {
+  loopbackBind: boolean;
+  tokenConfigured: boolean;
+  requireAuth: boolean;
+}
+
+/** Whether the primary listener trusts every caller that can reach loopback. */
+export function isTrustedLoopbackMode(
+  input: TrustedLoopbackModeInput,
+): boolean {
+  return input.loopbackBind && !input.tokenConfigured && !input.requireAuth;
+}
+
+/**
+ * Whether a request may act with daemon operator authority.
+ *
+ * Credential authentication and deployment-boundary authorization remain
+ * separate facts: trusted loopback requests are authorized without being
+ * stamped as bearer-authenticated.
+ */
+export function requestHasOperatorAuthority(
+  req: Request,
+  trustedLoopbackMode: boolean,
+): boolean {
+  return (
+    requestWasAuthenticated(req) ||
+    (trustedLoopbackMode && listenerIdentityOf(req).kind === 'primary')
+  );
+}
+
 /**
  * Per-route mutation gate.
  *
  * A single mutation-gating helper so all state-changing routes share one
  * choke point. Routes opt into `strict: true` to enforce
- * "token required even on loopback" without depending on the operator
- * also passing `--require-auth`.
+ * operator authority without changing legacy non-strict behavior.
  *
  * Behavior matrix:
  *
- * | daemon config              | route opts        | result          |
- * | -------------------------- | ----------------- | --------------- |
- * | requireAuth=true           | any               | passthrough (1) |
- * | token configured           | any               | passthrough (2) |
- * | no token (loopback dev)    | strict=false      | passthrough     |
- * | no token, authenticated LAN| strict=true       | passthrough     |
- * | no token, open loopback    | strict=true       | 401 + code      |
+ * | daemon config                  | route opts   | result          |
+ * | ------------------------------ | ------------ | --------------- |
+ * | token configured               | any          | passthrough (1) |
+ * | trusted loopback primary       | any          | passthrough     |
+ * | no token, authenticated LAN    | strict=true  | passthrough     |
+ * | no token, non-trusted request  | strict=true  | 401 + code      |
+ * | no token                       | strict=false | passthrough     |
  *
- * (1) `--require-auth` boots only with a token, so the global
- *     `bearerAuth` middleware already 401'd unauthenticated requests
- *     before they reached this gate.
- * (2) Any token configuration makes the global `bearerAuth` enforce
- *     bearer-required-everywhere; the gate is redundant but harmless.
+ * (1) Any token configuration makes the global `bearerAuth` reject missing
+ *     credentials before a request can reach this gate, so the gate is
+ *     redundant but harmless.
  *
  * The 401 body uses `code: 'token_required'` (distinct from
  * `bearerAuth`'s plain `Unauthorized` shape) so SDK clients can branch
- * on it: surface a "this route needs the daemon to be configured with
- * a token; restart with --require-auth or --token" hint rather than a
+ * on it: surface a "this deployment needs the daemon to be configured with
+ * a token" hint rather than a
  * generic auth failure. Pre-flight via `/capabilities.features.require_auth`
  * still requires a successful unauthenticated `/capabilities` call,
  * which is only possible when the daemon has not enforced auth — so
@@ -497,25 +686,12 @@ export function requestWasAuthenticated(req: Request): boolean {
  */
 export interface MutationGateOptions {
   /**
-   * When true, this route refuses to serve unauthenticated callers even on
-   * loopback no-token defaults, while allowing requests that passed a
-   * listener-scoped pairing credential. Used by mutation routes
-   * (memory, file edit, tool enable, MCP restart, device-flow auth)
-   * that should never be reachable without explicit operator opt-in.
+   * When true, this route requires operator authority: bearer or pairing
+   * credentials, or a primary-listener request in trusted-loopback mode.
+   * Used by high-impact mutation routes (memory, file edit, tool enable,
+   * MCP restart, device-flow auth).
    * Defaults to false so existing routes can adopt the helper without
    * behavior change.
-   *
-   * Resolved caveat (#9106): the pairing credential used to be minted and
-   * read back by any unauthenticated loopback caller through the Local
-   * Control enable/status routes, letting a local process present the
-   * credential on the LAN listener and pass this gate. The Local Control
-   * routes no longer return the pairing URL or QR to unauthenticated
-   * callers (`requestWasAuthenticated` gate in
-   * `routes/workspace-local-control.ts`); on a no-token daemon the pairing
-   * URL is printed to the daemon's own terminal instead. Obtaining the
-   * credential therefore requires the daemon token (or terminal access),
-   * so the strict surface no longer inherits the loopback trust boundary
-   * through these routes.
    */
   strict?: boolean;
 }
@@ -525,6 +701,11 @@ export interface CreateMutationGateDeps {
   tokenConfigured: boolean;
   /** Was `--require-auth` passed at boot? */
   requireAuth: boolean;
+  /**
+   * Does the primary listener trust all loopback callers? Defaults to false so
+   * direct users of this exported helper fail closed until they opt in.
+   */
+  trustedLoopbackMode?: boolean;
 }
 
 /**
@@ -545,7 +726,7 @@ export function createMutationGate(
   deps: CreateMutationGateDeps,
 ): (opts?: MutationGateOptions) => RequestHandler {
   // When the global gate is already enforcing bearer auth (token set
-  // via --token / env, OR --require-auth boot-checked a token), every
+  // via --token / env), every
   // request that reaches the route handler has already passed
   // `bearerAuth`. The mutation gate becomes a passthrough — return a
   // pre-built no-op so we don't allocate one closure per route call.
@@ -554,19 +735,23 @@ export function createMutationGate(
     _res: Response,
     next: NextFunction,
   ) => next();
-  if (deps.requireAuth || deps.tokenConfigured) {
+  if (deps.tokenConfigured) {
     return () => passthrough;
   }
-  // No token configured (loopback developer default). Non-strict
-  // routes preserve the legacy "open on loopback" behavior; strict
-  // routes refuse with a structured 401 the SDK can surface.
+  const trustedLoopbackMode =
+    deps.trustedLoopbackMode === true && deps.requireAuth === false;
+  // Without a configured token, non-strict routes preserve their existing
+  // open behavior. Strict routes accept trusted primary-listener requests and
+  // real listener-scoped credentials, then fail closed everywhere else.
   //
   // Body-parser ordering: the strict 401
   // fires AFTER `express.json()` because the gate is per-route
-  // middleware, not app-level. On no-token loopback defaults a strict
+  // middleware, not app-level. On non-trusted no-token deployments a strict
   // route therefore parses the request body before refusing it —
   // bounded by `express.json({limit: '10mb'})` × `--max-connections`
-  // (256 default). Loopback-only attack surface, so the worst case is
+  // (256 default). Production non-loopback entry points are already bearer
+  // gated before parsing; direct embeds own their listener boundary. The
+  // worst case is
   // ~2.5 GB transient on a fully-saturated listener. The strict routes
   // Wave 4 actually adds (memory writes / file edits / device-flow
   // auth) carry small bodies in legitimate use, so the parsing-cost
@@ -586,7 +771,7 @@ export function createMutationGate(
     res: Response,
     next: NextFunction,
   ) => {
-    if (requestWasAuthenticated(req)) {
+    if (requestHasOperatorAuthority(req, trustedLoopbackMode)) {
       next();
       return;
     }

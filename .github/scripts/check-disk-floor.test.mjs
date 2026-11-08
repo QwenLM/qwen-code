@@ -1,0 +1,282 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+const SCRIPT = fileURLToPath(new URL('./check-disk-floor.sh', import.meta.url));
+
+function runGate({ dirs = [], env = {} } = {}) {
+  return spawnSync('bash', [SCRIPT, ...dirs], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      RUNNER_NAME: 'ecs-test-runner-1',
+      GITHUB_RUN_ID: '12345',
+      GITHUB_RUN_ATTEMPT: '2',
+      GITHUB_JOB: 'test',
+      ...env,
+    },
+  });
+}
+
+const HEADER = 'Filesystem 1024-blocks Used Available Capacity Mounted on';
+
+// The ratio arm has no deterministic real-filesystem trigger, so pin a canned
+// df line through PATH. Both the block and inode invocations return it.
+function runGateWithDf({ mountLine, env = {} }) {
+  const bin = mkdtempSync(join(tmpdir(), 'disk-floor-bin-'));
+  const dir = mkdtempSync(join(tmpdir(), 'disk-floor-dir-'));
+  writeFileSync(
+    join(bin, 'df'),
+    `#!/usr/bin/env bash\nprintf '%s\\n' '${HEADER}' '${mountLine}'\n`,
+    { mode: 0o755 },
+  );
+  try {
+    return runGate({
+      dirs: [dir],
+      env: { ...env, PATH: `${bin}:${process.env.PATH}` },
+    });
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('check-disk-floor', () => {
+  it('passes with a tagged sample when the filesystem clears the floor', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'disk-floor-'));
+    try {
+      const result = runGate({
+        dirs: [dir],
+        env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MIN_FREE_INODES: '1' },
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      const sample = result.stdout
+        .split('\n')
+        .find((line) => line.startsWith('DISKFLOOR '));
+      assert.ok(sample, `expected a DISKFLOOR sample, got: ${result.stdout}`);
+      assert.ok(sample.includes(`dir[${dir}]`));
+      assert.ok(sample.includes('runner[ecs-test-runner-1]'));
+      assert.ok(sample.includes('run[12345/2]'));
+      assert.ok(!result.stdout.includes('::error::'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails before the heavy step when free space is below the floor', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'disk-floor-'));
+    try {
+      // No CI filesystem has an exabyte free; a huge floor forces the breach
+      // path deterministically without touching real usage.
+      const result = runGate({
+        dirs: [dir],
+        env: { DISK_FLOOR_MIN_FREE_KB: '999999999999' },
+      });
+
+      assert.equal(result.status, 1);
+      assert.ok(result.stdout.includes('::error::Disk floor breached'));
+      assert.ok(result.stdout.includes('ecs-test-runner-1'));
+      assert.ok(result.stdout.includes('KiB free'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when free inodes are below the floor', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'disk-floor-'));
+    try {
+      const result = runGate({
+        dirs: [dir],
+        env: {
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '999999999999',
+        },
+      });
+
+      assert.equal(result.status, 1);
+      assert.ok(result.stdout.includes('free inodes'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed for invalid floor overrides', () => {
+    for (const [name, value] of [
+      ['DISK_FLOOR_MIN_FREE_KB', '2G'],
+      ['DISK_FLOOR_MIN_FREE_INODES', '9223372036854775808'],
+    ]) {
+      const result = runGate({ env: { [name]: value } });
+
+      assert.equal(result.status, 1);
+      assert.ok(result.stdout.includes(`::error::${name} must be`));
+    }
+  });
+
+  it('warns and proceeds for a missing directory', () => {
+    const missing = join(tmpdir(), `disk-floor-missing-${process.pid}`);
+    const result = runGate({ dirs: [missing] });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('::warning::'));
+    assert.ok(result.stdout.includes(missing));
+  });
+
+  it('defaults to GITHUB_WORKSPACE and RUNNER_TEMP with no arguments', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'disk-floor-ws-'));
+    const temp = mkdtempSync(join(tmpdir(), 'disk-floor-tmp-'));
+    try {
+      const result = runGate({
+        env: {
+          GITHUB_WORKSPACE: workspace,
+          RUNNER_TEMP: temp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '1',
+        },
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(result.stdout.includes(`dir[${workspace}]`));
+      assert.ok(result.stdout.includes(`dir[${temp}]`));
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it('always checks the OS temp directory, deduplicated', () => {
+    // The 2026-10-31 hz incident: /tmp hit 100% inodes while the workspace
+    // and RUNNER_TEMP sat on a data disk, so caller directories alone were
+    // green while every mkdtemp died mid-suite. The gate must add the OS
+    // temp directory on its own — and not duplicate it when a caller
+    // already passed it.
+    const dir = mkdtempSync(join(tmpdir(), 'disk-floor-os-'));
+    const osTmp = mkdtempSync(join(tmpdir(), 'disk-floor-ostmp-'));
+    try {
+      // Explicit dirs: the OS temp dir is still checked (huge inode floor
+      // forces the breach on it deterministically).
+      const breached = runGate({
+        dirs: [dir],
+        env: {
+          TMPDIR: osTmp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '999999999999',
+        },
+      });
+      assert.equal(breached.status, 1);
+      assert.ok(breached.stdout.includes(`dir[${osTmp}]`));
+      assert.ok(breached.stdout.includes('free inodes'));
+
+      // Deduplication: passing the OS temp dir explicitly checks it once,
+      // and the sample set is exactly the caller's dirs (an appended-then-
+      // deduped path and a silently-dropped path differ only in set shape).
+      const counted = runGate({
+        dirs: [dir, osTmp],
+        env: {
+          TMPDIR: osTmp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '1',
+        },
+      });
+      assert.equal(counted.status, 0, counted.stderr);
+      const samples = counted.stdout
+        .split('\n')
+        .filter((line) => line.startsWith('DISKFLOOR '));
+      assert.equal(samples.length, 2);
+      const sampledDirs = samples
+        .map((line) => /dir\[([^\]]+)\]/.exec(line)?.[1])
+        .sort();
+      assert.deepEqual(sampledDirs, [dir, osTmp].sort());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(osTmp, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to /tmp when TMPDIR is unset', () => {
+    // The incident fleet's os.tmpdir() is /tmp with TMPDIR unset; the
+    // script's `${TMPDIR:-/tmp}` default must keep gating that path. A
+    // regression to plain `${TMPDIR}` appends nothing and the incident
+    // class returns with the suite green. An empty-string TMPDIR is the
+    // bash-equivalent of unset for `:-` (but not for a bare expansion),
+    // which is exactly the distinction under test. RUNNER_TEMP is pinned
+    // to a distinct directory so a dir[/tmp] sample can only come from the
+    // OS-temp append, not the RUNNER_TEMP default (mutation-verified).
+    const ws = mkdtempSync(join(tmpdir(), 'disk-floor-ws-'));
+    const temp = mkdtempSync(join(tmpdir(), 'disk-floor-tmp-'));
+    try {
+      const result = runGate({
+        env: {
+          GITHUB_WORKSPACE: ws,
+          RUNNER_TEMP: temp,
+          TMPDIR: '',
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '1',
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(result.stdout.includes(`dir[${ws}]`));
+      assert.ok(result.stdout.includes(`dir[${temp}]`));
+      assert.ok(
+        result.stdout
+          .split('\n')
+          .some(
+            (line) =>
+              line.startsWith('DISKFLOOR ') && line.includes('dir[/tmp]'),
+          ),
+        `expected the /tmp fallback sample, got: ${result.stdout}`,
+      );
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it('fails at the used-percent ceiling even with free bytes to spare', () => {
+    // The #16003 incident: the volume had tens of GiB free, the broker refused
+    // writes because its own used ratio was 0.94.
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '90' },
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(result.stdout.includes('94% used'));
+    assert.ok(result.stdout.includes('ceiling'));
+    assert.ok(result.stdout.includes('used_pct[94]'));
+  });
+
+  it('clears the used-percent ceiling below the threshold', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '95' },
+    });
+
+    assert.equal(result.status, 0, result.stdout);
+    assert.ok(!result.stdout.includes('::error::'));
+  });
+
+  it('leaves the ratio arm disabled unless a job opts in', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1' },
+    });
+
+    assert.equal(result.status, 0, result.stdout);
+    assert.ok(result.stdout.includes('max_used_pct[unset]'));
+  });
+
+  it('rejects a used-percent ceiling outside 1-100', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '0' },
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(result.stdout.includes('between 1 and 100'));
+  });
+});

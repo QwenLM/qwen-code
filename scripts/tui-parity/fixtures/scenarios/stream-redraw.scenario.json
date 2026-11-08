@@ -1,0 +1,48 @@
+{
+  "id": "stream-redraw",
+  "description": "Streaming live-output redraw: the fixed side must redraw incrementally with no full-screen clears, no duplicate live-output events, and every frame wrapped in balanced DEC 2026 synchronised-output pairs.",
+  "terminal": {
+    "rows": 12,
+    "columns": 40
+  },
+  "timeoutMs": 10000,
+  "input": [],
+  "env": {},
+  "compareParams": ["--frames"],
+  "commands": {
+    "base": {
+      "argv": [
+        "node",
+        "scripts/tui-parity/fixtures/emitters/tui-emitter.mjs",
+        "--frames",
+        "3",
+        "--clears-per-frame",
+        "1",
+        "--dups",
+        "2"
+      ],
+      "pty": "fixture"
+    },
+    "fixed": {
+      "argv": [
+        "node",
+        "scripts/tui-parity/fixtures/emitters/tui-emitter.mjs",
+        "--frames",
+        "3",
+        "--sync"
+      ],
+      "pty": "fixture"
+    }
+  },
+  "thresholds": {
+    "maxFullScreenClears": 0,
+    "maxLineErases": 60,
+    "maxDuplicateEvents": 0,
+    "maxDec2026Unbalanced": 0,
+    "requireSync": true,
+    "requireEventMarkers": true,
+    "requireExitCodeZero": true
+  },
+  "proves": "Under identical scenario parameters (terminal size, timeout, input, and the --frames comparison parameter validated equal on both sides), the fixed-side stream contains zero full-screen clears (ESC[2J/ESC[3J/RIS), zero duplicate live-output event markers (OSC 697), and balanced DEC 2026 synchronised-output begin/end pairs around every frame, while the base side exhibits all three defects. Incremental line erase stays within the configured budget.",
+  "doesNotProve": "Visual pixel parity, real Ink or OpenTUI product behavior (deterministic fixture emitters stand in for the real CLIs; fixture captures waive the native PTY contract), latency or throughput characteristics, behavior under a real PTY or alternate fonts/locales, and any model-driven UI path."
+}

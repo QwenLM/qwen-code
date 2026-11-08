@@ -189,6 +189,9 @@ export async function connectAgentViewPtyHostProcess(
     socketPath,
     launch,
     authToken,
+    ...(options.requestTimeoutMs !== undefined
+      ? { requestTimeoutMs: options.requestTimeoutMs }
+      : {}),
     pid: status.pid,
     workerPid: status.workerPid,
   });
@@ -199,6 +202,7 @@ function createRemotePtyHostHandle({
   socketPath,
   launch,
   authToken,
+  requestTimeoutMs,
   pid,
   workerPid,
   child,
@@ -207,6 +211,7 @@ function createRemotePtyHostHandle({
   socketPath: string;
   launch: AgentViewLaunchFile;
   authToken?: string;
+  requestTimeoutMs?: number;
   pid: number;
   workerPid: number;
   child?: ChildProcess;
@@ -227,7 +232,13 @@ function createRemotePtyHostHandle({
     output,
     exited: exitTracker.exited,
     async getOutput(): Promise<string> {
-      const result = await callAgentViewPtyHost(socketPath, authToken, 'logs');
+      const result = await callAgentViewPtyHost(
+        socketPath,
+        authToken,
+        'logs',
+        undefined,
+        requestTimeoutMs,
+      );
       if (isRecord(result) && typeof result['output'] === 'string') {
         return result['output'];
       }
@@ -658,7 +669,7 @@ export function createAgentViewPtyHostServer(
     });
     // Byte-transparent framing: only the request line is decoded, so
     // coalesced keystrokes after an attach request reach the worker verbatim.
-    let buffer = Buffer.alloc(0);
+    let buffer: Buffer = Buffer.alloc(0);
     socket.on('data', (chunk: Buffer) => {
       buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
       if (buffer.length > MAX_PTY_HOST_REQUEST_LINE_BYTES) {

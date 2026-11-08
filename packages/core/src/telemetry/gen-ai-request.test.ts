@@ -9,7 +9,7 @@ import { ROOT_CONTEXT, type Attributes, type Span } from '@opentelemetry/api';
 import {
   createGenAiRequestObserverContext,
   extractAnthropicRequestAttributes,
-  extractGeminiRequestAttributes,
+  extractLlmRequestAttributes,
   extractOpenAiRequestAttributes,
   reportOpenAiRequest,
 } from './gen-ai-request.js';
@@ -41,6 +41,7 @@ describe('GenAI request attribute extraction', () => {
         frequency_penalty: -0.25,
         presence_penalty: 0.5,
         stop: 'done',
+        reasoning_effort: 'high',
       }),
     ).toEqual({
       'gen_ai.request.choice.count': 3,
@@ -50,6 +51,7 @@ describe('GenAI request attribute extraction', () => {
       'gen_ai.request.frequency_penalty': -0.25,
       'gen_ai.request.presence_penalty': 0.5,
       'gen_ai.request.stop_sequences': ['done'],
+      'gen_ai.request.reasoning.level': 'high',
     });
   });
 
@@ -104,11 +106,42 @@ describe('GenAI request attribute extraction', () => {
       max_tokens: 50,
       temperature: 0.2,
       stop: ['inherited'],
+      reasoning_effort: 'high',
     }) as Record<string, unknown>;
     request['top_p'] = 0.8;
     expect(extractOpenAiRequestAttributes(request)).toEqual({
       'gen_ai.request.top_p': 0.8,
     });
+  });
+
+  it.each([
+    'low',
+    'medium',
+    'high',
+    'minimal',
+    'xhigh',
+    'max',
+    'none',
+    'custom',
+  ])('preserves the exact reasoning effort %s', (reasoningEffort) => {
+    expect(
+      extractOpenAiRequestAttributes({ reasoning_effort: reasoningEffort }),
+    ).toEqual({ 'gen_ai.request.reasoning.level': reasoningEffort });
+  });
+
+  it.each([undefined, null, '', 1, false, [], {}])(
+    'omits invalid reasoning effort %j',
+    (reasoningEffort) => {
+      expect(
+        extractOpenAiRequestAttributes({ reasoning_effort: reasoningEffort }),
+      ).toEqual({});
+    },
+  );
+
+  it('does not infer reasoning effort from nested provider fields', () => {
+    expect(
+      extractOpenAiRequestAttributes({ reasoning: { effort: 'high' } }),
+    ).toEqual({});
   });
 
   it('preserves and copies valid stop sequences', () => {
@@ -144,7 +177,7 @@ describe('GenAI request attribute extraction', () => {
 
   it('extracts fields from the final Gemini config', () => {
     expect(
-      extractGeminiRequestAttributes({
+      extractLlmRequestAttributes({
         candidateCount: 99,
         config: {
           candidateCount: 2,
@@ -168,8 +201,8 @@ describe('GenAI request attribute extraction', () => {
   });
 
   it('omits invalid Gemini config shapes', () => {
-    expect(extractGeminiRequestAttributes({ config: null })).toEqual({});
-    expect(extractGeminiRequestAttributes({ config: 'invalid' })).toEqual({});
+    expect(extractLlmRequestAttributes({ config: null })).toEqual({});
+    expect(extractLlmRequestAttributes({ config: 'invalid' })).toEqual({});
   });
 });
 
@@ -182,9 +215,26 @@ describe('GenAI request observer', () => {
     );
 
     reportOpenAiRequest({}, requestContext);
-    reportOpenAiRequest({ temperature: 0.5 }, requestContext);
+    reportOpenAiRequest(
+      { temperature: 0.5, reasoning_effort: 'high' },
+      requestContext,
+    );
 
     expect(attributes).toEqual({});
+  });
+
+  it('retains the first reasoning effort across request attempts', () => {
+    const { span, attributes } = createSpan();
+    const requestContext = createGenAiRequestObserverContext(
+      ROOT_CONTEXT,
+      span,
+    );
+
+    reportOpenAiRequest({ reasoning_effort: 'high' }, requestContext);
+    reportOpenAiRequest({ reasoning_effort: 'low' }, requestContext);
+    reportOpenAiRequest({}, requestContext);
+
+    expect(attributes).toEqual({ 'gen_ai.request.reasoning.level': 'high' });
   });
 
   it('consumes the first snapshot when extraction fails', () => {
@@ -220,11 +270,15 @@ describe('GenAI request observer', () => {
       second.span,
     );
 
-    reportOpenAiRequest({ temperature: 0.1 }, firstContext);
+    reportOpenAiRequest(
+      { temperature: 0.1, reasoning_effort: 'high' },
+      firstContext,
+    );
     reportOpenAiRequest({ temperature: 0.9 }, secondContext);
 
     expect(first.attributes).toEqual({
       'gen_ai.request.temperature': 0.1,
+      'gen_ai.request.reasoning.level': 'high',
     });
     expect(second.attributes).toEqual({
       'gen_ai.request.temperature': 0.9,

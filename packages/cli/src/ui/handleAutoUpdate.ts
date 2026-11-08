@@ -22,6 +22,7 @@ import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { getNpmNodePath } from '../utils/npm-runtime.js';
 
 const debugLogger = createDebugLogger('AUTO_UPDATE');
 
@@ -40,7 +41,7 @@ export async function handleAutoUpdate(
     return;
   }
 
-  // enableAutoUpdate is checked in gemini.tsx before calling this function,
+  // enableAutoUpdate is checked in llm.tsx before calling this function,
   // so if we get here, auto-update is enabled (or undefined, which defaults to enabled).
   const isAutoUpdateEnabled =
     settings.merged.general?.enableAutoUpdate !== false;
@@ -121,7 +122,7 @@ export async function handleAutoUpdate(
   const isManagedNpmUpdate =
     installationInfo.packageManager === PackageManager.NPM;
   const command = isManagedNpmUpdate
-    ? process.execPath
+    ? getNpmNodePath()
     : isWindows
       ? 'cmd.exe'
       : 'bash';

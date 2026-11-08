@@ -1,3 +1,8 @@
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonHttpError,
@@ -10,18 +15,26 @@ import {
   useConnection,
   useTranscriptBlocks,
   useWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
-import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 import type { Message } from '../adapters/types';
 import {
   isActiveToolStatus,
   isBackgroundSubAgentToolCall,
+  isTerminalBackgroundAgentStatus,
+  projectTerminalBackgroundAgentTool,
 } from '../adapters/toolClassification';
 
-type Translator = (
-  key: string,
-  vars?: Record<string, string | number>,
-) => string;
+// Re-exported for existing callers. The projection itself lives in a leaf module
+// so the read-only transcript entry does not pull this file's daemon imports —
+// see adapters/localizedMessages.ts.
+export {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
@@ -62,20 +75,6 @@ interface ReconciliationRound {
   errors: ReadonlyArray<{ callId: string; error: unknown }>;
   notFounds: ReadonlyArray<string>;
   succeeded: ReadonlyArray<string>;
-}
-
-export function transcriptBlocksToLocalizedMessages(
-  blocks: readonly DaemonTranscriptBlock[],
-  t: Translator,
-): Message[] {
-  return transcriptBlocksToDaemonMessages(blocks, {
-    labels: {
-      promptCancelled: t('request.cancelled'),
-      branchSuccess: (name) => t('branch.success', { name }),
-      modelStreamInterrupted: t('error.modelStreamInterrupted'),
-      loopDetected: t('error.loopDetected'),
-    },
-  });
 }
 
 function reuseUnchangedProjectedPrefix(
@@ -247,15 +246,6 @@ export function projectStreamingTailMessages(
   return messages;
 }
 
-function isTerminalBackgroundAgentStatus(status: string): boolean {
-  return (
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'canceled'
-  );
-}
-
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -361,30 +351,18 @@ export function reconcileBackgroundAgentResolutions(
       ) {
         return tool;
       }
+      const endTime =
+        tool.startTime !== undefined
+          ? tool.startTime + (resolution.durationMs ?? 0)
+          : undefined;
+      const reconciledTool = projectTerminalBackgroundAgentTool(
+        tool,
+        resolution.status,
+        endTime,
+      );
+      if (reconciledTool === tool) return tool;
       toolsChanged = true;
-      const cancelled =
-        resolution.status === 'cancelled' || resolution.status === 'canceled';
-      const status: typeof tool.status =
-        resolution.status === 'failed' ? 'failed' : 'completed';
-      return {
-        ...tool,
-        status,
-        ...(tool.startTime !== undefined
-          ? { endTime: tool.startTime + (resolution.durationMs ?? 0) }
-          : {}),
-        ...(cancelled
-          ? {
-              rawOutput: {
-                ...(typeof tool.rawOutput === 'object' &&
-                tool.rawOutput !== null &&
-                !Array.isArray(tool.rawOutput)
-                  ? tool.rawOutput
-                  : {}),
-                status: 'cancelled',
-              },
-            }
-          : {}),
-      };
+      return reconciledTool;
     });
     if (!toolsChanged) return message;
     changed = true;
@@ -400,6 +378,8 @@ export function useMessagesFromBlocks(
 ): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const [resolutionSnapshot, setResolutionSnapshot] = useState<{
     sessionId: string;
     resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
@@ -569,6 +549,13 @@ export function useMessagesFromBlocks(
     }
     const sessionId = connection.sessionId;
     if (
+      !available ||
+      (availability && availability.getSnapshot() !== 'available')
+    ) {
+      reconciliationRequestRef.current = undefined;
+      return;
+    }
+    if (
       !sessionId ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
@@ -679,6 +666,15 @@ export function useMessagesFromBlocks(
     request
       .then(({ resolutions, errors, notFounds, succeeded }) => {
         if (!active) return;
+        if (
+          (availability && availability.getSnapshot() !== 'available') ||
+          errors.some((entry) => isDaemonUnavailableError(entry.error))
+        ) {
+          if (reconciliationRequestRef.current?.request === request) {
+            reconciliationRequestRef.current = undefined;
+          }
+          return;
+        }
         round.processed = true;
         // Grace-miss accounting lives in the active handler, not the per-call
         // closure: a superseded round's late 404 must not consume grace that
@@ -810,6 +806,8 @@ export function useMessagesFromBlocks(
       clearTimeout(retryTimer);
     };
   }, [
+    availability,
+    available,
     backgroundAgentNotificationKey,
     connection.catchingUp,
     connection.loadingTranscript,

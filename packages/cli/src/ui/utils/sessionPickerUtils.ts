@@ -17,7 +17,8 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, {
 export interface SessionState {
   sessions: SessionListItem[];
   hasMore: boolean;
-  nextCursor?: number;
+  /** Opaque continuation token from {@link ListSessionsResult.nextCursor}. */
+  nextCursor?: number | string;
 }
 
 /**
@@ -64,7 +65,7 @@ function truncateToDisplayWidth(text: string, maxWidth: number): string {
 
 /**
  * Returns true when the session matches the query as a substring on any of:
- * customTitle, first prompt, gitBranch.
+ * customTitle, first prompt, Goal objective, gitBranch.
  *
  * Empty queries match everything. The query is expected pre-normalized —
  * `filterSessions` does the trim+lowercase once before the per-session
@@ -78,6 +79,7 @@ function matchesQuery(
   const haystacks: Array<string | undefined> = [
     session.customTitle,
     session.prompt,
+    session.goalObjective,
     session.gitBranch,
   ];
   for (const h of haystacks) {
@@ -91,8 +93,9 @@ function matchesQuery(
  *
  * Branch filter and query filter compose (AND): when both are active, a
  * session must satisfy both. Query is matched case-insensitively against
- * customTitle, prompt, and gitBranch — branch is included in query matching
- * so users can type a branch name without first toggling branch-filter.
+ * customTitle, prompt, Goal objective, and gitBranch — branch is included in
+ * query matching so users can type a branch name without first toggling
+ * branch-filter.
  */
 export function filterSessions(
   sessions: SessionListItem[],

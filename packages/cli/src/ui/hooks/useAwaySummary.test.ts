@@ -3,12 +3,14 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import * as core from '@qwen-code/qwen-code-core';
 import { useAwaySummary } from './useAwaySummary.js';
 import type { HistoryItem } from '../types.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const actual = await vi.importActual<
@@ -54,6 +56,57 @@ afterEach(() => {
 });
 
 describe('useAwaySummary', () => {
+  it.each(['failed', 'ready', 'aborted', 'busy'])(
+    'respects Mod startup before generating an away recap: %s',
+    async (state) => {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const ready = new Promise<void>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      void ready.catch(() => {});
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+      const config = makeConfig();
+      const addItem = vi.fn();
+      generateSessionRecapMock.mockResolvedValue('recap text');
+      const { rerender, unmount } = renderHook(
+        ({ isFocused, isIdle }) =>
+          useAwaySummary({
+            enabled: true,
+            config,
+            isFocused,
+            isIdle,
+            addItem,
+            history: THREE_USER_HISTORY,
+            awayThresholdMinutes: 0.1,
+          }),
+        { initialProps: { isFocused: false, isIdle: true } },
+      );
+      try {
+        vi.advanceTimersByTime(7000);
+        rerender({ isFocused: true, isIdle: true });
+        await Promise.resolve();
+        expect(generateSessionRecapMock).not.toHaveBeenCalled();
+        if (state === 'aborted') unmount();
+        if (state === 'busy') rerender({ isFocused: true, isIdle: false });
+        if (state === 'failed') reject(new Error('Mod startup failed'));
+        else resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(generateSessionRecapMock).toHaveBeenCalledTimes(
+          state === 'ready' ? 1 : 0,
+        );
+        expect(addItem).toHaveBeenCalledTimes(state === 'ready' ? 1 : 0);
+      } finally {
+        resolve();
+        unmount();
+        owner.mockRestore();
+      }
+    },
+  );
+
   it('records the auto-fired recap to chatRecordingService so it survives /resume', async () => {
     const recordSlashCommand = vi.fn();
     const config = makeConfig(recordSlashCommand);

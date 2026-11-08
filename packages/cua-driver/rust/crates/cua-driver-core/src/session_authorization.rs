@@ -16,9 +16,7 @@ use uuid::Uuid;
 use crate::authorization::PermissionMode;
 use crate::session_manifest::SessionManifest;
 
-#[cfg(test)]
 const DEFAULT_MAX_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-#[cfg(test)]
 const DEFAULT_MAX_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +44,7 @@ pub struct SessionModeCeiling {
     allowed_modes: HashSet<PermissionMode>,
     unrestricted_acknowledged: bool,
     delegation_enabled: bool,
+    owner_lifetime_allowed: bool,
     max_session_ttl: Option<Duration>,
     max_idle_ttl: Option<Duration>,
     user_policy_sha256: Option<String>,
@@ -58,6 +57,7 @@ impl SessionModeCeiling {
             allowed_modes: HashSet::from([mode]),
             unrestricted_acknowledged: mode == PermissionMode::Unrestricted,
             delegation_enabled: false,
+            owner_lifetime_allowed: false,
             max_session_ttl: None,
             max_idle_ttl: None,
             user_policy_sha256: crate::policy::user_policy_sha256()?,
@@ -74,6 +74,7 @@ impl SessionModeCeiling {
             allowed_modes: allowed_modes.into_iter().collect(),
             unrestricted_acknowledged,
             delegation_enabled: true,
+            owner_lifetime_allowed: false,
             max_session_ttl: Some(DEFAULT_MAX_SESSION_TTL),
             max_idle_ttl: Some(DEFAULT_MAX_IDLE_TTL),
             user_policy_sha256: None,
@@ -95,9 +96,12 @@ impl SessionModeCeiling {
         if allowed_modes.is_empty() {
             return Err("runtime authorization ceiling must allow at least one mode".to_owned());
         }
-        if max_session_ttl.is_zero() || max_idle_ttl.is_zero() || max_idle_ttl > max_session_ttl {
+        let persistent = max_session_ttl.is_zero() && max_idle_ttl.is_zero();
+        if max_session_ttl.is_zero() != max_idle_ttl.is_zero()
+            || (!persistent && max_idle_ttl > max_session_ttl)
+        {
             return Err(
-                "runtime authorization ceiling TTLs must be non-zero and idle TTL cannot exceed session TTL"
+                "runtime authorization ceiling TTLs must both be zero or idle TTL cannot exceed session TTL"
                     .to_owned(),
             );
         }
@@ -111,8 +115,17 @@ impl SessionModeCeiling {
             allowed_modes,
             unrestricted_acknowledged,
             delegation_enabled: true,
-            max_session_ttl: Some(max_session_ttl),
-            max_idle_ttl: Some(max_idle_ttl),
+            owner_lifetime_allowed: persistent,
+            max_session_ttl: Some(if persistent {
+                DEFAULT_MAX_SESSION_TTL
+            } else {
+                max_session_ttl
+            }),
+            max_idle_ttl: Some(if persistent {
+                DEFAULT_MAX_IDLE_TTL
+            } else {
+                max_idle_ttl
+            }),
             user_policy_sha256: crate::policy::user_policy_sha256()?,
             managed_policy_sha256: crate::policy::managed_policy_sha256()?,
         })
@@ -254,8 +267,7 @@ impl EffectiveAuthorizationContext {
     #[doc(hidden)]
     pub fn lifecycle_idle_ttl_override(&self) -> Option<Duration> {
         (self.source == AuthorizationContextSource::TrustedHost)
-            .then_some(self.idle_ttl)
-            .flatten()
+            .then_some(self.idle_ttl.unwrap_or(Duration::MAX))
     }
 
     #[doc(hidden)]
@@ -584,17 +596,19 @@ impl SessionAuthorizationRegistry {
         if request.mode == PermissionMode::Unrestricted && !self.ceiling.unrestricted_acknowledged {
             return Err(SessionAuthorizationError::UnrestrictedNotAcknowledged);
         }
-        if request.ttl.is_zero()
-            || request.idle_ttl.is_zero()
-            || self
-                .ceiling
-                .max_session_ttl
-                .is_none_or(|maximum| request.ttl > maximum)
-            || self
-                .ceiling
-                .max_idle_ttl
-                .is_none_or(|maximum| request.idle_ttl > maximum)
-            || request.idle_ttl > request.ttl
+        let persistent = request.ttl.is_zero() && request.idle_ttl.is_zero();
+        if request.ttl.is_zero() != request.idle_ttl.is_zero()
+            || (persistent && !self.ceiling.owner_lifetime_allowed)
+            || (!persistent
+                && (self
+                    .ceiling
+                    .max_session_ttl
+                    .is_some_and(|maximum| request.ttl > maximum)
+                    || self
+                        .ceiling
+                        .max_idle_ttl
+                        .is_some_and(|maximum| request.idle_ttl > maximum)
+                    || request.idle_ttl > request.ttl))
         {
             return Err(SessionAuthorizationError::InvalidTtl);
         }
@@ -625,6 +639,18 @@ impl SessionAuthorizationRegistry {
         }) {
             return Err(SessionAuthorizationError::SessionAlreadyBound);
         }
+        let (expires_unix_ms, expires_at, idle_ttl, last_authorized_dispatch, idle_expired) =
+            if persistent {
+                (None, None, None, None, None)
+            } else {
+                (
+                    Some(now_unix_ms() + request.ttl.as_millis()),
+                    Some(Instant::now() + request.ttl),
+                    Some(request.idle_ttl),
+                    Some(Arc::new(Mutex::new(Instant::now()))),
+                    Some(Arc::new(AtomicBool::new(false))),
+                )
+            };
         let context = Arc::new(EffectiveAuthorizationContext {
             daemon_generation: self.daemon_generation,
             source: AuthorizationContextSource::TrustedHost,
@@ -635,11 +661,11 @@ impl SessionAuthorizationRegistry {
             capability_manifest: request.capability_manifest,
             user_policy_sha256: self.ceiling.user_policy_sha256.clone(),
             managed_policy_sha256: self.ceiling.managed_policy_sha256.clone(),
-            expires_unix_ms: Some(now_unix_ms() + request.ttl.as_millis()),
-            expires_at: Some(Instant::now() + request.ttl),
-            idle_ttl: Some(request.idle_ttl),
-            last_authorized_dispatch: Some(Arc::new(Mutex::new(Instant::now()))),
-            idle_expired: Some(Arc::new(AtomicBool::new(false))),
+            expires_unix_ms,
+            expires_at,
+            idle_ttl,
+            last_authorized_dispatch,
+            idle_expired,
             revoked: Arc::new(AtomicBool::new(false)),
         });
         state.by_connection.insert(connection.id, context);
@@ -741,6 +767,7 @@ impl SessionAuthorizationRegistry {
             "daemon_authorization_ceiling": {
                 "allowed_modes": self.ceiling.allowed_mode_names(),
                 "unrestricted_acknowledged": self.ceiling.unrestricted_acknowledged,
+                "owner_lifetime_allowed": self.ceiling.owner_lifetime_allowed,
                 "max_session_ttl_seconds": self.ceiling.max_session_ttl.map(|ttl| ttl.as_secs()),
                 "max_idle_ttl_seconds": self.ceiling.max_idle_ttl.map(|ttl| ttl.as_secs()),
                 "policy_hashes_bound": {
@@ -1039,6 +1066,7 @@ mod tests {
             SessionModeCeiling::delegated([PermissionMode::Standard], false),
         );
         let invalid = [
+            (Duration::ZERO, Duration::ZERO),
             (Duration::ZERO, Duration::from_secs(1)),
             (Duration::from_secs(1), Duration::ZERO),
             (
@@ -1063,6 +1091,51 @@ mod tests {
                 SessionAuthorizationError::InvalidTtl
             );
         }
+    }
+
+    #[test]
+    fn owner_lifetime_session_does_not_expire() {
+        let ceiling = SessionModeCeiling::for_trusted_sessions(
+            [PermissionMode::Standard],
+            false,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let registry = SessionAuthorizationRegistry::delegated_for_test(ceiling);
+        let (host, connection) = registry.trusted_pair_for_test(None);
+        let mut persistent = request(PermissionMode::Standard);
+        persistent.ttl = Duration::ZERO;
+        persistent.idle_ttl = Duration::ZERO;
+        registry
+            .bind_delegated_session(&host, &connection, persistent)
+            .unwrap();
+
+        let context = registry
+            .resolve_delegated(&connection, "public-a", "transport-a")
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+        assert!(!context.is_expired());
+        context.authorize_dispatch().unwrap();
+        assert_eq!(context.lifecycle_idle_ttl_override(), Some(Duration::MAX));
+        let ceiling = &registry.status_json()["daemon_authorization_ceiling"];
+        assert_eq!(ceiling["owner_lifetime_allowed"], true);
+        assert_eq!(
+            ceiling["max_session_ttl_seconds"],
+            DEFAULT_MAX_SESSION_TTL.as_secs()
+        );
+
+        let (_, finite_connection) = registry.trusted_pair_for_test(Some(&host));
+        let mut excessive = request(PermissionMode::Standard);
+        excessive.public_session = "public-finite".to_owned();
+        excessive.transport_session = "transport-finite".to_owned();
+        excessive.ttl = DEFAULT_MAX_SESSION_TTL + Duration::from_secs(1);
+        assert_eq!(
+            registry
+                .bind_delegated_session(&host, &finite_connection, excessive)
+                .unwrap_err(),
+            SessionAuthorizationError::InvalidTtl
+        );
     }
 
     #[test]

@@ -4,7 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 
 const { execFileAsyncMock } = vi.hoisted(() => ({
   execFileAsyncMock: vi.fn(),
@@ -22,8 +42,33 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
-const { pickNativeDirectory, NativeDirectoryPickerUnavailableError } =
-  await import('./native-directory-picker.js');
+const {
+  pickNativeDirectory,
+  isNativeDirectoryPickerAvailable,
+  NativeDirectoryPickerUnavailableError,
+} = await import('./native-directory-picker.js');
+
+const zenityDir = mkdtempSync(join(tmpdir(), 'picker-zenity-'));
+writeFileSync(join(zenityDir, 'zenity'), '#!/bin/sh\nexit 0\n');
+chmodSync(join(zenityDir, 'zenity'), 0o755);
+const emptyDir = mkdtempSync(join(tmpdir(), 'picker-empty-'));
+const nonExecutableZenityDir = mkdtempSync(join(tmpdir(), 'picker-nonexec-'));
+writeFileSync(join(nonExecutableZenityDir, 'zenity'), '#!/bin/sh\nexit 0\n');
+chmodSync(join(nonExecutableZenityDir, 'zenity'), 0o644);
+const zenityDirectoryEntryDir = mkdtempSync(join(tmpdir(), 'picker-subdir-'));
+mkdirSync(join(zenityDirectoryEntryDir, 'zenity'));
+
+// A `:<n>` DISPLAY is served by a local X server over `/tmp/.X11-unix/X<n>`,
+// and the probe only advertises the picker when that socket exists. The
+// positive arms need a real socket path, so the fixture puts one there; the
+// display numbers are high enough to stay clear of any server the host
+// actually runs, and each arm re-asserts the socket state it depends on.
+const X11_SOCKET_DIR = '/tmp/.X11-unix';
+const REACHABLE_DISPLAY = ':97';
+const REACHABLE_SOCKET = join(X11_SOCKET_DIR, 'X97');
+const UNREACHABLE_DISPLAY = ':96';
+const UNREACHABLE_SOCKET = join(X11_SOCKET_DIR, 'X96');
+let createdX11SocketDir = false;
 
 function setPlatform(platform: NodeJS.Platform) {
   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
@@ -150,6 +195,20 @@ describe('pickNativeDirectory', () => {
     );
   });
 
+  it('treats a zenity 4 "Failed to open display" failure as unavailable on Linux', async () => {
+    setPlatform('linux');
+    execFileAsyncMock.mockRejectedValue(
+      pickerError({
+        code: 1,
+        stderr: '(zenity:167685): Gtk-WARNING **: Failed to open display',
+      }),
+    );
+
+    await expect(pickNativeDirectory()).rejects.toBeInstanceOf(
+      NativeDirectoryPickerUnavailableError,
+    );
+  });
+
   it('throws unavailable for a non-cancel zenity failure on Linux', async () => {
     setPlatform('linux');
     execFileAsyncMock.mockRejectedValue(pickerError({ code: 127 }));
@@ -187,5 +246,172 @@ describe('pickNativeDirectory', () => {
       expect.any(Array),
       { timeout: 300_000, signal: controller.signal },
     );
+  });
+});
+
+describe('isNativeDirectoryPickerAvailable', () => {
+  beforeAll(() => {
+    createdX11SocketDir = !existsSync(X11_SOCKET_DIR);
+    mkdirSync(X11_SOCKET_DIR, { recursive: true });
+    // A real X server puts a socket here; the probe only tests existence, so
+    // an empty file stands in for it.
+    writeFileSync(REACHABLE_SOCKET, '');
+  });
+
+  afterAll(() => {
+    rmSync(REACHABLE_SOCKET, { force: true });
+    if (createdX11SocketDir) {
+      // Only the directory this file created is removed, and only if nothing
+      // else has since appeared in it.
+      try {
+        rmdirSync(X11_SOCKET_DIR);
+      } catch {
+        // left in place on purpose
+      }
+    }
+  });
+
+  it('requires positive graphical-session evidence on macOS and Windows', () => {
+    setPlatform('darwin');
+    expect(
+      isNativeDirectoryPickerAvailable({}, { processUid: 0, consoleUid: 501 }),
+    ).toBe(false);
+    expect(
+      isNativeDirectoryPickerAvailable(
+        {},
+        { processUid: 501, consoleUid: 501 },
+      ),
+    ).toBe(true);
+    expect(
+      isNativeDirectoryPickerAvailable(
+        { SSH_CONNECTION: 'remote' },
+        { processUid: 501, consoleUid: 501 },
+      ),
+    ).toBe(false);
+    setPlatform('win32');
+    expect(isNativeDirectoryPickerAvailable({})).toBe(false);
+    expect(isNativeDirectoryPickerAvailable({ SESSIONNAME: 'Console' })).toBe(
+      true,
+    );
+    expect(isNativeDirectoryPickerAvailable({ SESSIONNAME: 'Services' })).toBe(
+      false,
+    );
+  });
+
+  it('is unavailable on unsupported platforms', () => {
+    setPlatform('aix');
+    expect(
+      isNativeDirectoryPickerAvailable({ DISPLAY: ':0', PATH: zenityDir }),
+    ).toBe(false);
+  });
+
+  it('requires a display on Linux', () => {
+    setPlatform('linux');
+    expect(isNativeDirectoryPickerAvailable({ PATH: zenityDir })).toBe(false);
+  });
+
+  it('requires an executable zenity on PATH on Linux', () => {
+    setPlatform('linux');
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: REACHABLE_DISPLAY,
+        PATH: emptyDir,
+      }),
+    ).toBe(false);
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: REACHABLE_DISPLAY,
+        PATH: zenityDir,
+      }),
+    ).toBe(true);
+    expect(
+      isNativeDirectoryPickerAvailable({
+        WAYLAND_DISPLAY: 'wayland-0',
+        PATH: zenityDir,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a DISPLAY whose X11 socket is absent on Linux', () => {
+    setPlatform('linux');
+    // The arm only means something if no server is listening on :96.
+    expect(existsSync(UNREACHABLE_SOCKET)).toBe(false);
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: UNREACHABLE_DISPLAY,
+        PATH: zenityDir,
+      }),
+    ).toBe(false);
+    // A screen suffix resolves to the same socket, so it stays unreachable.
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: `${UNREACHABLE_DISPLAY}.0`,
+        PATH: zenityDir,
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps the picker available when the X11 socket exists on Linux', () => {
+    setPlatform('linux');
+    expect(existsSync(REACHABLE_SOCKET)).toBe(true);
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: REACHABLE_DISPLAY,
+        PATH: zenityDir,
+      }),
+    ).toBe(true);
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: `${REACHABLE_DISPLAY}.0`,
+        PATH: zenityDir,
+      }),
+    ).toBe(true);
+  });
+
+  // Only a local `:<n>` display can be probed from a filesystem path; a TCP
+  // display's reachability would need a connection, which does not fit the
+  // synchronous startup probe, so those forms keep the DISPLAY+zenity result.
+  it('leaves a non-local DISPLAY to the existing probe on Linux', () => {
+    setPlatform('linux');
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: `remote.example.com${UNREACHABLE_DISPLAY}`,
+        PATH: zenityDir,
+      }),
+    ).toBe(true);
+  });
+
+  // Windows has no exec bit: libuv's fs__access ignores X_OK entirely, so
+  // fs.accessSync succeeds for any existing path and this probe returns true
+  // there. `process.platform` is mocked to 'linux' but the filesystem is the
+  // real host's, so the assertion cannot hold on a Windows runner — and
+  // ci.yml's merge-queue `test_windows` job collects this file. Same shape as
+  // packages/core/src/utils/shellContextEnv.test.ts:157.
+  it.skipIf(process.platform === 'win32')(
+    'rejects a zenity without the executable bit on Linux',
+    () => {
+      setPlatform('linux');
+      expect(
+        isNativeDirectoryPickerAvailable({
+          DISPLAY: ':0',
+          PATH: nonExecutableZenityDir,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it('rejects a directory named zenity on PATH on Linux', () => {
+    setPlatform('linux');
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: ':0',
+        PATH: zenityDirectoryEntryDir,
+      }),
+    ).toBe(false);
+  });
+
+  it('requires PATH to be set on Linux', () => {
+    setPlatform('linux');
+    expect(isNativeDirectoryPickerAvailable({ DISPLAY: ':0' })).toBe(false);
   });
 });

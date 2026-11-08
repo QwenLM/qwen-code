@@ -12,9 +12,12 @@ mod kill_app;
 mod launch_app;
 mod list_apps;
 mod list_windows;
+mod paste;
+mod pasteboard;
 mod press_key;
 mod right_click;
 mod scroll;
+pub(crate) mod select_text;
 mod set_value;
 mod set_window_frame;
 mod type_text;
@@ -213,6 +216,58 @@ pub(crate) fn background_refusal_result(
     .with_structured(structured)
 }
 
+pub(super) fn ax_action_unconfirmed(
+    action: &str,
+    index: Option<usize>,
+    status: crate::ax::bindings::AXError,
+) -> cua_driver_core::protocol::ToolResult {
+    let warning = format!(
+        "{action} returned {status}; delivery is uncertain. Observe before another action; this request was not replayed."
+    );
+    let target = index.map_or_else(
+        || "the hit-tested element".to_owned(),
+        |i| format!("element [{i}]"),
+    );
+    cua_driver_core::protocol::ToolResult::text(format!("Sent {action} to {target}. {warning}"))
+        .with_structured(serde_json::json!({
+            "path": "ax", "delivery_mode": "background", "sent": true, "verified": false,
+            "effect": "unverifiable", "ax_status": status, "warning": warning
+        }))
+}
+
+#[cfg(test)]
+mod ax_dispatch_tests {
+    #[test]
+    fn ax_errors_remain_unconfirmed_through_the_public_action_projection() {
+        use cua_driver_core::action_record::{ActionEffect, ActionExecutionRecord};
+
+        for (tool, action) in [
+            ("click", "AXPress"),
+            ("double_click", "AXOpen"),
+            ("right_click", "AXShowMenu"),
+        ] {
+            let result = super::ax_action_unconfirmed(action, None, -25202);
+            assert_ne!(result.is_error, Some(true));
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["sent"], true);
+            assert!(structured["warning"].as_str().unwrap().contains("Observe"));
+            let record = ActionExecutionRecord::from_legacy(
+                tool,
+                &serde_json::json!({"pid": 101, "window_id": 501, "delivery_mode": "foreground"}),
+                &structured,
+            )
+            .unwrap();
+            assert_eq!(record.effect, ActionEffect::Unverifiable);
+            assert!(record.evidence.is_empty());
+            let public = record.public_result().unwrap();
+            public.validate_invariants().unwrap();
+            let public = serde_json::to_value(public).unwrap();
+            assert_eq!(public["effect"], "unverifiable");
+            assert_eq!(public["delivery"]["mode"], "background");
+        }
+    }
+}
+
 /// Exclusive per-process ownership of one background mutation. Callers must
 /// keep this value alive through actuator dispatch, focus restoration, and
 /// target-bound verification.
@@ -285,10 +340,7 @@ pub(crate) async fn acquire_background_mutation(pid: i32) -> BackgroundMutationL
     }
 }
 
-/// Finish the post-action observation window. Embedded interactive clients
-/// that already observe the target continuously may opt out through the
-/// private registry argument to avoid adding a one-second acknowledgement
-/// delay to every input event. Regular MCP callers retain the full observer.
+/// Collect immediately available window changes. Bounded settling belongs to observations.
 pub(crate) async fn finish_window_observation(
     snapshot: crate::window_change_detector::Snapshot,
     args: &serde_json::Value,
@@ -612,6 +664,9 @@ pub fn load_driver_config() -> DriverConfig {
 /// used by CoreGraphics input APIs. Retina scaled modes cannot rely on the
 /// nominal backing factor alone, so derive the ratio from the actual PNG.
 pub async fn desktop_screenshot_point(x: f64, y: f64) -> (f64, f64) {
+    if cua_driver_core::tool::computer_use_native_dispatch() {
+        return (x, y);
+    }
     let ratio = tokio::task::spawn_blocking(|| {
         let logical_w = get_screen_size::main_screen_size().map(|(w, _, _)| w as f64);
         let shot_w = crate::capture::screenshot_display_bytes()
@@ -730,6 +785,7 @@ pub struct ToolState {
     pub zoom_registry: Arc<ZoomRegistry>,
     pub resize_registry: Arc<ResizeRegistry>,
     pub observation_revisions: Arc<MacObservationRevisions>,
+    app_monitors: std::sync::Mutex<std::collections::HashMap<i32, AppMonitors>>,
     watched_targets: std::sync::Mutex<std::collections::HashSet<(i32, u32)>>,
     watcher_started: std::sync::atomic::AtomicBool,
     /// Global, disk-persisted config — the base layer and the only one the
@@ -754,6 +810,11 @@ pub struct ToolState {
     pub host_bundle_id: Option<String>,
 }
 
+struct AppMonitors {
+    focus: crate::input::app_focus::FocusLease,
+    menu: Option<Arc<crate::ax::menu::MenuMonitor>>,
+}
+
 impl Default for ToolState {
     fn default() -> Self {
         Self::new(false, false, None)
@@ -772,6 +833,7 @@ impl ToolState {
             zoom_registry: Arc::new(ZoomRegistry::new()),
             resize_registry: Arc::new(ResizeRegistry::new()),
             observation_revisions: Arc::new(MacObservationRevisions::new()),
+            app_monitors: std::sync::Mutex::new(Default::default()),
             watched_targets: std::sync::Mutex::new(Default::default()),
             watcher_started: std::sync::atomic::AtomicBool::new(false),
             // Load persisted config from ~/.cua-driver/config.json so that
@@ -783,6 +845,30 @@ impl ToolState {
             host_owns_permission_ux,
             host_bundle_id,
         }
+    }
+
+    pub(crate) fn watch_app(&self, pid: i32) -> anyhow::Result<()> {
+        let mut monitors = self
+            .app_monitors
+            .lock()
+            .map_err(|_| anyhow::anyhow!("app monitor registry poisoned"))?;
+        monitors.retain(|_, monitor| monitor.focus.is_current());
+        if let Some(monitor) = monitors.get_mut(&pid) {
+            if monitor.menu.as_ref().is_some_and(|menu| !menu.is_current()) {
+                monitor.menu = crate::ax::menu::track(pid).ok();
+            }
+            return Ok(());
+        }
+        let focus = crate::input::app_focus::track(pid)?;
+        let menu = match crate::ax::menu::track(pid) {
+            Ok(menu) => Some(menu),
+            Err(error) => {
+                tracing::debug!(pid, %error, "app menu notifications unavailable");
+                None
+            }
+        };
+        monitors.insert(pid, AppMonitors { focus, menu });
+        Ok(())
     }
 
     pub(crate) fn watch_target(self: &Arc<Self>, pid: i32, window_id: u32) {
@@ -811,7 +897,9 @@ impl ToolState {
                     .iter()
                     .copied()
                     .collect::<Vec<_>>();
-                let windows = crate::windows::all_windows();
+                // A live dialog can change compositor layers when activated.
+                // Discovery filters must not turn that into a closed target.
+                let windows = crate::windows::all_windows_any_layer();
                 for (pid, window_id) in targets {
                     let process_alive = unsafe { libc::kill(pid, 0) } == 0
                         || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
@@ -914,6 +1002,7 @@ pub fn register_all(
         let cursor_registry = state.cursor_registry.clone();
         let observation_revisions = state.observation_revisions.clone();
         registry.retain_runtime_cleanup(move || {
+            cua_driver_core::pip_hook::remove_runtime(&prefix);
             for cursor in cursor_registry
                 .all_states()
                 .into_iter()
@@ -926,10 +1015,6 @@ pub fn register_all(
             cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
-    // Share the element cache with the recording-hook layer so it can
-    // resolve element_index → window-local screenshot coords for click.png.
-    crate::recording_hooks::set_element_cache(state.element_cache.clone());
-
     // Drop a disconnecting session's config overrides + owned cursor on
     // `session_end`. The daemon fans the session id out to this hook;
     // recording ownership is handled separately on the core RecordingSession.
@@ -939,6 +1024,7 @@ pub fn register_all(
         let observation_revisions = state.observation_revisions.clone();
         let registration =
             cua_driver_core::session::register_scoped_session_end_hook(move |session_id| {
+                cua_driver_core::pip_hook::remove_session(session_id);
                 session_config.clear(session_id);
                 observation_revisions.clear_session(session_id);
                 cua_driver_core::observation_revision::revision_tokens().clear_session(session_id);
@@ -959,6 +1045,10 @@ pub fn register_all(
         registry.retain_session_revive_hook(revive_registration);
     }
 
+    cua_driver_core::desktop_keyboard::register(
+        registry,
+        Arc::new(crate::input::keyboard::DesktopKeyboard),
+    );
     registry.register(Box::new(list_apps::ListAppsTool));
     registry.register(Box::new(list_windows::ListWindowsTool));
     registry.register(Box::new(get_window_state::GetWindowStateTool::new(
@@ -1041,6 +1131,8 @@ pub fn register_all(
     registry.register(Box::new(cursor_tools::SetAgentCursorEnabledTool::new(
         state.clone(),
     )));
+    registry.register(Box::new(paste::PasteTool::new(state.clone())));
+    registry.register(Box::new(select_text::SelectTextTool::new(state.clone())));
     registry.register(Box::new(cursor_tools::SetAgentCursorMotionTool::new(
         state.clone(),
     )));
@@ -1331,3 +1423,5 @@ mod recording_start_guard_tests {
         let _ = rec.stop_owner(None);
     }
 }
+
+mod menu_equivalent;

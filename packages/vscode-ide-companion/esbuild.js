@@ -194,6 +194,9 @@ async function main() {
     },
     define: {
       'import.meta.url': 'import_meta.url',
+      // VS Code guards extension-host navigator reads with a throwing getter.
+      navigator: 'undefined',
+      'globalThis.navigator': 'undefined',
     },
     plugins: [
       publicCliExportPlugin,
@@ -221,16 +224,6 @@ async function main() {
     outdir: 'dist',
     entryNames: 'webview',
     chunkNames: 'chunks/[name]-[hash]',
-    // @qwen-code/qwen-code-core is a peer dependency of @qwen-code/webui.
-    // Since @qwen-code/webui marks it as external in its own Vite build, the
-    // browser bundle must also mark it external to avoid bundling Node.js-only
-    // modules (undici, @grpc/grpc-js, fs, stream, etc.) into the webview.
-    // The wildcard ensures deep sub-path imports (e.g.
-    // '@qwen-code/qwen-code-core/src/core/tokenLimits.js') are also excluded;
-    // without it esbuild only matches the bare package name and attempts to
-    // bundle the sub-path, which triggers "Dynamic require is not supported"
-    // at runtime in the browser.
-    external: ['@qwen-code/qwen-code-core', '@qwen-code/qwen-code-core/*'],
     logLevel: 'silent',
     plugins: [reactDedupPlugin, cssInjectPlugin, esbuildProblemMatcherPlugin],
     jsx: 'automatic', // Use new JSX transform (React 17+)

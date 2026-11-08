@@ -112,3 +112,34 @@ it('distinguishes locale resolution from prompt sanitization', () => {
     definitionFiles('^export function getSanitizedExtensionDisplayName[(]'),
   ).toEqual(['packages/cli/src/utils/extension-mention.ts']);
 });
+
+it('publishes the external subagent runtime through its declared subpath', () => {
+  const pkg = JSON.parse(
+    readFileSync(join(root, 'packages/core/package.json'), 'utf8'),
+  );
+  expect(pkg.exports['./subagentRuntime']).toEqual({
+    types: './dist/src/subagent-runtime.d.ts',
+    import: './dist/src/subagent-runtime.js',
+  });
+  const barrel = readFileSync(
+    join(root, 'packages/core/src/subagent-runtime.ts'),
+    'utf8',
+  );
+  expect(barrel).toContain("from './agents/runtime/subagent-executor.js'");
+  expect(barrel).toContain('ExternalAgentExecutor');
+  expect(barrel).toContain('AgentEventEmitter');
+  const aliases = readFileSync(
+    join(root, 'packages/cli/vitest.config.ts'),
+    'utf8',
+  );
+  expect(aliases).toMatch(
+    /'@qwen-code\/qwen-code-core\/subagentRuntime'\s*:\s*path\.resolve\(\s*__dirname,\s*'\.\.\/core\/src\/subagent-runtime\.ts',?\s*\)/,
+  );
+  const tsconfig = readFileSync(
+    join(root, 'packages/cli/tsconfig.json'),
+    'utf8',
+  );
+  expect(tsconfig).toMatch(
+    /"@qwen-code\/qwen-code-core\/subagentRuntime"\s*:\s*\[\s*"\.\.\/core\/src\/subagent-runtime\.ts"\s*\]/,
+  );
+});

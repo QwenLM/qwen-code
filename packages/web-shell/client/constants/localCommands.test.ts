@@ -12,6 +12,28 @@ const zh = getTranslator('zh-CN');
 const en = getTranslator('en');
 
 describe('getLocalCommands', () => {
+  it('adds subscription account commands only when available', () => {
+    expect(
+      getLocalCommands(en).some((command) => command.name === 'upgrade'),
+    ).toBe(false);
+    expect(
+      getLocalCommands(zh, { subscriptionAvailable: true }),
+    ).toContainEqual({
+      name: 'upgrade',
+      description: '打开 Qwen 订阅套餐页面',
+      source: 'builtin-command',
+    });
+    expect(
+      getLocalCommands(en).some((command) => command.name === 'logout'),
+    ).toBe(false);
+    expect(
+      getLocalCommands(zh, { subscriptionAvailable: true }),
+    ).toContainEqual({
+      name: 'logout',
+      description: '断开此设备与你的 Qwen 账号的连接',
+      source: 'builtin-command',
+    });
+  });
   it('translates fallback command descriptions to the active language', () => {
     const byName = new Map(getLocalCommands(zh).map((c) => [c.name, c]));
     expect(byName.get('status')?.description).toBe('查看版本信息');
@@ -19,6 +41,7 @@ describe('getLocalCommands', () => {
     expect(
       getLocalCommands(en).every((c) => c.source === 'builtin-command'),
     ).toBe(true);
+    expect(byName.get('plan')?.subcommands).toEqual(['on', 'off', 'exit']);
     expect(byName.get('fork')?.argumentHint).toBe('<directive>');
     expect(byName.get('btw')?.argumentHint).toBe('<your question>');
     expect(
@@ -123,10 +146,28 @@ describe('skillDescriptionKey', () => {
     expect(zh(skillDescriptionKey('goal-draft')!)).toBe(
       '将模糊意图改写为可验证的 /goal 目标',
     );
+    expect(skillDescriptionKey('autofix-pr')).toBe('skilldesc.autofixPr');
+    expect(zh(skillDescriptionKey('autofix-pr')!)).toBe(
+      '盯住一个 PR，修复其 CI、评审意见和冲突',
+    );
   });
 
   it('returns undefined for an unknown (user) skill', () => {
     expect(skillDescriptionKey('my-personal-skill')).toBeUndefined();
+  });
+});
+
+describe('settings message catalog', () => {
+  it('does not retain translations for the removed dynamic command setting', () => {
+    const removedKeys = [
+      'settings.label.general.dynamicCommandTranslation',
+      'settings.description.general.dynamicCommandTranslation',
+    ];
+
+    for (const key of removedKeys) {
+      expect(zh(key)).toBe(key);
+      expect(en(key)).toBe(key);
+    }
   });
 });
 

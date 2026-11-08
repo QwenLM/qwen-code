@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ShellResultDisplay } from '../shellResult.js';
 import type {
   DaemonAuthDeviceFlowSdkErrorKind,
   DaemonAuthProviderId,
   DaemonEvent,
+  DaemonBackgroundTurn,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
   DaemonSkillToggleMutation,
@@ -21,6 +23,7 @@ export type DaemonUiEventType =
   | 'user.text.delta'
   | 'user.image.delta'
   | 'user.file.delta'
+  | 'user.resource_link.delta'
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -38,6 +41,7 @@ export type DaemonUiEventType =
   // Session-meta events
   | 'session.metadata.changed'
   | 'session.artifact.changed'
+  | 'session.source.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -90,8 +94,11 @@ export interface DaemonUiEventBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this event. */
   sourceRecordIds?: readonly string[];
+  /** Stable identity for one projected segment within a persisted record. */
+  segmentId?: string;
   /** Admitted prompt identifier for events belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   originatorClientId?: string;
@@ -102,7 +109,30 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
   parentToolCallId?: string;
+  /**
+   * The agent associated with this frame. This normally names the producer;
+   * for an inter-agent message it names the recipient, matching OpenAI's
+   * `agent_message` semantics. The identity uses a path such as
+   * `/root/security`.
+   *
+   * Source: daemon stamps `_meta.agent` (see `SubAgentTracker` in the CLI).
+   */
+  agent?: DaemonAgentIdentity;
   meta?: DaemonTextDeltaMeta;
+}
+
+/**
+ * Path-style agent identity associated with one frame.
+ *
+ * `agentName` is derived from the spawning agent's path plus the subagent type.
+ * It is a readable role path, not a unique execution id: concurrent subagents
+ * of the same type share it, and renaming the agent definition changes it. Use
+ * `parentToolCallId` when a consumer must distinguish subagent executions.
+ */
+export interface DaemonAgentIdentity {
+  agentName: string;
+  depth: number;
+  kind: 'root' | 'subagent' | 'teammate';
 }
 
 export interface DaemonInputReference {
@@ -134,6 +164,8 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  /** Present when the image is a session attachment; keeps it re-fetchable. */
+  attachmentId?: string;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -142,6 +174,29 @@ export interface DaemonUiUserFileEvent extends DaemonUiEventBase {
   name: string;
   mimeType: string;
   attachmentId: string;
+  meta?: DaemonTextDeltaMeta;
+}
+
+export type DaemonResourceLink = {
+  type: 'resource_link';
+  uri: string;
+  name: string;
+  mimeType?: string | null;
+  size?: number | null;
+  description?: string | null;
+  title?: string | null;
+  annotations?: {
+    audience?: Array<'user' | 'assistant'> | null;
+    lastModified?: string | null;
+    priority?: number | null;
+    _meta?: Record<string, unknown> | null;
+  } | null;
+  _meta?: Record<string, unknown> | null;
+};
+
+export interface DaemonUiUserResourceLinkEvent extends DaemonUiEventBase {
+  type: 'user.resource_link.delta';
+  resourceLink: DaemonResourceLink;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -154,6 +209,50 @@ export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
 export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
   type: 'assistant.done';
   reason?: string;
+}
+
+/**
+ * Recorded timing for one model request or one tool call, carried on
+ * `agent_message_chunk._meta.timing` by paged transcript replay.
+ *
+ * These frames are emitted at the telemetry record's own position rather than
+ * attached to the message they describe, because a transcript page can split
+ * the two apart. Readers pair them across their own event window: a request
+ * against the next assistant message in scope, a tool against its `callId`.
+ *
+ * Every field but `kind` and `durationMs` is optional and only ever holds a
+ * recorded value — a missing field means the session did not record it.
+ */
+export interface DaemonTranscriptTimingMeta {
+  /** One application-observable model invocation, independent of response ID. */
+  executionId?: string;
+  kind: 'request' | 'tool';
+  /**
+   * Epoch ms. A request frame has one whenever its end was recorded: a request
+   * is logged when its own stream ends, so its start follows from its
+   * duration. A tool frame has one only when the session recorded the call's
+   * start — tool calls can be logged after their whole batch settles, so no
+   * start is derived for them, and older sessions carry none.
+   */
+  startedAt?: number;
+  durationMs: number;
+  /** `kind === 'request'`: dispatch to first user-visible content. */
+  ttftMs?: number;
+  /** `kind === 'request'`: 'error' means the request failed. */
+  status?: 'ok' | 'error';
+  responseId?: string;
+  promptId?: string;
+  model?: string;
+  /** `kind === 'tool'`: the id of the `tool_call` this timing belongs to. */
+  callId?: string;
+  toolName?: string;
+  toolStatus?: 'success' | 'error' | 'cancelled';
+  /**
+   * `kind === 'request'` in practice: the tool logger attaches no subagent
+   * identity, so a subagent's tool frame never carries this. Its `promptId`
+   * (`<sessionId>#<agentId>#<round>`) is what marks it as a subagent's.
+   */
+  subagentId?: string;
 }
 
 /**
@@ -202,10 +301,20 @@ export type DaemonUiToolProvenance = 'builtin' | 'mcp' | 'subagent' | 'unknown';
 
 export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   type: 'tool.update';
+  subagentSessionReady?: boolean;
   toolCallId: string;
   title?: string;
   status?: string;
   toolName?: string;
+  /**
+   * Set when the event only carries a late-arriving tool name (a metadata
+   * lifecycle frame). Reducers may name an existing block by `toolCallId`
+   * but must not create a block from it.
+   */
+  nameOnly?: boolean;
+  /** Server-measured call timing; absent in older recordings. */
+  startedAt?: number;
+  durationMs?: number;
   toolKind?: string;
   content?: unknown;
   locations?: unknown;
@@ -239,9 +348,16 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
    * Source: daemon stamps `tool_call._meta.subagentType`.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this tool call, when it was not the session's
+   * root agent. Same shape and source as `DaemonUiTextEvent.agent`.
+   */
+  agent?: DaemonAgentIdentity;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
+  /** Typed, redacted output presentation supplied by a trusted projector. */
+  resultPreview?: DaemonToolResultPreview;
 }
 
 export interface DaemonUiShellOutputEvent extends DaemonUiEventBase {
@@ -336,7 +452,7 @@ export type DaemonUnrecognizedDiagnosticReason =
 
 /**
  * Membership over the runtime reason array, exported so every routing guard
- * (reducer sidechannel here, provider flush/drop guard pair in webui)
+ * (reducer sidechannel here, provider flush/drop guard pair in Web Shell)
  * classifies against one source. A reason added to the array routes onto the
  * sidechannel everywhere without hand-editing each consumer (#8823 review).
  */
@@ -391,13 +507,28 @@ export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   clearActiveText?: boolean;
 }
 
+/**
+ * Loop-protection detail of a `loop_detected` turn error: the detector's
+ * `loopType`, the `loopReason` when that type covers several causes, and the
+ * tool-call count and limit of a `turn_tool_call_cap` stop.
+ */
+export interface DaemonLoopStop {
+  loopType?: string;
+  loopReason?: string;
+  toolCallCount?: number;
+  toolCallLimit?: number;
+}
+
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
+  data?: unknown;
   text: string;
   recoverable?: boolean;
   code?: string;
   promptId?: string;
   source?: 'turn_error';
+  /** Set on a `loop_detected` turn error that names its detector. */
+  loop?: DaemonLoopStop;
   /**
    * Closed-enum error category propagated from the daemon's typed-error
    * taxonomy. Lets renderers branch on `errorKind` for "retry auth" vs
@@ -415,6 +546,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   type: 'session.metadata.changed';
   sessionId: string;
   displayName?: string;
+}
+
+export interface DaemonUiSessionSourceChangedEvent extends DaemonUiEventBase {
+  type: 'session.source.changed';
+  sessionId: string;
+  revision: number;
 }
 
 export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
@@ -469,6 +606,8 @@ export interface DaemonUiStateResyncRequiredEvent extends DaemonUiEventBase {
  */
 export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
   type: 'prompt.cancelled';
+  /** Execution time before explicit cancellation, excluding cleanup. */
+  elapsedMs?: number;
   /**
    * Why the turn was cancelled. Absent for a user-initiated cancel;
    * `'forward_failed'` when the daemon synthesized the cancel because the
@@ -514,7 +653,9 @@ export interface DaemonUiSessionRewoundEvent extends DaemonUiEventBase {
   type: 'session.rewound';
   sessionId?: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
+  replay?: DaemonUiEvent[];
 }
 
 export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
@@ -704,6 +845,7 @@ export type DaemonUiEvent =
   | DaemonUiTextEvent
   | DaemonUiUserImageEvent
   | DaemonUiUserFileEvent
+  | DaemonUiUserResourceLinkEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiAssistantUsageEvent
@@ -718,6 +860,7 @@ export type DaemonUiEvent =
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionArtifactChangedEvent
+  | DaemonUiSessionSourceChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
@@ -771,6 +914,24 @@ export interface DaemonTranscriptQuestion {
   question: string;
   options: DaemonTranscriptQuestionOption[];
   raw: unknown;
+}
+
+export interface DaemonTranscriptTodoItem {
+  id: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  priority?: 'high' | 'medium' | 'low';
+  blockedBy?: readonly string[];
+}
+
+export interface DaemonTodoListPreview {
+  kind: 'todo_list';
+  entries: readonly DaemonTranscriptTodoItem[];
+  /** Legacy runtime-renderer summary; document/export uses typed entries. */
+  summary?: string;
+  truncated?: boolean;
+  planId?: string;
+  revision?: number;
 }
 
 export type DaemonToolPreview =
@@ -868,6 +1029,24 @@ export type DaemonToolPreview =
       kind: 'key_value';
       rows: Array<{ label: string; value: string }>;
     }
+  | DaemonTodoListPreview
+  | {
+      kind: 'generic';
+      summary?: string;
+    };
+
+export type DaemonToolResultPreview =
+  | { kind: 'shell_result'; result: ShellResultDisplay }
+  | DaemonTodoListPreview
+  | {
+      kind: 'question_answers';
+      text: string;
+      answers: Array<{ question: string; answer: string }>;
+    }
+  | {
+      kind: 'text';
+      text: string;
+    }
   | {
       kind: 'generic';
       summary?: string;
@@ -908,8 +1087,11 @@ export interface DaemonTranscriptBlockBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this block. */
   sourceRecordIds?: readonly string[];
+  /** Stable projected segment identity when no daemon event cursor exists. */
+  segmentId?: string;
   /** Admitted prompt identifier for content belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   /**
@@ -937,7 +1119,12 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   kind: 'user' | 'assistant' | 'thought';
   text: string;
   /** Images attached to this user message (base64 data URIs). */
-  images?: Array<{ data: string; mimeType: string }>;
+  images?: Array<{
+    data: string;
+    mimeType: string;
+    /** Present when the image is a session attachment; keeps it re-fetchable. */
+    attachmentId?: string;
+  }>;
   /** File attachments on this user message. */
   files?: Array<{
     name: string;
@@ -946,10 +1133,18 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
     text?: string;
     attachmentId?: string;
   }>;
+  /** Original ACP resource links, with their URI and attachment metadata. */
+  resourceLinks?: DaemonResourceLink[];
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
+  /**
+   * The agent associated with this block. This normally names the producer;
+   * for an inter-agent message it names the recipient. Lets a renderer name
+   * an agent by path without walking `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /** Raw ACP update metadata used by renderers for display-only routing. */
   meta?: DaemonTextDeltaMeta;
   /**
@@ -962,13 +1157,21 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
 }
 
 export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
+  subagentSessionReady?: boolean;
   kind: 'tool';
   toolCallId: string;
   title: string;
   status: string;
   toolName?: string;
+  /** Server-measured call timing; absent in older recordings. */
+  startedAt?: number;
+  durationMs?: number;
   toolKind?: string;
   preview: DaemonToolPreview;
+  /** Typed, redacted result data for explicit document/export projection. */
+  resultPreview?: DaemonToolResultPreview;
+  /** Safe presentation signal that this tool continues as a background task. */
+  background?: boolean;
   content?: unknown;
   locations?: unknown;
   details?: string;
@@ -989,6 +1192,12 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
    * block came from a sub-agent delegation.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this block, when it was not the session's root
+   * agent. Carried through from the event so renderers can attribute a block
+   * by path without walking `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /**
    * `id` of the parent transcript block, populated by the reducer when
    * `parentToolCallId` matches a block already in state. Renderers can
@@ -1021,6 +1230,10 @@ export interface DaemonPermissionTranscriptBlock
   options: DaemonUiPermissionOption[];
   toolCall?: unknown;
   preview: DaemonToolPreview;
+  /** Safe tool identity retained after the raw tool call is removed. */
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: string;
   resolved?: string;
 }
 
@@ -1030,6 +1243,8 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   code?: string;
   promptId?: string;
   errorKind?: DaemonErrorKind;
+  /** Mirrors `DaemonUiErrorEvent.loop`; only set on `error` blocks. */
+  loop?: DaemonLoopStop;
   source?: string;
   data?: unknown;
   /** Mirrors `DaemonUiStatusEvent.debugReason`; only set on `debug` blocks. */
@@ -1040,6 +1255,7 @@ export interface DaemonPromptCancelledTranscriptBlock
   extends DaemonTranscriptBlockBase {
   kind: 'prompt_cancelled';
   reason?: string;
+  elapsedMs?: number;
 }
 
 export type DaemonTranscriptBlock =
@@ -1134,6 +1350,12 @@ export interface DaemonTranscriptState
   activeThoughtBlockByParent: Record<string, string>;
   blockIndexById: Readonly<Record<string, number>>;
   toolBlockByCallId: Record<string, string>;
+  /**
+   * Late tool name keyed by call id, for lifecycle frames that arrive before
+   * the block they name (mid-run attach). The create path consumes its entry;
+   * the oldest entry is evicted past `MAX_PENDING_TOOL_NAMES`. #16301
+   */
+  pendingToolNameByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
   nextOrdinal: number;
@@ -1186,11 +1408,13 @@ export interface DaemonTranscriptTruncationDetail {
   /**
    * Set for `kind: 'blocks'`: whether the eviction removed blocks from the
    * OLDEST end. True for retention trimming (oldest-first), which can evict
-   * the record an exclusive pagination anchor points at; false for a rewind
-   * (which drops the newest blocks and leaves the oldest anchor intact).
+   * the record an exclusive pagination anchor points at; false for a tail-only
+   * rewind. Replay replacement can also change the oldest retained anchor.
    * Consumers should only re-anchor pagination when this is true.
    */
   evictedOldest?: boolean;
+  /** True when an authoritative rewind installs a replacement replay. */
+  replacedReplay?: boolean;
   /**
    * Set for `kind: 'blocks'`: the post-trim window occupancy. Lets consumers
    * decide whether a previously rejected history page would now be admitted,

@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  EXECUTION_APPROVAL_MODES,
+  type WebShellApprovalMode,
+} from '../../utils/planMode';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -8,6 +11,7 @@ import styles from './ApprovalModeDialog.module.css';
 
 interface ApprovalModeDialogProps {
   currentMode: string;
+  availableModes?: readonly WebShellApprovalMode[];
   sessionWorkflowEnabled?: boolean;
   onSelect: (modeId: string) => void;
 }
@@ -20,23 +24,15 @@ interface ModeItem {
 
 export function ApprovalModeDialog({
   currentMode,
-  sessionWorkflowEnabled = false,
+  availableModes = EXECUTION_APPROVAL_MODES,
   onSelect,
 }: ApprovalModeDialogProps) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
-  const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.map((id) => ({
+  const approvalModes: ModeItem[] = availableModes.map((id) => ({
     id,
-    name: t(
-      id === 'plan' && sessionWorkflowEnabled
-        ? 'mode.listLabel.planReview'
-        : `mode.listLabel.${id}`,
-    ),
-    description: t(
-      id === 'plan' && sessionWorkflowEnabled
-        ? 'mode.desc.planReview'
-        : `mode.desc.${id}`,
-    ),
+    name: t(`mode.listLabel.${id}`),
+    description: t(`mode.desc.${id}`),
   }));
 
   const currentIdx = approvalModes.findIndex((m) => m.id === currentMode);
@@ -58,6 +54,44 @@ export function ApprovalModeDialog({
     setActiveIndex(index);
   };
 
+  const highlightedIndex = Math.min(
+    activeIndex,
+    Math.max(0, approvalModes.length - 1),
+  );
+
+  // Re-anchor the highlight by row identity, not position: a same-length
+  // swap otherwise leaves the index pointing at a row the user never
+  // highlighted, and Enter would commit that row. A highlighted row that
+  // still exists keeps the highlight (following it if it moved); one that
+  // disappeared re-derives from the current mode. Keyed on the ids alone so
+  // a current-mode change does not steal a highlight the user moved.
+  const approvalModesKey = approvalModes.map((mode) => mode.id).join('\n');
+  const approvalModesRef = useRef(approvalModes);
+  const highlightedIdsRef = useRef(approvalModes.map((mode) => mode.id));
+  useEffect(() => {
+    approvalModesRef.current = approvalModes;
+  });
+  useEffect(() => {
+    const previousIds = highlightedIdsRef.current;
+    highlightedIdsRef.current = approvalModes.map((mode) => mode.id);
+    setActiveIndex((prev) => {
+      // The follow-current effect may have queued its own update in this
+      // commit, leaving prev in new-list coordinates; until the user has
+      // navigated, the current mode is the anchor and needs no lookup.
+      if (!userNavigatedRef.current) return currentIdx >= 0 ? currentIdx : 0;
+      const highlightedId = previousIds[prev];
+      if (highlightedId === undefined) return 0;
+      const index = approvalModesRef.current.findIndex(
+        (mode) => mode.id === highlightedId,
+      );
+      if (index >= 0) return index;
+      return currentIdx >= 0 ? currentIdx : 0;
+    });
+    // currentIdx is read fresh inside the update; keying on it would fire on
+    // every mode change and steal a user-moved highlight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approvalModesKey]);
+
   const confirm = (index: number) => {
     const mode = approvalModes[index];
     if (mode) onSelect(mode.id);
@@ -65,17 +99,17 @@ export function ApprovalModeDialog({
 
   const { keyboardMode } = useListboxKeyboard({
     itemCount: approvalModes.length,
-    activeIndex,
+    activeIndex: highlightedIndex,
     onActiveIndexChange: moveHighlight,
     onConfirm: confirm,
   });
 
   useEffect(() => {
-    const el = listRef.current?.children[activeIndex] as
+    const el = listRef.current?.children[highlightedIndex] as
       | HTMLElement
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex]);
+  }, [highlightedIndex]);
 
   return (
     <div
@@ -84,13 +118,13 @@ export function ApprovalModeDialog({
       role="listbox"
       tabIndex={0}
       aria-activedescendant={
-        approvalModes.length > 0 ? `mode-opt-${activeIndex}` : undefined
+        approvalModes.length > 0 ? `mode-opt-${highlightedIndex}` : undefined
       }
       aria-label={t('mode.select')}
       data-web-shell-approval-mode-dialog
     >
       {approvalModes.map((mode, index) => {
-        const selected = index === activeIndex;
+        const selected = index === highlightedIndex;
         const isCurrent = mode.id === currentMode;
         return (
           <div

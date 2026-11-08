@@ -34,13 +34,15 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
-    eventRingSize: 8000,
+    eventRingSize: 8_000,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
     journalGrowth: null,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
+    sessionPromptSettledCloseGraceMs: 0,
   },
   sessionCount: 0,
   pendingPermissionCount: 0,
@@ -124,12 +126,103 @@ describe('buildDaemonStatusResponse', () => {
     expect(JSON.stringify(response.issues)).not.toContain('/secret/path');
   });
 
+  it('exposes the bridge event ring byte cap and retention diagnostics', async () => {
+    const session = {
+      sessionId: 'retention-session',
+      workspaceCwd: BASE_WORKSPACE,
+      createdAt: '2026-07-01T00:00:00.000Z',
+      clientCount: 1,
+      subscriberCount: 0,
+      attachCount: 1,
+      pendingPromptCount: 0,
+      pendingPermissionCount: 0,
+      hasActivePrompt: false,
+      lastEventId: 10,
+      eventRingCount: 2,
+      eventRingBytes: 1024,
+      eventRingEarliestEventId: 9,
+      eventRingEvictedEvents: 8,
+      eventRingEvictedBytes: 4096,
+      availableCommandsSnapshotBytes: 128,
+      maxJournalEvents: 10_000,
+      maxJournalBytes: 8 * 1024 * 1024,
+    };
+    const options = makeOptions({
+      bridgeSnapshot: {
+        ...BASE_BRIDGE_SNAPSHOT,
+        limits: { ...BASE_BRIDGE_SNAPSHOT.limits, eventRingMaxBytes: 2048 },
+        sessionCount: 1,
+        sessions: [session],
+      },
+    });
+    options.opts.eventRingMaxBytes = 4096;
+    const summary = await buildDaemonStatusResponse('summary', options);
+    expect(summary.limits.eventRingMaxBytes).toBe(2048);
+    expect(summary.full).toBeUndefined();
+    const full = await buildDaemonStatusResponse('full', options);
+    expect(full.limits.eventRingMaxBytes).toBe(2048);
+    expect(full.full?.sessions).toEqual([session]);
+  });
+
   it('includes maxTotalSessions in daemon status limits', async () => {
     const options = makeOptions();
     options.opts.maxTotalSessions = 50;
     const response = await buildDaemonStatusResponse('summary', options);
 
     expect(response.limits.maxTotalSessions).toBe(50);
+  });
+
+  it.each(['admit', 'enforce'] as const)(
+    'managed heap mode %s',
+    async (mode) => {
+      const options = makeOptions();
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
+      const policy = createChildHeapPolicy({ budget, mode });
+      options.opts.daemonMemoryBudget = budget;
+      options.getChildHeapPolicySnapshot = () => policy.snapshot();
+      options.childAdmissionEnforced = true;
+      options.getCommittedAcpChildCount = () => 6;
+      const response = await buildDaemonStatusResponse('summary', options);
+      expect(response.limits.memory).toMatchObject({
+        enforced: mode === 'enforce',
+        childHeap: {
+          mode,
+          admissionEnforced: true,
+          maxConcurrentChildren: 6,
+          perChildCeilingMb: 544,
+        },
+      });
+      expect(response.runtime.memory).toMatchObject({
+        committedAcpChildren: 6,
+      });
+    },
+  );
+
+  it('does not claim heap enforcement from an injected policy snapshot alone', async () => {
+    const options = makeOptions();
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8192 });
+    const policy = createChildHeapPolicy({ budget, mode: 'enforce' });
+    options.opts.daemonMemoryBudget = budget;
+    options.opts.childHeapMode = 'enforce';
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
+    const response = await buildDaemonStatusResponse('summary', options);
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: { mode: 'enforce', admissionEnforced: false },
+    });
+  });
+
+  it('does not claim heap enforcement during bootstrap without a policy', async () => {
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8192,
+    });
+    options.opts.childHeapMode = 'enforce';
+    const response = await buildDaemonStatusResponse('summary', options);
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: null,
+    });
   });
 
   it('reports the modeled partition without claiming it is applied', async () => {
@@ -292,6 +385,7 @@ describe('buildDaemonStatusResponse', () => {
 
     // The single bound workspace has a live channel in BASE_BRIDGE_SNAPSHOT.
     expect(response.runtime.memory).toEqual({
+      committedAcpChildren: null,
       registeredWorkspaces: 1,
       activeAcpChildren: 1,
       childRssCoverage: 'active_children',
@@ -343,6 +437,7 @@ describe('buildDaemonStatusResponse', () => {
     const response = await buildDaemonStatusResponse('summary', options);
 
     expect(response.runtime.memory).toEqual({
+      committedAcpChildren: null,
       registeredWorkspaces: 0,
       activeAcpChildren: 0,
       childRssCoverage: 'active_children',
@@ -508,6 +603,81 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory!.children.sampled).toBeLessThan(
       response.runtime.memory!.activeAcpChildren,
     );
+  });
+
+  it('counts each live engine of a paired runtime as a child', async () => {
+    // A paired runtime holds one child per engine. Counting runtimes would
+    // under-report children to anything dividing a budget by them, and adding
+    // a reading that covers two children as one sample would misstate
+    // `sampled` in the other direction.
+    const reading = (children: number, heapReported?: number) => ({
+      rssBytes: 100 * children,
+      cpuPercent: 1,
+      ageMs: 10 * children,
+      children,
+      ...(heapReported !== undefined
+        ? {
+            heapReported,
+            heap: {
+              peakOldGenerationBytes: 900,
+              peakLiveSetBytes: 300,
+              peakTotalHeapBytes: 1_200,
+              majorGcCount: 4,
+              majorGcMs: 8,
+              unclassifiedSpaceNames: [],
+            },
+          }
+        : {}),
+    });
+    const bridge = (
+      liveChannelCount: number | undefined,
+      snapshot: ReturnType<typeof reading>,
+    ) =>
+      ({
+        getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+        isChannelLive: () => (liveChannelCount ?? 1) > 0,
+        ...(liveChannelCount !== undefined ? { liveChannelCount } : {}),
+        getChildResourceSnapshot: () => snapshot,
+        lastActivityAt: null,
+      }) as unknown as AcpSessionBridge;
+    const bridges = [
+      // Both engines live and measured, both with heap marks.
+      bridge(2, reading(2, 2)),
+      // Both engines live, one of them not measured yet.
+      bridge(2, reading(1)),
+      // Deliberately unfaithful: claims more children and heap reporters than
+      // are live, which must not push `sampled` past `activeAcpChildren` or
+      // `heap.reported` past `sampled`.
+      bridge(1, reading(3, 3)),
+      // A bridge predating the count covers exactly one child.
+      bridge(undefined, reading(1)),
+    ];
+    const runtimes = bridges.map((b, i) => ({
+      workspaceId: `w${i}`,
+      workspaceCwd: i === 0 ? BASE_WORKSPACE : `/work/w${i}`,
+      bridge: b,
+    }));
+    const options = makeOptions();
+    options.bridge = bridges[0];
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: bridges[0] },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => runtimes.map(() => ({})),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.activeAcpChildren).toBe(6);
+    expect(response.runtime.memory?.children).toMatchObject({
+      rssBytes: 700,
+      sampled: 5,
+      oldestReadingAgeMs: 30,
+      heap: expect.objectContaining({ reported: 3 }),
+    });
   });
 
   it('reports a zero age as zero, and ages a mixed-contract sum by the ones that can', async () => {
@@ -1154,6 +1324,11 @@ describe('buildDaemonStatusResponse', () => {
             pendingPermissionCount: 0,
             hasActivePrompt: false,
             lastEventId: 0,
+            eventRingCount: 0,
+            eventRingBytes: 0,
+            eventRingEvictedEvents: 0,
+            eventRingEvictedBytes: 0,
+            availableCommandsSnapshotBytes: 0,
             maxJournalEvents: 10_000,
             maxJournalBytes: 8 * 1024 * 1024,
           },
@@ -1666,6 +1841,73 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('warns once per workspace about channels its serve.channels did not restore', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () => [
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'feishu',
+          message: 'gateway did not answer',
+        },
+        {
+          workspaceCwd: '/ws/b',
+          channel: 'ghost',
+          message: 'not configured',
+        },
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'dingtalk',
+          message: 'rolled back',
+        },
+      ],
+    });
+
+    expect(
+      response.issues.filter(
+        (issue) => issue.code === 'channel_restore_failed',
+      ),
+    ).toEqual([
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/a were not restored: ' +
+          'feishu (gateway did not answer); dingtalk (rolled back).',
+      },
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/b were not restored: ghost (not configured).',
+      },
+    ]);
+    expect(response.status).toBe('warning');
+  });
+
+  it('bounds the restore warning by entry count and channel-name length', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () =>
+        Array.from({ length: 70 }, (_, index) => ({
+          workspaceCwd: '/ws/a',
+          channel: `${'c'.repeat(200)}-${index}`,
+          message: 'down',
+        })),
+    });
+
+    const [issue, ...rest] = response.issues.filter(
+      (item) => item.code === 'channel_restore_failed',
+    );
+    expect(rest).toEqual([]);
+    // 64 entries shown, each name capped at 128, and the remainder counted
+    // rather than silently dropped.
+    expect(issue!.message.split('; ')).toHaveLength(65);
+    expect(issue!.message).toContain(`${'c'.repeat(128)} (down)`);
+    expect(issue!.message).not.toContain('c'.repeat(129));
+    expect(issue!.message).toMatch(/; and 6 more\.$/u);
+  });
+
   it('rolls up statuses inside tools, hooks, and extensions', async () => {
     const response = await buildDaemonStatusResponse(
       'full',
@@ -1911,6 +2153,12 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: true,
               lastEventId: 10,
+              eventRingCount: 2,
+              eventRingBytes: 1024,
+              eventRingEarliestEventId: 9,
+              eventRingEvictedEvents: 8,
+              eventRingEvictedBytes: 4096,
+              availableCommandsSnapshotBytes: 128,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -1925,6 +2173,11 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 0,
+              eventRingCount: 0,
+              eventRingBytes: 0,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -1960,6 +2213,12 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 1,
+              eventRingCount: 1,
+              eventRingBytes: 128,
+              eventRingEarliestEventId: 1,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -1990,6 +2249,12 @@ describe('buildDaemonStatusResponse', () => {
           pendingPermissionCount: 0,
           hasActivePrompt: true,
           lastEventId: 1,
+          eventRingCount: 1,
+          eventRingBytes: 128,
+          eventRingEarliestEventId: 1,
+          eventRingEvictedEvents: 0,
+          eventRingEvictedBytes: 0,
+          availableCommandsSnapshotBytes: 0,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
         },
@@ -2010,6 +2275,12 @@ describe('buildDaemonStatusResponse', () => {
           pendingPermissionCount: 0,
           hasActivePrompt: false,
           lastEventId: 1,
+          eventRingCount: 1,
+          eventRingBytes: 128,
+          eventRingEarliestEventId: 1,
+          eventRingEvictedEvents: 0,
+          eventRingEvictedBytes: 0,
+          availableCommandsSnapshotBytes: 0,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
         },
@@ -2078,6 +2349,12 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: true,
               lastEventId: 1,
+              eventRingCount: 1,
+              eventRingBytes: 128,
+              eventRingEarliestEventId: 1,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },

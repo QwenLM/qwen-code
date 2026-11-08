@@ -11,7 +11,7 @@ import type {
 import {
   useConnection,
   useTranscriptStore,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 
 // Cap transcript re-renders at ~20fps. During streaming every network chunk
 // notifies the store; each render then runs the O(transcript) normalization
@@ -146,12 +146,20 @@ export function useAnimationFrameTranscriptSnapshot(
   //
   // Session and block-index identities ride inside the deferred snapshot. The
   // session id rejects a previous session, while the index identity rejects a
-  // same-session store reset without blocking ordinary streamed text updates.
+  // same-session store reset. Structural changes (including a new user turn)
+  // must also be current: urgent prompt status must not render against the
+  // previous turn and its elapsed-time anchor. Pure streaming tail appends
+  // retain the deferred path.
   const snapshot = useMemo(() => ({ sessionId, ...live }), [live, sessionId]);
   const deferred = useDeferredValue(snapshot);
   const current =
     deferred.sessionId === sessionId &&
-    deferred.blockIndexById === live.blockIndexById
+    deferred.blockIndexById === live.blockIndexById &&
+    (deferred.blockChangeSummary === live.blockChangeSummary ||
+      isSameTranscriptStructure(
+        deferred.blockChangeSummary,
+        live.blockChangeSummary,
+      ))
       ? deferred
       : live;
   return {

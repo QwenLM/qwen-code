@@ -11,15 +11,17 @@ type CleanupFunction = (() => void) | (() => Promise<void>);
 
 const priorityCleanupFunctions: CleanupFunction[] = [];
 const cleanupFunctions: CleanupFunction[] = [];
+let exitCleanupPromise: Promise<void> | undefined;
 
 export function registerCleanup(
   fn: CleanupFunction,
-  options: { priority?: boolean } = {},
+  options: { priority?: boolean; first?: boolean } = {},
 ): () => void {
   const functions = options.priority
     ? priorityCleanupFunctions
     : cleanupFunctions;
-  functions.push(fn);
+  if (options.first) functions.unshift(fn);
+  else functions.push(fn);
   return () => {
     const index = functions.indexOf(fn);
     if (index !== -1) functions.splice(index, 1);
@@ -72,8 +74,19 @@ export interface RunExitCleanupOptions {
   _testOverallTimeoutMs?: number;
 }
 
-export async function runExitCleanup(
+export function runExitCleanup(
   options: RunExitCleanupOptions = {},
+): Promise<void> {
+  if (exitCleanupPromise) return exitCleanupPromise;
+  const cleanup = runExitCleanupPass(options).finally(() => {
+    if (exitCleanupPromise === cleanup) exitCleanupPromise = undefined;
+  });
+  exitCleanupPromise = cleanup;
+  return cleanup;
+}
+
+async function runExitCleanupPass(
+  options: RunExitCleanupOptions,
 ): Promise<void> {
   const perFn = options._testPerFnTimeoutMs ?? PER_CLEANUP_TIMEOUT_MS;
   const overall = options._testOverallTimeoutMs ?? OVERALL_CLEANUP_TIMEOUT_MS;
@@ -117,6 +130,7 @@ export async function runExitCleanup(
 export function _resetCleanupFunctionsForTest(): void {
   priorityCleanupFunctions.length = 0;
   cleanupFunctions.length = 0;
+  exitCleanupPromise = undefined;
 }
 
 export async function cleanupCheckpoints() {

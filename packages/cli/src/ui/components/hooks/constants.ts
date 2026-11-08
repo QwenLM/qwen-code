@@ -66,6 +66,13 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 0, description: t('stdout/stderr not shown') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.FileChanged]: [
+      { code: 0, description: t('use watchPaths if provided') },
+      {
+        code: 'Other',
+        description: t('file change is already complete; cannot block it'),
+      },
+    ],
     [HookEventName.UserPromptSubmit]: [
       { code: 0, description: t('stdout shown to Qwen') },
       {
@@ -183,6 +190,7 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PostToolBatch]: t('After all tool calls in a batch resolve'),
     [HookEventName.Notification]: t('When notifications are sent'),
     [HookEventName.InstructionsLoaded]: t('When instruction files are loaded'),
+    [HookEventName.FileChanged]: t('When a watched file changes'),
     [HookEventName.UserPromptSubmit]: t('When the user submits a prompt'),
     [HookEventName.UserPromptExpansion]: t(
       'When a slash command expands into a prompt',
@@ -211,7 +219,7 @@ export function getHookShortDescription(eventName: string): string {
       'When a permission dialog is displayed',
     ),
     [HookEventName.PermissionDenied]: t(
-      'When a tool call is denied before a permission dialog is displayed',
+      'When AUTO-mode classification denies a tool call',
     ),
     [HookEventName.TodoCreated]: t('When a new todo item is created'),
     [HookEventName.TodoCompleted]: t('When a todo item is marked as completed'),
@@ -243,8 +251,11 @@ export function getHookDescription(eventName: string): string {
     [HookEventName.InstructionsLoaded]: t(
       'Input to command is JSON with file_path, memory_type, load_reason, and optional trigger_file_path and parent_file_path.',
     ),
+    [HookEventName.FileChanged]: t(
+      'Input to command is JSON with absolute file_path and event (add/change/unlink). Matchers filter the basename. Synchronous hookSpecificOutput.watchPaths replaces dynamic watch paths; file changes cannot be blocked.',
+    ),
     [HookEventName.UserPromptSubmit]: t(
-      'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
+      'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).',
     ),
     [HookEventName.UserPromptExpansion]: t(
       'Input to command is JSON with command_name, command_args, and expanded prompt text.',

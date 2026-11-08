@@ -19,6 +19,7 @@ Add things you'd otherwise have to repeat every session:
 - Coding conventions your team follows ("all new files must have JSDoc comments")
 - Architectural decisions ("we use the repository pattern, never call the database directly from controllers")
 - Personal preferences ("always use pnpm, not npm")
+- A verification policy for high-stakes work — for example "verify against the database before concluding" (see [Enforce evidence-based conclusions](../common-workflow.md#enforce-evidence-based-conclusions) for a ready-made template)
 
 Don't include things Qwen can figure out by reading your code. QWEN.md works best when it's short and specific — the longer it gets, the less reliably Qwen follows it.
 
@@ -76,6 +77,8 @@ Auto-memory runs in the background. After each of your conversations, Qwen quiet
 
 This is different from QWEN.md: you don't write it, Qwen does.
 
+When a turn that answers a message relayed by a [channel](./channels/overview) — GitHub, Telegram, DingTalk and the others — ends, Qwen runs no extraction and schedules no [periodic cleanup](#periodic-cleanup): the sender is often not you, and extracting after every relayed message would add model calls to each one. In a session that also takes your own prompts, such as one bound to a pull request, extraction after your next prompt still reads the recent conversation, so relayed messages still in it can be learned from. Memory recall is unaffected: a reply to a channel message can draw on what is already saved. A channel chat keeps durable context in [channel memory](./channels/overview#channel-memory) instead.
+
 ### What Qwen saves
 
 Qwen looks for four kinds of things worth remembering:
@@ -94,6 +97,14 @@ Qwen doesn't save everything — only things that would actually be useful next 
 Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of the same checkout share the same memory folder, so what Qwen learns in one branch is available in others. Each linked git worktree gets its own memory folder, matching the per-worktree isolation of chats and other session state — repository-wide conventions you want in every worktree belong in [team memory](#team-memory-shared-with-collaborators).
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
+
+`MEMORY.md` is a compact index, rather than the full memory store. Its generated body and the portion loaded into prompts share a limit of 200 lines and 25,000 UTF-16 code units; truncation notices are added separately. Line endings are normalized before prompt budgeting. Under size pressure, complete ordinary entries (up to 150 code units) get space before longer entries, and retained entries keep their original order. An entry that cannot fit is skipped whole, so its Markdown link is never cut in the middle. Keep detail in the linked topic files.
+
+When rebuilding omits entries, the saved warning reports the dropped count and up to three names for each limit: the topic-file scan cap and the index-body budget. The counts stay separate because one grouped team entry can represent several files. The warning remains visible when the index is loaded into a prompt while it is the file's last paragraph. Insert new index pointers above the trailing warning to preserve it. Omission from the index does not delete the linked topic files. For index-body pressure, merge topic files or remove obsolete ones, or shorten their frontmatter names and descriptions. An overlong link already has no description: shorten its topic-file path or frontmatter name instead. Editing only the generated index does not survive the next rebuild. For the file-count scan cap, merge topic files or remove obsolete ones; editing only the generated index does not reduce the number of files scanned.
+
+The warning for a partially loaded index distinguishes the line and character budgets. Shortening descriptions can help with the total character budget even when no entry exceeds the ordinary line length. For entries matching the generated format, that advice accounts for names and links, including grouped links; prune or merge entries when those links alone consume the budget. Hand-edited formats or grouped suffixes that could instead be description text receive possible remedies without a promise that shortening will fit. If the entry-count limit is exceeded, entries must still be pruned or merged: shortening a description does not reduce the number of entries. When both budgets are exceeded, reducing the index to 200 entries may still require shorter descriptions or fewer entries to meet the character budget; the warning reports the actual candidate count. Shortening to 150 units per entry is not always enough to meet the 25,000-unit total.
+
+A bounded, single-paragraph trailing writer notice is excluded from prompt budgeting. When all saved entries fit, Qwen preserves that notice without claiming that more entries were omitted while loading. Regenerating a saturated index can refill space freed by shorter descriptions, so the size of the saved file need not shrink immediately. For project, user, and team memory, edit the topic files' `description` frontmatter and check the regenerated index. An empty description can fall back to the memory type, so shortening frontmatter does not guarantee that every entry will fit. Direct index-line edits can be replaced by the next managed write. Keep full link targets intact even when a link exceeds 150 units; shorten display metadata or prune or merge topic files instead of cutting links.
 
 #### Pinned memory
 
@@ -114,8 +125,10 @@ Automatic extraction is instructed to leave pinned records and their valid
 index entries unchanged, while Dream is instructed to skip `pinned/` during
 consolidation. Both automatic extraction and forked Dream workers, including
 background cleanup, enforce the pinned-file boundary on their write and edit
-tools, including paths that resolve through a symlink into `pinned/`; their
-existing read-only shell policy blocks command-line deletion. You still control
+tools, including paths that resolve through a symlink into `pinned/`.
+Command-line deletion is closed off too: only the project Dream worker holds a
+shell, and its policy is read-only, while automatic extraction and the
+user-memory Dream worker hold no shell at all. You still control
 these files directly and can remove them with an explicit `/forget` request.
 
 > **Note:** The visible `/dream` slash command runs on the main Agent. It
@@ -142,6 +155,24 @@ You can also set them in `~/.qwen/settings.json` (applies to all projects) or `.
   }
 }
 ```
+
+### Structured recall (opt-in)
+
+By default Qwen reads memory as a flat `MEMORY.md` index. The structured protocol replaces that with a hierarchical memory tree, injects only the subtree relevant to your current request, and gives Qwen a `search_memory` tool to pull full entries on demand — which costs fewer tokens once a memory collection grows past a handful of files.
+
+It is off by default. Turn it on in `settings.json` (restart required):
+
+```json
+{
+  "memory": {
+    "enableStructuredRecall": true
+  }
+}
+```
+
+or for a single run with `QWEN_CODE_MEMORY_STRUCTURED_RECALL=1`.
+
+Turning it on starts a background metadata migration: each memory file gains the frontmatter (category, keywords, usage scenarios) that recall needs. It runs in small batches of at most 10 files per turn and only rewrites frontmatter, never the body of a note. While the setting is off the migration is never scheduled, so nothing is rewritten and no background model calls are made.
 
 ### Team memory (shared with collaborators)
 
@@ -208,6 +239,10 @@ Opens the Memory panel. From here you can:
 - Open your personal QWEN.md (`~/.qwen/QWEN.md`)
 - Open the project QWEN.md
 - Browse the auto-memory folder
+
+### `/memory migrate-team`
+
+Migrates the **team memory** tier (`.qwen/team-memory/`) to the structured metadata format: each file gains the frontmatter (name, description, category, keywords, usage scenarios) that memory recall needs. Personal and project memory are migrated automatically in the background once [structured recall](#structured-recall-opt-in) is enabled; team memory is shared through git, so the rewrite runs only on explicit request and shows up as a reviewable commit. Run it once per repository in a trusted workspace with team memory enabled.
 
 ### `/init`
 

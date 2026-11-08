@@ -9,6 +9,25 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    '週額度已用完{{reset}}。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    '週額度已用完{{reset}}，請在額度恢復後重試。',
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    '額度已用完{{reset}}，請在額度恢復後重試。',
+  ' Your credits are expected to reset in {{time}}.':
+    '，預計將於{{time}}後恢復',
+  '{{days}} and {{hours}}': '{{days}} {{hours}}',
+  '1 day': '1天',
+  '{{count}} days': '{{count}}天',
+  '1 hour': '1小時',
+  '{{count}} hours': '{{count}}小時',
+  Retry: '重試',
+  'Connecting…': '正在連線…',
+  'Generated UI': 'Generated UI 生成式介面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在支援的本機工作階段中啟用內建 Generated UI。重新建立所屬工作階段後生效。',
+
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
@@ -23,6 +42,8 @@ export default {
   'Project level': '專案層級',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪貼簿圖片貼上功能無法使用，因為原生剪貼簿模組載入失敗。請重新安裝 Qwen Code，或改用 npm 安裝方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪貼簿圖片貼上功能無法使用：未找到支援的剪貼簿工具。在 Linux 上請安裝 `wl-clipboard`（Wayland）或 `xclip`（X11），若為無頭環境請設定 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -145,6 +166,7 @@ export default {
   'from {{marketplace}}': '來自 {{marketplace}}',
   installed: '已安裝',
   '{{count}} Agents': '{{count}} 個智能體',
+  '{{count}} Workflows': '{{count}} 個工作流程',
   '{{count}} Commands': '{{count}} 個命令',
   '{{count}} MCP': '{{count}} 個 MCP',
   '{{count}} Skills': '{{count}} 個技能',
@@ -168,6 +190,7 @@ export default {
   // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
   // verbatim inside an otherwise-translated label.
   // ============================================================================
+  'toolDisplayName.Exec': '執行程式碼',
   'toolDisplayName.Edit': '編輯',
   'toolDisplayName.WriteFile': '寫入檔案',
   'toolDisplayName.ReadFile': '讀取檔案',
@@ -179,10 +202,15 @@ export default {
   'toolDisplayName.TodoList': '任務清單',
   'toolDisplayName.Goal': '目標',
   'toolDisplayName.UpdateGoal': '更新目標',
+  'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.ManageMemory': '管理記憶',
+  'toolDisplayName.SearchMemory': '搜尋記憶',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.RecordSource': '記錄來源',
   'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
@@ -196,6 +224,7 @@ export default {
   'toolDisplayName.CronCreate': '建立定時任務',
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.AutofixPr': 'PR 自動修復',
   'toolDisplayName.LoopWakeup': '循環喚醒',
   'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.ListAgents': '列出 Agent',
@@ -212,11 +241,29 @@ export default {
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
   'toolDisplayName.ToolSearch': '工具搜尋',
+  'toolDisplayName.ToolCall': '工具呼叫',
   'toolDisplayName.EnterWorktree': '進入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
+  'toolDisplayName.DownsampleImage': '降採樣圖像',
+  'toolDisplayName.DownscaleVideo': '降採樣影片',
+  'toolDisplayName.DownsampleAudio': '降採樣音訊',
+  'toolDisplayName.ExtractKeyframes': '擷取關鍵影格',
+  'toolDisplayName.ExtractAudio': '擷取音軌',
+  'toolDisplayName.ClipVideo': '剪輯影片',
+  'toolDisplayName.ClipImage': '裁剪圖像',
+  'toolDisplayName.ClipAudio': '剪輯音訊',
+  'toolDisplayName.CaptionImage': '描述圖像',
+  'toolDisplayName.CaptionAudio': '描述音訊',
+  'toolDisplayName.OcrImage': '識別圖像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解影片',
+  'toolDisplayName.ConvertImage': '轉換圖像',
+  'toolDisplayName.TranscribeAudio': '轉寫音訊',
+  'toolDisplayName.RecallMediaMemory': '召回媒體記憶',
+  '[fixed-only: runs via media policies, not the model]':
+    '［僅固定策略：由媒體策略調用，不開放給模型］',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
@@ -334,11 +381,10 @@ export default {
   'Search:': '搜尋：',
   'type to filter…': '輸入以篩選…',
   'No skills are currently available.': '目前沒有可用的技能。',
-  'All available skills are locked at a higher scope (see below).':
-    '所有可用技能都被更高範圍鎖定（詳見下方）。',
   'No skills match the search.': '沒有符合搜尋條件的技能。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '被更高範圍設定鎖定（此處無法切換）：',
+  'Locked by settings entries you cannot toggle here:':
+    '被無法在此切換的設定條目鎖定：',
+  '{{count}} locked not shown': '{{count}} 個已鎖定技能未顯示',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',
@@ -384,6 +430,8 @@ export default {
     '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '無法回退到已被壓縮的輪次，請嘗試更近一些的輪次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '無法將對話回退到該輪次：它已無法與模型歷史對應（例如經過重試）。請嘗試更近一些的輪次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '該輪次無法還原檔案（沒有擷取到檔案變更，或該輪次屬於本次會話之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -630,6 +678,13 @@ export default {
   active: '已啟用',
   disabled: '已禁用',
   enabled: '已啟用',
+  'disabled (bare mode)': '已禁用（精簡模式）',
+  'disabled (safe mode)': '已禁用（安全模式）',
+  'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (not approved)': '已禁用（未核准）',
+  'disabled (rejected)': '已禁用（已拒絕）',
+  'disabled (folder not trusted)': '已禁用（資料夾未受信任）',
+  'disabled (turned off for this session)': '已禁用（本工作階段中已關閉）',
   'View Details': '查看詳情',
   'Update failed:': '更新失敗：',
   'Updating {{name}}...': '正在更新 {{name}}...',
@@ -680,6 +735,10 @@ export default {
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
+  'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
+  'Mods (Experimental)': 'Mods（實驗性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
@@ -694,6 +753,7 @@ export default {
   'Hide Window Title': '隱藏窗口標題',
   'Show Status in Title': '在標題中顯示狀態',
   'Hide Tips': '隱藏提示',
+  'Show Tool Call Arguments': '顯示工具呼叫參數',
   'Show Line Numbers in Code': '在代碼中顯示行號',
   'Show Citations': '顯示引用',
   'Custom Witty Phrases': '自定義詼諧短語',
@@ -847,6 +907,10 @@ export default {
   'This extension will install the following skills:': '此擴展將安裝以下技能：',
   'This extension will install the following subagents:':
     '此擴展將安裝以下子智能體：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此擴展將安裝以下工作流程（可啟動子智能體的 JavaScript 腳本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流程腳本與已安裝版本相比有變更：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安裝 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安裝來自 {{originSource}} 的擴展。某些功能可能無法完美兼容 Qwen Code。',
@@ -918,6 +982,7 @@ export default {
   'Context files:': '上下文檔案：',
   'Skills:': '技能：',
   'Agents:': '智能體：',
+  'Workflows:': '工作流程：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '連結擴展安裝失敗。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1003,6 +1068,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 個 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此選單為只讀。要添加或修改 Hook，請直接編輯 settings.json 或詢問 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新開啟此選單可重新載入 Hook 定義。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制項與 HTTP 安全設定需要重新啟動後生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新載入 Hook 定義失敗：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 選擇 · Esc 取消',
   'Exit codes:': '退出碼：',
   'Configured hooks:': '已配置的 Hook：',
@@ -1017,6 +1088,20 @@ export default {
   'No hook config selected': '未選擇 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或刪除此 Hook，請直接編輯 settings.json 或詢問 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已開啟，本會話不會執行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精簡模式已開啟，本會話不會執行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 設定停用。',
+  'Timeout:': '逾時：',
+  'Status message:': '狀態訊息：',
+  'Condition:': '條件：',
+  'Options:': '選項：',
+  'Skill:': '技能：',
+  'runs in background': '在背景執行',
+  'runs once': '只執行一次',
+  sequential: '依序執行',
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
     '所有 Hook 當前已禁用。您有 {{count}} 未運行。',
@@ -1061,8 +1146,8 @@ export default {
     '命令輸入為包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令輸入為包含通知消息和類型的 JSON。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    '命令輸入為 JSON，其中包含 "prompt"（目前模型側提示）以及選用的 "submitted_prompt"（受支援互動式 TUI 的提交文字投影）。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    '命令輸入為 JSON，其中包含 "prompt"（目前模型側提示）以及選用的 "submitted_prompt"（在受支援的提交邊界擷取的文字投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令輸入為包含 command_name、command_args 和展開後提示文本的 JSON。',
   'Input to command is JSON with session start source.':
@@ -1424,6 +1509,12 @@ export default {
     '聊天歷史壓縮未能減小大小。這可能表明壓縮提示存在問題。',
   'Could not compress chat history due to a token counting error.':
     '由於 token 計數錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由於壓縮摘要為空，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
+  'Could not compress chat history due to an API error.':
+    '由於 API 錯誤，無法壓縮聊天歷史。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
@@ -1885,6 +1976,10 @@ export default {
   'API key cannot be empty.': 'API Key 不能為空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '無效的 API Key。按量付費 Key 以 "sk-" 或 "sk-ws-" 開頭。Token Plan Key（"sk-sp-"）請使用 Token Plan 入口。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '無效的 API Key。Token Plan API Key 以 "sk-sp-" 開頭。請從 Token Plan 控制台產生，或使用 Standard API Key 入口綁定按量付費 Key。',
   'You can get your Coding Plan API key here':
     '您可以在這裏獲取 Coding Plan API Key',
   'You can get your Token Plan API key here':
@@ -1903,6 +1998,17 @@ export default {
     '您可以在 settings.json 中配置 API Key 和模型',
   'Refer to the documentation for setup instructions': '請參考文檔瞭解配置說明',
   'Coding Plan': 'Coding Plan',
+  QwenCloud: '千問AI平台',
+  'QwenCloud · Access Method': '千問AI平台 · 接入方式',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推薦配置：Token Plan 或 Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    '按量付費 · 使用既有的平台 API Key 連線',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    '按月 Credit 額度訂閱 · 專用 endpoint（個人版與團隊版）',
+  'China — 千问AI平台': '中國 — 千問AI平台',
+  'International — QwenCloud': '國際 — QwenCloud',
+  Platform: '平台',
   Custom: '自定義',
   'Select Region for Coding Plan': '選擇 Coding Plan 區域',
   'Choose based on where your account is registered':
@@ -1920,6 +2026,9 @@ export default {
     '上下文超出限制！請使用 /compress 或 /clear 來減少上下文。',
   'No API response yet. Send a message to see actual usage.':
     '暫無 API 響應。發送消息以查看實際使用情況。',
+  'Estimated usage, including the conversation': '估算用量（含對話）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下為本地估算，包含對話。',
   'Estimated pre-conversation overhead': '預估對話前開銷',
   'Context window': '上下文窗口',
   tokens: 'tokens',
@@ -1930,9 +2039,14 @@ export default {
   'System prompt': '系統提示',
   'Built-in tools': '內置工具',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指令檔案',
+  'Auto memory': '自動記憶',
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '啟動上下文',
+  Unattributed: '未歸因',
+  'Cached prefix': '快取前綴',
   'Run /context detail for per-item breakdown.':
     '運行 /context detail 查看詳細分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2020,8 +2134,10 @@ export default {
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
-  'Set a goal — keep working until the condition is met':
-    '設定目標 — 持續工作直到條件滿足',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
+  'It is saved but does not apply while this workspace is untrusted.':
+    '已儲存，但此工作區不受信任時不會生效。',
   'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
@@ -2065,6 +2181,13 @@ export default {
     '在不影響主對話的情況下快速提問旁支問題',
   'Get a second opinion on the current conversation from a reviewer model':
     '讓審查模型對目前對話給出第二意見',
+  'Configure the Advisor model': '設定 Advisor 模型',
+  'Disable Advisor': '停用 Advisor',
+  'Select Advisor Model': '選擇 Advisor 模型',
+  'Advisor disabled': 'Advisor 已停用',
+  'Advisor set to {{model}}': 'Advisor 已設定為 {{model}}',
+  'Selected Advisor model is unavailable.': '所選 Advisor 模型無法使用。',
+  'Advisor configuration is unavailable.': 'Advisor 設定無法使用。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
@@ -2127,6 +2250,11 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'Large workflow': '大型工作流程',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流程：已排定 {{agents}} 個 agent（警示門檻 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流程：預計輸出 ~{{tokens}} 個 token（警示門檻 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
@@ -2263,6 +2391,8 @@ export default {
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定版本升級需要獨立安裝。請使用目前的安裝方式手動安裝 {{version}} 版本。',
   'Check for Qwen Code updates and install if available':
     '檢查 Qwen Code 更新並安裝（如果可用）',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2335,6 +2465,8 @@ export default {
   '{{count}} skills': '{{count}} 個技能',
   '{{count}} agent': '{{count}} 個代理',
   '{{count}} agents': '{{count}} 個代理',
+  '{{count}} workflow': '{{count}} 個工作流程',
+  '{{count}} workflows': '{{count}} 個工作流程',
   '{{count}} hook': '{{count}} 個鉤子',
   '{{count}} hooks': '{{count}} 個鉤子',
   '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',
@@ -2422,6 +2554,90 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
   'Kept model as {{model}}': '模型保持為 {{model}}',
-  'Review messages held from other Qwen Code sessions (accept | deny)':
-    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny）',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交訊息建立 git 提交',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    '驗證逾時，請重試或選擇其他驗證方式。',
+  'Authorization or access was denied.': '授權或存取遭拒。',
+  'Retry Connection': '重試',
+  'Checking your subscription…': '正在檢查你的訂閱…',
+  'Choose another model provider': '選擇其他模型服務供應商',
+  'Could not complete authorization. Please try signing in again.':
+    '無法完成授權，請重新登入。',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    '無法讀取或儲存 Qwen 憑證，請檢查本機檔案權限和磁碟空間。',
+  'Could not refresh your Qwen session. Please try again.':
+    '無法更新 Qwen 登入憑證，請重試。',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    '無法清除本機 Qwen 憑證，請檢查檔案權限。',
+  'Could not request an authorization link. Please try signing in again.':
+    '無法申請授權連結，請重新登入。',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    '按 Enter 選取，↑↓ 切換 · Esc 關閉',
+  "If the browser didn't open, visit:": '如果瀏覽器未開啟，請前往：',
+  'Loading models from provider…': '正在從服務供應商載入模型…',
+  'Model: {{model}}': '模型：{{model}}',
+  'View Plans': '檢視方案',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    '正在瀏覽器中開啟 chat.qwen.ai… 請登入以連接 Qwen Code。',
+  'Opens the Qwen Code plans page in your browser':
+    '在瀏覽器中開啟 Qwen Code 方案頁面',
+  'Qwen Account with Subscription': '使用 Qwen 訂閱帳號',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Plus 和 Pro 包含 Qwen Code',
+  'Qwen Subscription': 'Qwen 訂閱',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} 已啟用 · 用量包含在你的方案中',
+  'Recommended models · provider list unavailable, showing built-ins':
+    '推薦模型 · 無法取得服務供應商清單，顯示內建模型',
+  'Sign out': '登出',
+  'Signed in as {{email}}': '已登入 {{email}}',
+  'Signed in successfully · {{email}}': '登入成功 · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    '目前方案：Qwen {{plan}}，已可使用 Qwen Code',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
+    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型。',
+  'Common commands: /usage   /upgrade   /model   /status   /logout':
+    '常用指令：/usage   /upgrade   /model   /status   /logout',
+  'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
+  'The network request failed or timed out.': '網路請求失敗或逾時。',
+  'The service returned an invalid response.': '服務回傳的資料格式無效。',
+  'Too many requests. Please try again later.': '請求過多，請稍後重試。',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    '在 chat.qwen.ai 訂閱 Plus／Pro，解鎖 Qwen Code 和 Agent 能力',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    '登入憑證已失效，請執行 /auth 重新登入。',
+  'Switch Provider': '切換供應商',
+  'Use another account': '使用其他帳號',
+  'Waiting for sign-in…': '正在等待登入…',
+  'Waiting for your subscription to become active…': '正在等待你的訂閱生效…',
+  'You are signed out locally, but the remote session could not be revoked.':
+    '本機已登出，但未能撤銷遠端工作階段。',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    '你目前登入的 {{plan}} 帳號未包含 Qwen Code。請在瀏覽器中選擇 Plus 或 Pro；訂閱後此終端機將自動繼續。',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    '你的 Qwen 登入已過期，請執行 /auth 重新登入。',
+  'c to copy link · Esc to cancel': '按 c 複製連結 · Esc 取消',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    '模型：{{model}} · 執行 /usage 查看方案用量',
+  'Type your request, or /usage': '輸入你的請求，或 /usage',
+  'Try:': '試試：',
+  'Open Qwen subscription plans': '開啟 Qwen 訂閱方案頁',
+  'Could not open your browser. Visit {{url}}':
+    '無法開啟瀏覽器，請造訪 {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen 訂閱方案：{{url}}',
+  'Sign out of your Qwen account': '登出 Qwen 帳號',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    '目前連線無需透過 /logout 登出。如需切換模型服務，請使用 /auth。',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    '此命令僅適用於 Qwen 訂閱登入。如需使用 Qwen 訂閱，請透過 /auth 登入。',
+  'Wait for the current response to finish before signing out.':
+    '請等待目前回覆結束後再登出。',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    '已登出，但無法清除儲存的驗證方式。',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    '已登出 Qwen，請使用 /auth 登入其他帳號。',
+  'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
 };

@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
@@ -50,6 +51,7 @@ afterEach(() => {
 describe('start_sandbox', () => {
   it('passes child environment variables into a container sandbox', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '/tmp/qwen-code-warnings-test.txt');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
       String(filePath),
@@ -82,10 +84,20 @@ describe('start_sandbox', () => {
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
     const args = spawnMock.mock.calls[1]?.[1] as string[];
     const options = spawnMock.mock.calls[1]?.[2];
+    expect(args[args.indexOf('--hostname') + 1]).toBe(
+      args[args.indexOf('--name') + 1],
+    );
     const envFlagIndex = args.indexOf(PRIVATE_ACP_CAPABILITY_ENV);
     expect(args.slice(envFlagIndex - 1, envFlagIndex + 1)).toEqual([
       '--env',
       PRIVATE_ACP_CAPABILITY_ENV,
+    ]);
+    const warningsFlagIndex = args.indexOf(
+      'QWEN_CODE_WARNINGS_FILE=/tmp/qwen-code-warnings-test.txt',
+    );
+    expect(args.slice(warningsFlagIndex - 1, warningsFlagIndex + 1)).toEqual([
+      '--env',
+      'QWEN_CODE_WARNINGS_FILE=/tmp/qwen-code-warnings-test.txt',
     ]);
     expect(options).toEqual(
       expect.objectContaining({
@@ -94,6 +106,138 @@ describe('start_sandbox', () => {
         }),
       }),
     );
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('lets the runtime choose a hostname for image-ID containers', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: `sha256:${'a'.repeat(64)}` },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js', '--acp'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const containerName = args[args.indexOf('--name') + 1];
+    expect(containerName.length).toBeGreaterThan(64);
+    expect(args).not.toContain('--hostname');
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it.each([
+    'QWEN_CODE_WARNINGS_FILE',
+    'QWEN_CODE_MCP_APPROVALS_PATH',
+    'QWEN_CODE_HOOK_APPROVALS_PATH',
+    'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  ])(
+    'omits %s from the container environment when it is unset',
+    async (name) => {
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      vi.stubEnv(name, '');
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+        String(filePath),
+      );
+      execSyncMock.mockReturnValue(Buffer.from(''));
+
+      const imageCheck = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(),
+      });
+      const child = new EventEmitter();
+      spawnMock
+        .mockImplementationOnce(() => {
+          queueMicrotask(() => {
+            imageCheck.stdout.emit('data', Buffer.from('image-id'));
+            imageCheck.emit('close', 0);
+          });
+          return imageCheck;
+        })
+        .mockReturnValueOnce(child);
+
+      const result = start_sandbox(
+        { command: 'docker', image: 'example.com/qwen-code:latest' },
+        [],
+        undefined,
+        [process.execPath, '/path/to/cli.js'],
+      );
+
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+      const args = spawnMock.mock.calls[1]?.[1] as string[];
+      expect(args.filter((arg) => arg.startsWith(`${name}=`))).toEqual([]);
+
+      child.emit('close', 0);
+      await expect(result).resolves.toBe(0);
+    },
+  );
+
+  it.each([
+    'QWEN_CODE_WARNINGS_FILE',
+    'QWEN_CODE_MCP_APPROVALS_PATH',
+    'QWEN_CODE_HOOK_APPROVALS_PATH',
+    'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  ])('translates %s before forwarding it on Windows', async (name) => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv(name, 'C:\\Users\\test\\Temp\\qwen-code-test.txt');
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const flag = `${name}=/c/Users/test/Temp/qwen-code-test.txt`;
+    const flagIndex = args.indexOf(flag);
+    expect(args.slice(flagIndex - 1, flagIndex + 1)).toEqual(['--env', flag]);
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);
@@ -248,16 +392,27 @@ describe('resolveSeatbeltProfileFile', () => {
 });
 
 describe('getSandboxPassthroughEnvArgs', () => {
-  it('passes update relaunch state into container sandboxes', () => {
+  it('passes operator state into container sandboxes', () => {
     expect(
       getSandboxPassthroughEnvArgs({
+        QWEN_CODE_MODELS_DEV: 'off',
+        QWEN_CODE_MODELS_DEV_REFRESH: 'off',
+        QWEN_CODE_MODELS_DEV_URL: 'https://mirror.example/api.json',
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
         QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
         QWEN_CODE_SERVE: '1',
         QWEN_CODE_DESKTOP: '1',
+        QWEN_CODE_ENABLE_WORKFLOWS: '1',
+        QWEN_CODE_DISABLE_WORKFLOWS: '1',
       }),
     ).toEqual([
+      '--env',
+      'QWEN_CODE_MODELS_DEV=off',
+      '--env',
+      'QWEN_CODE_MODELS_DEV_REFRESH=off',
+      '--env',
+      'QWEN_CODE_MODELS_DEV_URL=https://mirror.example/api.json',
       '--env',
       'QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true',
       '--env',
@@ -268,6 +423,10 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_SERVE=1',
       '--env',
       'QWEN_CODE_DESKTOP=1',
+      '--env',
+      'QWEN_CODE_ENABLE_WORKFLOWS=1',
+      '--env',
+      'QWEN_CODE_DISABLE_WORKFLOWS=1',
     ]);
   });
 });

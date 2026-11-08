@@ -1,7 +1,22 @@
 package com.alibaba.qwen.code.cli.session;
 
-import java.util.concurrent.TimeUnit;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.qwen.code.cli.QwenCodeCli;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantUsage;
@@ -21,18 +36,33 @@ import com.alibaba.qwen.code.cli.session.event.consumers.SessionEventConsumers;
 import com.alibaba.qwen.code.cli.session.event.consumers.SessionEventSimpleConsumers;
 import com.alibaba.qwen.code.cli.session.exception.SessionControlException;
 import com.alibaba.qwen.code.cli.session.exception.SessionSendPromptException;
+import com.alibaba.qwen.code.cli.transport.Transport;
 import com.alibaba.qwen.code.cli.transport.TransportOptions;
 import com.alibaba.qwen.code.cli.utils.Timeout;
-
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SessionTest {
 
     private static final Logger log = LoggerFactory.getLogger(SessionTest.class);
+    private static final String INIT_RESPONSE = "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\","
+            + "\"response\":{\"subtype\":\"initialize\",\"capabilities\":{}}}}";
+    private static final String INITIALIZE_RESPONSE
+            = "{\"type\":\"control_response\",\"response\":{\"request_id\":\"init\",\"subtype\":\"success\","
+            + "\"response\":{\"subtype\":\"initialize\",\"session_id\":\"session-test\"}}}";
+
+    @TempDir
+    Path tempDir;
 
     @Test
     @Tag("integration")
@@ -177,6 +207,266 @@ class SessionTest {
     }
 
     @Test
+    void unavailableSessionOperationsThrowSessionControlException() throws SessionControlException {
+        TestTransport transport = new TestTransport();
+        Session session = new Session(transport);
+
+        transport.setAvailable(false);
+
+        assertThrows(SessionControlException.class,
+                () -> session.sendPrompt("hello", new SessionEventSimpleConsumers()));
+        assertThrows(SessionControlException.class, session::interrupt);
+        assertThrows(SessionControlException.class, () -> session.setModel("qwen3-coder-flash"));
+        assertThrows(SessionControlException.class, () -> session.setPermissionMode(PermissionMode.DEFAULT));
+    }
+
+    @Test
+    void unavailableTransportConstructorThrowsSessionControlException() {
+        TestTransport transport = new TestTransport();
+        transport.setAvailable(false);
+
+        assertThrows(SessionControlException.class, () -> new Session(transport));
+    }
+
+    @Test
+    void initializationFailureThrowsSessionControlException() {
+        TestTransport transport = new TestTransport();
+        transport.setInitializeFailure(new IOException("init failed"));
+
+        assertThrows(SessionControlException.class, () -> new Session(transport));
+    }
+
+    @Test
+    void newSessionWrapsCreationFailuresInRuntimeException() {
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> QwenCodeCli.newSession(
+                        new TransportOptions().setPathToQwenExecutable("/nonexistent/qwen-code")));
+
+        assertTrue(failure.getMessage().startsWith("initialized ProcessTransport error!"));
+        assertInstanceOf(IOException.class, failure.getCause());
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void newSessionWrapsInitializationFailuresInRuntimeException() throws IOException {
+        Path executable = tempDir.resolve("exit-after-input.sh");
+        Files.write(executable, "#!/bin/sh\nread line\nexit 0\n".getBytes(StandardCharsets.UTF_8));
+        executable.toFile().setExecutable(true);
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> QwenCodeCli.newSession(
+                        new TransportOptions().setPathToQwenExecutable(executable.toString())));
+
+        assertTrue(failure.getMessage().startsWith("initialized Session error!"));
+        assertInstanceOf(SessionControlException.class, failure.getCause());
+    }
+
+    @Test
+    void sendPromptDrainsTurnWhenControlResponseSubtypeIsNestedError() throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error\","
+                        + "\"error\":\"set model failed\"}}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"still consumed\"}]}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        AtomicInteger controlResponses = new AtomicInteger();
+        AtomicInteger results = new AtomicInteger();
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers() {
+                @Override
+                public void onControlResponse(Session session, CLIControlResponse<?> cliControlResponse) {
+                    controlResponses.incrementAndGet();
+                }
+
+                @Override
+                public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
+                    results.incrementAndGet();
+                }
+            });
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(3, transport.getProcessedPromptLineCount());
+        assertEquals(1, controlResponses.get());
+        assertEquals(1, results.get());
+        assertTrue(hasControlResponseErrorWarning(logAppender, "set model failed"));
+    }
+
+    @Test
+    void sendPromptUsesTopLevelSubtypeWhenNestedSubtypeIsMissing() throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"subtype\":\"error\",\"response\":{\"request_id\":\"set-model\","
+                        + "\"error\":\"set model failed\"}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertTrue(hasControlResponseErrorWarning(logAppender, "set model failed"));
+    }
+
+    @Test
+    void sendPromptUsesTopLevelSubtypeWhenResponseObjectIsMissing()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"subtype\":\"error\",\"request_id\":\"set-model\","
+                        + "\"error\":\"set model failed\"}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertTrue(hasControlResponseErrorWarning(logAppender, "set model failed"));
+    }
+
+    @Test
+    void sendPromptContinuesAfterNestedControlResponseSuccess() throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"success\","
+                        + "\"response\":{\"message\":\"ok\"}}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        AtomicInteger controlResponses = new AtomicInteger();
+        AtomicInteger results = new AtomicInteger();
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers() {
+                @Override
+                public void onControlResponse(Session session, CLIControlResponse<?> cliControlResponse) {
+                    controlResponses.incrementAndGet();
+                }
+
+                @Override
+                public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
+                    results.incrementAndGet();
+                }
+            });
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertEquals(1, controlResponses.get());
+        assertEquals(1, results.get());
+        assertFalse(hasControlResponseErrorWarning(logAppender, "ok"));
+    }
+
+    @Test
+    void sendPromptDoesNotWarnWhenControlResponseSubtypeIsNotExactError()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error_extra\","
+                        + "\"error\":\"not an exact error subtype\"}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertFalse(
+                hasControlResponseErrorWarning(logAppender, "not an exact error subtype"));
+    }
+
+    @Test
+    void sendPromptDoesNotWarnWhenControlResponseSubtypeIsProgress()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"progress\","
+                        + "\"response\":{\"message\":\"still working\"}}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertFalse(hasControlResponseErrorWarning(logAppender, "still working"));
+    }
+
+    @Test
+    void sendPromptDoesNotWarnWhenControlResponseSubtypeIsMissing()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\","
+                        + "\"response\":{\"message\":\"no subtype\"}}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertFalse(hasControlResponseErrorWarning(logAppender, "no subtype"));
+    }
+
+    private static ListAppender<ILoggingEvent> attachSessionLogAppender() {
+        ch.qos.logback.classic.Logger sessionLogger = (ch.qos.logback.classic.Logger) LoggerFactory
+                .getLogger(Session.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        sessionLogger.addAppender(appender);
+        return appender;
+    }
+
+    private static void detachSessionLogAppender(ListAppender<ILoggingEvent> appender) {
+        ch.qos.logback.classic.Logger sessionLogger = (ch.qos.logback.classic.Logger) LoggerFactory
+                .getLogger(Session.class);
+        sessionLogger.detachAppender(appender);
+        appender.stop();
+    }
+
+    private static boolean hasControlResponseErrorWarning(
+            ListAppender<ILoggingEvent> appender, String expectedPayload) {
+        return appender.list.stream()
+                .anyMatch(event -> event.getLevel().equals(Level.WARN)
+                        && event.getFormattedMessage().contains("control_response error")
+                        && event.getFormattedMessage().contains(expectedPayload));
+    }
+
+    @Test
     void testJSON() {
         String json
                 = "{\"type\":\"assistant\",\"uuid\":\"ed8374fe-a4eb-4fc0-9780-9bd2fd831cda\","
@@ -186,5 +476,116 @@ class SessionTest {
                 + "\"input_tokens\":12770,\"output_tokens\":17,\"total_tokens\":12787}}}";
         SDKAssistantMessage assistantMessage = JSON.parseObject(json, SDKAssistantMessage.class);
         log.info("the assistantMessage: {}", assistantMessage);
+    }
+
+    private static final class TestTransport implements Transport {
+        private boolean available = true;
+        private IOException initializeFailure;
+        private final TransportOptions transportOptions = new TransportOptions();
+
+        void setAvailable(boolean available) {
+            this.available = available;
+        }
+
+        void setInitializeFailure(IOException initializeFailure) {
+            this.initializeFailure = initializeFailure;
+        }
+
+        @Override
+        public TransportOptions getTransportOptions() {
+            return transportOptions;
+        }
+
+        @Override
+        public boolean isReading() {
+            return false;
+        }
+
+        @Override
+        public void start() throws IOException {
+            available = true;
+        }
+
+        @Override
+        public void close() throws IOException {
+            available = false;
+        }
+
+        @Override
+        public boolean isAvailable() {
+            return available;
+        }
+
+        @Override
+        public String inputWaitForOneLine(String message)
+                throws IOException, ExecutionException, InterruptedException, TimeoutException {
+            if (initializeFailure != null) {
+                throw initializeFailure;
+            }
+            return INIT_RESPONSE;
+        }
+
+        @Override
+        public void inputWaitForMultiLine(String message, Function<String, Boolean> callBackFunction) throws IOException {
+        }
+
+        @Override
+        public void inputNoWaitResponse(String message) throws IOException {
+        }
+    }
+
+    private static class FakeTransport implements Transport {
+        private final String[] promptLines;
+        private final AtomicInteger processedPromptLineCount = new AtomicInteger();
+
+        FakeTransport(String... promptLines) {
+            this.promptLines = promptLines;
+        }
+
+        @Override
+        public TransportOptions getTransportOptions() {
+            return new TransportOptions();
+        }
+
+        @Override
+        public boolean isReading() {
+            return false;
+        }
+
+        @Override
+        public void start() throws IOException {
+        }
+
+        @Override
+        public void close() throws IOException {
+        }
+
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public String inputWaitForOneLine(String message) {
+            return INITIALIZE_RESPONSE;
+        }
+
+        @Override
+        public void inputWaitForMultiLine(String message, Function<String, Boolean> callBackFunction) {
+            for (String line : promptLines) {
+                processedPromptLineCount.incrementAndGet();
+                if (callBackFunction.apply(line)) {
+                    return;
+                }
+            }
+        }
+
+        @Override
+        public void inputNoWaitResponse(String message) throws IOException {
+        }
+
+        int getProcessedPromptLineCount() {
+            return processedPromptLineCount.get();
+        }
     }
 }

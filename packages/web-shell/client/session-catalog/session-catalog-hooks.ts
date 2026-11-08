@@ -1,14 +1,22 @@
+import { useDaemonAvailability } from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
 } from 'react';
-import { useSessions, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useActions,
+  useSessions,
+  useWorkspace,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonClient,
+  DaemonBackgroundTurn,
   DaemonSessionArchiveState,
   DaemonSessionListPageOptions,
   DaemonSessionSummary,
@@ -19,6 +27,7 @@ import {
   type SessionCatalogQuery,
   type SessionCatalogSnapshot,
 } from './session-catalog-store';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 
 const EMPTY_SNAPSHOTS: readonly SessionCatalogSnapshot[] = [];
 const EMPTY_QUERIES: readonly SessionCatalogQuery[] = [];
@@ -39,6 +48,7 @@ export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
   sourceType?: string;
   sourceId?: string;
   parentSessionId?: string;
+  liveOnly?: boolean;
 }
 
 export function useSessionCatalogQuery(
@@ -167,24 +177,87 @@ export function useSessionCatalogQueries(
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_SNAPSHOTS);
 }
 
-export function useSessionHasActivePrompt(
+/**
+ * Whether the daemon reports a prompt in flight for `sessionId`, together with
+ * whether that answer is allowed to *settle* a running turn.
+ *
+ * Only a live-state response observed after this session became the target is
+ * `authoritative`. A cached response can still light the indicator, but cannot
+ * settle a newer `/load` snapshot. The catalog-page fallback cannot settle
+ * either: the page is bounded, so a running session may simply have fallen off
+ * a fresher first page (#9487).
+ */
+export function useSessionActivePromptState(
   client: DaemonClient,
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
-): boolean {
+): {
+  hasActivePrompt: boolean;
+  activeWorkState: DaemonSessionSummary['activeWorkState'];
+  backgroundTurn?: DaemonBackgroundTurn;
+  authoritative: boolean;
+  observationRevision: number | undefined;
+  requestStartedAt?: number;
+} {
+  const available = useDaemonAvailability() === 'available';
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
-  const subscribeLiveSessions = useCallback(
+  const subscribeLiveSessionObservations = useCallback(
     (listener: () => void) =>
       workspaceCwd
-        ? store.subscribeLiveSessions(workspaceCwd, listener)
+        ? store.subscribeLiveSessionObservations(workspaceCwd, listener)
         : () => undefined,
     [store, workspaceCwd],
   );
-  const hasLiveSessions = useSyncExternalStore(
-    subscribeLiveSessions,
-    () => (workspaceCwd ? store.hasLiveSessions(workspaceCwd) : false),
-    () => false,
+  // Track the session's own live flag, not just whether the workspace has any
+  // live-state coverage: a coverage boolean stays `true` across polls, so
+  // `useSyncExternalStore` would bail out of re-rendering on the one change
+  // that matters — this session's prompt starting or finishing — and the
+  // reader would keep serving whatever it last happened to render (#9487).
+  // `undefined` distinguishes "no live-state response covers this workspace"
+  // from "covered, and this session has no prompt in flight".
+  const getLiveSessionRevision = useCallback(
+    () =>
+      workspaceCwd ? store.getLiveSessionRevision(workspaceCwd) : undefined,
+    [store, workspaceCwd],
   );
+  const liveSessionRevision = useSyncExternalStore(
+    subscribeLiveSessionObservations,
+    getLiveSessionRevision,
+    () => undefined,
+  );
+  const liveSession =
+    liveSessionRevision !== undefined && sessionId !== undefined
+      ? store.getLiveSession(workspaceCwd!, sessionId)
+      : undefined;
+  const liveActivePrompt =
+    liveSessionRevision === undefined
+      ? undefined
+      : liveSession?.hasActivePrompt === true;
+  const liveActiveWorkState = liveSession?.activeWorkState;
+  const hasLiveSessions = liveActivePrompt !== undefined;
+  const authorityBaselineRef = useRef<
+    | {
+        workspaceCwd: string | undefined;
+        sessionId: string | undefined;
+        revision: number | undefined;
+      }
+    | undefined
+  >(undefined);
+  if (
+    !authorityBaselineRef.current ||
+    authorityBaselineRef.current.workspaceCwd !== workspaceCwd ||
+    authorityBaselineRef.current.sessionId !== sessionId
+  ) {
+    authorityBaselineRef.current = {
+      workspaceCwd,
+      sessionId,
+      revision: liveSessionRevision,
+    };
+  }
+  const liveAnswerIsFreshForTarget =
+    available &&
+    liveSessionRevision !== undefined &&
+    liveSessionRevision !== authorityBaselineRef.current.revision;
   // The live-state response is authoritative and independent of catalog
   // paging. Arm the full-catalog fallback only when nothing tracks live-state
   // for this workspace — i.e. the daemon lacks workspace_session_live_state.
@@ -210,18 +283,115 @@ export function useSessionHasActivePrompt(
   }, [catalogFallbackArmed, hasLiveSessions, workspaceCwd]);
   // autoLoad keeps the fallback page loading (and the store's error-retry
   // timer armed) for observer panes that never trigger an invalidation.
-  const { sessions } = useSessionCatalogQuery(client, catalogQuery, {
+  const { sessions, page } = useSessionCatalogQuery(client, catalogQuery, {
     autoLoad: true,
   });
-  if (!workspaceCwd || !sessionId) return false;
-  if (hasLiveSessions) {
-    return (
-      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
-    );
+  if (!workspaceCwd || !sessionId) {
+    return {
+      hasActivePrompt: false,
+      activeWorkState: undefined,
+      authoritative: false,
+      observationRevision: undefined,
+    };
   }
-  return sessions.some(
-    (session) => session.sessionId === sessionId && session.hasActivePrompt,
-  );
+  if (liveActivePrompt !== undefined) {
+    return {
+      hasActivePrompt: liveActivePrompt,
+      activeWorkState: liveActiveWorkState,
+      backgroundTurn: store.getLiveSession(workspaceCwd, sessionId)
+        ?.backgroundTurn,
+      authoritative: liveAnswerIsFreshForTarget,
+      observationRevision: liveSessionRevision,
+      requestStartedAt: store.getLiveSessionRequestStartedAt(workspaceCwd),
+    };
+  }
+  const row = page
+    ? sessions.find((session) => session.sessionId === sessionId)
+    : undefined;
+  return {
+    hasActivePrompt: row?.hasActivePrompt === true,
+    activeWorkState: row?.activeWorkState,
+    backgroundTurn: row?.backgroundTurn,
+    // Never settle-grade, whether or not the row is on the page. A row that
+    // drops off a bounded page between refetches is indistinguishable from one
+    // whose turn ended, and treating that as "the turn ended" is exactly the
+    // bug this signal exists to prevent.
+    authoritative: false,
+    observationRevision: undefined,
+  };
+}
+
+/**
+ * Read the daemon's live prompt state for the surrounding
+ * `DaemonSessionProvider`'s session, and publish it back into that provider.
+ *
+ * Every view that owns a provider needs its own bridge: a split pane and a
+ * side task each mount one (via ChatPane), and each is an observer of a turn
+ * it did not submit — the case where the event stream alone cannot tell a long
+ * silent tool call from a finished turn (#9487). Publishing `undefined` while
+ * the answer is unknown leaves that provider's pre-existing heuristics alone.
+ *
+ * Returns both live facts for callers that need them; the boolean wrapper
+ * below preserves the existing prompt-only API.
+ */
+export function useDaemonSessionActivityBridge(
+  client: DaemonClient,
+  workspaceCwd: string | undefined,
+  sessionId: string | undefined,
+): {
+  hasActivePrompt: boolean;
+  activeWorkState: DaemonSessionSummary['activeWorkState'];
+} {
+  const {
+    hasActivePrompt,
+    activeWorkState,
+    authoritative,
+    observationRevision,
+    backgroundTurn,
+    requestStartedAt,
+  } = useSessionActivePromptState(client, workspaceCwd, sessionId);
+  // Idempotent, so the main view and its ChatPane sharing one provider both
+  // publishing the same value is harmless; a split pane, which renders a
+  // ChatPane without an App around it, needs its own.
+  const { setDaemonActivePrompt } = useActions();
+  // Publish only what may settle a turn. On the catalog-fallback path this is
+  // always `undefined`, so the provider never sees a `true` there and no
+  // fallback refetch can produce the `true -> undefined` transition that
+  // settles. A genuine loss of live-state coverage still does.
+  const daemonActivePrompt = authoritative ? hasActivePrompt : undefined;
+  useEffect(() => {
+    // A retained snapshot from before this session became the target may still
+    // render its status, but publishing it would let old `false` consume a
+    // newer `/load` snapshot. Leave the provider's current owner-scoped value
+    // untouched until a fresh response arrives. No revision means coverage was
+    // actually lost, so `undefined` must still be published.
+    if (!authoritative && observationRevision !== undefined) return;
+    setDaemonActivePrompt(
+      daemonActivePrompt,
+      { workspaceCwd, sessionId },
+      backgroundTurn,
+      requestStartedAt,
+    );
+  }, [
+    authoritative,
+    backgroundTurn,
+    daemonActivePrompt,
+    observationRevision,
+    requestStartedAt,
+    sessionId,
+    setDaemonActivePrompt,
+    workspaceCwd,
+  ]);
+  return { hasActivePrompt, activeWorkState };
+}
+
+export function useDaemonActivePromptBridge(
+  client: DaemonClient,
+  workspaceCwd: string | undefined,
+  sessionId: string | undefined,
+): boolean {
+  return useDaemonSessionActivityBridge(client, workspaceCwd, sessionId)
+    .hasActivePrompt;
 }
 
 export function useSessionCatalogPolling(
@@ -249,6 +419,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       refreshQueries(queries: readonly SessionCatalogQuery[]) {
         for (const query of queries) {
           void store.loadOnce(query, { fresh: true }).catch((error) => {
+            if (isDaemonUnavailableError(error)) return;
             console.warn('[session-catalog] failed to refresh catalog:', error);
           });
         }
@@ -287,8 +458,20 @@ export function useSessionCatalogController(client: DaemonClient) {
       },
       renamed(workspaceCwd: string, sessionId: string, displayName: string) {
         update(() => {
+          // A landed rename is authoritative; drop the provisional title so
+          // the following stale snapshot cannot restore it over this name.
+          store.clearPendingSessionTitle(workspaceCwd, sessionId);
           store.patchSession(workspaceCwd, sessionId, { displayName });
           store.invalidateWorkspace(workspaceCwd);
+        });
+      },
+      setPendingSessionTitle(
+        workspaceCwd: string,
+        sessionId: string,
+        displayName: string,
+      ) {
+        update(() => {
+          store.setPendingSessionTitle(workspaceCwd, sessionId, displayName);
         });
       },
       toggleSessionPinned(
@@ -323,6 +506,7 @@ export function useSessionCatalogController(client: DaemonClient) {
 }
 
 export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const {
     autoLoad = false,
     enabled = true,
@@ -336,6 +520,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sourceType,
     sourceId,
     parentSessionId,
+    liveOnly,
   } = options;
   const workspace = useWorkspace();
   const legacy = useSessions({
@@ -361,11 +546,13 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
       ...(sourceType !== undefined ? { sourceType } : {}),
       ...(sourceId !== undefined ? { sourceId } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      ...(liveOnly === true ? { liveOnly: true } : {}),
     }),
     [
       archiveState,
       cursor,
       group,
+      liveOnly,
       pageSize,
       parentSessionId,
       sourceId,
@@ -407,22 +594,30 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const deleteSession = useCallback(
     async (sessionId: string) => {
       try {
-        return await workspace.actions.deleteSession(sessionId);
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
+        const removed = await workspace.actions.deleteSession(sessionId);
+        if (removed) invalidateDeleted?.([sessionId]);
+        return removed;
       } finally {
         invalidate();
       }
     },
-    [invalidate, workspace.actions],
+    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
   );
   const deleteSessions = useCallback(
     async (sessionIds: string[]) => {
       try {
-        return await workspace.actions.deleteSessions(sessionIds);
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
+        const result = await workspace.actions.deleteSessions(sessionIds);
+        invalidateDeleted?.([...result.removed, ...result.notFound]);
+        return result;
       } finally {
         invalidate();
       }
     },
-    [invalidate, workspace.actions],
+    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
   );
   const archiveSession = useCallback(
     async (sessionId: string) => {
@@ -461,6 +656,10 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sessions: result.sessions,
     loading: result.loading,
     error: result.error,
+    // A retained page after a failed refresh (or a hidden-tab deferral) is
+    // not a fresh answer from the daemon — readers that prune on absence must
+    // treat it as "not in this page" rather than "gone".
+    stale: result.stale,
     reload,
     nextCursor: page?.nextCursor,
     liveMergeFailed: page?.liveMergeFailed === true,

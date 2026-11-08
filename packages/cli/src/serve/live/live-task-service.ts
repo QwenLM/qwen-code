@@ -108,7 +108,10 @@ export interface LiveTaskServiceOptions {
   ensureConversationRuntime: () => Promise<WorkspaceRuntime>;
   standaloneSessionService?: Pick<
     StandaloneSessionService,
-    'createWithInitialPrompt' | 'get' | 'list' | 'resume'
+    | 'createWithInitialPrompt'
+    | 'getForInternalTask'
+    | 'list'
+    | 'resumeForInternalTask'
   > & {
     dispatchPrompt(
       sessionId: string,
@@ -849,6 +852,23 @@ export class LiveTaskService {
     )) {
       const reason = eventWakeReason(event);
       if (!reason) continue;
+      if (
+        event.type === 'turn_complete' &&
+        (event.data as { backgroundTurn?: unknown } | null)?.backgroundTurn
+      ) {
+        // getSessionSummary throws when the session left the bridge between
+        // the publish and this read; fail open so a delivered wake is not
+        // swallowed as a silent neither-woke-nor-timed-out result.
+        let stillActive = false;
+        try {
+          stillActive = task.runtime.bridge.getSessionSummary(
+            task.bridgeSessionId,
+          ).hasActivePrompt;
+        } catch {
+          stillActive = false;
+        }
+        if (stillActive) continue;
+      }
       return {
         reason,
         threadId: target.threadId,
@@ -1099,7 +1119,9 @@ export class LiveTaskService {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
     if (isReservedStandaloneSessionSourceType(task.summary.sourceType)) {
-      await this.getStandaloneSessionService().resume(task.summary.sessionId);
+      await this.getStandaloneSessionService().resumeForInternalTask(
+        task.summary.sessionId,
+      );
       return;
     }
     const service = createWorkspaceRuntimeSessionService(task.runtime);
@@ -1206,7 +1228,8 @@ export class LiveTaskService {
     const service = createWorkspaceRuntimeSessionService(runtime);
     let summary: BridgeSessionSummary;
     if (runtime.provenance === 'live-conversation') {
-      const standalone = await this.getStandaloneSessionService().get(threadId);
+      const standalone =
+        await this.getStandaloneSessionService().getForInternalTask(threadId);
       if ('state' in standalone) {
         throw new Error(`Task is still being created: ${threadId}`);
       }
@@ -1267,7 +1290,7 @@ export class LiveTaskService {
         exists:
           runtime.provenance === 'live-conversation'
             ? await this.getStandaloneSessionService()
-                .get(threadId)
+                .getForInternalTask(threadId)
                 .then((summary) => !('state' in summary))
                 .catch((error) => {
                   if (

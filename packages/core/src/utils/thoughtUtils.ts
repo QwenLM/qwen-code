@@ -38,6 +38,41 @@ export function isOpenAIReasoningThoughtPart(part: Part): boolean {
 }
 
 /**
+ * Recognizes the OpenAI Responses reasoning-replay payload that
+ * `openaiResponsesContentGenerator` stashes in the shared
+ * `Part.thoughtSignature` field (`JSON.stringify({ id, encrypted_content })`).
+ *
+ * `thoughtSignature` carries no origin marker, so every wire that reads it has
+ * to decide for itself whether the value is one of its own. A native Anthropic
+ * `thinking.signature` or Gemini `thoughtSignature` is an opaque token that
+ * never takes this JSON shape, so recognizing the payload is enough to keep it
+ * off a foreign wire without putting a legitimate native signature at risk.
+ *
+ * Mirrors `decodeReasoningSignature` in `responses-converter.ts`, which also
+ * tolerates leading whitespace. `llm-chat.ts`'s
+ * `isCompleteResponsesReasoningSignature` is the same check without that
+ * tolerance.
+ * See https://github.com/QwenLM/qwen-code/issues/9453
+ */
+export function isResponsesReasoningSignature(signature: unknown): boolean {
+  if (typeof signature !== 'string') return false;
+  if (!signature.trimStart().startsWith('{')) return false;
+  try {
+    const payload: unknown = JSON.parse(signature);
+    return (
+      payload !== null &&
+      typeof payload === 'object' &&
+      'id' in payload &&
+      typeof payload.id === 'string' &&
+      'encrypted_content' in payload &&
+      typeof payload.encrypted_content === 'string'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Parses a raw thought string into a structured ThoughtSummary object.
  *
  * Thoughts are expected to have a bold "subject" part enclosed in double
@@ -78,35 +113,29 @@ export function parseThought(rawText: string): ThoughtSummary {
   return { subject, description };
 }
 
+/** The text of a response's thought parts, joined as the model sent it. */
+export function getThoughtText(response: GenerateContentResponse): string {
+  return (response.candidates?.[0]?.content?.parts ?? [])
+    .filter((part) => part.thought)
+    .map((part) => part.text ?? '')
+    .join('');
+}
+
+/** `thoughtText` is the response's `getThoughtText`, when already read. */
 export function getThoughtSummary(
   response: GenerateContentResponse,
+  thoughtText = getThoughtText(response),
 ): ThoughtSummary | null {
-  if (response.candidates && response.candidates.length > 0) {
-    const candidate = response.candidates[0];
-
-    if (
-      candidate.content &&
-      candidate.content.parts &&
-      candidate.content.parts.length > 0
-    ) {
-      const thoughtParts = candidate.content.parts.filter(
-        (part) => part.thought,
-      );
-      if (thoughtParts.length === 0) {
-        return null;
-      }
-
-      const thoughtText = thoughtParts.map((part) => part.text ?? '').join('');
-      if (!thoughtText) {
-        return null;
-      }
-
-      if (thoughtParts.some(isOpenAIReasoningThoughtPart)) {
-        return { subject: '', description: thoughtText };
-      }
-
-      return parseThought(thoughtText);
-    }
+  if (!thoughtText) {
+    return null;
   }
-  return null;
+
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  if (
+    parts.some((part) => part.thought && isOpenAIReasoningThoughtPart(part))
+  ) {
+    return { subject: '', description: thoughtText };
+  }
+
+  return parseThought(thoughtText);
 }

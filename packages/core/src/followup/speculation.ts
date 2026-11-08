@@ -6,7 +6,7 @@
  * Speculation Engine
  *
  * Speculatively executes the accepted suggestion before the user confirms,
- * using a forked GeminiChat with copy-on-write file isolation.
+ * using a forked LlmChat with copy-on-write file isolation.
  *
  * Flow:
  * 1. Suggestion shown → startSpeculation() fires
@@ -15,11 +15,12 @@
  * 4. User types → abortSpeculation() cleans up
  */
 
+import { shellResultText } from '../utils/shell-result.js';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { GeminiClient } from '../core/client.js';
+import type { LlmClient } from '../core/client.js';
 import type { ToolArtifact } from '../tools/tools.js';
-import { StreamEventType } from '../core/geminiChat.js';
+import { StreamEventType } from '../core/llm-chat.js';
 import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
@@ -141,6 +142,11 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
+  if (config.getShellExecutionSandbox?.()) {
+    throw new Error(
+      'Speculative execution is unavailable with tools.executionSandbox.',
+    );
+  }
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');
@@ -449,11 +455,11 @@ async function runSpeculativeLoop(
             artifacts: resultArtifacts,
             values: () => [
               ...toolResultPartDiagnosticValues(result.llmContent),
-              ...(typeof result.returnDisplay === 'string'
+              ...(shellResultText(result.returnDisplay) !== undefined
                 ? [
                     {
                       representation: 'display' as const,
-                      value: result.returnDisplay,
+                      value: shellResultText(result.returnDisplay)!,
                     },
                   ]
                 : []),
@@ -466,8 +472,15 @@ async function runSpeculativeLoop(
                 id ?? '',
                 result.llmContent,
                 result.error.message,
+                config,
               )
-            : convertToFunctionResponse(name, id ?? '', result.llmContent);
+            : convertToFunctionResponse(
+                name,
+                id ?? '',
+                result.llmContent,
+                result,
+                config,
+              );
           const bridgedResponseParts = stripToolResultImages(
             convertedResponseParts,
           );
@@ -592,7 +605,7 @@ async function runSpeculativeLoop(
  */
 export async function acceptSpeculation(
   state: SpeculationState,
-  geminiClient: GeminiClient,
+  llmClient: LlmClient,
 ): Promise<SpeculationResult> {
   const timeSavedMs = state.boundary
     ? Math.max(0, state.boundary.completedAt - state.startTime)
@@ -609,8 +622,11 @@ export async function acceptSpeculation(
 
     // Inject into main conversation
     for (const msg of cleanMessages) {
-      await geminiClient.addHistory(msg);
+      await llmClient.addHistory(msg);
     }
+    // The fork chat already reported these results; mark the replay so this
+    // chat does not re-emit their injection events.
+    llmClient.markToolResultsInjected(cleanMessages);
 
     state.status = 'completed';
 

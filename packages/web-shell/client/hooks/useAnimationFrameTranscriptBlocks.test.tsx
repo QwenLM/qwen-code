@@ -83,7 +83,7 @@ const testConnection = vi.hoisted(() => ({
   sessionId: 'session-a' as string | undefined,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useTranscriptStore: () => testStore,
   useConnection: () => testConnection,
 }));
@@ -410,5 +410,27 @@ describe('useAnimationFrameTranscriptSnapshot', () => {
 
     expect(renderLog.some((entry) => entry.ids.includes('old'))).toBe(false);
     expect(latestBlocks).toEqual([]);
+  });
+
+  it('does not show the previous user turn when a new prompt changes urgent state', () => {
+    const oldUser = { id: 'old-user', kind: 'user' } as DaemonTranscriptBlock;
+    const newUser = { id: 'new-user', kind: 'user' } as DaemonTranscriptBlock;
+    testStore.update([oldUser]);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => root!.render(<Harness />));
+    renderLog = [];
+
+    // Prompt status changes urgently while useDeferredValue still holds the
+    // previous transcript. It must not pair a new spinner with the old turn.
+    act(() => {
+      testStore.update([oldUser, newUser]);
+      root!.render(<Harness />);
+    });
+    expect(renderLog.length).toBeGreaterThan(0);
+    for (const entry of renderLog) {
+      expect(entry.ids).toEqual(['old-user', 'new-user']);
+    }
   });
 });

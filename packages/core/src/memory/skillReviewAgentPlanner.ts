@@ -7,7 +7,7 @@
 import type { Content } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Config } from '../config/config.js';
+import { deriveConfig, type Config } from '../config/config.js';
 import type {
   PermissionManager,
   ToolRegistrationStatus,
@@ -17,6 +17,7 @@ import type {
   PermissionDecision,
 } from '../permissions/types.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -55,7 +56,6 @@ type SkillScopedPermissionManager = Pick<
   | 'getToolRegistrationStatus'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
-  | 'isPermissionsAllowListActive'
   | 'isToolDisabledByCoreToolsAllowList'
   | 'isToolEnabled'
 >;
@@ -255,29 +255,28 @@ export function createSkillScopedAgentConfig(
         : 'default';
       return mergePermissionDecision(scopedDecision, baseDecision);
     },
-    async isToolEnabled(toolName: string): Promise<boolean> {
+    async isToolEnabled(
+      toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
+    ): Promise<boolean> {
       if (isScopedTool(toolName)) return true;
-      if (basePm) return basePm.isToolEnabled(toolName);
+      if (basePm)
+        return basePm.isToolEnabled(toolName, toolAliases, mcpIdentity);
       return true;
     },
     async getToolRegistrationStatus(
       toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
     ): Promise<ToolRegistrationStatus> {
       if (isScopedTool(toolName)) return 'registered';
       if (basePm) {
         return typeof basePm.getToolRegistrationStatus === 'function'
-          ? basePm.getToolRegistrationStatus(toolName)
+          ? basePm.getToolRegistrationStatus(toolName, toolAliases, mcpIdentity)
           : Promise.resolve('registered' as ToolRegistrationStatus);
       }
       return 'registered';
-    },
-    // The scheduler's permission-denied message branch calls this on
-    // whatever `getPermissionManager()` returns (#9827). Without the
-    // delegation a shim-rejected call under an active allowlist threw
-    // `TypeError: ... is not a function` instead of reaching the
-    // designed permission error.
-    isPermissionsAllowListActive(): boolean {
-      return basePm?.isPermissionsAllowListActive() ?? false;
     },
     isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
       return (
@@ -288,10 +287,9 @@ export function createSkillScopedAgentConfig(
     },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+  });
 }
 
 // Exported for tests so the `auto-skill-` prefix instruction stays asserted
@@ -476,9 +474,13 @@ export async function runSkillReviewByAgent(params: {
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: this planner passes no abortSignal, so
+    // runForkedAgent cannot resolve 'cancelled' here.
     throw new Error(
-      result.terminateReason ||
+      terminateReasonMessage(
+        result.terminateReason,
         'Skill review agent did not complete successfully',
+      ),
     );
   }
 

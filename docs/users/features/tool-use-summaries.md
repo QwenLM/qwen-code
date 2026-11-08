@@ -124,7 +124,7 @@ Three points that tend to trip up a first read of this feature:
 
 1. **One generation per batch, shared by both display modes.** The fast-model call happens exactly once in `handleCompletedTools` when a tool batch finalizes. Toggling `Ctrl+O` expanded detail mode afterwards does **not** trigger a new call — both the collapsed and the expanded rendering read from the same `tool_use_summary` history entry that was captured the first time.
 2. **No backfill on toggle or on session resume.** A `tool_group` that completed before the feature was enabled (or before you flipped the setting on, or in a resumed session — `ChatRecordingService` does not persist summary entries) will never get a label. There is no "sweep existing history" pass. If you turn this setting on mid-session, only _future_ batches will show a label; older groups keep the default rendering with no indicator that a label is missing.
-3. **Main-agent batches only.** The trigger lives in the main session's turn loop (`useGeminiStream`), so:
+3. **Main-agent batches only.** The trigger lives in the main session's turn loop (`useLlmStream`), so:
    - ✅ Shell, MCP, file operations, and the `Task` / subagent tool _call itself_ (as it appears in the main batch) are summarized.
    - ❌ A subagent's **internal** tool batches (run through `packages/core/src/agents/runtime/`) are not summarized.
 

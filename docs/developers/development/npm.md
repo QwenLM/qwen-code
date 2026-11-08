@@ -41,16 +41,16 @@ Regular stable releases for production use.
 
 ### Preview Releases
 
-Weekly preview releases every Tuesday at 23:59 UTC for early access to upcoming features.
+Weekly preview releases every Tuesday at 17:00 UTC for early access to upcoming features.
 
 ### Nightly Releases
 
-Daily nightly releases at midnight UTC for bleeding-edge development testing.
+Daily nightly releases at 21:00 UTC for bleeding-edge development testing.
 
 ## Automated Release Schedule
 
-- **Nightly**: Every day at midnight UTC
-- **Preview**: Every Tuesday at 23:59 UTC
+- **Nightly**: Every day at 21:00 UTC
+- **Preview**: Every Tuesday at 17:00 UTC
 - **Stable**: Manual releases triggered by maintainers
 
 ### How to Use Different Release Types
@@ -83,6 +83,14 @@ Every scheduled or manual release follows these steps:
 
 If any step in the release workflow fails, it will automatically create a new issue in the repository with the labels `bug` and a type-specific failure label (e.g., `nightly-failure`, `preview-failure`). The issue will contain a link to the failed workflow run for easy debugging.
 
+### When a release sits in the queue
+
+`Publish Release` runs on a GitHub-hosted runner and cannot move to the ECS pools: [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) supports cloud-hosted runners only, so a self-hosted publisher would fail to authenticate and would emit no provenance. The macOS and Windows legs of `audio-capture-prebuilds.yml` are hosted as well, because they build against native toolchains; only its Linux legs select `ecs-qwen-release-host`.
+
+Hosted concurrency is account-wide and shared with the PR review, autofix, and triage automation, so these hosted steps queue behind that traffic. A queued step is not a failed release: GitHub has not assigned it a runner, its log is still empty, and `timeout-minutes` only starts counting once it runs. On 2026-11-01 a publish waited 2h33m for a runner and then finished in 5m37s, while the nightlies around it were dispatched 3–4s after their build finished. Prefer the nightly, or dispatch outside the Asia/Shanghai working-day peak, when a manual release is timing-sensitive.
+
+See [Release runner slots](../../design/2026-10-28-release-queue-optimization.md) for the pool analysis and for which release jobs were already moved off hosted runners.
+
 ## Release Validation
 
 After pushing a new release smoke testing should be performed to ensure that the packages are working as expected. This can be done by installing the packages locally and running a set of tests to ensure that they are functioning correctly.
@@ -101,7 +109,7 @@ The above pattern for creating patch or hotfix releases from current or older co
     out this tag gets the exact code that was published.
 2.  The Branch (`release-vX.Y.Z-patch.1`): This branch contains one new commit on top of the
     tagged commit. That new commit only contains the version number change in package.json
-    (and other related files like package-lock.json).
+    (and the other workspace manifests).
 
 This separation is good. It keeps your main branch history clean of release-specific
 version bumps until you decide to merge them.
@@ -253,6 +261,6 @@ This tells NPM that any folder inside the `packages` directory is a separate pac
 
 ### Benefits of Workspaces
 
-- **Simplified Dependency Management**: Running `npm install` from the root of the project will install all dependencies for all packages in the workspace and link them together. This means you don't need to run `npm install` in each package's directory.
-- **Automatic Linking**: Packages within the workspace can depend on each other. When you run `npm install`, NPM will automatically create symlinks between the packages. This means that when you make changes to one package, the changes are immediately available to other packages that depend on it.
+- **Simplified Dependency Management**: Running `corepack pnpm install --frozen-lockfile` from the root of the project installs the dependencies of every package in the workspace and links the packages together, so you don't need to install in each package's directory.
+- **Automatic Linking**: Packages within the workspace can depend on each other. When you install from the root, pnpm creates symlinks between the packages. This means that when you make changes to one package, the changes are immediately available to other packages that depend on it.
 - **Simplified Script Execution**: You can run scripts in any package from the root of the project using the `--workspace` flag. For example, to run the `build` script in the `cli` package, you can run `npm run build --workspace @qwen-code/qwen-code`.

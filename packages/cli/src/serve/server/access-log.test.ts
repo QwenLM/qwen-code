@@ -21,7 +21,12 @@ vi.mock('./telemetry-context.js', () => ({
     telemetryMocks.getDaemonTelemetryInboundTraceId,
 }));
 
-import { installAccessLogMiddleware } from './access-log.js';
+import {
+  ACCESS_LOG_ERROR_CODE_LOCAL,
+  ACCESS_LOG_ERROR_REASON_LOCAL,
+  ACCESS_LOG_REJECT_LOCAL,
+  installAccessLogMiddleware,
+} from './access-log.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -67,13 +72,16 @@ function harness() {
       method?: string;
       status?: number;
       rawHeaders?: string[];
+      locals?: Record<string, unknown>;
     } = {},
   ) => {
     if (!middleware) throw new Error('Access middleware was not installed');
     const response = new EventEmitter() as EventEmitter & {
       statusCode: number;
+      locals: Record<string, unknown>;
     };
     response.statusCode = input.status ?? 200;
+    response.locals = input.locals ?? {};
     const next = vi.fn();
     middleware(
       {
@@ -126,6 +134,56 @@ describe('installAccessLogMiddleware', () => {
       'request completed',
       expect.objectContaining({ route: 'GET /failure', status: 400 }),
     );
+  });
+
+  it('logs the rejecting branch code and reason on error responses', () => {
+    const h = harness();
+    h.begin({
+      path: '/conflict',
+      status: 409,
+      locals: {
+        [ACCESS_LOG_ERROR_CODE_LOCAL]: 'hosted_turn_recovery_required',
+        [ACCESS_LOG_ERROR_REASON_LOCAL]: 'restore_blocked',
+      },
+    }).response.emit('finish');
+
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({
+        route: 'GET /conflict',
+        status: 409,
+        code: 'hosted_turn_recovery_required',
+        reason: 'restore_blocked',
+      }),
+    );
+
+    h.begin({
+      path: '/conflict-without-branch',
+      status: 409,
+      locals: {
+        [ACCESS_LOG_ERROR_CODE_LOCAL]: 'hosted_turn_active',
+      },
+    }).response.emit('finish');
+    const codeOnly = vi.mocked(h.logger.warn).mock.calls.at(-1)?.[1] as
+      | DaemonLogContext
+      | undefined;
+    expect(codeOnly).toMatchObject({ code: 'hosted_turn_active' });
+    expect('reason' in (codeOnly ?? {})).toBe(false);
+
+    h.begin({
+      path: '/success',
+      status: 200,
+      locals: {
+        [ACCESS_LOG_ERROR_CODE_LOCAL]: 'never_logged',
+        [ACCESS_LOG_ERROR_REASON_LOCAL]: 'never_logged',
+      },
+    }).response.emit('finish');
+    const success = vi.mocked(h.logger.info).mock.calls.at(-1)?.[1] as
+      | DaemonLogContext
+      | undefined;
+    expect(success).toMatchObject({ route: 'GET /success', status: 200 });
+    expect('code' in (success ?? {})).toBe(false);
+    expect('reason' in (success ?? {})).toBe(false);
   });
 
   it('joins the request log line to the caller trace when telemetry is off', () => {
@@ -292,5 +350,40 @@ describe('installAccessLogMiddleware', () => {
     pending.response.emit('finish');
     expect(h.logger.info).not.toHaveBeenCalled();
     expect(h.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('charges pre-auth gate rejects to their own budget, never the operator one', () => {
+    const h = harness();
+    // 92 marked rejects: past the reject burst (30) AND past the point where
+    // a shared-suppressed flush would have drained the operator's burst
+    // entirely — a 65-request burst was not far enough to see that cliff.
+    for (let i = 0; i < 92; i += 1) {
+      const { response } = h.begin({
+        method: 'POST',
+        path: '/session',
+        status: 403,
+        locals: { [ACCESS_LOG_REJECT_LOCAL]: true },
+      });
+      response.emit('finish');
+    }
+    expect(
+      vi
+        .mocked(h.logger.warn)
+        .mock.calls.filter(([message]) => message === 'request completed'),
+    ).toHaveLength(30);
+    // The operator's own line is untouched by the flood.
+    const { response } = h.begin({ path: '/capabilities', status: 200 });
+    response.emit('finish');
+    expect(h.logger.info).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
+    );
+    // The reject flood's overflow surfaces at seal, counted on the reject
+    // side only — the flush spends nothing from the operator budget.
+    h.controller.sealAndFlushSuppressed();
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      'access logs suppressed',
+      expect.objectContaining({ suppressed: 62 }),
+    );
   });
 });

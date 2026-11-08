@@ -39,7 +39,7 @@ export const EVENT_PROTOCOL_TAG_SANITIZED =
   'qwen-code.chat.protocol_tag_sanitized';
 // Phase 4b — HTTP-status retry telemetry emitted by `retryWithBackoff` for
 // 429 / 5xx errors at LLM call sites. Distinct from EVENT_CONTENT_RETRY,
-// which is fired by geminiChat for InvalidStreamError retries on a separate
+// which is fired by llmChat for InvalidStreamError retries on a separate
 // retry budget. See docs/design/telemetry-llm-request-timing-design.md.
 export const EVENT_API_RETRY = 'qwen-code.api_retry';
 export const EVENT_CONVERSATION_FINISHED = 'qwen-code.conversation_finished';
@@ -48,6 +48,7 @@ export const EVENT_MALFORMED_JSON_RESPONSE =
 export const EVENT_FILE_OPERATION = 'qwen-code.file_operation';
 export const EVENT_MODEL_SLASH_COMMAND = 'qwen-code.slash_command.model';
 export const EVENT_SUBAGENT_EXECUTION = 'qwen-code.subagent_execution';
+export const EVENT_GOAL_STATE = 'qwen-code.goal_state';
 export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
@@ -71,6 +72,7 @@ export const EVENT_SPECULATION = 'qwen-code.speculation';
 // Workflow Events (#4721)
 export const EVENT_WORKFLOW_KEYWORD = 'qwen-code.workflow_keyword';
 export const EVENT_WORKFLOW_RUN = 'qwen-code.workflow_run';
+export const EVENT_WORKFLOW_SIZE_WARNING = 'qwen-code.workflow_size_warning';
 
 // Arena Events
 export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';
@@ -88,6 +90,10 @@ export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
 export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
 export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';
 export const EVENT_MEMORY_RECALL_DELIVERY = 'qwen-code.memory.recall.delivery';
+export const EVENT_MEMORY_SEARCH = 'qwen-code.memory.search';
+export const EVENT_MEMORY_MIGRATION = 'qwen-code.memory.migration';
+export const EVENT_MEMORY_RECALL_MODE_TRANSITION =
+  'qwen-code.memory.recall_mode_transition';
 
 // Session Tracing Span Names
 export const SPAN_INTERACTION = 'qwen-code.interaction';

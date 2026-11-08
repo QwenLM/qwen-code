@@ -31,7 +31,9 @@ import {
   getAgentPluginSchemaStatus,
 } from './agent-plugins-v1/manifest.js';
 import {
-  assertTarArchiveHasNoLinks,
+  MAX_ARCHIVE_EXPANDED_BYTES,
+  assertDirectorySymlinksAreSafe,
+  assertTarArchiveLinksAreSafe,
   type TarArchiveSafetyOptions,
 } from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
@@ -102,6 +104,20 @@ function getSupportedArchiveExtension(url: string): string | undefined {
 
 export function isSupportedArchivePath(source: string): boolean {
   return getSupportedArchiveExtensionFromPathname(source) !== undefined;
+}
+
+/**
+ * Archive-shaped URL regardless of scheme.
+ *
+ * Single source of truth for "does this URL's pathname end in a supported
+ * archive extension" — callers that need the scheme policy (HTTPS-only
+ * downloads, insecure-scheme rejections) layer it on top of this instead of
+ * re-deriving the pathname themselves, so a future change to how a URL's
+ * pathname is derived (matrix parameters, percent-decoding, …) keeps every
+ * consumer in sync automatically.
+ */
+export function isArchiveShapedUrl(source: string): boolean {
+  return getSupportedArchiveExtension(source) !== undefined;
 }
 
 export function isSupportedArchiveUrl(source: string): boolean {
@@ -523,6 +539,11 @@ export async function downloadPublicGitHubArchiveFallback(
   );
   await extractArchiveFile(archivePath, destination, signal, {
     enforceResourceLimits: true,
+    // Public repositories legitimately carry in-repo symlinks (the reported
+    // case is a root `AGENTS.md -> CLAUDE.md`), and this fallback is the only
+    // way to install them without Git 2.37+. Targets that escape the archive
+    // root or do not point directly to an archived file are still refused.
+    allowContainedSymlinks: true,
   });
   await fs.promises.unlink(archivePath);
   await assertArchivePreservesGitSemantics(destination);
@@ -823,6 +844,8 @@ export async function downloadFromGitHubRelease(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
+  target?: { platform: string; arch: string },
+  archiveSafety: TarArchiveSafetyOptions = {},
 ): Promise<GitHubDownloadResult> {
   const { source, ref } = installMetadata;
   const { owner, repo } = parseGitHubRepoForReleases(source);
@@ -838,7 +861,7 @@ export async function downloadFromGitHubRelease(
     throw new Error(`No release data found for ${owner}/${repo} at tag ${ref}`);
   }
 
-  const asset = findReleaseAsset(releaseData.assets);
+  const asset = findReleaseAsset(releaseData.assets, target);
   let archiveUrl: string | undefined;
   let isTar = false;
   let isZip = false;
@@ -886,7 +909,12 @@ export async function downloadFromGitHubRelease(
   }
 
   signal?.throwIfAborted();
-  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  await extractArchiveFile(
+    downloadedAssetPath,
+    destination,
+    signal,
+    archiveSafety,
+  );
   signal?.throwIfAborted();
 
   await fs.promises.unlink(downloadedAssetPath);
@@ -900,6 +928,7 @@ export async function downloadFromArchiveUrl(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
+  archiveSafety: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   const archiveExtension = getSupportedArchiveExtension(installMetadata.source);
   if (!archiveExtension) {
@@ -932,7 +961,12 @@ export async function downloadFromArchiveUrl(
   }
 
   signal?.throwIfAborted();
-  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  await extractArchiveFile(
+    downloadedAssetPath,
+    destination,
+    signal,
+    archiveSafety,
+  );
   signal?.throwIfAborted();
   await fs.promises.unlink(downloadedAssetPath);
 }
@@ -951,6 +985,18 @@ export async function extractArchiveFile(
   }
   try {
     await extractFile(archivePath, destination, signal, options);
+    signal?.throwIfAborted();
+    await flattenSingleExtensionDirectory(destination, archivePath);
+    signal?.throwIfAborted();
+    if (options.allowContainedSymlinks === true) {
+      await assertDirectorySymlinksAreSafe(destination, signal, {
+        maxExpandedBytes:
+          options.enforceResourceLimits === true
+            ? MAX_ARCHIVE_EXPANDED_BYTES
+            : undefined,
+        excludePath: archivePath,
+      });
+    }
   } catch (error) {
     signal?.throwIfAborted();
     throw new Error(
@@ -959,14 +1005,15 @@ export async function extractArchiveFile(
     );
   }
   signal?.throwIfAborted();
-  await flattenSingleExtensionDirectory(destination, archivePath);
-  signal?.throwIfAborted();
   assertExtractedArchiveContainsExtensionSource(destination);
 }
 
-export function findReleaseAsset(assets: Asset[]): Asset | undefined {
-  const platform = os.platform();
-  const arch = os.arch();
+export function findReleaseAsset(
+  assets: Asset[],
+  target?: { platform: string; arch: string },
+): Asset | undefined {
+  const platform = target?.platform ?? os.platform();
+  const arch = target?.arch ?? os.arch();
 
   const platformArchPrefix = `${platform}.${arch}.`;
   const platformPrefix = `${platform}.`;
@@ -980,8 +1027,13 @@ export function findReleaseAsset(assets: Asset[]): Asset | undefined {
   }
 
   // Check for platform specific asset
-  const platformAsset = assets.find((asset) =>
-    asset.name.toLowerCase().startsWith(platformPrefix),
+  const platformAsset = assets.find(
+    (asset) =>
+      asset.name.toLowerCase().startsWith(platformPrefix) &&
+      (!target ||
+        !/^(?:x64|arm64|arm|ia32|ppc64|s390x|riscv64)\./.test(
+          asset.name.toLowerCase().slice(platformPrefix.length),
+        )),
   );
   if (platformAsset) {
     return platformAsset;
@@ -1320,12 +1372,19 @@ export async function extractFile(
 ): Promise<void> {
   signal?.throwIfAborted();
   if (file.endsWith('.tar.gz')) {
-    await assertTarArchiveHasNoLinks(file, signal, options);
+    await assertTarArchiveLinksAreSafe(file, signal, options);
     signal?.throwIfAborted();
     try {
-      await pipeline(fs.createReadStream(file), tar.x({ cwd: dest }), {
-        signal,
-      });
+      await pipeline(
+        fs.createReadStream(file),
+        tar.x({
+          cwd: dest,
+          // The opt-in fallback intentionally treats every tar warning as a
+          // failure; see docs/design/safe-archive-symlinks.md.
+          strict: options.allowContainedSymlinks === true,
+        }),
+        { signal },
+      );
     } catch (error) {
       signal?.throwIfAborted();
       throw error;

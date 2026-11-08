@@ -1,0 +1,874 @@
+{
+  "request": {
+    "protocolVersion": 2,
+    "identity": {
+      "profile": "csi-files-retirement/1",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+    },
+    "context": {
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+      "epoch": 4,
+      "isolationClass": "session",
+      "leaseId": "lease-01",
+      "managedContext": "managed-context/1",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "provisionRequestId": "provision-01",
+      "runtimeIncarnation": "boot-01",
+      "runtimeInstanceId": "runtime-01",
+      "storageId": "storage://pvc/workspace-a",
+      "tenantId": "tenant-a",
+      "workspaceGeneration": "7",
+      "workspaceId": "workspace-a",
+      "protocolVersion": 3
+    },
+    "installedContext": {
+      "protocolVersion": 3,
+      "managedContext": "managed-context/1",
+      "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "workspace-a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/workspace-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+        "contextRevision": "1"
+      }
+    },
+    "managedCsi": "managed-csi/2",
+    "operation": {
+      "kind": "csi-file-history",
+      "version": 1,
+      "action": "snapshot"
+    }
+  },
+  "valid": [
+    {
+      "name": "empty",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [],
+          "files": {}
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": []
+      }
+    },
+    {
+      "name": "inherited-original-backup",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "foreign-owner",
+      "observation": {
+        "state": {
+          "ownerSessionId": "foreign",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "crossed-volume-device",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "2",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "noncanonical-inode",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "03"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "uint64-overflow",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "18446744073709551616"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-pin",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": []
+      }
+    },
+    {
+      "name": "changed-pin-device",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "2",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsafe-leaf",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "../original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "failed-backup",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z",
+                  "failed": true
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "extra-untracked-file",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            },
+            "extra": null
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-prompt",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsafe-mode",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 4096
+          }
+        ]
+      }
+    },
+    {
+      "name": "noncanonical-timestamp",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "extra-pin-field",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420,
+            "grant": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsupported-extra-root",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ],
+        "grant": true
+      }
+    }
+  ]
+}

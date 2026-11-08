@@ -6,6 +6,7 @@
 
 import {
   Client,
+  SdkHttpError,
   SSEClientTransport,
   StreamableHTTPClientTransport,
   type GetPromptResult,
@@ -30,8 +31,6 @@ import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
 import { validateAgentPluginStdioRuntimePaths } from '../extension/agent-plugins-v1/mcp.js';
-import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
-import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
@@ -62,7 +61,11 @@ import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
-import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorStatus,
+  wrapLazyModuleLoadError,
+} from '../utils/errors.js';
 import {
   getOrCreateMcpDispatcher,
   loadUndici,
@@ -105,6 +108,12 @@ export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS =
   MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS;
 export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
 export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
+/**
+ * Upper bound on `tools/list` round-trips for one server. The @google/genai
+ * pager this walk replaced stopped after 100 tools, so a 100-page ceiling is
+ * never stricter for a server that returns at least one tool per page.
+ */
+export const MCP_MAX_TOOL_LIST_PAGES = 100;
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
@@ -128,8 +137,15 @@ function bindInvocationContextPolicy(
   }
 }
 
-const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404, 422, 501]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
+// The MCP undici dispatcher runs with headersTimeout: 0, bodyTimeout: 0
+// (see getOrCreateMcpDispatcher in runtimeFetchOptions.ts), and every caller
+// of the optional GET/SSE probe is fire-and-forget, so nothing above this
+// wrapper will ever time out a body that sends headers but never completes.
+// This excerpt is best-effort diagnostics only — bound it so a stalled body
+// can't leak a reader/connection for the life of the process.
+const STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS = 2_000;
 
 export function getMcpOAuthDialogInstruction(
   action: 'authenticate' | 're-authenticate',
@@ -177,11 +193,11 @@ async function readResponseBodyExcerpt(
     return undefined;
   }
 
-  const decoder = new TextDecoder();
-  let body = '';
-  let bytesRead = 0;
-  let truncated = false;
-  try {
+  const readLoop = async (): Promise<string | undefined> => {
+    const decoder = new TextDecoder();
+    let body = '';
+    let bytesRead = 0;
+    let truncated = false;
     while (bytesRead < STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT) {
       const { done, value } = await reader.read();
       if (done) {
@@ -225,7 +241,23 @@ async function readResponseBodyExcerpt(
       excerpt.length > STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT
       ? `${excerpt.slice(0, STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT)}...`
       : excerpt;
+  };
+
+  try {
+    return await runWithTimeout(
+      readLoop(),
+      STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS,
+      'Streamable HTTP GET SSE fallback body excerpt',
+    );
   } catch {
+    // Timed out (or the read failed): drop the diagnostics and cancel this
+    // clone's tee branch so the abandoned read settles instead of dangling.
+    // Cancelling one branch alone does not run the underlying source's
+    // cancel algorithm — it's the caller's response.body?.cancel() below
+    // that cancels the sibling branch and actually releases the connection.
+    reader.cancel().catch(() => {
+      // Best-effort cleanup; the caller still returns the 405 sentinel.
+    });
     return undefined;
   }
 }
@@ -249,9 +281,37 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 }
 
 /**
+ * Whether the Agent Plugin transport must refuse redirects: it may only reach
+ * the address it was configured with, and a configured or bearer credential
+ * makes a forwarded 30x a credential leak.
+ *
+ * The SDK resolves redirects outside the compatibility fetch, against
+ * `requestInit.redirect`, so both layers have to be told. Asking the same
+ * question in one place keeps them from disagreeing.
+ */
+function agentPluginForbidsRedirect(
+  mcpServerConfig: MCPServerConfig | undefined,
+  headers: Headers | undefined,
+): boolean {
+  return (
+    mcpServerConfig?.agentPluginV1 === true &&
+    ((mcpServerConfig.headers !== undefined &&
+      Object.keys(mcpServerConfig.headers).length > 0) ||
+      headers?.has('authorization') === true)
+  );
+}
+
+/**
  * Wraps fetch to preserve OAuth challenges before the SDK discards response
- * metadata and to normalize Spring AI-style 400 responses to the SDK's
- * unsupported sentinel for the optional Streamable HTTP GET SSE request.
+ * metadata and to normalize conventional "GET not supported" rejections of
+ * the optional Streamable HTTP GET SSE request to the SDK's unsupported
+ * sentinel: Spring AI rejects it with 400 (#4521), servers with no GET route
+ * at all — e.g. the official SDK's stateless
+ * `StreamableHTTPServerTransport` behind Express, whose default fallthrough
+ * answers 404 — reject it with 404 (#8784). Some gateways map unsupported
+ * optional GET requests to 422 or 501; these are normalized too. A raw 405
+ * needs no rewriting (the SDK tolerates it natively) and 401 must stay
+ * untouched (the OAuth challenge detection above depends on observing it).
  *
  * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
  * 405 response as "GET SSE unsupported" and continues in POST-only mode.
@@ -266,11 +326,10 @@ export function createStreamableHttpCompatibilityFetch(
     const requestHeaders = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
-    const stopAgentPluginRedirect =
-      mcpServerConfig?.agentPluginV1 === true &&
-      ((mcpServerConfig.headers !== undefined &&
-        Object.keys(mcpServerConfig.headers).length > 0) ||
-        requestHeaders.has('authorization'));
+    const stopAgentPluginRedirect = agentPluginForbidsRedirect(
+      mcpServerConfig,
+      requestHeaders,
+    );
     const effectiveInit = stopAgentPluginRedirect
       ? { ...init, redirect: 'manual' as const }
       : init;
@@ -448,19 +507,25 @@ export function getMcpAppResourceUri(tool: {
     : undefined;
 }
 
+function getMcpAppVisibility(tool: {
+  _meta?: Record<string, unknown>;
+}): readonly string[] | undefined {
+  const ui = tool._meta?.['ui'];
+  if (typeof ui !== 'object' || ui === null || Array.isArray(ui))
+    return undefined;
+  const visibility = (ui as Record<string, unknown>)['visibility'];
+  if (visibility === undefined) return undefined;
+  return Array.isArray(visibility)
+    ? visibility.filter((value): value is string => typeof value === 'string')
+    : [];
+}
+
 /** SEP-1865: omit tools whose visibility does not include `"model"`. */
 export function isMcpToolVisibleToModel(tool: {
   _meta?: Record<string, unknown>;
 }): boolean {
-  const ui = tool._meta?.['ui'];
-  if (typeof ui !== 'object' || ui === null || Array.isArray(ui)) {
-    return true;
-  }
-  const visibility = (ui as Record<string, unknown>)['visibility'];
-  if (visibility === undefined || visibility === null) {
-    return true;
-  }
-  return Array.isArray(visibility) && visibility.includes('model');
+  const visibility = getMcpAppVisibility(tool);
+  return visibility === undefined || visibility.includes('model');
 }
 
 /**
@@ -536,7 +601,10 @@ export class McpClient {
       this.transport = await this.createTransport();
 
       this.client.onerror = (error) => {
-        if (this.isDisconnecting) {
+        // Legacy Streamable HTTP can wrap a JSON-RPC -32601 response in a
+        // transport error. Discovery treats that response as an absent
+        // optional method, so it must not poison the healthy connection.
+        if (this.isDisconnecting || isBenignMcpMethodNotFound(error)) {
           return;
         }
         // capture the upstream error
@@ -626,8 +694,18 @@ export class McpClient {
    * `status !== CONNECTED` — would silently omit it from the
    * non-interactive failure banner. The caller (manager) still catches
    * and logs; we just need the status registry to reflect reality.
+   *
+   * @param opts.preserveStatusOnFailure Leave the status untouched when
+   *   discovery fails, instead of flipping it to DISCONNECTED. For callers
+   *   that hold a live transport which must outlive a discovery failure —
+   *   the `readResource` lazy-spawn path, where `readResource()` itself
+   *   refuses to serve a non-CONNECTED client, so the flip would turn a
+   *   best-effort discovery into a failed read. Defaults to `false`.
    */
-  async discover(cliConfig: Config): Promise<void> {
+  async discover(
+    cliConfig: Config,
+    opts?: { preserveStatusOnFailure?: boolean },
+  ): Promise<void> {
     // legacy
     // `discover()` path (used by non-pool sessions and any direct
     // McpClient consumers) MUST apply config filters at discovery
@@ -642,8 +720,10 @@ export class McpClient {
     // (operators saw unexpected permission prompts) and include/
     // exclude filters were ignored. Now `discoverAndReturn` defaults
     // to applying filters; pool callers explicitly opt out.
-    const { tools, prompts, resources } =
-      await this.discoverAndReturn(cliConfig);
+    const { tools, prompts, resources } = await this.discoverAndReturn(
+      cliConfig,
+      { preserveStatusOnFailure: opts?.preserveStatusOnFailure },
+    );
     for (const tool of tools) {
       this.toolRegistry.registerTool(tool);
     }
@@ -688,6 +768,7 @@ export class McpClient {
    * Behavior mirrors `discover()` for error handling: status flips to
    * DISCONNECTED on any failure (so the global status registry +
    * `getFailedMcpServerNames()` reflect reality), then re-throws.
+   * `opts.preserveStatusOnFailure` opts out of the flip.
    *
    * Returns the same combined "no prompts or tools" error that `discover()`
    * raised previously, so callers that distinguish "server up but empty" from
@@ -700,10 +781,15 @@ export class McpClient {
    *   `SessionMcpView.applyTools` is the authoritative filter
    *   (otherwise pool-mode trust + filtering would apply twice
    *   inconsistently across sessions).
+   * @param opts.preserveStatusOnFailure Skip the DISCONNECTED flip.
+   *   See `discover()`. Defaults to `false`.
    */
   async discoverAndReturn(
     cliConfig: Config,
-    opts?: { applyConfigFilters?: boolean },
+    opts?: {
+      applyConfigFilters?: boolean;
+      preserveStatusOnFailure?: boolean;
+    },
   ): Promise<{
     tools: DiscoveredMCPTool[];
     prompts: DiscoveredMCPPrompt[];
@@ -743,7 +829,14 @@ export class McpClient {
 
       return { tools, prompts, resources };
     } catch (error) {
-      this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Skipped for `preserveStatusOnFailure` callers: "discovery found
+      // nothing" is not "the transport is down" — a transient list blip is
+      // indistinguishable from a server that advertises nothing, and the
+      // lazy-spawn read path's `readResource()` refuses to serve a client
+      // this flip just marked DISCONNECTED.
+      if (!opts?.preserveStatusOnFailure) {
+        this.updateStatus(MCPServerStatus.DISCONNECTED);
+      }
       // Same carrier as `connect()`'s catch: the manager swallows this error
       // for best-effort discovery; keep the cause retrievable for status
       // consumers (issue #9944). Gated like the status write so a server
@@ -1287,13 +1380,20 @@ async function createTransportWithOAuth(
   try {
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
+      const oauthHeaders = {
+        ...mcpServerConfig.headers,
+        Authorization: `Bearer ${accessToken}`,
+      };
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
         fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
         requestInit: {
-          headers: {
-            ...mcpServerConfig.headers,
-            Authorization: `Bearer ${accessToken}`,
-          },
+          headers: oauthHeaders,
+          ...(agentPluginForbidsRedirect(
+            mcpServerConfig,
+            new Headers(oauthHeaders),
+          )
+            ? { redirect: 'manual' as const }
+            : {}),
         },
       };
 
@@ -1444,6 +1544,12 @@ export async function connectAndDiscover(
     );
 
     mcpClient.onerror = (error) => {
+      // Match the pooled client path above: a legacy transport may surface an
+      // optional method's JSON-RPC -32601 as an error callback, even though
+      // discovery correctly treats it as "method not found".
+      if (isBenignMcpMethodNotFound(error)) {
+        return;
+      }
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
@@ -1501,15 +1607,10 @@ export async function connectAndDiscover(
 }
 
 /**
- * Discovers and sanitizes tools from a connected MCP client.
- * It retrieves function declarations from the client, filters out disabled tools,
- * generates valid names for them, and wraps them in `DiscoveredMCPTool` instances.
- *
- * @param mcpServerName The name of the MCP server.
- * @param mcpServerConfig The configuration for the MCP server.
- * @param mcpClient The active MCP client instance.
- * @returns A promise that resolves to an array of discovered and enabled tools.
- * @throws An error if no enabled tools are found or if the server provides invalid function declarations.
+ * Applies resource listing UI metadata (`_meta.ui`) to matching discovered tools.
+ * @param tools Discovered tools.
+ * @param resources Resources whose `_meta.ui` decorates matching tools.
+ * @returns The updated tool list.
  */
 function applyListingAppResourceUi(
   tools: DiscoveredMCPTool[],
@@ -1568,22 +1669,83 @@ async function discoverToolsWithMetadata(
     const listedTools: Array<
       Awaited<ReturnType<Client['listTools']>>['tools'][number]
     > = [];
+    let collidedToolNames: string[] = [];
     let didListTools = false;
-    const listTools = async (params?: { cursor?: string }) => {
-      // Clients without getProtocolEra (tests and the genai adapter) keep
-      // the typed helper. Modern sessions use it only when `tools` is
-      // declared; otherwise the v2 helper returns [] without a wire request.
-      const result =
-        typeof mcpClient.getProtocolEra !== 'function' ||
-        canUseModernTypedHelper(mcpClient, 'tools')
-          ? await mcpClient.listTools(params)
-          : await mcpClient.request(
-              { method: 'tools/list', params: params ?? {} },
-              ListToolsResultSchema,
-            );
+    // Clients without getProtocolEra (tests and the genai adapter) keep the
+    // typed helper. Modern sessions use it only when `tools` is declared;
+    // otherwise the v2 helper returns [] without a wire request.
+    const requestTools = async (params?: { cursor?: string }) =>
+      typeof mcpClient.getProtocolEra !== 'function' ||
+      canUseModernTypedHelper(mcpClient, 'tools')
+        ? await mcpClient.listTools(params)
+        : await mcpClient.request(
+            { method: 'tools/list', params: params ?? {} },
+            ListToolsResultSchema,
+          );
+    // Walk the whole cursor chain inside one call: the duplicate counts have to
+    // span every page, and a retry (which restarts at the first page) must
+    // start from empty bookkeeping. @google/genai is then handed a single
+    // terminal page — its pager terminates by counting yielded tools, so a page
+    // filtered down to nothing would leave it issuing tools/list forever when a
+    // server repeats a cursor.
+    const listTools = async () => {
+      const tools: typeof listedTools = [];
+      const declarationCounts = new Map<string, number>();
+      const seenCursors = new Set<string>();
+      let pages = 0;
+      let cursor: string | undefined;
+      do {
+        if (pages >= MCP_MAX_TOOL_LIST_PAGES) {
+          // A server that mints a fresh cursor per call never repeats one and
+          // never terminates the chain, so bound the walk itself.
+          debugLogger.warn(
+            `MCP server '${mcpServerName}' stopped paginating tools/list ` +
+              `after ${MCP_MAX_TOOL_LIST_PAGES} pages.`,
+          );
+          break;
+        }
+        pages++;
+        const result = await requestTools(
+          cursor === undefined ? undefined : { cursor },
+        );
+        for (const tool of result.tools) {
+          tools.push(tool);
+          declarationCounts.set(
+            tool.name,
+            (declarationCounts.get(tool.name) ?? 0) + 1,
+          );
+        }
+        const next = result.nextCursor;
+        // @google/genai's pager treats a falsy cursor as the end of the chain,
+        // so `''` is terminal here too — otherwise the last page is fetched
+        // twice and every tool on it is counted as a duplicate.
+        if (!next) break;
+        // A server that ignores the cursor would otherwise loop here forever.
+        if (seenCursors.has(next)) {
+          debugLogger.warn(
+            `MCP server '${mcpServerName}' repeated cursor '${next}' while ` +
+              `listing tools; stopping after ${tools.length} declarations.`,
+          );
+          break;
+        }
+        seenCursors.add(next);
+        cursor = next;
+      } while (cursor !== undefined);
       didListTools = true;
-      listedTools.push(...result.tools);
-      return result;
+      listedTools.length = 0;
+      listedTools.push(...tools);
+      collidedToolNames = [...declarationCounts]
+        .filter(([, count]) => count > 1)
+        .map(
+          ([name, count]) => `'${name}' (${count} conflicting declarations)`,
+        );
+      // A duplicated name has no single command behind `tools/call`, so no
+      // declaration of it can be advertised safely: drop the whole group
+      // rather than electing an arbitrary one (#15741).
+      return {
+        tools: tools.filter((tool) => declarationCounts.get(tool.name) === 1),
+        nextCursor: undefined,
+      };
     };
     // @google/genai still types this structural adapter against SDK v1. Its
     // discovery path only calls listTools(); execution stays on the v2 client.
@@ -1601,6 +1763,14 @@ async function discoverToolsWithMetadata(
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
       return { tools: [], hadVisibilityFilteredTools: false };
+    }
+
+    if (collidedToolNames.length > 0) {
+      debugLogger.warn(
+        `MCP server '${mcpServerName}' returned duplicate tool names ` +
+          `${collidedToolNames.join(', ')}. Skipping every declaration of ` +
+          `each duplicated name.`,
+      );
     }
 
     // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
@@ -1655,9 +1825,10 @@ async function discoverToolsWithMetadata(
         const listed = listedTools.find(
           (mcpTool) => mcpTool.name === funcDecl.name,
         );
+        const appVisibility = listed ? getMcpAppVisibility(listed) : undefined;
         if (listed && !isMcpToolVisibleToModel(listed)) {
           hadVisibilityFilteredTools = true;
-          continue;
+          if (!appVisibility?.includes('app')) continue;
         }
 
         discoveredTools.push(
@@ -1677,6 +1848,14 @@ async function discoverToolsWithMetadata(
             mcpServerConfig.alwaysLoadTools === true,
             invocationContextClients.has(mcpClient),
             appResourceUriMap.get(funcDecl.name!),
+            undefined,
+            {
+              appResourceMaxBytes: mcpServerConfig.appResourceMaxBytes,
+              appResourceTimeoutMs: mcpServerConfig.appResourceTimeoutMs,
+              extensionName: mcpServerConfig.extensionName,
+              scope: mcpServerConfig.scope,
+            },
+            appVisibility,
           ),
         );
       } catch (error) {
@@ -1687,7 +1866,14 @@ async function discoverToolsWithMetadata(
         );
       }
     }
-    return { tools: discoveredTools, hadVisibilityFilteredTools };
+    // A server whose every declaration collided is not an empty server: the
+    // caller must not report it as "found nothing" and mark it DISCONNECTED,
+    // since the warning above already named the colliding tools.
+    return {
+      tools: discoveredTools,
+      hadVisibilityFilteredTools:
+        hadVisibilityFilteredTools || collidedToolNames.length > 0,
+    };
   } catch (error) {
     if (!isMethodNotFound(error)) {
       debugLogger.error(
@@ -1706,12 +1892,90 @@ async function discoverToolsWithMetadata(
  * precise check. The message fallback (for transports that drop the code)
  * keeps the original case-sensitive exact substring `'Method not found'` —
  * deliberately NOT a broad `/method not found/i`, which would also swallow
- * unrelated errors like "Error in method not found handler: ...".
+ * unrelated errors like "Error in method not found handler: ...". Transport
+ * wrappers use the stricter JSON-RPC body/status predicate below; a wrapper
+ * that fails that gate is not treated as a method-not-found message.
  */
 function isMethodNotFound(error: unknown): boolean {
+  // Use the same JSON-RPC body predicate as the status callback. This keeps
+  // transport-wrapped -32601 responses quiet even when their message wording
+  // is not the literal "Method not found".
+  if (isBenignMcpMethodNotFound(error)) return true;
+  // A recognized transport error that fails the body/status gate must not
+  // fall through to the message substring, which could hide a 401 or 503.
+  if (isLegacyMcpTransportError(error)) return false;
   const code = (error as { code?: unknown } | null)?.code;
+  // Direct protocol errors reach discovery as request rejections rather than
+  // transport callbacks, so retain the numeric JSON-RPC fallback for them.
   if (code === -32601) return true;
   return error instanceof Error && error.message.includes('Method not found');
+}
+
+const LEGACY_MCP_SSE_ERROR_PATTERN =
+  /^Error POSTing to endpoint(?: \(HTTP (\d{3})\))?:\s*([\s\S]*)$/u;
+
+function isLegacyMcpTransportError(error: unknown): boolean {
+  return (
+    error instanceof SdkHttpError ||
+    (error instanceof Error && LEGACY_MCP_SSE_ERROR_PATTERN.test(error.message))
+  );
+}
+
+const LEGACY_MCP_METHOD_NOT_FOUND_STATUSES = new Set([400, 404, 405, 422, 501]);
+
+/**
+ * Legacy HTTP transports may surface JSON-RPC method-not-found as a structured
+ * HTTP error or as a plain error message containing `(HTTP nnn): {body}`.
+ * Only allow HTTP 400, 404, 405, 422, or 501 with a valid JSON-RPC body;
+ * 401, 403, missing/other statuses, and unrelated transport errors must still
+ * retire the connection.
+ */
+function isBenignMcpMethodNotFound(error: unknown): boolean {
+  if (!isLegacyMcpTransportError(error)) return false;
+
+  const sdkHttpError = error instanceof SdkHttpError ? error : undefined;
+  const legacySseResponse =
+    error instanceof Error
+      ? error.message.match(LEGACY_MCP_SSE_ERROR_PATTERN)
+      : undefined;
+  const embeddedStatus = legacySseResponse?.[1];
+  const sdkHttpStatus = sdkHttpError?.data?.['status'];
+  const sdkHttpResponseText = sdkHttpError?.data?.['text'];
+  const responseText =
+    typeof sdkHttpResponseText === 'string'
+      ? sdkHttpResponseText
+      : legacySseResponse?.[2];
+  // Prefer transport-owned structured status. Older SSE transports expose
+  // only a plain SDK-generated `Error POSTing ... (HTTP nnn): <body>` message;
+  // parse status only from that prefix, never from the peer-controlled body.
+  const status =
+    typeof sdkHttpStatus === 'number'
+      ? sdkHttpStatus
+      : embeddedStatus === undefined
+        ? undefined
+        : Number(embeddedStatus);
+  // Legacy servers and gateways use more than HTTP 400 for this JSON-RPC
+  // response. Keep the accepted mappings explicit so authentication errors
+  // and unrelated server failures still retire the connection.
+  if (
+    status === undefined ||
+    !LEGACY_MCP_METHOD_NOT_FOUND_STATUSES.has(status)
+  ) {
+    return false;
+  }
+  if (responseText === undefined) return false;
+
+  const jsonStart = responseText.indexOf('{');
+  if (jsonStart === -1) return false;
+  try {
+    const payload = JSON.parse(responseText.slice(jsonStart)) as {
+      jsonrpc?: unknown;
+      error?: { code?: unknown };
+    };
+    return payload.jsonrpc === '2.0' && payload.error?.code === -32601;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1747,8 +2011,9 @@ function canUseModernTypedHelper(
  * helper returns `[]` without a request in that case. Modern sessions
  * therefore use the helper only when the capability is declared;
  * otherwise we issue the same raw `prompts/list` request as the legacy
- * path. A server that truly lacks prompts answers `-32601 Method not
- * found`, which the catch below swallows silently.
+ * path. A server that truly lacks prompts answers with JSON-RPC error code
+ * `-32601`, which the catch below swallows silently; legacy HTTP wrappers are
+ * accepted only when their status and response body pass the transport gate.
  */
 export async function listMcpPrompts(
   mcpServerName: string,
@@ -2349,6 +2614,21 @@ export async function connectToMcpServer(
   }
 }
 
+/**
+ * Loads a Google auth provider on demand: google-auth-library would otherwise
+ * ride along in every process that imports this module, MCP servers or not.
+ * As a separate chunk it can be gone after a background update replaced
+ * `dist`, which is reported as a restart rather than a connection error.
+ */
+function loadGoogleAuthModule<T>(load: () => Promise<T>): Promise<T> {
+  return load().catch((error: unknown) => {
+    throw wrapLazyModuleLoadError(
+      error,
+      'Google authentication for MCP servers',
+    );
+  });
+}
+
 /** Visible for Testing */
 export async function createTransport(
   mcpServerName: string,
@@ -2373,6 +2653,9 @@ export async function createTransport(
     mcpServerConfig.authProviderType ===
     AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION
   ) {
+    const { ServiceAccountImpersonationProvider } = await loadGoogleAuthModule(
+      () => import('../mcp/sa-impersonation-provider.js'),
+    );
     const provider = new ServiceAccountImpersonationProvider(mcpServerConfig);
     const transportOptions:
       | StreamableHTTPClientTransportOptions
@@ -2402,6 +2685,9 @@ export async function createTransport(
   if (
     mcpServerConfig.authProviderType === AuthProviderType.GOOGLE_CREDENTIALS
   ) {
+    const { GoogleCredentialProvider } = await loadGoogleAuthModule(
+      () => import('../mcp/google-auth-provider.js'),
+    );
     const provider = new GoogleCredentialProvider(mcpServerConfig);
     const transportOptions:
       | StreamableHTTPClientTransportOptions
@@ -2490,6 +2776,18 @@ export async function createTransport(
       };
     }
 
+    // The compatibility fetch answers the request it issues, but the SDK
+    // resolves a redirect before that, against this field.
+    if (
+      transportOptions.requestInit &&
+      agentPluginForbidsRedirect(
+        mcpServerConfig,
+        new Headers(transportOptions.requestInit.headers as HeadersInit),
+      )
+    ) {
+      transportOptions.requestInit.redirect = 'manual';
+    }
+
     return new StreamableHTTPClientTransport(
       new URL(mcpServerConfig.httpUrl),
       transportOptions,
@@ -2531,8 +2829,19 @@ export async function createTransport(
     // Windows), then apply server-specific overrides on top so that a server
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
+    const inherited = normalizePathEnvForWindows(sanitizeChildEnv(process.env));
+    // The Desktop AppImage exports its bundled Python's PYTHONHOME/PYTHONPATH
+    // globally, and a stdio MCP server's own interpreter then looks for its
+    // standard library under the AppImage mount and crashes at startup
+    // (#11718). Strip both from the inherited environment under the desktop
+    // shell only — the CLI leaves a user's own Python setup untouched, and an
+    // explicit `env` entry in the server config below still wins.
+    if (process.env['QWEN_CODE_DESKTOP'] === '1') {
+      delete inherited['PYTHONHOME'];
+      delete inherited['PYTHONPATH'];
+    }
     const env = {
-      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+      ...inherited,
       ...(mcpServerConfig.env || {}),
     };
 

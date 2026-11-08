@@ -17,7 +17,7 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';
@@ -173,7 +173,13 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   const prefixWidth = getPrefixWidth(prefix);
   const imageHeightBudget =
     availableTerminalHeight !== undefined && images?.length
-      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      ? Math.max(
+          1,
+          Math.floor(
+            availableTerminalHeight /
+              (images.length + (text.length > 0 ? 1 : 0)),
+          ),
+        )
       : availableTerminalHeight;
 
   return (
@@ -226,7 +232,13 @@ const ContinuationMarkdownMessage: React.FC<
   const prefixWidth = getPrefixWidth(basePrefix);
   const imageHeightBudget =
     availableTerminalHeight !== undefined && images?.length
-      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      ? Math.max(
+          1,
+          Math.floor(
+            availableTerminalHeight /
+              (images.length + (text.length > 0 ? 1 : 0)),
+          ),
+        )
       : availableTerminalHeight;
 
   return (

@@ -7,7 +7,7 @@
 
 use core_graphics::{
     event::{CGEvent, CGEventFlags},
-    event_source::{CGEventSource, CGEventSourceStateID},
+    event_source::CGEventSource,
 };
 use foreign_types::ForeignType;
 
@@ -28,6 +28,11 @@ pub fn is_screen_sharing_pid(pid: i32) -> bool {
     crate::apps::bundle_id_for_pid(pid)
         .as_deref()
         .is_some_and(is_screen_sharing_bundle_id)
+}
+
+pub(crate) fn uses_application_keyboard_target(foreground: bool, modifiers: &[&str]) -> bool {
+    // Command equivalents are dispatched through the application's menu chain.
+    foreground || modifier_flags(modifiers).contains(CGEventFlags::CGEventFlagCommand)
 }
 
 /// Press and release a single key, delivered to `pid` without stealing focus.
@@ -51,27 +56,44 @@ pub fn press_key(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Type a string character-by-character to `pid`.
+fn text_characters(text: &str) -> impl Iterator<Item = char> + '_ {
+    let mut previous_was_cr = false;
+    text.chars().filter_map(move |ch| {
+        let skip_lf = previous_was_cr && ch == '\n';
+        previous_was_cr = ch == '\r';
+        if skip_lf {
+            None
+        } else {
+            Some(if ch == '\r' { '\n' } else { ch })
+        }
+    })
+}
+
+fn text_event(source: &CGEventSource, ch: char, down: bool) -> anyhow::Result<CGEvent> {
+    // A Unicode LF on keycode 0 inserts a line inside an Excel cell. Text
+    // synthesis promises Return semantics, so use the actual Return keycode.
+    let code = if ch == '\n' { 36 } else { 0 };
+    let event = CGEvent::new_keyboard_event(source.clone(), code, down)
+        .map_err(|_| anyhow::anyhow!("CGEvent text keyboard event failed"))?;
+    if ch != '\n' {
+        event.set_string(&ch.to_string());
+    }
+    // Avoid leaking inferred Shift state from an uppercase Unicode payload.
+    event.set_flags(CGEventFlags::CGEventFlagNull);
+    Ok(event)
+}
+
+/// Type a string character-by-character to `pid`, with line breaks as Return.
 pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
-    for ch in text.chars() {
-        let ch_str = ch.to_string();
-        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard down failed"))?;
-        down.set_string(&ch_str);
-        // Always zero flags: Chrome inspects the flags field to infer modifier
-        // state; without this, uppercase chars (e.g. 'E') are seen as Shift+e
-        // and the modifier leaks into the next character (Swift fix: event.flags = []).
-        down.set_flags(CGEventFlags::CGEventFlagNull);
+    for ch in text_characters(text) {
+        let down = text_event(&source, ch, true)?;
         post_keyboard_event(pid, &down);
         std::thread::sleep(std::time::Duration::from_millis(8));
 
-        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard up failed"))?;
-        up.set_string(&ch_str);
-        up.set_flags(CGEventFlags::CGEventFlagNull);
+        let up = text_event(&source, ch, false)?;
         post_keyboard_event(pid, &up);
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
@@ -81,22 +103,15 @@ pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
 /// Type a string character-by-character with an extra `inter_char_delay_ms`
 /// pause after each character (on top of the internal 8 ms down/up gap).
 pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
-    for ch in text.chars() {
-        let ch_str = ch.to_string();
-        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard down failed"))?;
-        down.set_string(&ch_str);
-        down.set_flags(CGEventFlags::CGEventFlagNull);
+    for ch in text_characters(text) {
+        let down = text_event(&source, ch, true)?;
         post_keyboard_event(pid, &down);
         std::thread::sleep(std::time::Duration::from_millis(8));
 
-        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard up failed"))?;
-        up.set_string(&ch_str);
-        up.set_flags(CGEventFlags::CGEventFlagNull);
+        let up = text_event(&source, ch, false)?;
         post_keyboard_event(pid, &up);
 
         // Additional inter-character delay on top of the 8 ms internal gap.
@@ -150,7 +165,7 @@ pub fn press_key_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
     use core_graphics::event::CGEventTapLocation;
 
     let key_code = key_name_to_code(key)?;
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let mut active_flags = CGEventFlags::CGEventFlagNull;
     let mut pressed_modifiers: Vec<(u16, CGEventFlags)> = Vec::new();
@@ -228,9 +243,9 @@ pub(super) fn with_global_modifier_keys<T>(
 ) -> anyhow::Result<T> {
     use core_graphics::event::CGEventTapLocation;
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
-    let mut active_flags = CGEventFlags::CGEventFlagNull;
+    let mut active_flags = held_flags();
     let mut pressed = Vec::new();
 
     for modifier in modifiers {
@@ -272,9 +287,23 @@ fn post_global_key(
 ) -> anyhow::Result<()> {
     let event = CGEvent::new_keyboard_event(source.clone(), key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent keyboard event creation failed"))?;
-    event.set_flags(flags);
+    event.set_flags(key_event_flags(key_code, flags));
     event.post(tap);
     Ok(())
+}
+
+fn key_event_flags(key_code: u16, modifiers: CGEventFlags) -> CGEventFlags {
+    // Preserve key structure without inheriting physical modifiers from the
+    // event source. Fn (63) is a modifier, not an intrinsically marked key.
+    let intrinsic = match key_code {
+        123..=126 => CGEventFlags::CGEventFlagSecondaryFn | CGEventFlags::CGEventFlagNumericPad,
+        64 | 71 | 79 | 80 | 96..=101 | 103 | 105..=107 | 109 | 111 | 113..=122 => {
+            CGEventFlags::CGEventFlagSecondaryFn
+        }
+        65 | 67 | 69 | 75 | 76 | 78 | 81..=89 | 91 | 92 => CGEventFlags::CGEventFlagNumericPad,
+        _ => CGEventFlags::CGEventFlagNull,
+    };
+    modifiers | intrinsic
 }
 
 fn release_global_modifiers(
@@ -295,7 +324,7 @@ fn release_global_modifiers(
 
 fn modifier_key_code_and_flag(modifier: &str) -> Option<(u16, CGEventFlags)> {
     match modifier.to_lowercase().as_str() {
-        "cmd" | "command" => Some((55, CGEventFlags::CGEventFlagCommand)),
+        "cmd" | "command" | "meta" | "super" => Some((55, CGEventFlags::CGEventFlagCommand)),
         "shift" => Some((56, CGEventFlags::CGEventFlagShift)),
         "option" | "alt" => Some((58, CGEventFlags::CGEventFlagAlternate)),
         "ctrl" | "control" => Some((59, CGEventFlags::CGEventFlagControl)),
@@ -361,20 +390,13 @@ fn release_pid_modifiers(
 pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
     use core_graphics::event::CGEventTapLocation;
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
-    for ch in text.chars() {
-        let value = ch.to_string();
-        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard down failed"))?;
-        down.set_string(&value);
-        down.set_flags(CGEventFlags::CGEventFlagNull);
+    for ch in text_characters(text) {
+        let down = text_event(&source, ch, true)?;
         down.post(CGEventTapLocation::HID);
         std::thread::sleep(std::time::Duration::from_millis(8));
-        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
-            .map_err(|_| anyhow::anyhow!("CGEvent keyboard up failed"))?;
-        up.set_string(&value);
-        up.set_flags(CGEventFlags::CGEventFlagNull);
+        let up = text_event(&source, ch, false)?;
         up.post(CGEventTapLocation::HID);
         std::thread::sleep(std::time::Duration::from_millis(inter_char_delay_ms.max(8)));
     }
@@ -599,14 +621,11 @@ pub(super) fn post_keyboard_event(pid: i32, event: &CGEvent) {
 }
 
 fn post_key(pid: i32, key_code: u16, key_down: bool, flags: CGEventFlags) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let event = CGEvent::new_keyboard_event(source, key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
-    // HIDSystemState can inherit physically held modifiers. Always overwrite
-    // the event flags, including the empty case, so an unrelated Shift/Caps
-    // state cannot leak into a targeted key press.
-    event.set_flags(flags);
+    event.set_flags(key_event_flags(key_code, flags));
     post_keyboard_event(pid, &event);
     Ok(())
 }
@@ -617,11 +636,11 @@ fn post_key_no_auth(
     key_down: bool,
     flags: CGEventFlags,
 ) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let event = CGEvent::new_keyboard_event(source, key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
-    event.set_flags(flags);
+    event.set_flags(key_event_flags(key_code, flags));
     let event_ptr = event.as_ptr() as *mut std::ffi::c_void;
     // attach_auth_message = false → IOHIDPostEvent path → NSMenu fires
     if !crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false) {
@@ -634,7 +653,7 @@ fn modifier_flags(modifiers: &[&str]) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     for m in modifiers {
         match m.to_lowercase().as_str() {
-            "cmd" | "command" => flags |= CGEventFlags::CGEventFlagCommand,
+            "cmd" | "command" | "meta" | "super" => flags |= CGEventFlags::CGEventFlagCommand,
             "shift" => flags |= CGEventFlags::CGEventFlagShift,
             "option" | "alt" => flags |= CGEventFlags::CGEventFlagAlternate,
             "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
@@ -652,7 +671,7 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
         "space" => 49,
         "delete" | "backspace" => 51,
         "escape" | "esc" => 53,
-        "command" | "cmd" => 55,
+        "command" | "cmd" | "meta" | "super" => 55,
         "shift" => 56,
         "capslock" => 57,
         "option" | "alt" => 58,
@@ -663,10 +682,10 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
         "del" | "forward_delete" => 117,
         "end" => 119,
         "pagedown" => 121,
-        "left" | "left_arrow" => 123,
-        "right" | "right_arrow" => 124,
-        "down" | "down_arrow" => 125,
-        "up" | "up_arrow" => 126,
+        "left" | "left_arrow" | "arrowleft" => 123,
+        "right" | "right_arrow" | "arrowright" => 124,
+        "down" | "down_arrow" | "arrowdown" => 125,
+        "up" | "up_arrow" | "arrowup" => 126,
         "f1" => 122,
         "f2" => 120,
         "f3" => 99,
@@ -734,7 +753,129 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_graphics::event::CGEventType;
+
+    #[test]
+    fn command_chords_keep_application_target() {
+        for command in ["cmd", "COMMAND", "meta", "super"] {
+            assert!(uses_application_keyboard_target(false, &[command]));
+        }
+        assert!(uses_application_keyboard_target(true, &[]));
+        for modifiers in [&[][..], &["shift"][..], &["ctrl", "option"][..]] {
+            assert!(!uses_application_keyboard_target(false, modifiers));
+        }
+    }
+    use core_graphics::{event::CGEventType, event_source::CGEventSourceStateID};
+
+    #[test]
+    fn named_key_flags_match_native_structure_without_inheriting_modifiers() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private).unwrap();
+        let structural = CGEventFlags::CGEventFlagSecondaryFn | CGEventFlags::CGEventFlagNumericPad;
+        for code in 0..128 {
+            let down = CGEvent::new_keyboard_event(source.clone(), code, true).unwrap();
+            let up = CGEvent::new_keyboard_event(source.clone(), code, false).unwrap();
+            // A modifier's down-only bit is state, not key structure.
+            let intrinsic = down.get_flags() & up.get_flags() & structural;
+            for owned in [
+                CGEventFlags::CGEventFlagNull,
+                CGEventFlags::CGEventFlagControl,
+                CGEventFlags::CGEventFlagShift | CGEventFlags::CGEventFlagControl,
+                CGEventFlags::CGEventFlagSecondaryFn,
+                CGEventFlags::CGEventFlagCommand | CGEventFlags::CGEventFlagAlternate,
+            ] {
+                assert_eq!(
+                    key_event_flags(code, owned),
+                    intrinsic | owned,
+                    "code {code}"
+                );
+            }
+        }
+        assert_eq!(
+            key_event_flags(63, flags_for_codes(&[63])),
+            CGEventFlags::CGEventFlagSecondaryFn
+        );
+        assert_eq!(
+            key_event_flags(63, flags_for_codes(&[])),
+            CGEventFlags::CGEventFlagNull
+        );
+    }
+
+    #[test]
+    fn synthesized_line_breaks_coalesce_crlf_and_preserve_unicode() {
+        assert_eq!(
+            text_characters("甲\té🙂\r\nx\ny\rz\r\r\n").collect::<String>(),
+            "甲\té🙂\nx\ny\nz\n\n"
+        );
+    }
+
+    #[test]
+    fn synthesized_return_uses_physical_keycode_in_both_transitions() {
+        use core_graphics::event::EventField;
+        let source = crate::input::new_event_source().unwrap();
+        for down in [true, false] {
+            for (ch, expected_code) in [('a', 0), ('甲', 0), ('\t', 0), ('\n', 36)] {
+                let event = text_event(&source, ch, down).unwrap();
+                assert_eq!(
+                    event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                    expected_code
+                );
+                assert_eq!(event.get_flags(), CGEventFlags::CGEventFlagNull);
+            }
+        }
+    }
+
+    #[test]
+    fn synthesized_text_preserves_exact_unicode_and_punctuation_payloads() {
+        extern "C" {
+            fn CGEventKeyboardGetUnicodeString(
+                event: *mut std::ffi::c_void,
+                max_length: usize,
+                actual_length: *mut usize,
+                unicode_string: *mut u16,
+            );
+        }
+        let source = crate::input::new_event_source().unwrap();
+        for ch in "aA_~!@#$%^&*()+-={}[]|:;\"'<>,.?/中🙂".chars() {
+            for down in [true, false] {
+                let event = text_event(&source, ch, down).unwrap();
+                let mut units = [0u16; 4];
+                let mut length = 0;
+                unsafe {
+                    CGEventKeyboardGetUnicodeString(
+                        event.as_ptr().cast(),
+                        units.len(),
+                        &mut length,
+                        units.as_mut_ptr(),
+                    );
+                }
+                assert_eq!(
+                    String::from_utf16(&units[..length]).unwrap(),
+                    ch.to_string()
+                );
+                assert_eq!(event.get_flags(), CGEventFlags::CGEventFlagNull);
+            }
+        }
+    }
+
+    #[test]
+    fn common_key_aliases_preserve_native_codes_and_flags() {
+        for alias in ["meta", "super", "Meta"] {
+            assert_eq!(
+                modifier_key_code_and_flag(alias),
+                modifier_key_code_and_flag("cmd")
+            );
+            assert_eq!(modifier_flags(&[alias]), modifier_flags(&["cmd"]));
+            assert_eq!(key_name_to_code(alias).unwrap(), 55);
+        }
+        for (name, code) in [
+            ("ArrowLeft", 123),
+            ("ArrowRight", 124),
+            ("ArrowDown", 125),
+            ("ArrowUp", 126),
+        ] {
+            assert_eq!(key_name_to_code(name).unwrap(), code);
+        }
+        assert!(key_name_to_code("ArrowDiagonal").is_err());
+    }
 
     #[test]
     fn physical_text_uses_flags_changed_for_balanced_shift_transitions() {
@@ -882,4 +1023,42 @@ mod tests {
         assert!(!is_screen_sharing_bundle_id("com.apple.screensharing"));
         assert!(!is_screen_sharing_bundle_id("com.microsoft.rdc.macos"));
     }
+}
+
+pub struct DesktopKeyboard;
+impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
+    fn resolve(&self, key: &str) -> Result<u32, String> {
+        key_name_to_code(key)
+            .map(u32::from)
+            .map_err(|error| error.to_string())
+    }
+    fn transition(&self, code: u32, down: bool, held: &[u32]) -> Result<(), String> {
+        let source = crate::input::new_event_source()
+            .map_err(|_| "Could not create a keyboard event source".to_owned())?;
+        let event = CGEvent::new_keyboard_event(source, code as u16, down)
+            .map_err(|_| "Could not create a keyboard event".to_owned())?;
+        event.set_flags(key_event_flags(code as u16, flags_for_codes(held)));
+        event.post(core_graphics::event::CGEventTapLocation::HID);
+        Ok(())
+    }
+}
+
+fn flags_for_codes(codes: &[u32]) -> CGEventFlags {
+    codes
+        .iter()
+        .fold(CGEventFlags::CGEventFlagNull, |flags, code| {
+            flags
+                | match code {
+                    55 | 54 => CGEventFlags::CGEventFlagCommand,
+                    56 | 60 => CGEventFlags::CGEventFlagShift,
+                    58 | 61 => CGEventFlags::CGEventFlagAlternate,
+                    59 | 62 => CGEventFlags::CGEventFlagControl,
+                    63 => CGEventFlags::CGEventFlagSecondaryFn,
+                    _ => CGEventFlags::CGEventFlagNull,
+                }
+        })
+}
+
+pub(super) fn held_flags() -> CGEventFlags {
+    flags_for_codes(&cua_driver_core::desktop_keyboard::held_codes())
 }

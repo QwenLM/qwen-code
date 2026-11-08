@@ -74,24 +74,29 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /verify '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
-    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
-    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner. The job IS the write-permission check, so
-    # it cannot route on its own output; downstream jobs (triage, tmux, verify)
-    # route on what it finds instead.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
+    # but runs no agent, checks out nothing, and processes no untrusted PR
+    # content — its steps only read event metadata and call read/receipt APIs,
+    # and each gh step pins GH_HOST plus a private GH_CONFIG_DIR (below) — so
+    # it is safe on the persistent ECS pool whenever the trigger cannot carry
+    # fork code into it:
+    # - pull_request_target keeps the canonical same-repo guard: a fork head
+    #   stays on hosted (ephemeral), an in-repo head uses ECS.
+    # - issue_comment (/triage, /tmux, /verify) and workflow_dispatch carry no
+    #   github.event.pull_request payload at all, so the same-repo guard alone
+    #   fell through to ubuntu-latest for EVERY command — the gate then sat in
+    #   the hosted queue while the ECS pool was idle. Route them to ECS like
+    #   qwen-code-pr-review.yml's authorize and qwen-autofix.yml's
+    #   route/review-scan ("no PR payload -> no fork code -> persistent pool").
+    # The job IS the write-permission check, so it cannot route on its own
+    # output; downstream jobs (triage, tmux, verify) route on what it finds
+    # instead.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
     outputs:
       should_run: '${{ steps.perm.outputs.should_run }}'
-      # Real write-permission check on the PR AUTHOR (collaborator-permission
-      # API, not the coarse author_association), computed only on
-      # pull_request_target events; empty on every other event. Consumed by
-      # the triage job's runner routing so a maintainer's fork PR uses the
-      # ECS pool while a read-only collaborator's or org member's fork PR
-      # stays on ephemeral hosted runners.
-      author_can_write: '${{ steps.perm.outputs.author_can_write }}'
       # /verify trust level: 'trusted' when the PR author has write,
       # 'external' when they do not. Both run on the persistent ECS pool
       # (maintainer decision, 2026-07-29: the pool is network-isolated and
@@ -192,9 +197,24 @@ jobs:
           # issues; compare against null rather than truthiness so the shell
           # receives a plain true/false.
           IS_PR: '${{ github.event.issue.pull_request != null }}'
-          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
         run: |-
           set -euo pipefail
+          # Harden gh against the pool's shared, writable HOME config (this
+          # gate now runs on ecs-qwen for comment/dispatch triggers): a
+          # planted ~/.config/gh (http_unix_socket) would otherwise receive
+          # CI_BOT_PAT and could forge the permission response downstream
+          # consumes. Same pins as qwen-autofix.yml's route/review-scan; no
+          # `unset GH_TOKEN` — it is this step's only credential. A failed
+          # mktemp exits 1 (fail closed), never falling back to the shared
+          # config.
+          export GH_HOST=github.com
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the pool; clean up the mint.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           IS_VERIFY=false
           # VERIFY_LANE is "run the verify job"; IS_VERIFY is "the commenter
           # typed /verify". They differ only for the piggybacked lane, where
@@ -210,18 +230,6 @@ jobs:
             # says the PR is ready to be worth that.
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            # Runner-routing input for the triage job: the REAL author write
-            # check (author_association admits org members and read-only
-            # collaborators). Fail OPEN on purpose — unlike the deny gates
-            # below, this selects a runner pool, not a decision: an API
-            # hiccup merely routes the triage to a hosted runner, it must
-            # never skip or fail the triage itself.
-            if [ -n "$PR_AUTHOR" ] &&
-               author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
-              case "$author_perm" in
-                admin|maintain|write) echo "author_can_write=true" >> "$GITHUB_OUTPUT" ;;
-              esac
-            fi
             exit 0
           fi
           case "$EVENT_NAME" in
@@ -378,9 +386,11 @@ jobs:
 
       # The verify job needs a scarce self-hosted runner; when the pool is
       # saturated (or disabled) the job sits queued with no visible feedback.
-      # Acknowledge the authorized request from this always-hosted job so a
-      # /verify commenter gets a receipt even when the sandbox lane is backed
-      # up. The verify job itself no longer reacts.
+      # Acknowledge the authorized request from this gate job so a /verify
+      # commenter gets a receipt ahead of the sandbox lane. The gate itself
+      # now routes comment triggers to the pool, so the receipt queues with
+      # the pool when it is saturated — earlier than the verify run, not
+      # guaranteed instant. The verify job itself no longer reacts.
       # `github.event.issue.pull_request` is required here as well as on the
       # verify job: /verify on a plain issue would otherwise be acknowledged
       # with 👀 while the verify job's own PR guard skips it and
@@ -397,6 +407,15 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
+          # gh config reroute hardening — same pins as the perm step above.
+          export GH_HOST=github.com
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the pool; clean up the mint.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           gh api \
             --method POST \
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
@@ -420,6 +439,15 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           NUMBER: '${{ github.event.issue.number }}'
         run: |-
+          # gh config reroute hardening — same pins as the perm step above.
+          export GH_HOST=github.com
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the pool; clean up the mint.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           printf -v BODY '%s\n\n%s' \
             '**Sandboxed verification unavailable** — the maintainer runner pool is currently disabled, so `/verify` cannot run. Try again once the pool is back, or use `@qwen-code /triage` for the static review.' \
             '**沙箱验证当前不可用** —— 维护者 runner 池已停用，`/verify` 无法运行。请待恢复后重试，或使用 `@qwen-code /triage` 进行静态评审。'
@@ -483,26 +511,40 @@ jobs:
         }}
     # Triage is a static-analysis agent: it checks out the trusted base repo,
     # reaches the PR/issue only via the API, and must NEVER execute PR-derived
-    # code — its step env carries a write PAT that executed code could read.
-    # This is defended in layers, none of which is a hard boundary on its own
-    # (see the long note on the Qwen step for why a `--yolo` command denylist
-    # cannot be): the skill forbids executing PR code
-    # (.qwen/skills/triage/SKILL.md Rules), the `settings` deny rules block the
-    # direct interpreter/build/network invocations, and the routing below keeps
-    # foreign code off the persistent pool.
-    # Runner routing: the persistent ECS pool serves events whose payload
-    # carries no foreign code — issue triage and same-repo PR events — plus
-    # fork PRs whose author REALLY has write access, per the collaborator-
-    # permission lookup the authorize job already performs (the coarse
-    # author_association would admit org members and read-only collaborators
-    # to this secret-bearing agent; the pool is network-isolated, but a
-    # write-access author is the trust bar for reusing it). authorize is
-    # skipped on the issues/dispatch paths, so the explicit `issues` clause
-    # must stay; there its output is ''. PRs by other fork authors, and
-    # comment/dispatch-triggered reruns (which may target fork PRs), go to
-    # ephemeral hosted runners so a steered agent cannot persist anything
-    # across runs. Forks of this repo fall back to ubuntu-latest as before.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # code. The agent no longer carries a write credential: it reads GitHub
+    # with the job's read-only GITHUB_TOKEN and expresses every write as a
+    # draft that the separate publish-triage job validates and executes with
+    # the bot PAT (see the long note on the Qwen step). The container below
+    # and the per-run workspace sanitize bound what a steered agent could
+    # persist on the reusable pool.
+    # Runner routing: with the write PAT out of the agent environment, every
+    # triage trigger — issues, same-repo and fork PRs, comment reruns,
+    # dispatch — may use the persistent ECS pool. The pool is
+    # maintainer-provided and network-isolated; hosted capacity is the scarce
+    # side. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED falls back to
+    # ubuntu-latest, which stays safe because the controls are additive.
+    # Forks of this repo fall back to ubuntu-latest as before.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Read-only by construction: the agent's GH_TOKEN is this job's
+    # GITHUB_TOKEN. Every write goes through publish-triage's PAT. The
+    # pre-agent reaction step uses the PAT explicitly (reactions need write).
+    permissions:
+      contents: 'read'
+      issues: 'read'
+      pull-requests: 'read'
+      checks: 'read'
+      actions: 'read'
+    # The agent reads untrusted PR content on a reusable machine. Run the
+    # steps in a container so nothing it does persists on the runner host
+    # beyond the sanitized workspace (same contract as tmux/verify).
+    container:
+      image: 'node:22-bookworm'
+      options: '--init'
+    defaults:
+      run:
+        shell: 'bash'
+    outputs:
+      pr_number: '${{ steps.resolve.outputs.number }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -531,10 +573,33 @@ jobs:
         )
       )
     steps:
+      # The job runs in a bare node container; gh/jq/git are not in the image.
+      # Same toolchain step as the tmux lane.
+      - name: 'Install triage tools'
+        run: |-
+          set -euo pipefail
+          apt-get update
+          # util-linux provides runuser for the agent launch (tmux/verify
+          # install it explicitly for the same reason).
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq util-linux
+
+          install -d -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+          gh --version
+          git config --global --add safe.directory '*'
+
       - name: 'Acknowledge triage request'
         if: "github.event_name == 'issue_comment'"
         env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # Reactions need write scope; the job's GITHUB_TOKEN is read-only.
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           gh api \
@@ -610,10 +675,18 @@ jobs:
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout repo'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
+          # The agent reads this workspace; keep even the read-only token out
+          # of .git/config.
+          persist-credentials: false
 
       - name: 'Resolve target number'
         id: 'resolve'
@@ -706,88 +779,99 @@ jobs:
         id: 'ensure_qwen'
         run: |-
           set -euo pipefail
-          if command -v qwen >/dev/null 2>&1; then
-            echo "qwen already installed:"
-          else
-            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+          # Install from RUNNER_TEMP: the persistent workspace may hold a
+          # previous run's tree, and npm reads a cwd .npmrc whose settings a
+          # --registry flag does not override (same rule as the tmux lane).
+          if ! command -v qwen >/dev/null 2>&1; then
+            (cd "${RUNNER_TEMP:?}" && npm install -g --loglevel=error --no-audit --registry=https://registry.npmjs.org @qwen-code/qwen-code@latest)
           fi
           qwen --version
           echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Run Qwen Triage'
-        id: 'triage'
-        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
+      # Everything the agent needs that it must NOT fetch with a write
+      # credential: the bot identity for its author filters, the optional
+      # cross-repo direction signal, the draft drop zone, and its settings.
+      - name: 'Prepare agent context'
+        id: 'context'
         env:
-          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          REPOSITORY: '${{ github.repository }}'
-          # Per-run agent home so this run's session/memory cannot leak into the
-          # next on the reused self-hosted workspace (reset in "Clean stale
-          # agent state"). Must match the QWEN_HOME computed there.
-          QWEN_HOME: '${{ runner.temp }}/qwen-home'
-        with:
-          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
-          # Pin the action's unconditional global reinstall to the version
-          # this job already runs. Left at `latest`, the action installs with
-          # --prefer-offline and resolves the dist-tag from the runner's
-          # persistent npm cache, which lags npm publishes and has downgraded
-          # the shared ECS box back to a stale release.
-          qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'
-          # The input name is `settings` — this action version has no
-          # `settings_json` input. The old `settings_json:` block was silently
-          # dropped ("Unexpected input(s) 'settings_json'" in the run log), so
-          # the agent ran with the full default toolset. Do not rename it back.
-          #
+        run: |-
+          set -euo pipefail
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+          mkdir -p "$QWEN_HOME"
+          # Under the read-only GITHUB_TOKEN the agent will run with,
+          # `gh api user` returns github-actions[bot]; the skill's duplicate
+          # guard, reopen guard, and review dedup filter on the PAT's bot
+          # login, so resolve it here and pass it in.
+          BOT_LOGIN="$(gh api user --jq '.login')"
+          if [ -z "$BOT_LOGIN" ]; then
+            echo "::error::Cannot resolve the bot identity; refusing to run the agent without it."
+            exit 1
+          fi
+          echo "bot_login=$BOT_LOGIN" >> "$GITHUB_OUTPUT"
+          # Stage 1c's optional cross-repo direction signal. GITHUB_TOKEN is
+          # scoped to this repository, so prefetch with the PAT; a missing
+          # file means "signal unavailable", which the skill accepts.
+          mkdir -p "$RUNNER_TEMP/triage-context"
+          gh api repos/anthropics/claude-code/contents/CHANGELOG.md \
+            -H 'Accept: application/vnd.github.raw+json' \
+            > "$RUNNER_TEMP/triage-context/claude-code-changelog.md" 2>/dev/null ||
+            echo "::warning::CHANGELOG prefetch failed; the skill treats the signal as unavailable."
+          # Draft drop zone: the agent writes actions.jsonl + bodies here;
+          # publish-triage is the only writer to GitHub. RUNNER_TEMP survives
+          # across runs on the persistent pool — clear any previous run's
+          # drafts so a re-run cannot append to stale actions.
+          rm -rf "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results"
+          mkdir -p "$RUNNER_TEMP/triage-drafts/bodies" "$RUNNER_TEMP/triage-results"
+          chown -R node:node "$GITHUB_WORKSPACE" "$QWEN_HOME" \
+            "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results"
           # ── What these settings are, and are NOT ────────────────────────────
-          # The action runs `qwen --yolo`, so every permission resolves to
-          # auto-approve EXCEPT a `permissions.deny` match, which the scheduler
-          # errors out before approval mode is consulted (verified in
-          # coreToolScheduler L5 + permissionFlow.needsConfirmation). `tools.core`
-          # additionally filters which tools register at all (fail-safe: an
-          # unlisted tool like web_fetch/web_search/save_memory never loads, so
-          # those network/persistence tool channels are gone). No `sandbox` key
-          # — a deliberate omission, not a capability gap: the ECS pool does run
-          # containers (this workflow's own container jobs, and autofix's
-          # `sandbox: "docker"` agent, both land on those labels). Adding one
-          # here is an open decision, NOT tracked in #9556 — that issue is
-          # scoped to the /review pipeline's execution steps.
+          # The agent runs under --approval-mode yolo, so every permission
+          # resolves to auto-approve EXCEPT a `permissions.deny` match, which
+          # the scheduler errors out before approval mode is consulted.
+          # `tools.core` additionally filters which tools register at all
+          # (fail-safe: an unlisted tool like web_fetch/web_search/save_memory
+          # never loads). No `sandbox` key: the job itself is the container.
           #
-          # ⚠️ A command denylist is NOT a security boundary under --yolo, and
+          # ⚠️ A command denylist is NOT a security boundary under yolo, and
           # is not treated as one here. It is defense-in-depth against the
-          # NORMAL failure (the agent running `npm test`/`npx`/a build because a
-          # prompt implied it) and low-effort injection. It does NOT stop a
+          # NORMAL failure (the agent running `npm test`/`npx`/a build because
+          # a prompt implied it) and low-effort injection. It does NOT stop a
           # determined prompt-injection: `$(...)` substitution is not reliably
-          # deny-matchable (parser-dependent), and even with it blocked, exec
-          # can hide in `sed s///e`, env-var interpreters, etc. — an unwinnable
-          # denylist game. Backtick and `<(` ARE hard-blocked below (verified,
-          # they were free); `$(` and `>(` are not reliably matchable and are
-          # left to the layers below, not papered over with a rule that no-ops.
+          # deny-matchable, and exec can hide in `sed s///e`, env-var
+          # interpreters, etc. Backtick and `<(` ARE hard-blocked below.
           #
           # The REAL controls, in order of strength:
-          #   1. No PR code is ever executed (skill Rules; every legit triage
-          #      command is a gh-API call, a read-only git command, or text
-          #      processing — none touch the PR's tree in an executable way).
-          #   2. Fork PRs run on ephemeral hosted runners (see the triage job
-          #      `runs-on`), bounding persistence/lateral movement.
-          #   3. Stale git exec vectors (hooks/config/aliases) are wiped each
-          #      run (see "Clean stale agent state").
-          # RESIDUAL RISK: the agent still holds a write PAT (GH_TOKEN above),
-          # and under a successful injection it could exfiltrate it or forge bot
-          # writes — it even has a legitimate comment-posting capability. The
-          # structural fix is token isolation (agent runs read-only; a separate
-          # PR-code-free step publishes its drafted output with the PAT, as
-          # publish-tmux already does). Tracked as a follow-up; not yet wired.
+          #   1. No PR code is ever executed (skill Rules; the agent reads the
+          #      PR only through the API and the base checkout).
+          #   2. Token isolation: the agent's GH_TOKEN is the job's read-only
+          #      GITHUB_TOKEN; every write is a draft executed by
+          #      publish-triage with the PAT. There is no write credential in
+          #      the agent environment to exfiltrate, and the model key sits
+          #      behind the loopback proxy started in the run step.
+          #   3. The job container plus the per-run workspace sanitize bound
+          #      persistence on the reusable pool (see "Clean stale agent
+          #      state" and the ownership restores).
+          # A steered agent can still draft malicious content within triage's
+          # intended capability (a wrong review, a misleading comment); that
+          # surface is inherent to the product and reviewed by humans. The
+          # publisher validates shape, not semantics.
           #
-          # The deny list below therefore backs the skill's no-PR-code rule as
-          # a speed bump: interpreters/build tools, shells, exec wrappers,
-          # network binaries, path execution, and the git/gh subcommands that
-          # execute configured commands or materialize PR code. Prefix match is
-          # word-boundary ("npm" blocks `npm test`, not `npmx`); shell redirects
-          # are also checked against the write_file path rules.
-          settings: |-
+          # The deny list below backs the skill's no-PR-code rule as a speed
+          # bump: interpreters/build tools, shells, exec wrappers, network
+          # binaries, path execution, and the git/gh subcommands that execute
+          # configured commands or materialize PR code. Prefix match is
+          # word-boundary ("npm" blocks `npm test`, not `npmx`). It also
+          # blocks `node`, which structurally prevents the agent from running
+          # the publisher itself in CI mode.
+          # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort
+          # (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
+          # renders "", which the CLI ignores — the provider default.
+          cat > "$QWEN_HOME/settings.json" <<'SETTINGS_JSON'
             {
+              "model": {
+                "reasoningEffort": "${{ vars.QWEN_TRIAGE_EFFORT }}"
+              },
               "tools": {
                 "core": [
                   "run_shell_command",
@@ -914,7 +998,357 @@ jobs:
                 ]
               }
             }
-          prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
+          SETTINGS_JSON
+
+      # Direct CLI launch (the tmux/verify contract), replacing the former
+      # qwen-code-action step: the proxy must live and die in the same step as
+      # the agent, and env -i is what keeps the write credential out. The step
+      # keeps the id `triage` and emits the same `summary` output so 'Check
+      # triage response' stays unchanged.
+      - name: 'Run Qwen Triage'
+        id: 'triage'
+        env:
+          # Upstream model credentials — consumed by the loopback proxy below,
+          # never passed to the agent (it gets the dummy PROXY_TOKEN instead).
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # The agent's read credential: this job's read-only GITHUB_TOKEN.
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BOT_LOGIN: '${{ steps.context.outputs.bot_login }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+          REPOSITORY: '${{ github.repository }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          TRIAGE_TIMEOUT_MINUTES: '${{ needs.authorize.outputs.triage_timeout_minutes || 60 }}'
+        run: |-
+          set -euo pipefail
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # Bypass the runner proxy for qwen itself (it cuts SSE streams and
+          # qwen reads HTTP(S)_PROXY without honoring NO_PROXY), while
+          # restoring it for child gh/git commands the agent spawns. Same
+          # shape as the tmux lane; wrappers live on the container's own disk
+          # so no root-owned files leak onto the host through RUNNER_TEMP.
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              echo "::error::Could not parse a hostname from OPENAI_BASE_URL"
+              exit 1
+            fi
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="$(mktemp -d /tmp/qwen-network-bin.XXXXXX)"
+            # mktemp -d is 700 root-owned; the agent runs as node and must be
+            # able to traverse it, or the wrappers silently fall out of PATH
+            # and child gh/git lose the runner proxy. The wrappers hold no
+            # secrets (env-var names only).
+            chmod 755 "$proxy_bin"
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+          }
+          configure_qwen_network
+
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+
+          # Root-owned loopback proxy: the real model key never enters the
+          # agent environment. Ephemeral port + nonce health check + bearer
+          # token defend against a squatter on the reused runner (proven
+          # exploitable on the verify lane; same defences as tmux).
+          start_openai_proxy() {
+            local proxy_port proxy_script proxy_nonce port_file
+            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-triage.js"
+            port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-triage.port"
+            proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            # NOT local on purpose: the agent env reads it as OPENAI_API_KEY
+            # and the proxy receives it as PROXY_TOKEN (tmux lane rule).
+            PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            export PROXY_TOKEN
+            rm -f "$port_file"
+            cat > "$proxy_script" <<'NODE'
+          const http = require('node:http');
+          const { writeFileSync } = require('node:fs');
+          const { Readable } = require('node:stream');
+
+          const portFile = process.argv[2];
+          const baseUrl = process.env.OPENAI_BASE_URL;
+          const apiKey = process.env.OPENAI_API_KEY;
+          const nonce = process.env.QWEN_PROXY_NONCE;
+          const token = process.env.PROXY_TOKEN;
+          if (!baseUrl || !apiKey || !portFile || !nonce || !token) {
+            console.error('missing proxy configuration');
+            process.exit(1);
+          }
+
+          const base = new URL(baseUrl);
+          const basePath = base.pathname.replace(/\/+$/, '');
+
+          const server = http.createServer(async (req, res) => {
+            if (req.url === '/__health') {
+              res.writeHead(200, { 'content-type': 'text/plain' });
+              res.end(nonce);
+              return;
+            }
+
+            let timer;
+            try {
+              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+              const target = new URL(base.origin);
+              let path = incoming.pathname;
+              if (
+                basePath &&
+                basePath !== '/' &&
+                path !== basePath &&
+                !path.startsWith(`${basePath}/`)
+              ) {
+                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
+              }
+              target.pathname = path;
+              target.search = incoming.search;
+
+              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
+                res.writeHead(403, { 'content-type': 'text/plain' });
+                res.end('proxy: only POST /chat/completions is allowed\n');
+                return;
+              }
+
+              if (req.headers.authorization !== `Bearer ${token}`) {
+                res.writeHead(401, { 'content-type': 'text/plain' });
+                res.end('proxy: unauthorized\n');
+                return;
+              }
+
+              const headers = new Headers(req.headers);
+              headers.delete('host');
+              headers.delete('content-length');
+              headers.set('authorization', `Bearer ${apiKey}`);
+
+              const init = { method: req.method, headers };
+              if (req.method !== 'GET' && req.method !== 'HEAD') {
+                init.body = req;
+                init.duplex = 'half';
+              }
+
+              const controller = new AbortController();
+              timer = setTimeout(() => controller.abort(), 120_000);
+              let upstream;
+              try {
+                upstream = await fetch(target, { ...init, signal: controller.signal });
+              } catch (error) {
+                if (error instanceof Error && error.name === 'AbortError') {
+                  res.writeHead(504, { 'content-type': 'text/plain' });
+                  res.end('proxy error: upstream request timed out\n');
+                  return;
+                }
+                throw error;
+              }
+              // The timer deliberately stays armed after fetch() resolves on
+              // headers: it doubles as the first idle window for the body,
+              // refreshed per chunk below (tmux lane rule).
+              const responseHeaders = {};
+              upstream.headers.forEach((value, key) => {
+                const lower = key.toLowerCase();
+                if (lower !== 'content-encoding' && lower !== 'content-length') {
+                  responseHeaders[key] = value;
+                }
+              });
+              res.writeHead(upstream.status, responseHeaders);
+              if (upstream.body) {
+                const body = Readable.fromWeb(upstream.body);
+                const done = () => clearTimeout(timer);
+                body.on('end', done);
+                body.on('error', () => {
+                  done();
+                  res.destroy();
+                });
+                res.on('close', () => {
+                  done();
+                  controller.abort();
+                });
+                body.pipe(res);
+                body.on('data', () => {
+                  clearTimeout(timer);
+                  timer = setTimeout(() => controller.abort(), 120_000);
+                });
+              } else {
+                clearTimeout(timer);
+                res.end();
+              }
+            } catch (error) {
+              clearTimeout(timer);
+              console.error('proxy upstream failure:', error);
+              res.writeHead(502, { 'content-type': 'text/plain' });
+              res.end('proxy error: upstream request failed\n');
+            }
+          });
+
+          server.listen(0, '127.0.0.1', () => {
+            writeFileSync(portFile, String(server.address().port));
+          });
+          NODE
+
+            OPENAI_API_KEY="$OPENAI_API_KEY" \
+              OPENAI_BASE_URL="$OPENAI_BASE_URL" \
+              QWEN_PROXY_NONCE="$proxy_nonce" \
+              node "$proxy_script" "$port_file" &
+            OPENAI_PROXY_PID=$!
+            trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
+
+            proxy_port=''
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
+                echo "::error::OpenAI proxy exited before becoming ready"
+                exit 1
+              fi
+              if [ -z "$proxy_port" ] && [ -s "$port_file" ]; then
+                proxy_port="$(tr -cd '0-9' < "$port_file")"
+              fi
+              if [ -n "$proxy_port" ] &&
+                 [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" = "$proxy_nonce" ]; then
+                break
+              fi
+              proxy_port=''
+              sleep 1
+            done
+            if [ -z "$proxy_port" ] ||
+               ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null ||
+               [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" != "$proxy_nonce" ]; then
+              echo "::error::OpenAI proxy did not become ready (or another process answered on its port)"
+              exit 1
+            fi
+
+            LOCAL_OPENAI_BASE_URL="$(
+              OPENAI_BASE_URL="$OPENAI_BASE_URL" node -e '
+                const base = new URL(process.env.OPENAI_BASE_URL);
+                const path = base.pathname.replace(/\/+$/, "");
+                console.log("http://127.0.0.1:" + process.argv[1] + (path && path !== "/" ? path : ""));
+              ' "$proxy_port"
+            )"
+            export LOCAL_OPENAI_BASE_URL
+            unset OPENAI_API_KEY OPENAI_BASE_URL
+            echo "openai_proxy=enabled (${LOCAL_OPENAI_BASE_URL})"
+          }
+          start_openai_proxy
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          # The agent's graceful budget stays BELOW the job timeout so a
+          # timeout still reaches the drafts upload, the publisher, and the
+          # lifecycle finalize instead of the runner killing the container.
+          AGENT_BUDGET_M=$(( ${TRIAGE_TIMEOUT_MINUTES:-60} - 10 ))
+          if (( AGENT_BUDGET_M < 5 )); then
+            AGENT_BUDGET_M=5
+          fi
+
+          QWEN_ENV=(
+            "HOME=/home/node"
+            "USER=node"
+            "SHELL=/bin/bash"
+            "PATH=$PATH"
+            "TERM=${TERM:-xterm-256color}"
+            "LANG=${LANG:-C.UTF-8}"
+            "CI=${CI:-true}"
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            "GITHUB_EVENT_NAME=$EVENT_NAME"
+            # Read-only job token: the agent's sole GitHub credential.
+            "GITHUB_TOKEN=$GH_TOKEN"
+            "GH_TOKEN=$GH_TOKEN"
+            "BOT_LOGIN=$BOT_LOGIN"
+            "REPOSITORY=$REPOSITORY"
+            "QWEN_HOME=${RUNNER_TEMP:?}/qwen-home"
+            "QWEN_TRIAGE_DRAFT_DIR=${RUNNER_TEMP:?}/triage-drafts"
+            "QWEN_TRIAGE_PUBLISH=workflow"
+            "QWEN_TRIAGE_CHANGELOG=${RUNNER_TEMP:?}/triage-context/claude-code-changelog.md"
+            "OPENAI_API_KEY=$PROXY_TOKEN"
+            "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
+            "NO_PROXY=${NO_PROXY:-}"
+            "no_proxy=${no_proxy:-}"
+            "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}"
+            "QWEN_CI_https_proxy=${QWEN_CI_https_proxy:-}"
+            "QWEN_CI_HTTP_PROXY=${QWEN_CI_HTTP_PROXY:-}"
+            "QWEN_CI_http_proxy=${QWEN_CI_http_proxy:-}"
+            "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
+            "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
+          )
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
+          fi
+
+          set +e
+          timeout --kill-after=10s "${AGENT_BUDGET_M}m" runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
+            --prompt "/triage ${NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/triage-results/output.jsonl"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          # Same `summary` output the action used to emit: the last result
+          # frame's text. 'Check triage response' consumes it unchanged.
+          SUMMARY="$(node -e '
+            const fs = require("node:fs");
+            let summary = "";
+            for (const line of fs.readFileSync(process.argv[1], "utf8").split("\n")) {
+              if (!line.trim()) continue;
+              try {
+                const frame = JSON.parse(line);
+                if (frame.type === "result" && typeof frame.result === "string") {
+                  summary = frame.result;
+                }
+              } catch {}
+            }
+            process.stdout.write(summary);
+          ' "$RUNNER_TEMP/triage-results/output.jsonl" 2>/dev/null || true)"
+          # Random delimiter: the summary is agent-controlled text; a fixed
+          # delimiter would let a steered result frame inject extra outputs
+          # into this step's GITHUB_OUTPUT.
+          SUMMARY_DELIM="TRIAGE_SUMMARY_$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "summary<<${SUMMARY_DELIM}"
+            printf '%s\n' "$SUMMARY"
+            echo "${SUMMARY_DELIM}"
+          } >> "$GITHUB_OUTPUT"
+          echo "triage exit code: $EXIT_CODE (budget ${AGENT_BUDGET_M}m)" >> "$GITHUB_STEP_SUMMARY"
+          exit "$EXIT_CODE"
 
       - name: 'Check triage response'
         if: 'success() || failure()'
@@ -942,8 +1376,259 @@ jobs:
             fi
             exit 1
           fi
+          # A non-empty response is not necessarily a triage: on an API error
+          # the stream-json adapter appends the formatted error LAST
+          # (BaseJsonOutputAdapter appendText), optionally followed by
+          # rate-limit guidance. Run 33070765162 (triage for #10285) answered
+          # with a bare 268-char "[API Error: Connection error. ...]" that
+          # this step passed as success, so nothing retried or alerted. Strip
+          # the known suffixes, right-trim, then fail on the trailing shape --
+          # a real summary that merely quotes an API error mid-prose keeps
+          # writing afterwards and stays green. Same pattern as
+          # qwen-code-pr-review.yml.
+          BODY="${RESPONSE}"
+          for S in \
+            'Possible quota limitations in place or slow response times detected. Please wait and try again later.' \
+            'Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method' \
+            'Please wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method'; do
+            BODY="${BODY%"$S"}"
+          done
+          BODY="${BODY%"${BODY##*[![:space:]]}"}"
+          case "${BODY}" in
+            *"[API Error: "*"]")
+              echo "::error title=Triage aborted by an API error::The model API returned an error instead of a triage, so no triage was posted. This is infrastructure, not this issue -- re-run the failed job."
+              exit 1
+              ;;
+          esac
           echo "Triage response received (${#RESPONSE} chars)."
 
+      # Flip the early status comment to a terminal state so a lingering
+      # "running" line doesn't outlive the run. Neutral wording — the verdict
+      # lives in the stage comments above; this only records that the run ended
+      # and keeps the run link. PATCHes exactly the comment id the claim step
+      # exported. An empty id means this run never ended up owning a comment:
+      # a cancel landing before the claim posted, or a transient failure of the
+      # claim's write (both the fresh-POST and PATCH arms export an empty id on
+      # failure). Either way nothing is flipped and a previous run's terminal
+      # wording stays untouched. A failed claim therefore leaves no lifecycle
+      # breadcrumb even when the comments API recovers during the minutes-long
+      # agent run — accepted: the verdict still lands in the stage comments,
+      # and a list-then-POST recovery here would reintroduce exactly the
+      # selection this coupling removes. Best-effort, on success, failure, AND
+      # cancellation: always() (not success() || failure()) because
+      # cancellation — cancel-in-progress superseding this run on a newer push
+      # or comment, job timeout, or manual cancel — would skip this step and
+      # leave the comment claiming the run is still in progress — the verify
+      # lane has publish-verify to catch that case, this lane only has us.
+      - name: 'Finalize triage status comment'
+        if: "always() && steps.resolve.outputs.number != ''"
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
+          JOB_STATUS: '${{ job.status }}'
+        run: |-
+          set -uo pipefail
+          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
+            echo "This run claimed no status comment; nothing to finalize." >&2
+          else
+            # A step success is not a green job: 'Check triage response' exits
+            # 1 on an empty summary while steps.triage.outcome stays 'success',
+            # and a later step can still fail. Only a non-failed job may claim
+            # "finished".
+            if [ "${TRIAGE_OUTCOME:-}" = 'success' ] && [ "${JOB_STATUS:-}" != 'failure' ]; then
+              EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
+              ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
+            elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
+              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing. Check for a newer run before re-running."
+              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消。重跑前请先确认是否有更新的运行。"
+            else
+              EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
+              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
+            fi
+            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to finalize triage status comment; continuing." >&2
+          fi
+
+      # Drafts are the agent's only output channel to GitHub. Upload on every
+      # outcome so a timeout or a failed check still publishes what was
+      # drafted. Strip non-regular files first: actions/upload-artifact
+      # FOLLOWS symlinks, and a node-planted link would exfiltrate its target
+      # into the artifact (tmux/verify rule).
+      - name: 'Sanitize triage drafts'
+        if: 'always()'
+        run: |-
+          set -uo pipefail
+          # A steered agent can background children (the denylist is not a
+          # boundary), and a detached child could re-plant symlinks between
+          # the strip below and the upload — RUNNER_TEMP is shared across
+          # jobs on the host, so a followed link exfiltrates other lanes'
+          # data. Kill everything still running as the agent user FIRST
+          # (tmux/verify rule). Zombies do not count: they hold nothing open
+          # and cannot be killed, so counting them would never clear.
+          live_agent_processes() {
+            ps -o pid=,stat=,args= -u node 2>/dev/null | awk '$2 !~ /^Z/'
+          }
+          pkill -KILL -u node 2>/dev/null || true
+          for _ in 1 2 3; do
+            [ -n "$(live_agent_processes)" ] || break
+            sleep 1
+            pkill -KILL -u node 2>/dev/null || true
+          done
+          survivors="$(live_agent_processes)" || true
+          if [ -n "$survivors" ]; then
+            # Deny by default: an unkillable writer makes the draft set
+            # untrustworthy, so drop it instead of uploading a race loser.
+            echo "::error::Processes owned by the agent user survived SIGKILL; dropping drafts as possibly tainted."
+            printf '%s\n' "$survivors"
+            rm -rf "${RUNNER_TEMP:?}/triage-drafts"
+            exit 0
+          fi
+          [ -d "${RUNNER_TEMP:?}/triage-drafts" ] || exit 0
+          find "$RUNNER_TEMP/triage-drafts" \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete 2>/dev/null || true
+
+      - name: 'Upload triage drafts'
+        if: 'always()'
+        # A missing drafts dir (agent died before writing any) must not mask
+        # the original error; the publisher reports the absence itself.
+        continue-on-error: true
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
+        with:
+          # Same expression as the download side: if the run died before
+          # 'Resolve target number', both sides fall back to the event's
+          # issue number instead of disagreeing on an empty segment.
+          name: 'triage-drafts-${{ steps.resolve.outputs.number || github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/triage-drafts/'
+          retention-days: 7
+          if-no-files-found: 'warn'
+
+      # Restore workspace ownership while the container still runs as root so
+      # the next job on this runner can check out without EACCES (the context
+      # step chowned everything to node; tmux lane rule).
+      - name: 'Restore workspace ownership after agent'
+        if: 'always()'
+        run: |-
+          set -uo pipefail
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions"
+          RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership"
+          else
+            echo "::warning::could not determine runner UID; skipping ownership restore"
+          fi
+
+  # Publish the triage agent's drafts with the write PAT. Like publish-tmux,
+  # this job may land on the persistent pool, so it takes the agent jobs'
+  # workspace precautions: ownership restore plus a fresh .git before
+  # checkout, so git metadata planted by an earlier run cannot execute here.
+  # It runs only trusted base-repo code — a sparse checkout pinned to
+  # github.sha, never agent-provided code — and the publisher imports only
+  # node builtins plus one relative helper, leaving no bare-specifier
+  # node_modules to hijack in a reused workspace. The agent environment in
+  # the triage job holds no write credential; this job is the only path from
+  # the agent's drafts to GitHub. (The triage job's own host steps — the
+  # reaction and the lifecycle comments — also write with the PAT.)
+  publish-triage:
+    needs: ['triage']
+    # Publish even when the agent run failed or timed out: drafts written
+    # before the failure still reach the PR, and the lifecycle comment in the
+    # triage job records the early end. 'skipped' means no triage ran at all.
+    if: >-
+      always() &&
+      needs.triage.result != 'skipped' &&
+      github.repository == 'QwenLM/qwen-code'
+    # Per-RUN group, deliberately not per-PR (publish-tmux rule): a per-PR
+    # group would let a second run replace a completed run's pending
+    # publisher and drop its drafts. Overlap is made safe by the publisher's
+    # bot-owned marker upserts.
+    concurrency:
+      group: "${{ format('{0}-publish-triage-{1}', github.workflow, github.run_id) }}"
+      cancel-in-progress: false
+    timeout-minutes: 10
+    # Checks out only trusted base-repo scripts at the default-branch head
+    # (issue_comment/pull_request_target events resolve github.sha there);
+    # no agent-provided code runs here. Kill-switch:
+    # MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover root-owned files"
+
+      # The pool reuses workspaces: an earlier agent run owned this directory
+      # and could have planted .git hooks/config that checkout's git commands
+      # would execute — in the job that then publishes with the write PAT.
+      # Drop the metadata first, exactly as the triage/tmux/verify jobs do
+      # before their checkouts (pinned by
+      # qwen-runner-checkout-workflow.test.js).
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
+      # Sparse and pinned: the publisher, the owner-assignment helpers it
+      # imports, and the owner policy — nothing else (publish-verify pattern).
+      - name: 'Checkout the triage publisher scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.sha }}'
+          sparse-checkout: |-
+            /.github/scripts/triage-publish.mjs
+            /.github/scripts/assign-issue-owner.mjs
+            /.github/issue-owners.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: 'Download triage drafts'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'triage-drafts-${{ needs.triage.outputs.pr_number || github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: 'triage-drafts'
+        continue-on-error: true
+
+      - name: 'Publish triage drafts'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
+          TRIAGE_RESULT: '${{ needs.triage.result }}'
+          QWEN_MAINTAINER_HANDLE: '${{ vars.QWEN_MAINTAINER_HANDLE }}'
+        run: |-
+          set -euo pipefail
+          if [ -z "${NUMBER:-}" ]; then
+            echo "::warning::No target number resolved; nothing to publish."
+            exit 0
+          fi
+          if [ ! -f triage-drafts/actions.jsonl ]; then
+            if [ "${TRIAGE_RESULT:-}" = 'success' ]; then
+              echo "::error::The triage agent succeeded but produced no drafts; nothing was published."
+              exit 1
+            fi
+            echo "::warning::The triage run ended before writing drafts; nothing to publish."
+            exit 0
+          fi
+          node .github/scripts/triage-publish.mjs \
+            --drafts triage-drafts \
+            --repo "$GITHUB_REPOSITORY" \
+            --number "$NUMBER"
+
+      # Moved here from the triage job: it inspects the reviews the run
+      # posted, and those now land in the publish step above, so it must run
+      # AFTER publishing. Body unchanged otherwise.
       - name: 'Notify silent triage re-run'
         if: >-
           success() &&
@@ -953,11 +1638,32 @@ jobs:
         shell: 'bash'
         env:
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ steps.resolve.outputs.number }}'
+          NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIGGERED_AT: '${{ github.event.comment.created_at }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          # A close at/after the trigger is a terminal action of THIS run:
+          # Stage 1-pre closes a duplicate PR without leaving a review, and
+          # the review-list check below cannot tell that apart from a re-run
+          # that did nothing — it would announce on the just-closed PR that
+          # the re-run "did not" review it, and the ::warning would dispatch
+          # a human to a correctly-handled run. Read the PR's own state and
+          # exit quietly; a close BEFORE the trigger keeps the old behaviour,
+          # because this run still owes its summary. A failed `gh pr view`
+          # is not fatal: the review-list check below then decides, as before.
+          if PR_STATE="$(
+               gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt
+             )" &&
+             CLOSED_SINCE_TRIGGER="$(
+               printf '%s' "$PR_STATE" |
+                 jq -r --arg since "$TRIGGERED_AT" \
+                   '.closedAt != null and .closedAt >= $since'
+             )" &&
+             [ "$CLOSED_SINCE_TRIGGER" = true ]; then
+            echo "PR closed at/after the trigger comment; no re-run summary needed."
+            exit 0
+          fi
           HAS_REVIEW=false
           HEAD_SHA=''
           # unknown until both the review list and the head SHA are readable
@@ -1050,59 +1756,6 @@ jobs:
             "上方各阶段评论已更新为最新结果。[查看工作流运行]($RUN_URL)。"
           gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
             -f body="$BODY" >/dev/null
-
-      # Flip the early status comment to a terminal state so a lingering
-      # "running" line doesn't outlive the run. Neutral wording — the verdict
-      # lives in the stage comments above; this only records that the run ended
-      # and keeps the run link. PATCHes exactly the comment id the claim step
-      # exported. An empty id means this run never ended up owning a comment:
-      # a cancel landing before the claim posted, or a transient failure of the
-      # claim's write (both the fresh-POST and PATCH arms export an empty id on
-      # failure). Either way nothing is flipped and a previous run's terminal
-      # wording stays untouched. A failed claim therefore leaves no lifecycle
-      # breadcrumb even when the comments API recovers during the minutes-long
-      # agent run — accepted: the verdict still lands in the stage comments,
-      # and a list-then-POST recovery here would reintroduce exactly the
-      # selection this coupling removes. Best-effort, on success, failure, AND
-      # cancellation: always() (not success() || failure()) because
-      # cancellation — cancel-in-progress superseding this run on a newer push
-      # or comment, job timeout, or manual cancel — would skip this step and
-      # leave the comment claiming the run is still in progress — the verify
-      # lane has publish-verify to catch that case, this lane only has us.
-      - name: 'Finalize triage status comment'
-        if: "always() && steps.resolve.outputs.number != ''"
-        shell: 'bash'
-        env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
-          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-          TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
-          JOB_STATUS: '${{ job.status }}'
-        run: |-
-          set -uo pipefail
-          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
-            echo "This run claimed no status comment; nothing to finalize." >&2
-          else
-            # A step success is not a green job: 'Check triage response' exits
-            # 1 on an empty summary while steps.triage.outcome stays 'success',
-            # and a later step can still fail. Only a non-failed job may claim
-            # "finished".
-            if [ "${TRIAGE_OUTCOME:-}" = 'success' ] && [ "${JOB_STATUS:-}" != 'failure' ]; then
-              EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
-              ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
-            elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
-              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing. Check for a newer run before re-running."
-              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消。重跑前请先确认是否有更新的运行。"
-            else
-              EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
-              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
-            fi
-            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
-            gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to finalize triage status comment; continuing." >&2
-          fi
 
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and
@@ -1272,6 +1925,11 @@ jobs:
           fi
           git worktree prune -v || true
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -1281,23 +1939,27 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
-      - name: 'Clear stale npm cache'
+      - name: 'Clear stale pnpm store'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+        run: 'rm -rf "$RUNNER_TEMP/pnpm-store"'
 
-      - name: 'Restore npm cache'
-        id: 'npm-cache'
+      - name: 'Restore pnpm store'
+        id: 'pnpm-store'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/npm-cache'
-          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
-          restore-keys: 'npm-ci-'
+          path: '${{ runner.temp }}/pnpm-store'
+          key: "pnpm-store-triage-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: 'pnpm-store-triage-'
 
-      - name: 'Report npm cache hit'
+      - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+        run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
+      - name: 'Bootstrap pnpm'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'runuser -u node -- corepack pnpm --version'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -1310,17 +1972,17 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          # Make the npm cache readable+writable by the build user so
-          # `npm ci --prefer-offline --cache …` can use it without
-          # touching the Actions cache API (whose credentials were
+          # Make the pnpm store readable+writable by the build user so
+          # `pnpm install --prefer-offline --store-dir …` can use it
+          # without touching the Actions cache API (whose credentials were
           # stripped above).
-          mkdir -p "$RUNNER_TEMP/npm-cache"
-          chown -R node:node "$RUNNER_TEMP/npm-cache"
+          mkdir -p "$RUNNER_TEMP/pnpm-store"
+          chown -R node:node "$RUNNER_TEMP/pnpm-store"
           prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
 
           set +e
           {
-            # Retried once for the same reason as the verify lane: npm can
+            # Retried once for the same reason as the verify lane: an install can
             # exec a dependency's binary before its own write is closed and
             # take an ETXTBSY that has nothing to do with the PR, and this
             # lane blames the PR for any install failure. Unconditional, so
@@ -1328,19 +1990,22 @@ jobs:
             # build stays single-shot: compile errors are deterministic.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
+              printf '%s\n' '$ corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false \
-                --cache "$RUNNER_TEMP/npm-cache"
+                corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only \
+                --store-dir "$RUNNER_TEMP/pnpm-store"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
               fi
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status}; retrying once."
+              # pnpm install, unlike npm ci, keeps an existing node_modules;
+              # clear it so the retry cannot inherit a half-written file.
+              find . -name node_modules -type d -prune -exec rm -rf {} +
               install_attempt=$((install_attempt + 1))
             done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -1356,7 +2021,7 @@ jobs:
           if [ "${install_status:-0}" -ne 0 ]; then
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
-            echo "::error::npm ci failed; reporting a tmux fail verdict instead of an infrastructure failure."
+            echo "::error::pnpm install failed; reporting a tmux fail verdict instead of an infrastructure failure."
             exit 0
           fi
           if [ "${build_status:-0}" -ne 0 ]; then
@@ -1388,7 +2053,7 @@ jobs:
             exit 1
           fi
 
-          # `npm ci`/`npm run build` ran the PR's lifecycle scripts as `node`
+          # `pnpm install`/`npm run build` ran the PR's lifecycle scripts as `node`
           # in the previous step. A detached postinstall child can outlive that
           # step and the one-shot sweep below — re-planting a `*-tmux-*`
           # artifact dir after the sweep runs, or tampering with the agent's
@@ -1424,7 +2089,7 @@ jobs:
             exit 1
           fi
 
-          # `npm ci`/`npm run build` just ran the PR's lifecycle scripts, which
+          # `pnpm install`/`npm run build` just ran the PR's lifecycle scripts, which
           # can plant a `tmp/<name>-tmux-<ts>/` directory holding a report.md
           # and a transcript. The collector below globs `*-tmux-*` and the
           # publisher takes the first match, so a planted dir can supply the
@@ -1847,9 +2512,11 @@ jobs:
             echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
 
-  # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
-  # with the write PAT and never checks out PR code, so the write credential is
-  # isolated from the untrusted-code execution in tmux-testing above.
+  # Post the tmux verdict back to the PR with the write PAT. Like
+  # publish-triage it may land on the persistent pool; it checks out nothing
+  # and runs no repository code, so the write credential is never on a path
+  # that executes untrusted code — isolated from the untrusted-code execution
+  # in tmux-testing above.
   publish-tmux:
     needs: ['tmux-testing']
     # Post when there is a real test verdict to report (not the no-TUI 'n/a'),
@@ -1878,8 +2545,8 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours. Same bound as publish-verify.
     timeout-minutes: 10
-    # Checks out nothing and runs no repository code (base-repo YAML events),
-    # so the persistent ECS pool is safe.
+    # Checks out nothing and runs no repository code (base-repo YAML events)
+    # — the controls that let this job use the persistent ECS pool.
     # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
@@ -1997,7 +2664,7 @@ jobs:
             PREPARE_ATTEMPTS=''
             case "$PREPARE_FAILURE_PHASE" in
               install)
-                PREPARE_COMMAND='npm ci'
+                PREPARE_COMMAND='pnpm install'
                 # Retried once in the prepare step; see the verify lane.
                 PREPARE_ATTEMPTS=' twice in a row'
                 ;;
@@ -2165,12 +2832,17 @@ jobs:
     #                                (≤~345s)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
+    #   java toolchain + Maven repo
+    #   + sibling modules            ≤ ~20m, and only when the diff touches
+    #                                a Java module. curl --max-time caps
+    #                                each download; `timeout 300` caps each
+    #                                mvn install
     #   ------------------------------------
-    #   worst case                   ~180m  ⇒ 190 leaves 10m of headroom.
+    #   worst case                   ~200m  ⇒ 210 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
-    # verify run now occupies one ECS slot for up to ~3h instead of 1h.
-    timeout-minutes: 190
+    # verify run now occupies one ECS slot for up to ~3.5h instead of 1h.
+    timeout-minutes: 210
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2190,7 +2862,13 @@ jobs:
       # empty -> the job broke before deciding (publish reports infra).
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
-      agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
+      # Report-footer attribution: the configured model, the runner's CLI
+      # version, and the content hash of the base-pinned skill that ran.
+      # Empty when the run step never reached its output writes; the
+      # publisher then keeps its generic signature.
+      model: '${{ steps.run.outputs.model }}'
+      cli_version: '${{ steps.run.outputs.cli_version }}'
+      skill_hash: '${{ steps.run.outputs.skill_hash }}'
       # Deterministic flakiness gate (#9125): `flaky` demotes the published
       # headline; every other value is informational. The summary is
       # gate-authored fixed text plus counters — never PR-controlled strings.
@@ -2232,8 +2910,9 @@ jobs:
         run: |-
           set -euo pipefail
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-          # The 👀 acknowledgement lives in the hosted authorize job, so the
-          # requester gets a receipt even when this self-hosted job is queued.
+          # The 👀 acknowledgement lives in the authorize gate job, so the
+          # requester gets a receipt ahead of this sandbox lane (for comment
+          # triggers the gate itself queues with the pool).
           # Same mergeability settling loop as the tmux job: refs/pull/N/merge
           # is only current once GitHub has computed mergeability.
           for attempt in 1 2 3 4 5; do
@@ -2290,6 +2969,13 @@ jobs:
             echo "verdict=n/a" >> "$GITHUB_OUTPUT"
             echo "decision=na" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # Same full list, same `grep <<<` (a pipe would SIGPIPE under
+          # pipefail). Only the Maven package trees pay for a JDK; the broader
+          # sdk-java.yml path list is mostly core/CLI, and those diffs still
+          # cannot run the database-backed Java ITs this lane does not host.
+          if grep -qE '^packages/(sdk-java|managed-agent-server)/' <<< "$files"; then
+            echo "java=true" >> "$GITHUB_OUTPUT"
           fi
           # Snapshot PR metadata for the token-free agent: the agent env
           # carries no GitHub credential, so everything it may cite (title,
@@ -2398,9 +3084,9 @@ jobs:
               # the registry name as npmjs, so
               # `https://registry.npmjs.org.evil.com/pkg.tgz` would pass —
               # and the tarball's own postinstall never appears in the diff.
-              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/' | head -1 || true)"
+              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http|(tarball|repo):[[:space:]]*[^[:alnum:]]?https?://' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/|(tarball|repo):[[:space:]]*[^[:alnum:]]?https://registry\.npmjs\.org/' | head -1 || true)"
               [ -n "$hit" ] && add_reason 'a dependency resolves outside registry.npmjs.org'
-              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$' "$diff_file" | head -1 || true)"
+              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$' "$diff_file" | head -1 || true)"
               [ -n "$hit" ] && add_reason 'the diff modifies package-manager configuration'
               hit="$(grep -E '^\+' "$diff_file" | grep -Ev '"(integrity|resolved)"' | awk '{ for (i = 1; i <= NF; i++) if (length($i) >= 600) { print; exit } }' || true)"
               [ -n "$hit" ] && add_reason 'the diff adds long opaque single-line content'
@@ -2466,34 +3152,68 @@ jobs:
               exit 0
             fi
           fi
-          # Status comment with the live run link, upserted by marker so
-          # re-runs reuse one comment; publish-verify rewrites the same
-          # comment with the final report. Best-effort.
+          # Review threads, resolved ones included, and standing change
+          # requests for the same token-free agent: a round that never sees a
+          # reviewer's Critical, or the author's claim to have fixed one, can
+          # certify a head that still carries it. Same query and shape as
+          # scripts/verify-pr-prepare.mjs; a test runs both over one set of
+          # pages. Best-effort, and absent on failure: the skill reads a
+          # missing file as unknown, never as nothing open.
+          # shellcheck disable=SC2016 # $owner and friends are GraphQL's
+          if ! gh api graphql --paginate --slurp -f owner="${GITHUB_REPOSITORY%/*}" \
+              -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }' |
+            jq 'def who: {author: .author.login, association: .authorAssociation};
+              [.[].data.repository.pullRequest] as $p
+              | {threads: [$p[].reviewThreads.nodes[]
+                  | {resolved: .isResolved, outdated: .isOutdated, path, line, originalLine,
+                     commentCount: .comments.totalCount,
+                     comments: [.comments.nodes[] | who + {createdAt, url,
+                       review: .pullRequestReview.url, commit: .originalCommit.oid, body}]}],
+                 changeRequests: [$p[0].latestOpinionatedReviews.nodes[]
+                  | select(.state == "CHANGES_REQUESTED")
+                  | who + {submittedAt, commit: .commit.oid, url, body}]}' \
+              > "$RUNNER_TEMP/verify-context/review-threads.json" ||
+            [ ! -s "$RUNNER_TEMP/verify-context/review-threads.json" ]; then
+            rm -f "$RUNNER_TEMP/verify-context/review-threads.json"
+            echo "::warning::Could not snapshot the PR's review threads; the round reports them as not covered."
+          fi
+          # Status comment with the live run link; publish-verify rewrites
+          # this same comment with the final report. Best-effort.
           MARKER='<!-- qwen-triage:verify -->'
           # A dedicated machine marker for the live status. Inferring the
           # lifecycle state from prose would misread a REPORT that merely
           # quotes the running sentence as a live status — and the next run
           # would then overwrite that report.
           STATUS_MARKER='<!-- qwen-triage:verify-state=running -->'
+          # Which run the live status belongs to. Verify jobs are serialized
+          # per PR, but their publishers queue on hosted runners, so the
+          # previous round's status is often still "running" here. Taking it
+          # over would put two rounds into one comment, and the later report
+          # would overwrite the earlier one. A run reuses only its own status
+          # (a re-run attempt keeps the run id).
+          RUN_MARKER="<!-- qwen-triage:verify-run=${GITHUB_RUN_ID} -->"
           # Bodies that carry findings mark themselves. Selecting "newest
           # comment without the running marker" would pick a cancelled or
           # infra notice, silently dropping the last real round's findings.
           SUBSTANTIVE_MARKER='<!-- qwen-triage:verify-substantive -->'
-          printf -v BODY '%s\n%s\n\n%s\n\n%s' \
+          printf -v BODY '%s\n%s\n%s\n\n%s\n\n%s' \
             "$MARKER" \
             "$STATUS_MARKER" \
+            "$RUN_MARKER" \
             "🔬 **Sandboxed verification is running** — [watch live progress]($RUN_URL). The report will be posted here when the run completes." \
             "🔬 **沙箱验证正在运行** —— [查看实时进度]($RUN_URL)。运行结束后验证报告会发布在这里。"
           # Marker lookup, shared with publish-verify: only BOT-OWNED
           # comments whose body STARTS with the marker count. Any user can
           # paste the marker into a comment of their own; matching on
           # `contains` anywhere would make the bot try to PATCH a stranger's
-          # comment (403) and strand the run. `stale` marks a marker comment
-          # that is a previous round's terminal report rather than a live
-          # status.
+          # comment (403) and strand the run.
           # Fail CLOSED on an identity lookup failure: an empty bot login
           # used to widen the filter to every user's comments, so one
           # transient API error could point the bot at an attacker's comment.
+          # Markers count only in the header, the lines before the first
+          # blank line, where they are written: a report or a notice can
+          # quote them further down.
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh status comment instead of reusing one."
             BOT_LOGIN=''
@@ -2503,41 +3223,38 @@ jobs:
             EXISTING_META="$(
               gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
                 --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg bot "$BOT_LOGIN" \
+                jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg bot "$BOT_LOGIN" \
                   '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] as $mine
-                   | ($mine | last) as $latest
-                   | ($mine | map(select(.body | contains($sub))) | last) as $report
-                   | if $latest == null then ""
-                     else "\($latest.id)\t\($latest.body | contains($s))\t\($report.id // "")" end'
+                   | ($mine | map(select(.body | split("\n\n")[0] | split("\n") | any(.[]; . == $s) and any(.[]; . == $run))) | last) as $own
+                   | ($mine | map(select(.body | split("\n\n")[0] | split("\n") | any(.[]; . == $sub))) | last) as $report
+                   | "\($own.id // "")\t\($report.id // "")"'
             )" || EXISTING_META=''
           fi
-          EXISTING_ID="${EXISTING_META%%$'\t'*}"
+          OWN_ID="${EXISTING_META%%$'\t'*}"
           # Snapshot the newest SUBSTANTIVE report, not simply the newest
           # marker comment: after a real report followed by a weak notice
           # (cancelled / infra), snapshotting the notice would drop the prior
           # round's unresolved findings from the follow-up table.
-          REPORT_ID="${EXISTING_META##*$'\t'}"
-          if [ -n "$REPORT_ID" ] && [ "$REPORT_ID" != "$EXISTING_META" ]; then
+          REPORT_ID="${EXISTING_META#*$'\t'}"
+          if [ -n "$REPORT_ID" ]; then
             gh api "repos/$GITHUB_REPOSITORY/issues/comments/$REPORT_ID" \
               --jq '.body' > "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null ||
               rm -f "$RUNNER_TEMP/verify-context/previous-report.md"
           fi
-          # Only reuse the marker comment when it is a live status: replacing
-          # a previous round's REPORT with "running" would destroy evidence
-          # that a cancelled or infra-failed re-run then never restores.
-          case "$EXISTING_META" in
-            *$'\t'true$'\t'*)
-              gh api --method PATCH \
-                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to update verify status comment; continuing." >&2
-              ;;
-            *)
-              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to post verify status comment; continuing." >&2
-              ;;
-          esac
+          # Anything that is not this run's own live status gets a fresh
+          # comment: replacing a previous round's REPORT with "running" would
+          # destroy evidence that a cancelled or infra-failed re-run then
+          # never restores.
+          if [ -n "$OWN_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$OWN_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to update verify status comment; continuing." >&2
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to post verify status comment; continuing." >&2
+          fi
           echo "decision=run" >> "$GITHUB_OUTPUT"
 
       # Install before checkout so PR-controlled .npmrc cannot affect npm.
@@ -2545,7 +3262,11 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
-          apt-get install -y --no-install-recommends util-linux
+          # zip pairs with the base image's unzip so the install-script archive
+          # suite runs instead of throwing at collection: its CI-host guard
+          # hard-fails when CI=true and either binary is missing, and
+          # node:22-bookworm ships unzip but not zip.
+          apt-get install -y --no-install-recommends util-linux zip
 
           # Run the global install from RUNNER_TEMP: the persistent workspace
           # still holds the PREVIOUS run's checked-out tree at this point, and
@@ -2573,6 +3294,50 @@ jobs:
             rm -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok"
             echo "::warning::Chromium system deps install failed; the verification agent will produce a text-only report."
           fi
+
+      # Before checkout, as root, with no PR tree on disk — same supply-chain
+      # surface as the runner-tools step above. /opt is container-local and
+      # root-owned, so the node user cannot plant the ready marker, and a
+      # fresh container cannot inherit one. Best-effort: a failed download
+      # leaves Java under Not covered instead of failing the verification.
+      - name: 'Install Java toolchain'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        env:
+          TEMURIN_VERSION: '21.0.12.1+1'
+          TEMURIN_SHA256: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
+          TEMURIN_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz'
+          MAVEN_VERSION: '3.9.11'
+          MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
+        run: |-
+          set -uo pipefail
+          prefix=/opt/verify-java
+          rm -rf -- "$prefix"
+          work="$(mktemp -d)"
+          maven_url="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$TEMURIN_URL" \
+            && echo "${TEMURIN_SHA256}  $work/jdk.tar.gz" | sha256sum --check --status \
+            && curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/maven.tar.gz" "$maven_url" \
+            && echo "${MAVEN_SHA512}  $work/maven.tar.gz" | sha512sum --check --status \
+            && tar -xzf "$work/jdk.tar.gz" -C "$work" \
+            && tar -xzf "$work/maven.tar.gz" -C "$work" \
+            && jdk_dir="$(find "$work" -mindepth 1 -maxdepth 1 -type d -name 'jdk-*' -print -quit)" \
+            && [ -n "$jdk_dir" ] \
+            && [ -d "$work/apache-maven-${MAVEN_VERSION}" ] \
+            && mkdir -p "$prefix" \
+            && mv -- "$jdk_dir" "$prefix/jdk" \
+            && mv -- "$work/apache-maven-${MAVEN_VERSION}" "$prefix/maven" \
+            && chmod -R a+rX "$prefix" \
+            && export JAVA_HOME="$prefix/jdk" \
+            && export PATH="$JAVA_HOME/bin:$prefix/maven/bin:$PATH" \
+            && "$prefix/jdk/bin/java" -version \
+            && "$prefix/maven/bin/mvn" -version \
+            && printf 'ok\n' > "$prefix/ready"; then
+            echo "Java toolchain ready at ${prefix} (Temurin ${TEMURIN_VERSION}, Maven ${MAVEN_VERSION})."
+          else
+            rm -rf -- "$prefix"
+            echo "::warning::Java toolchain install failed; Java changes will be reported as not covered."
+          fi
+          rm -rf -- "$work"
 
       # This container mounts the persistent runner workspace, and a previous
       # run EXECUTED PR code as the node user with write access to .git —
@@ -2777,6 +3542,11 @@ jobs:
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -2833,7 +3603,7 @@ jobs:
       # The flakiness gate (#9125) re-runs the PR's changed test files and
       # compares outcomes across identical rounds. The file list is recorded
       # HERE — before the workspace is handed to the build user — because
-      # after `npm ci` a PR lifecycle script owns .git and could rewrite the
+      # after `pnpm install` a PR lifecycle script owns .git and could rewrite the
       # diff to hide a test file from the gate. The list lives root-owned in
       # RUNNER_TEMP, so the gate later runs exactly what was recorded. This
       # pin is honesty, not a security boundary: the gate's verdict can only
@@ -3054,23 +3824,40 @@ jobs:
           rm -f "$GATE_HOME/files-all"
           echo "Recorded $(tr -cd '\0' < "$GATE_HOME/files" | wc -c) changed test file(s) for the flakiness gate."
 
-      - name: 'Clear stale npm cache'
+      - name: 'Clear stale pnpm store'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+        run: 'rm -rf "$RUNNER_TEMP/pnpm-store"'
 
-      - name: 'Restore npm cache'
-        id: 'npm-cache'
+      - name: 'Restore pnpm store'
+        id: 'pnpm-store'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/npm-cache'
-          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
-          restore-keys: 'npm-ci-'
+          path: '${{ runner.temp }}/pnpm-store'
+          key: "pnpm-store-triage-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: 'pnpm-store-triage-'
 
-      - name: 'Report npm cache hit'
+      - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+        run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
+      # restore-only, before any PR code runs. The producer is
+      # verify-maven-repo.yml on main; a save step here would let a PR write
+      # the shared cache. A cache outage degrades to a cold repo.
+      - name: 'Clear stale verify Maven repo'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        run: 'rm -rf "$RUNNER_TEMP/verify-maven-repo"'
+
+      - name: 'Restore verify Maven repo'
+        id: 'maven-repo'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        continue-on-error: true
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/verify-maven-repo'
+          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml', 'packages/managed-agent-server/**/pom.xml') }}"
+          restore-keys: 'verify-maven-repo-'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -3090,23 +3877,23 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          # Make the npm cache readable+writable by the build user so
-          # `npm ci --prefer-offline --cache …` can use it without
-          # touching the Actions cache API (whose credentials were
+          # Make the pnpm store readable+writable by the build user so
+          # `pnpm install --prefer-offline --store-dir …` can use it
+          # without touching the Actions cache API (whose credentials were
           # stripped above).
-          mkdir -p "$RUNNER_TEMP/npm-cache"
-          chown -R node:node "$RUNNER_TEMP/npm-cache"
+          mkdir -p "$RUNNER_TEMP/pnpm-store"
+          chown -R node:node "$RUNNER_TEMP/pnpm-store"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
 
           set +e
           {
-            # `npm ci` can die on a race that has nothing to do with the PR:
-            # npm writes a dependency's binary and that package's install
-            # script execs it before the write is closed, so Linux answers
-            # ETXTBSY. Observed on esbuild in run 30319209722, which turned
-            # it into a `fail` verdict against a PR that never touched the
-            # dependency. One clean retry absorbs that class — `npm ci`
-            # removes node_modules before installing, so the second attempt
+            # The install can die on a race that has nothing to do with the
+            # PR: a dependency's binary is written and that package's
+            # install script execs it before the write is closed, so Linux
+            # answers ETXTBSY. Observed on esbuild under npm in run
+            # 30319209722, which turned it into a `fail` verdict against a PR
+            # that never touched the dependency. One clean retry absorbs that
+            # class — node_modules is cleared before the second attempt, so it
             # cannot inherit the half-written file.
             #
             # Unconditional by design. Gating the retry on the log would
@@ -3119,19 +3906,22 @@ jobs:
             # would only double the cost of an honest failure.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
+              printf '%s\n' '$ corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false \
-                --cache "$RUNNER_TEMP/npm-cache"
+                corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only \
+                --store-dir "$RUNNER_TEMP/pnpm-store"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
               fi
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status}; retrying once."
+              # pnpm install, unlike npm ci, keeps an existing node_modules;
+              # clear it so the retry cannot inherit a half-written file.
+              find . -name node_modules -type d -prune -exec rm -rf {} +
               install_attempt=$((install_attempt + 1))
             done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -3167,10 +3957,10 @@ jobs:
           if [ "${install_status:-0}" -ne 0 ]; then
             if registry_unreachable; then
               echo "verdict=infra-error" >> "$GITHUB_OUTPUT"
-              echo "::error::npm ci failed (exit ${install_status}) and the registry is unreachable from this runner; reporting infrastructure."
+              echo "::error::pnpm install failed (exit ${install_status}) and the registry is unreachable from this runner; reporting infrastructure."
             else
               echo "verdict=fail" >> "$GITHUB_OUTPUT"
-              echo "::error::npm ci failed (exit ${install_status})."
+              echo "::error::pnpm install failed (exit ${install_status})."
             fi
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
             exit 0
@@ -3502,7 +4292,7 @@ jobs:
           has_vitest_config() {
             # Mirror vitest's own resolution: it accepts vitest.config AND
             # vite.config in six extensions. A narrower probe skips runnable
-            # packages (packages/webui's only config is vite.config.ts).
+            # packages (some packages only have vite.config.ts).
             local n e
             for n in vitest.config vite.config; do
               for e in ts mts cts js mjs cjs; do
@@ -3705,7 +4495,7 @@ jobs:
               # reset leaves file i seeing what files 1..i-1 left THIS
               # round — residue, staged mutations, HOME state — and round
               # 1 must sample the same restored tree as rounds 2..N (PR
-              # lifecycle scripts, npm ci/build run as node, may have
+              # lifecycle scripts, pnpm install/build run as node, may have
               # mutated the tree since the list was recorded).
               reset_round_state
               reset_rc=$?
@@ -3894,6 +4684,58 @@ jobs:
           [ "$ncoll" -gt 0 ] && pass_note=" (${ncoll} not collected by the runner — see the log)"
           finish pass "${total} changed test file(s) x ${rounds_done} identical rounds, no divergence${pass_note}"
 
+      # After the TypeScript build, as node, credentials already stripped.
+      # Always exits 0: a sibling-install failure must not turn a TypeScript
+      # verification into fail. The agent reads the exit codes from the log.
+      - name: 'Install Java modules'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true' && steps.prepare.outputs.verdict == ''"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |-
+          set -uo pipefail
+          log="${RUNNER_TEMP:?}/verify-context/java-prepare.log"
+          mkdir -p "${RUNNER_TEMP:?}/verify-context"
+          : > "$log"
+          echo "verify Maven repo: hit=${{ steps.maven-repo.outputs.cache-hit }} key=${{ steps.maven-repo.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f /opt/verify-java/ready ]; then
+            echo "::warning::Java toolchain is not ready; skipping sibling module install."
+            printf 'toolchain=missing\n' >> "$log"
+            exit 0
+          fi
+          repo="${RUNNER_TEMP:?}/verify-maven-repo"
+          mkdir -p "$repo"
+          if ! chown -R node:node "$repo"; then
+            echo "::warning::could not hand the Maven repo to the build user; sibling install skipped."
+            printf 'toolchain=chown-failed\n' >> "$log"
+            exit 0
+          fi
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          JAVA_HOME=/opt/verify-java/jdk
+          PATH="/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}"
+          run_mvn() {
+            local pom="$1"
+            shift
+            printf '\n$ mvn -f %s %s\n' "$pom" "$*"
+            timeout -k 30 300 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_RUNTIME_URL -u ACTIONS_CACHE_URL \
+              -u GITHUB_TOKEN -u GH_TOKEN \
+              HOME=/home/node \
+              USER=node \
+              JAVA_HOME="$JAVA_HOME" \
+              PATH="$PATH" \
+              LANG="${LANG:-C.UTF-8}" \
+              mvn --batch-mode --no-transfer-progress \
+                -Dmaven.repo.local="$repo" \
+                -f "$pom" "$@"
+          }
+          set +e
+          {
+            run_mvn packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+            qwencode_status=$?
+          } >> "$log" 2>&1
+          printf 'qwencode=%s\n' "$qwencode_status" >> "$log"
+
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
         env:
@@ -3902,17 +4744,22 @@ jobs:
         run: |-
           set -uo pipefail
           # Download the browser binary for the Playwright package the
-          # capture harness actually imports. This lockfile has TWO
-          # Playwright trees: terminal-capture.ts imports `playwright`, but
-          # node_modules/.bin/playwright is @playwright/test's CLI, which
-          # pins a different chromium revision — so `npx playwright install`
-          # would download a browser the harness cannot launch. Resolve the
-          # CLI from the harness's own directory: require.resolve runs the
-          # same algorithm as its `from 'playwright'` import, so the binary
-          # matches the lockfile even if npm's hoist layout changes (nothing
-          # pins playwright to the root node_modules). cli.js is not in the
-          # package's exports map, so resolve the exported package.json and
-          # join. Runs as node so the tree is agent-readable without chmod.
+          # capture harness actually imports. Root `playwright` and Web
+          # Shell's `@playwright/test` carry the same exact pin, and
+          # `npm run check:lockfile` fails if the two manifests or their
+          # resolved trees drift apart, so both of those CLIs install the
+          # same chromium revision. The parity stops there: a transitive
+          # dependency of packages/mobile-mcp hoists an older
+          # `playwright-core` to the root, and its own bin pins an older
+          # revision. Resolve the CLI from the harness's own directory
+          # rather than assuming a hoist location anyway: require.resolve
+          # runs the same algorithm as the harness's `from 'playwright'`
+          # import, so the binary keeps matching the imported package if
+          # npm's hoist layout changes, if a workspace later nests its own
+          # copy, or if that parity check is ever bypassed. cli.js is not in
+          # the package's exports map, so resolve the exported package.json
+          # and join. Runs as node so the tree is agent-readable without
+          # chmod.
           # Best-effort: failure degrades to a text-only report.
           PW_PATH="${RUNNER_TEMP:?}/pw-browsers"
           mkdir -p "$PW_PATH"
@@ -3956,7 +4803,7 @@ jobs:
           fi
 
           # ── Re-establish the trust boundary after the PR's own code ran ──
-          # `npm ci`/`npm run build` executed PR-authored lifecycle scripts as
+          # `pnpm install`/`npm run build` executed PR-authored lifecycle scripts as
           # `node`. Everything below undoes what those could have left behind,
           # in order, BEFORE the agent starts.
 
@@ -4015,10 +4862,27 @@ jobs:
           chown -R root:root .qwen
           chmod -R a-w,a+rX .qwen
 
-          # 3. Fake artifact dirs planted during the build: a zeroed
-          #    timestamp sorts AHEAD of the agent's real dir at collection
-          #    time. (A steered agent can still forge its own artifacts —
-          #    that residual is why the report is advisory, never a review.)
+          # Attribution for the published report's footer, collected HERE —
+          # after the re-pin above and BEFORE the agent starts. The workspace
+          # parent directory stays node-owned, so during the agent era PR
+          # code can replace the whole .qwen directory (mv + mkdir) without
+          # touching the root-owned files inside it; a hash taken after the
+          # agent could then name instructions the round never loaded. The
+          # model is the lane's own config and the CLI is the root-owned
+          # global install. --no-filters matters even here: prepare left
+          # .git node-owned, and a planted clean filter would otherwise
+          # choose what gets hashed — or run as root. Best-effort: an empty
+          # value makes the publisher keep its generic signature instead of
+          # posting a half-attributed footer. The timeout keeps a planted
+          # shim from hanging the step.
+          CLI_VERSION="$(timeout 30s qwen --version 2>/dev/null | head -1 | tr -d '[:space:]' | cut -c1-64 || true)"
+          SKILL_HASH="$(timeout 30s git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md 2>/dev/null | cut -c1-12 || true)"
+
+          # 3. Fake artifact dirs planted during the build: the publisher
+          #    takes the round that sorts last, so a plant dated after the
+          #    agent's real dir would headline the run. (A steered agent can
+          #    still forge its own artifacts — that residual is why the
+          #    report is advisory, never a review.)
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
           # 4. A fresh agent home, created after the lifecycle processes are
           #    gone: qwen loads user-scope file commands from $HOME/.qwen, and
@@ -4030,7 +4894,7 @@ jobs:
           mkdir -p "$AGENT_HOME"
           chown node:node "$AGENT_HOME"
 
-          # 5. Same for the upload staging dir: it is flushed before npm ci,
+          # 5. Same for the upload staging dir: it is flushed before pnpm install,
           #    but the lifecycle scripts that ran since could have planted
           #    files there too, and everything in it is uploaded verbatim.
           #    Recreate it empty (prepare.log is re-copied below if present).
@@ -4381,6 +5245,16 @@ jobs:
               "QWEN_VERIFY_CHROMIUM=1"
             )
           fi
+          # env applies QWEN_ENV left to right, so this PATH overrides the
+          # one above. ready is root-owned under /opt; node cannot create it.
+          if [ -f /opt/verify-java/ready ]; then
+            QWEN_ENV+=(
+              "PATH=/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}"
+              "JAVA_HOME=/opt/verify-java/jdk"
+              "MAVEN_ARGS=-Dmaven.repo.local=${RUNNER_TEMP}/verify-maven-repo"
+              "QWEN_VERIFY_JAVA=1"
+            )
+          fi
           if [ -n "${OPENAI_MODEL:-}" ]; then
             QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
           fi
@@ -4452,24 +5326,20 @@ jobs:
             echo "::error::Failed to write the agent output stream (tee exit ${TEE_STATUS}); reporting an infrastructure failure rather than a pass."
           fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          # verdict.txt is read only by the publisher, from the uploaded
+          # report's own directory: a second reader here picked its own
+          # round directory and could name a different word.
 
-          # The skill writes its verdict as one word in verdict.txt. It is
-          # output of a run that executed untrusted PR code, so allowlist it
-          # instead of echoing it into workflow outputs.
-          AGENT_VERDICT=''
-          VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | sort | head -1 || true)"
-          if [ -n "$VERDICT_FILE" ]; then
-            # Bound the read before the pipeline: with `head` closing early on
-            # an oversized file, the producer takes SIGPIPE and `pipefail`
-            # would abort the step instead of ignoring an unusable verdict.
-            CANDIDATE="$(head -c 4096 "$VERDICT_FILE" | tr -d '[:space:]' | cut -c1-32)"
-            case "$CANDIDATE" in
-              merge-ready|findings|blocked|inconclusive) AGENT_VERDICT="$CANDIDATE" ;;
-              *) echo "::warning::Unrecognized agent verdict in ${VERDICT_FILE}; ignoring." ;;
-            esac
-          fi
-          echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
-          echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+          # Emit the attribution collected before the agent started (see the
+          # re-pin above) — the saved values, never re-derived here: the
+          # agent era can replace the .qwen directory itself, so a post-agent
+          # hash could name instructions the round never loaded.
+          {
+            echo "model=$(printf '%s' "${OPENAI_MODEL:-}" | tr -d '\r\n' | cut -c1-200)"
+            echo "cli_version=$CLI_VERSION"
+            echo "skill_hash=$SKILL_HASH"
+          } >> "$GITHUB_OUTPUT"
+          echo "verify verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       # The gate log's authoritative copy lives root-owned inside the 0700
       # root-only home (/flake-gate/log), which no PR-controlled
@@ -4935,8 +5805,8 @@ jobs:
           echo "Workspace wiped after external code (deny-by-default cleanup for the next pool job)." >> "$GITHUB_STEP_SUMMARY"
 
   # Post the verification report back to the PR. Runs on a clean GitHub-hosted
-  # runner with the write PAT and never checks out PR code, so the write
-  # credential is isolated from the untrusted-code execution in verify above —
+  # runner with the write PAT and only checks out trusted base-repo publisher
+  # scripts, so credentials stay isolated from untrusted execution above —
   # the same split as publish-tmux. Unlike publish-tmux it also reports the
   # skip/na cases: /verify is always an explicit request, so silence would
   # read as a lost run.
@@ -4949,8 +5819,9 @@ jobs:
     # per-PR group here would let a second /verify cancel a completed run's
     # pending publisher and drop its report entirely. Overlap between
     # publishers is instead made safe by the marker discipline below
-    # (bot-owned + prefix match, live-status-only reuse, post-fresh
-    # fallback), which is a correctness property rather than a scheduling one.
+    # (bot-owned + prefix match, each run writes only into its own
+    # comment, post-fresh fallback), which is a correctness property rather
+    # than a scheduling one.
     concurrency:
       group: "${{ format('{0}-publish-verify-{1}', github.workflow, github.run_id) }}"
       cancel-in-progress: false
@@ -4958,31 +5829,84 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours.
     timeout-minutes: 10
-    # Checks out nothing and runs no repository code (base-repo YAML events),
-    # so the persistent ECS pool is safe.
-    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # This job carries OSS credentials, so it must stay isolated from the
+    # persistent runner pool that executes untrusted PR code.
+    runs-on: 'ubuntu-latest'
     permissions:
+      contents: 'read'
       pull-requests: 'write'
     steps:
-      - name: 'Restore workspace ownership'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          set -uo pipefail
-          RUNNER_UID="$(id -u)"
-          RUNNER_GID="$(id -g)"
-          if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
-          fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+      # Sparse — the uploader, the artifact checker, their helpers, and the
+      # root package.json that marks the uploader's `.js` as ESM (without it
+      # the uploader only parses on the Node versions that infer module
+      # syntax, and this job pins no Node).
+      - name: 'Checkout the OSS publisher scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          # Pin the trusted ref explicitly: publish-verify only runs under
+          # issue_comment events (needs: verify), where github.sha is the
+          # default-branch head — never a PR merge ref. The pin makes
+          # "never PR code" a property of this step instead of an inference
+          # from the event's default resolution.
+          ref: '${{ github.sha }}'
+          sparse-checkout: |-
+            /package.json
+            scripts/upload-aliyun-oss-assets.js
+            scripts/release-script-utils.js
+            scripts/verify-pr-check.mjs
+            scripts/lib/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
-      # The publish job runs on the persistent ECS pool and downloads into
-      # a WORKSPACE-relative directory, which the runner does not clean
-      # between jobs: without this, a previous run's (possibly a different
-      # PR's) flake-gate.log survives and the publisher — which treats the
-      # file's presence as proof THIS run staged it — embeds it as this
-      # run's evidence. The verify side already applies the same rm-first
-      # rule to its own $RUNNER_TEMP tree.
+      - name: 'Install ossutil'
+        id: 'install-ossutil'
+        # Evidence hosting is best-effort; the report still posts as text if
+        # the client cannot be installed.
+        continue-on-error: true
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |-
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          # Retry, unlike the release syncs: a red run there is simply rerun,
+          # but a CDN blip here costs this PR its evidence images. The
+          # worst-case budget stays inside the 10-minute job cap: 3 attempts
+          # x 120s max-time + 2 x 2s delays ≈ 6.1 minutes (an unreachable
+          # mirror fails the connect-timeout long before that).
+          curl -fsSL --retry 2 --retry-delay 2 --retry-all-errors \
+            --connect-timeout 10 --max-time 120 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
+          unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
+          ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          [ -n "$ossutil_path" ] || { echo '::error::ossutil binary not found'; exit 1; }
+          chmod +x "$ossutil_path"
+          install -m 0755 "$ossutil_path" "$RUNNER_TEMP/ossutil"
+          "$RUNNER_TEMP/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS credentials'
+        if: "${{ steps.install-ossutil.outcome == 'success' }}"
+        continue-on-error: true
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+          if [ -z "$ALIYUN_OSS_ACCESS_KEY_ID" ] || [ -z "$ALIYUN_OSS_ACCESS_KEY_SECRET" ]; then
+            echo '::error::Missing Aliyun OSS credentials.'
+            exit 1
+          fi
+          "$RUNNER_TEMP/ossutil" config -e "$ALIYUN_OSS_ENDPOINT" -i "$ALIYUN_OSS_ACCESS_KEY_ID" -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" -L EN -c "$RUNNER_TEMP/.ossutilconfig"
+
+      # Belt-and-braces against a stale download directory. The job moved to
+      # an ephemeral hosted runner (and checkout cleans the workspace first),
+      # so nothing should survive between runs — but the publisher treats the
+      # presence of a file like flake-gate.log as proof THIS run staged it,
+      # and that inference must not silently start embedding another PR's
+      # evidence if this job is ever moved back onto the persistent pool.
+      # The verify side applies the same rm-first rule to its $RUNNER_TEMP.
       - name: 'Clear stale downloaded results'
         run: 'rm -rf verify-results'
 
@@ -5005,7 +5929,9 @@ jobs:
           # cancellations. Verified by executing this step with both values.
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
-          AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
+          VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
+          VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
+          VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
           FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
           FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
@@ -5013,6 +5939,25 @@ jobs:
           VERIFY_RESULT: '${{ needs.verify.result }}'
           DOWNLOAD_OUTCOME: '${{ steps.download.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          OSSUTIL_INSTALL_OUTCOME: '${{ steps.install-ossutil.outcome }}'
+          # PR evidence is untrusted, PR-derived content, so it gets its own
+          # bucket knob: set ALIYUN_OSS_PR_ASSETS_BUCKET to move it off the
+          # bucket that also serves release, desktop, and live-host downloads.
+          # Unset, it falls back to the shared bucket — today's behaviour.
+          # The default public URL is derived from the resolved bucket so that
+          # overriding only one of the two vars cannot post comment links
+          # that 404 against (or show stale objects from) the other bucket.
+          # A cross-region ALIYUN_OSS_ENDPOINT override must also override
+          # ALIYUN_OSS_PUBLIC_BASE_URL because the default host pins Hangzhou.
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
+          # A stalled upload must not burn this job's 10-minute cap and take
+          # the whole report with it: bound every ossutil attempt so the
+          # uploader exhausts its retries and degrades to a text-only report
+          # instead of hanging one black-hole socket until the job dies.
+          # Worst case is one image's 3 attempts x 120s + backoffs ≈ 6.1 min
+          # (the uploader stops at the first image that fails all attempts).
+          OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000'
         # shellcheck disable=SC2016
         run: |-
           set -euo pipefail
@@ -5021,6 +5966,13 @@ jobs:
             exit 0
           fi
           BODY_FILE="${RUNNER_TEMP:-/tmp}/verify-comment.md"
+          # Every body keeps the run marker the status step wrote, so this
+          # job, re-run after it published, finds its own comment again
+          # instead of posting the report twice.
+          RUN_MARKER="<!-- qwen-triage:verify-run=${GITHUB_RUN_ID} -->"
+          SUBSTANTIVE_MARKER='<!-- qwen-triage:verify-substantive -->'
+          # Set only from the published report's own verdict.txt below.
+          AGENT_VERDICT=''
 
           # Same embedding discipline as publish-tmux: the report is untrusted
           # PR-run output, so it goes inside <details><pre><code> with &, <, >
@@ -5317,50 +6269,40 @@ jobs:
             printf '\n'
           }
 
-          # Host the agent's evidence images (if any) on a per-PR branch
-          # (pr-assets/<N>-verify, matching hand-run convention) and build
-          # a markdown section referencing them. Image bytes come from a run
+          # Host the agent's evidence images (if any) on Aliyun OSS and build a
+          # markdown section referencing them. Image bytes come from a run
           # that executed PR code: inert but untrusted, so filenames pass a
           # strict allowlist, count/size are capped (8 files, <2 MB each; the
           # find predicates enforce both), and any failure degrades to a
           # text-only comment rather than blocking the report. The
-          # VERIFY_ASSETS_REMOTE override exists as a test seam only.
+          # VERIFY_ASSETS_UPLOADER override exists as a test seam only.
+          # $1 is the round directory the comment publishes: its images
+          # illustrate its report, never another round's.
           EVIDENCE_SECTION=''
           collect_and_host_evidence() {
-            local imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
-            local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
-            local assets_branch="pr-assets/${PR_NUMBER}-verify"
-            local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
-            local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
+            local round="${1:-}" imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
+            local prefix="pr-assets/verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+            local stage_dir="${RUNNER_TEMP:-/tmp}/verify-assets-stage"
+            local uploader="${VERIFY_ASSETS_UPLOADER:-scripts/upload-aliyun-oss-assets.js}"
+            [ -n "$round" ] || return 0
             # `|| true` on every find: the artifact download is
             # continue-on-error, so verify-results may not exist at all, and
             # a bare non-zero find under `pipefail` would abort the step
             # before the missing-report notice and the final upsert.
-            total="$(find verify-results -type f -path '*/evidence/*.png' 2>/dev/null | wc -l | tr -d ' ' || true)"
+            total="$(find "$round" -type f -path '*/evidence/*.png' 2>/dev/null | wc -l | tr -d ' ' || true)"
             [ -n "$total" ] && [ "$total" -gt 0 ] || return 0
             # Byte-exact size cap: find's -2M unit rounds file sizes UP to
             # whole MiB first, silently turning a documented 2 MB cap into a
             # 1 MiB one; the c (bytes) unit does not round.
             while IFS= read -r f; do imgs+=("$f"); done < <(
-              find verify-results -type f -path '*/evidence/*.png' -size -2097153c 2>/dev/null | sort | head -8
+              find "$round" -type f -path '*/evidence/*.png' -size -2097153c 2>/dev/null | sort | head -8
             )
             if [ "${#imgs[@]}" -eq 0 ]; then
               EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting caps (8 images, ≤2 MB each); see the run artifacts._"$'\n\n'
               return 0
             fi
-            rm -rf "$clone_dir"
-            if ! git clone -q --depth 1 --branch "$assets_branch" "$remote" "$clone_dir" 2>/dev/null; then
-              rm -rf "$clone_dir"
-              mkdir -p "$clone_dir"
-              git -C "$clone_dir" init -q
-              git -C "$clone_dir" checkout -q --orphan "$assets_branch"
-              git -C "$clone_dir" remote add origin "$remote"
-            fi
-            # Rebase in the racing-push retry needs a committer identity, so
-            # set it once on the clone instead of per-command -c flags.
-            git -C "$clone_dir" config user.name 'qwen-code-ci-bot'
-            git -C "$clone_dir" config user.email 'qwen-code-ci-bot@users.noreply.github.com'
-            mkdir -p "$clone_dir/$dest_dir"
+            rm -rf "$stage_dir"
+            mkdir -p "$stage_dir"
             for f in "${imgs[@]}"; do
               base="$(basename "$f")"
               safe="$(printf '%s' "$base" | tr -cd 'a-zA-Z0-9._-' | head -c 80)"
@@ -5370,13 +6312,19 @@ jobs:
                 *) continue ;;
               esac
               [ -n "${safe%.png}" ] || continue
-              # Two artifact dirs can sanitize to the same name; the second
-              # copy would silently overwrite the first and render twice.
+              # Two images can sanitize to the same name (nested evidence/
+              # dirs, or names that differ only in stripped characters); the
+              # second copy would silently overwrite the first and render
+              # twice.
               case "$seen" in *" $safe "*) continue ;; esac
-              # Extension is attacker-choosable; the magic bytes are what
-              # raw.githubusercontent.com will actually serve. PNG only.
+              # Extension is attacker-choosable, and it is the enforcement
+              # point for what OSS serves: ossutil derives the object's
+              # Content-Type from the key's extension, so the .png allowlist
+              # above is what keeps these hosted as an image type. This
+              # magic-byte check then verifies the bytes actually match the
+              # claimed type. PNG only.
               [ "$(head -c 8 "$f" | od -An -tx1 | tr -d ' \n')" = '89504e470d0a1a0a' ] || continue
-              cp "$f" "$clone_dir/$dest_dir/$safe" || continue
+              cp "$f" "$stage_dir/$safe" || continue
               seen="${seen}${safe} "
               hosted=$((hosted + 1))
             done
@@ -5385,26 +6333,55 @@ jobs:
               EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting checks (PNG magic, unique sanitized name, ≤2 MB, max 8); see the run artifacts._"$'\n\n'
               return 0
             fi
-            if ! (
-              cd "$clone_dir" &&
-              git add "$dest_dir" &&
-              git commit -q -m "verify evidence for PR #${PR_NUMBER} (run ${GITHUB_RUN_ID})" &&
-              {
-                git push -q origin "HEAD:$assets_branch" 2>/dev/null ||
-                {
-                  # One retry after a racing push from another assets job.
-                  git pull -q --rebase origin "$assets_branch" 2>/dev/null &&
-                  git push -q origin "HEAD:$assets_branch" 2>/dev/null
-                }
-              }
-            ); then
-              echo "::warning::Failed to push evidence images; posting a text-only report." >&2
+            local upload_cmd=()
+            local upload_path="${PATH}"
+            local trusted_bin=''
+            if [ -n "${VERIFY_ASSETS_UPLOADER:-}" ]; then
+              upload_cmd=("$uploader")
+            elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = 'success' ] &&
+                 [ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ]; then
+              # Resolve node under the inherited PATH, never through the
+              # shared temp dir, and run ossutil from a fresh job-private
+              # copy of the sha256-verified binary installed above instead
+              # of resolving it through $RUNNER_TEMP (PATH hijack shape).
+              # Not exploitable on today's ephemeral ubuntu-latest runner,
+              # but the shape must not regress if this job ever moves to a
+              # persistent pool.
+              local node_bin
+              node_bin="$(command -v node || true)"
+              upload_cmd=("$node_bin" "$uploader")
+              trusted_bin="$(mktemp -d || true)"
+              if [ -n "$trusted_bin" ]; then
+                install -m 0755 "${RUNNER_TEMP:-/tmp}/ossutil" "$trusted_bin/ossutil" 2>/dev/null || true
+                upload_path="$trusted_bin"
+              fi
+            else
+              # The install and configure steps are continue-on-error, so a
+              # failure there renders green; say which precondition is missing
+              # instead of burning three retry backoffs per image on an
+              # uploader that cannot possibly authenticate.
+              echo "::warning::OSS publishing unavailable (ossutil=$([ -x "${RUNNER_TEMP:-/tmp}/ossutil" ] && echo ok || echo MISSING), config=$([ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ] && echo ok || echo MISSING)); posting a text-only report." >&2
               EVIDENCE_SECTION=''
               return 0
             fi
-            local raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${assets_branch}/${dest_dir}"
+            if ! PATH="$upload_path" "${upload_cmd[@]}" \
+              --bucket "$ALIYUN_OSS_BUCKET" \
+              --config "${RUNNER_TEMP:-/tmp}/.ossutilconfig" \
+              --prefix "$prefix" \
+              "$stage_dir"/*.png; then
+              if [ -n "$trusted_bin" ]; then rm -rf "$trusted_bin"; fi
+              # Report the local preconditions so a tooling/credential gap
+              # (the install/config steps are continue-on-error and render
+              # green when they fail) is distinguishable from a transient
+              # upload blip without trawling three steps of logs.
+              echo "::warning::Failed to upload evidence images (ossutil=$([ -x "${RUNNER_TEMP:-/tmp}/ossutil" ] && echo ok || echo MISSING), config=$([ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ] && echo ok || echo MISSING)); posting a text-only report." >&2
+              EVIDENCE_SECTION=''
+              return 0
+            fi
+            if [ -n "$trusted_bin" ]; then rm -rf "$trusted_bin"; fi
+            local raw_base="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${prefix}"
             EVIDENCE_SECTION=$'### Evidence images\n\n'
-            for f in "$clone_dir/$dest_dir"/*.png; do
+            for f in "$stage_dir"/*.png; do
               [ -f "$f" ] || continue
               safe="$(basename "$f")"
               EVIDENCE_SECTION+="![${safe%.png}](${raw_base}/${safe})"$'\n\n'
@@ -5423,20 +6400,30 @@ jobs:
           PARTIAL_EN='The verification run did not complete, so the phases below may be partial or missing entirely. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
           PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
-          # Weak terminal notices (cancelled / infra / skipped / n-a) carry no
-          # new evidence, so they must never overwrite a previous round's real
-          # report — they only replace this run's own "running" status (see
-          # the upsert below). Real outcomes (report, prepare-fail) upsert.
-          WEAK_BODY=false
+          # Every body opens with a header: the verify marker, this run's
+          # marker, the flaky marker when the gate demoted the run and, on a
+          # body that carries findings, the substantive marker, ended by a
+          # blank line. Every lookup reads markers only
+          # from a header, so it is started once, here, and each branch below
+          # appends to it.
+          printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
+          # Every branch a flaky verdict can reach demotes on it (the gate step
+          # runs only on a prepared round it was asked to verify), so the
+          # header records it once, here: a later attempt of this run can
+          # then tell whether the report it would post beside carries it.
+          FLAKY_MARKER='<!-- qwen-triage:verify-flaky -->'
+          if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+            printf '%s\n' "$FLAKY_MARKER" >> "$BODY_FILE"
+          fi
+
           # The gate verdict travels via job outputs: it survives a later
           # agent-step failure, a job timeout, and a cancellation. A
           # recorded `flaky` must demote the headline in EVERY terminal
           # branch — these two used to post the neutral notice and silently
           # drop the demotion the download-failure branch already honors.
           if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
-            WEAK_BODY=true
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); job cancelled before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5453,11 +6440,10 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
-            WEAK_BODY=true
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); the job then failed before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5474,14 +6460,13 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ] || [ "${VERDICT:-}" = "n/a" ]; then
             # These outcomes deliberately upload nothing, so their download
             # always "fails"; they must be answered before the
             # download-failure branch or their real reason is unreachable.
-            WEAK_BODY=true
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${VERDICT:-}" = "skipped" ]; then
                 printf '**Sandboxed verification: ⚠️ not run — skipped** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
@@ -5496,42 +6481,38 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${DOWNLOAD_OUTCOME:-success}" != "success" ]; then
             # The verify job may have succeeded, but its artifact never
             # arrived (the download step is continue-on-error). Without this
             # branch the full-report path still runs and its scope paragraph
             # claims the A/B, the harnesses and the gates were delivered —
             # when nothing was.
-            WEAK_BODY=true
             # The flake verdict travels via job outputs, independent of the
             # artifact — the gate's demotion contract ("reported as not
             # passed regardless of the agent verdict") must fire even when
             # the download did not, or a flaky PR gets a neutral
             # "results unavailable" notice instead of its ❌.
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
-                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; while the PR is open, re-run `@qwen-code /verify` for a fresh report.\n\n'
                 printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；结果产物不可用</summary>\n\n'
                 printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
-                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
                 printf '</details>\n\n'
               else
                 printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
-                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; while the PR is open, re-run `@qwen-code /verify` for a fresh report.\n\n'
                 printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
-                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
-            # An infra-classified prepare failure says nothing about the PR,
-            # so it must not overwrite a previous round's real report.
-            [ "${VERDICT:-}" = 'infra-error' ] && WEAK_BODY=true
             PREPARE_LOG="$(find verify-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
             # Initialised, not merely defaulted at use: an inherited value
             # would otherwise tell a reader that a single-shot `npm run
@@ -5541,7 +6522,7 @@ jobs:
             PREPARE_ATTEMPTS_ZH=''
             case "$PREPARE_FAILURE_PHASE" in
               install)
-                PREPARE_COMMAND='npm ci'
+                PREPARE_COMMAND='pnpm install'
                 # The prepare step retries the install once, so reaching
                 # this phase means two consecutive failures. Say so: the
                 # sentence below blames the PR for it, and "failed twice in
@@ -5558,7 +6539,7 @@ jobs:
                 echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
                 ;;
             esac
-            # infra-error can now arise from exactly one condition: npm ci
+            # infra-error can now arise from exactly one condition: pnpm install
             # failed AND the registry was unreachable from the runner (the
             # log-pattern classifier is gone, and build failures are always
             # `fail`). The copy must name that condition and nothing else —
@@ -5566,10 +6547,10 @@ jobs:
             # mis-attribution this commit set out to remove, pointed the
             # other way.
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
               # Reachable: the prepare step reports infra-error when the
               # registry was unreachable from the runner at failure time.
               if [ "${VERDICT:-}" = 'infra-error' ]; then
+                printf '\n'
                 printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf '`%s` failed before any verification started, and `registry.npmjs.org` was unreachable from the runner at that moment — so this looks like an infrastructure incident rather than a problem with this PR. Re-running `@qwen-code /verify` may well succeed; the install log below is the place to confirm.\n\n' "$PREPARE_COMMAND"
                 printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
@@ -5585,19 +6566,52 @@ jobs:
               fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           else
-            collect_and_host_evidence
             # Pin the artifact-dir shape and sort: a bare -name search takes
-            # whatever directory find visits first, which is unordered.
-            REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
-            ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            # whatever directory find visits first, which is unordered. Rounds
+            # are named pr<n>-verify-<YYYYMMDD>-<HHMMSS>, so the last in sort
+            # order is the newest; an earlier round left beside it must not
+            # headline the run. Depth 2 exactly: a report.md nested in a
+            # round (scratch/) sorts past the round's own and would stand in
+            # for it.
+            REPORT="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | tail -1 || true)"
+            # The report's own directory is the round: its counts, its
+            # verdict word and its images go with it, never another
+            # directory's. This is the only reader of verdict.txt, which
+            # untrusted PR code wrote.
+            if [ -n "$REPORT" ]; then
+              ROUND_DIR="$(dirname "$REPORT")"
+              ASSERTIONS_FILE="$ROUND_DIR/assertions.json"
+              [ -f "$ASSERTIONS_FILE" ] || ASSERTIONS_FILE=''
+              AGENT_VERDICT="$(head -c 4096 "$ROUND_DIR/verdict.txt" 2>/dev/null | tr -d '[:space:]' | cut -c1-32 || true)"
+              case "$AGENT_VERDICT" in
+                merge-ready|findings|blocked|inconclusive) ;;
+                *)
+                  echo "::warning::No usable verdict.txt beside the published report.md; the round has no agent verdict."
+                  AGENT_VERDICT=''
+                  ;;
+              esac
+            else
+              # No report, so no verdict to trust: the newest round's counts
+              # and images are shown only as partial evidence under the
+              # process outcome.
+              ASSERTIONS_FILE="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | tail -1 || true)"
+              if [ -n "$ASSERTIONS_FILE" ]; then
+                ROUND_DIR="$(dirname "$ASSERTIONS_FILE")"
+              else
+                ROUND_DIR="$(find verify-results -mindepth 1 -maxdepth 1 -type d -name '*-verify-*' 2>/dev/null | sort | tail -1 || true)"
+              fi
+            fi
+            collect_and_host_evidence "$ROUND_DIR"
             # Exact root-level path, never a find: the staging step writes
             # this name last as root, and a same-named file nested inside a
             # collected agent artifact dir must not shadow it.
             FLAKE_LOG='verify-results/flake-gate.log'
             ASSERT_LINE=''
             ASSERT_LINE_ZH=''
+            GATES_LINE=''
+            GATES_LINE_ZH=''
             if [ -n "$ASSERTIONS_FILE" ]; then
               # Numbers only — coerce anything non-numeric to 0 so untrusted
               # JSON cannot smuggle text into the comment body.
@@ -5624,9 +6638,66 @@ jobs:
                 read -r A_PASS A_FAIL A_TOTAL <<< "$ASSERT_META"
                 ASSERT_LINE="Scripted assertions: ${A_PASS} passed · ${A_FAIL} failed · ${A_TOTAL} total"
                 ASSERT_LINE_ZH="脚本断言：${A_PASS} 通过 · ${A_FAIL} 失败 · ${A_TOTAL} 总计"
+                # Existing test suites run as targeted gates are counted
+                # apart from the round's own assertions: folded in, a
+                # workspace's thousands of tests made "N scripted
+                # assertions" a measure of the repo, not of the round. Totals
+                # only, so no agent-chosen suite name reaches the body; a
+                # malformed list gets no line, and the checker refuses it.
+                # Shape rules mirror the checker's, and one shared fixture
+                # table pins the parity: a blank suite or a non-count skipped
+                # (false/null) is refused, not defaulted, and counts stop at
+                # 2^53-1, the last integer JSON literals parse to exactly.
+                # Blank means JSON whitespace only: jq's \S and JS's trim()
+                # disagree on U+0085 and U+FEFF.
+                GATES_META="$(
+                  jq -r 'def count: type == "number" and . >= 0 and . == floor and . <= 9007199254740991;
+                         if (.gates | type) == "array" and (.gates | length) > 0
+                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("[^ \t\n\r]")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
+                         then "\(.gates | length) \(.gates | map(.pass) | add | floor) \(.gates | map(.fail) | add | floor) \(.gates | map(.skipped // 0) | add | floor) \(.gates | map(select(.skipped != null)) | length)"
+                         else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
+                )"
+                if [ -n "$GATES_META" ]; then
+                  read -r G_SUITES G_PASS G_FAIL G_SKIP G_RECORDED <<< "$GATES_META"
+                  # Absent skipped is "not recorded", not a measured zero,
+                  # and a partial sum is not the run's total: the clause
+                  # prints only when every entry carries the field.
+                  G_SKIP_CLAUSE=''
+                  G_SKIP_CLAUSE_ZH=''
+                  if [ "$G_RECORDED" = "$G_SUITES" ]; then
+                    G_SKIP_CLAUSE=" · ${G_SKIP} skipped"
+                    G_SKIP_CLAUSE_ZH=" · ${G_SKIP} 跳过"
+                  fi
+                  GATES_LINE="Targeted gates (existing tests, not counted individually above): ${G_PASS} passed · ${G_FAIL} failed${G_SKIP_CLAUSE} across ${G_SUITES} suite(s)"
+                  GATES_LINE_ZH="定向门禁（已有测试，不逐条计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败${G_SKIP_CLAUSE_ZH}，共 ${G_SUITES} 个套件"
+                fi
               else
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
               fi
+            fi
+            # The checker local rounds run before posting, from this trusted
+            # checkout, so both paths share one set of rules. It must pass on
+            # the report's directory and read the verdict taken from it above.
+            # Only its last stdout line is the summary: warnings above it can
+            # carry agent-chosen evidence filenames, so they are never echoed.
+            # node also exits 1 when the script cannot load; stderr says why.
+            ARTIFACT_CHECK=''
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
+              check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
+              check_status=0
+              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
+              case "${check_status}:$(tail -n 1 "$check_log")" in
+                "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;
+                '1:  failed: verdict='*)
+                  ARTIFACT_CHECK=refused
+                  grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
+                  ;;
+                *)
+                  ARTIFACT_CHECK=error
+                  echo "::warning::The artifact check could not run (exit ${check_status}); not trusting the agent verdict."
+                  head -n 8 "$check_log.err" | cut -c1-300 || true
+                  ;;
+              esac
             fi
             # The agent's own verdict is only honoured for a run that
             # actually completed AND left consistent evidence: an early
@@ -5634,7 +6705,7 @@ jobs:
             # crashed, or produced no report/assertions. Otherwise the
             # headline comes from the process outcome.
             TRUST_AGENT_VERDICT=false
-            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ]; then
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ "$ARTIFACT_CHECK" = ok ]; then
               case "${AGENT_VERDICT:-}" in
                 merge-ready) [ "$A_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
@@ -5649,9 +6720,18 @@ jobs:
             # or produced no usable verdict says nothing about the PR and
             # gets incomplete/inconclusive, never a pass or a fail.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
+              # Verdicts come from harness exits: `findings` with no failed
+              # assertion is advisory, and the checker has already refused
+              # failures none of which the ledger attributes to the PR.
               case "$AGENT_VERDICT" in
                 merge-ready) QUAL='✅ passed'; QUAL_ZH='✅ 通过'; HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
-                findings) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
+                findings)
+                  if [ "$A_FAIL" = '0' ]; then
+                    QUAL='✅ passed with findings'; QUAL_ZH='✅ 通过（有发现）'; HEADLINE='non-blocking findings, every scripted assertion passed (agent verdict)'; HEADLINE_ZH='非阻塞发现，脚本断言全部通过（agent 判定）'
+                  else
+                    QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）'
+                  fi
+                  ;;
                 blocked) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
                 inconclusive) QUAL='⚠️ inconclusive'; QUAL_ZH='⚠️ 无法判定'; HEADLINE='the agent could not reach a conclusion'; HEADLINE_ZH='agent 未能得出结论' ;;
               esac
@@ -5665,12 +6745,14 @@ jobs:
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
                 if [ "${VERDICT:-}" = 'pass' ]; then
-                  if [ -z "$REPORT" ]; then
-                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (report.md missing); reporting the process outcome instead."
-                  elif [ -z "$ASSERT_LINE" ]; then
+                  # A word is only ever read beside a report, so the report
+                  # is present here.
+                  if [ -z "$ASSERT_LINE" ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions.json missing or inconsistent); reporting the process outcome instead."
-                  else
+                  elif [ "$AGENT_VERDICT" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."
+                  else
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (artifact check: ${ARTIFACT_CHECK}); reporting the process outcome instead."
                   fi
                 else
                   echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
@@ -5721,19 +6803,27 @@ jobs:
                 FLAKE_LINE_ZH='抖动门：⚠️ error — 发布时门判定缺失或无法识别，按 error 处理'
                 ;;
             esac
+            # The merge-ready-with-failures case has its own paragraph below.
+            CHECK_NOTE=''
+            CHECK_NOTE_ZH=''
+            if [ "$TRUST_AGENT_VERDICT" != true ] &&
+               ! { [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; }; then
+              case "$ARTIFACT_CHECK" in
+                refused)
+                  CHECK_NOTE='its artifacts fail the consistency check (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors'
+                  CHECK_NOTE_ZH='其产物未通过一致性检查（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志'
+                  ;;
+                error)
+                  CHECK_NOTE='the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why'
+                  CHECK_NOTE_ZH='一致性检查（`verify-pr-check.mjs`）无法在其产物上运行，因此该判定未被采信——原因见工作流运行日志'
+                  ;;
+              esac
+            fi
             if [ -z "$REPORT" ]; then
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
             fi
-            # A run that timed out or crashed before writing report.md has
-            # no findings to preserve: marking it substantive would let a
-            # headline plus "no report found" overwrite the previous round's
-            # real evidence, which is the opposite of the rule.
-            if [ -z "$REPORT" ]; then
-              WEAK_BODY=true
-            fi
             {
-              printf '%s\n' '<!-- qwen-triage:verify -->'
               # Substantive marker: this body carries findings, so a later
               # weak notice must not displace it as the follow-up round's
               # previous-report snapshot.
@@ -5755,11 +6845,22 @@ jobs:
               if [ -n "$ASSERT_LINE" ]; then
                 printf '%s\n\n' "$ASSERT_LINE"
               fi
+              if [ -n "$GATES_LINE" ]; then
+                printf '%s\n\n' "$GATES_LINE"
+                # Advisory only: a gate can be red for a pre-existing main
+                # failure, so this never refuses or demotes the verdict.
+                if [ "$TRUST_AGENT_VERDICT" = true ] && [ "${G_FAIL:-0}" != '0' ]; then
+                  printf 'Gate totals do not decide the verdict: a gate red the PR causes belongs in the assertion ledger above — read that count before trusting the verdict.\n\n'
+                fi
+              fi
               if [ -n "$FLAKE_LINE" ]; then
                 printf '%s\n\n' "$FLAKE_LINE"
               fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
-                printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
+                printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted: an expected A/B control red counts as a pass, so a recorded failure contradicts `merge-ready`.\n\n' "$A_FAIL"
+              fi
+              if [ -n "$CHECK_NOTE" ]; then
+                printf 'The agent reported `%s`, but %s.\n\n' "$AGENT_VERDICT" "$CHECK_NOTE"
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
@@ -5780,11 +6881,20 @@ jobs:
               if [ -n "$ASSERT_LINE_ZH" ]; then
                 printf '%s\n\n' "$ASSERT_LINE_ZH"
               fi
+              if [ -n "$GATES_LINE_ZH" ]; then
+                printf '%s\n\n' "$GATES_LINE_ZH"
+                if [ "$TRUST_AGENT_VERDICT" = true ] && [ "${G_FAIL:-0}" != '0' ]; then
+                  printf '门禁合计不影响判定：PR 导致的门禁红灯应记入上面的断言账本——采信判定前请先看那个数。\n\n'
+                fi
+              fi
               if [ -n "$FLAKE_LINE_ZH" ]; then
                 printf '%s\n\n' "$FLAKE_LINE_ZH"
               fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
-                printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
+                printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信：预期中的 A/B 对照红灯应计为通过，所以记录在案的失败与 `merge-ready` 相矛盾。\n\n' "$A_FAIL"
+              fi
+              if [ -n "$CHECK_NOTE_ZH" ]; then
+                printf 'agent 报告了 `%s`，但%s。\n\n' "$AGENT_VERDICT" "$CHECK_NOTE_ZH"
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"
@@ -5805,47 +6915,93 @@ jobs:
                 printf '%s' "$EVIDENCE_SECTION"
               fi
               printf 'Harness scripts and raw logs are in the workflow run artifacts (7-day retention).\n\n'
-              printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+              # Attribution footer, the same shape /review posts: model, CLI
+              # version, and the content hash of the skill that ran. Only on
+              # a body that actually carries a report and only when all three
+              # workflow-owned values arrived — without a report the body
+              # is only a notice, and a half-known identity keeps the
+              # generic signature too.
+              if [ -n "$REPORT" ] && [ -n "${VERIFY_MODEL:-}" ] && [ -n "${VERIFY_CLI_VERSION:-}" ] && [ -n "${VERIFY_SKILL_HASH:-}" ]; then
+                printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\n' "$VERIFY_MODEL" "$VERIFY_CLI_VERSION" "$VERIFY_SKILL_HASH"
+              else
+                printf '%s\n' '— _Qwen Code · sandboxed verification_'
+              fi
+            } >> "$BODY_FILE"
           fi
 
-          # Upsert by marker: a real outcome (report / prepare-fail) replaces
-          # whatever carries the marker — the "running" status or an older
-          # report. A WEAK_BODY notice only replaces this run's own "running"
-          # status; if the marker comment is a previous round's real report,
-          # post fresh so that report survives.
+          # Write only into this run's own comment, found by its run marker:
+          # the live status its verify job posted, or the body this job
+          # already published if it is re-run. Anything else gets a fresh
+          # comment. The newest marker comment may belong to another round —
+          # a later round's live status, or an earlier round's report — and
+          # replacing either would make one round overwrite the other.
           # Same ownership discipline as the resolve step: only BOT-OWNED
           # comments STARTING with the marker are candidates, so a marker
           # pasted by any user cannot divert the bot into PATCHing (and
           # failing on) someone else's comment.
           # Fail CLOSED on identity failure (an empty login previously
-          # widened the filter to every user's comments), and match the
-          # live-status MARKER rather than prose a report could quote.
-          EXISTING='' EXISTING_RUNNING='false'
+          # widened the filter to every user's comments), and read the
+          # machine markers only from a header: a report, or a value a PR
+          # run produced, can quote one further down.
+          OWN_ID=''
+          OWN_SUBSTANTIVE=''
+          OWN_FLAKY=''
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh comment instead of reusing one."
             BOT_LOGIN=''
           fi
-          if [ -n "$BOT_LOGIN" ] && EXISTING_META="$(
+          if [ -n "$BOT_LOGIN" ] && OWN_META="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr --arg bot "$BOT_LOGIN" \
-                '[.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)] | last
-                 | if . == null then "" else "\(.id)\t\(.body | contains("<!-- qwen-triage:verify-state=running -->"))" end'
+              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg flaky "$FLAKY_MARKER" \
+                'def header: split("\n\n")[0] | split("\n");
+                 [.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)
+                    | (.body | header) as $h | select(any($h[]; . == $run))
+                    | "\(.id)\t\(any($h[]; . == $sub))\t\(any($h[]; . == $flaky))"]
+                 | last // empty'
           )"; then
-            EXISTING="${EXISTING_META%%$'\t'*}"
-            case "$EXISTING_META" in *$'\t'true) EXISTING_RUNNING='true' ;; esac
+            OWN_ID="${OWN_META%%$'\t'*}"
+            OWN_META="${OWN_META#*$'\t'}"
+            OWN_SUBSTANTIVE="${OWN_META%%$'\t'*}"
+            OWN_FLAKY="${OWN_META#*$'\t'}"
           elif [ -n "$BOT_LOGIN" ]; then
-            echo "::warning::Failed to look up existing verify comments; will create a new one."
+            echo "::warning::Failed to look up this run's comment; will create a new one."
+          fi
+          # A notice never replaces a body that carries findings. Re-run on
+          # its own, this job cannot download results (the artifact name
+          # carries the attempt), so its "results unavailable" notice would
+          # otherwise replace the round's report; it is posted beside it.
+          BODY_SUBSTANTIVE="$(
+            jq -Rrs --arg sub "$SUBSTANTIVE_MARKER" 'split("\n\n")[0] | split("\n") | any(.[]; . == $sub)' "$BODY_FILE" || true
+          )"
+          if [ "$OWN_SUBSTANTIVE" = true ] && [ "$BODY_SUBSTANTIVE" != true ]; then
+            OWN_ID=''
+          fi
+          # A round can queue for hours: a notice with no status of its own
+          # to finalize is noise on a PR that closed meanwhile. A flaky
+          # demotion still posts, since on a merged PR it names tests now on
+          # main, unless this run's own report already carries it. An
+          # attempt whose own live status is missing (that post is
+          # best-effort) finds an earlier attempt's report instead, which
+          # can predate the verdict. A failed lookup posts.
+          if [ -z "$OWN_ID" ] && [ "$BODY_SUBSTANTIVE" != true ] &&
+            { [ "${FLAKE_VERDICT:-}" != flaky ] || [ "$OWN_FLAKY" = true ]; } &&
+            [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.state' 2>/dev/null || true)" = closed ]; then
+            echo "PR #${PR_NUMBER} closed before this round published; notice not posted (verdict=${VERDICT})." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           # A failed PATCH (comment deleted, or ownership changed under us)
           # must still leave a terminal report on the PR, never silence.
-          if [ -n "$EXISTING" ] && { [ "$WEAK_BODY" = false ] || [ "$EXISTING_RUNNING" = 'true' ]; }; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null ||
+          if [ -n "$OWN_ID" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$OWN_ID" -F body=@"$BODY_FILE" >/dev/null ||
               gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           else
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           fi
           echo "Posted verification result to PR #${PR_NUMBER} (verdict=${VERDICT}, agent=${AGENT_VERDICT:-none})." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Cleanup Aliyun OSS credentials'
+        if: '${{ always() }}'
+        run: 'rm -f "$RUNNER_TEMP/.ossutilconfig"'

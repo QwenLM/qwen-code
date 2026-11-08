@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { act, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
@@ -11,6 +12,8 @@ import {
   useResumeCommand,
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
+import { ModSession } from '../../services/mod-session.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
   makeSwapSlotClient,
   type SwapSlotClient,
@@ -30,11 +33,11 @@ const mockSettings = {
 } as unknown as LoadedSettings;
 
 /** Minimal Config mock shaped like the other failure tests in this file. */
-function makeSwapSlotConfig(geminiClient: SwapSlotClient) {
+function makeSwapSlotConfig(llmClient: SwapSlotClient) {
   return {
     getSessionId: () => 'old-session-id',
     getTargetDir: () => '/tmp',
-    getGeminiClient: () => geminiClient,
+    getLlmClient: () => llmClient,
     startNewSession: vi.fn(),
     getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
     getBackgroundTaskRegistry: () => ({
@@ -52,6 +55,8 @@ function makeSwapSlotConfig(geminiClient: SwapSlotClient) {
     }),
     getWorkflowRunRegistry: () => ({
       hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      listStartingRunIds: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
       abortAll: vi.fn(),
     }),
@@ -133,6 +138,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   class SessionService {
     constructor(_cwd: string) {}
+    assertLegacySessionExecution = vi.fn();
     async loadSession(_sessionId: string) {
       return (
         resumeMocks.getPendingLoadSession() ??
@@ -155,6 +161,140 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  it('waits for the mode snapshot under the swap latch before loading', async () => {
+    resumeMocks.reset();
+    const client = makeSwapSlotClient();
+    client.initialize.mockRejectedValueOnce(new Error('destination failed'));
+    const config = makeSwapSlotConfig(client);
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: true,
+      turns: 0,
+    };
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const restore = vi.fn();
+    Object.assign(config, {
+      captureWorkflowModeState: async () => {
+        expect(client.isTelemetrySwapInProgress()).toBe(true);
+        await held;
+        return snapshot;
+      },
+      restoreWorkflowModeState: restore,
+    });
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager: {
+          addItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
+      }),
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handleResume('new-session-id');
+    });
+    const swappedBeforeSnapshot = vi.mocked(config.startNewSession).mock.calls
+      .length;
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(swappedBeforeSnapshot).toBe(0);
+    expect(restore).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(client.isTelemetrySwapInProgress()).toBe(false);
+  });
+
+  it.each([
+    'rollback-init',
+    'forward-old',
+    'forward-target',
+    'before-invalidate',
+  ])('restores eligible Mod ownership after %s', async (mode) => {
+    resumeMocks.reset();
+    const config = makeSwapSlotConfig(makeSwapSlotClient());
+    let sessionId = config.getSessionId();
+    const oldSessionId = sessionId;
+    Object.assign(config, {
+      getSessionId: () => sessionId,
+      isInteractive: () => true,
+    });
+    const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+    const old = owner.captureToolSignal();
+    const restore = vi.fn(() => owner.restoreTools());
+    const binding = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue({
+        invalidateTools: () => owner.invalidateTools(),
+        restoreTools: restore,
+        syncSession: vi.fn(),
+      } as unknown as interactiveMods.InteractiveModSession);
+    const settle = vi.fn(() => {
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+    });
+    const client = {
+      beginTelemetrySwap: () => true,
+      abortTelemetrySwap: settle,
+      commitTelemetrySwap: settle,
+      initialize: vi.fn(async () => {
+        throw new Error('init failed');
+      }),
+    };
+    vi.spyOn(config, 'startNewSession').mockImplementation((id) => {
+      if (!id) throw new Error('missing session ID');
+      if (mode === 'forward-old')
+        throw new Error('start failed before mutation');
+      sessionId = id;
+      if (mode === 'forward-target')
+        throw new Error('start failed after mutation');
+      return sessionId;
+    });
+    vi.spyOn(config, 'getLlmClient').mockReturnValue(
+      client as unknown as ReturnType<typeof config.getLlmClient>,
+    );
+    if (mode === 'before-invalidate')
+      vi.spyOn(config, 'getTargetDir').mockImplementation(() => {
+        throw new Error('load failed');
+      });
+    try {
+      const { result } = renderHook(() =>
+        useResumeCommand({
+          config,
+          settings: mockSettings,
+          historyManager: {
+            addItem: vi.fn(),
+            clearItems: vi.fn(),
+            loadHistory: vi.fn(),
+          },
+          startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
+        }),
+      );
+      await act(async () => {
+        await result.current.handleResume('target-session');
+      });
+      const renew = mode === 'rollback-init' || mode === 'forward-old';
+      expect(restore).toHaveBeenCalledTimes(renew ? 1 : 0);
+      expect(old.aborted).toBe(mode !== 'before-invalidate');
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+      if (renew) expect(owner.captureToolSignal()).not.toBe(old);
+      else expect(owner.captureToolSignal()).toBe(old);
+      expect(sessionId === oldSessionId).toBe(mode !== 'forward-target');
+      expect(settle).toHaveBeenCalledOnce();
+    } finally {
+      binding.mockRestore();
+      await owner.close();
+    }
+  });
+
   it('should initialize with dialog closed', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -166,6 +306,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -183,6 +324,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -204,6 +346,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -229,6 +372,9 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    // Stable reference: an inline vi.fn() would be a new function on every
+    // render and invalidate the useCallback identity this test pins.
+    const seedPromptCount = vi.fn();
 
     const { result, rerender } = renderHook(() =>
       useResumeCommand({
@@ -236,6 +382,7 @@ describe('useResumeCommand', () => {
         config: null,
         historyManager,
         startNewSession,
+        seedPromptCount,
       }),
     );
 
@@ -264,6 +411,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -286,8 +434,9 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const seedPromptCount = vi.fn();
     const clearPendingState = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
     const resetMonitorRegistry = vi.fn();
@@ -295,7 +444,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -313,6 +462,8 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -334,6 +485,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount,
         clearPendingState,
       }),
     );
@@ -353,10 +505,20 @@ describe('useResumeCommand', () => {
     expect(result.current.isResumeDialogOpen).toBe(false);
 
     // Now finish the async load and let the handler complete.
+    const baseConversation = resumeMocks.makeConversation([
+      { role: 'user', parts: [{ text: 'hello' }] },
+    ]);
+    const conversation = {
+      ...baseConversation,
+      sessionId: 'session-2',
+      messages: baseConversation.messages.map((message) => ({
+        ...message,
+        sessionId: 'session-2',
+        promptId: 'session-2########2',
+      })),
+    };
     resumeMocks.resolvePendingLoadSession({
-      conversation: resumeMocks.makeConversation([
-        { role: 'user', parts: [{ text: 'hello' }] },
-      ]),
+      conversation,
     });
     await act(async () => {
       await resumePromise;
@@ -369,8 +531,12 @@ describe('useResumeCommand', () => {
       }),
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
-    expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
-    expect(geminiClient.initialize).toHaveBeenCalledWith();
+    expect(seedPromptCount).toHaveBeenCalledWith(3);
+    expect(startNewSession.mock.invocationCallOrder[0]).toBeLessThan(
+      seedPromptCount.mock.invocationCallOrder[0]!,
+    );
+    expect(llmClient.initialize).toHaveBeenCalledTimes(1);
+    expect(llmClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
     expect(clearPendingState).toHaveBeenCalledTimes(1);
@@ -395,7 +561,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => ({
+      getLlmClient: () => ({
         initialize: vi.fn().mockResolvedValue(undefined),
       }),
       startNewSession: vi.fn(),
@@ -415,6 +581,8 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -439,6 +607,7 @@ describe('useResumeCommand', () => {
         // rebuilt history must flow through it, not the raw manager.
         loadHistory: overrideLoadHistory,
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -469,14 +638,14 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
 
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -494,6 +663,8 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -515,6 +686,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -552,7 +724,7 @@ describe('useResumeCommand', () => {
 
   it('applies collapseOnResume policy when resuming a session', async () => {
     const startNewSession = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn(),
     };
     const resetMonitorRegistry = vi.fn();
@@ -560,7 +732,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -578,6 +750,8 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -607,6 +781,7 @@ describe('useResumeCommand', () => {
         settings: settingsWithCollapse,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       });
       return { historyManager, resumeCommand };
     });
@@ -646,7 +821,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn(),
     };
     const buildRecoveredBackgroundAgentsNotice = vi
@@ -656,7 +831,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -674,6 +849,8 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -697,6 +874,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -749,6 +927,7 @@ describe('useResumeCommand', () => {
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
         list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -766,6 +945,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -824,6 +1004,7 @@ describe('useResumeCommand', () => {
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
         list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -841,6 +1022,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -869,13 +1051,13 @@ describe('useResumeCommand', () => {
   it('rolls core back when persisted Goal state is malformed', async () => {
     resumeMocks.reset();
     const startNewSession = vi.fn();
-    const geminiClient = makeSwapSlotClient();
+    const llmClient = makeSwapSlotClient();
     const goalFailure = new Error('unsupported Goal lifecycle record');
 
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockRejectedValue(goalFailure),
       getBackgroundTaskRegistry: () => ({
@@ -893,6 +1075,8 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -917,6 +1101,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -957,7 +1142,7 @@ describe('useResumeCommand', () => {
     // it); the single call is the rollback's re-initialize of the old
     // session, which re-hydrates the client against the restored session
     // the same way /branch's rollback does (#9844 review).
-    expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
+    expect(llmClient.initialize).toHaveBeenCalledTimes(1);
     // The rollback aborted the transaction this attempt opened. The return
     // value is deliberately NOT asserted: the failure landed before the
     // forward initialize(), so the real client armed nothing and returns
@@ -965,8 +1150,8 @@ describe('useResumeCommand', () => {
     // in client.telemetrySwap.test.ts) — the slot fake over-approximates
     // that case (see mock-swap-slot-client.ts). The load-bearing hook
     // invariants: abort ran exactly once and commit never did.
-    expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
-    expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
+    expect(llmClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.commitTelemetrySwap).not.toHaveBeenCalled();
   });
 
   it('re-initializes the outgoing session when resume fails after initialize', async () => {
@@ -983,10 +1168,10 @@ describe('useResumeCommand', () => {
     // (#9844 review).
     resumeMocks.reset();
 
-    const geminiClient = makeSwapSlotClient();
+    const llmClient = makeSwapSlotClient();
     const resumeFailure = new Error('background agent recovery failed');
     const config = {
-      ...makeSwapSlotConfig(geminiClient),
+      ...makeSwapSlotConfig(llmClient),
       loadPausedBackgroundAgents: vi
         .fn()
         .mockRejectedValueOnce(resumeFailure)
@@ -1005,6 +1190,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -1036,7 +1222,7 @@ describe('useResumeCommand', () => {
     );
     // The forward initialize ran, and the rollback re-initialized the
     // outgoing session (a reverted fix leaves the call count at 1).
-    expect(geminiClient.initialize).toHaveBeenCalledTimes(2);
+    expect(llmClient.initialize).toHaveBeenCalledTimes(2);
     // The outgoing session's paused agents were reloaded after rollback.
     expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
       'old-session-id',
@@ -1048,9 +1234,9 @@ describe('useResumeCommand', () => {
     // The rollback aborted the armed transaction and never committed it.
     // The true return is safe to assert here: the forward initialize ran,
     // so the real client armed its undo and also returns true.
-    expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
-    expect(geminiClient.abortTelemetrySwap).toHaveReturnedWith(true);
-    expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
+    expect(llmClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.abortTelemetrySwap).toHaveReturnedWith(true);
+    expect(llmClient.commitTelemetrySwap).not.toHaveBeenCalled();
 
     // The released slot admits the follow-up same-session resume of the
     // outgoing session (the double-count trigger): it is NOT rejected with
@@ -1058,7 +1244,7 @@ describe('useResumeCommand', () => {
     await act(async () => {
       await result.current.handleResume('old-session-id');
     });
-    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(llmClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
     expect(historyManager.addItem).not.toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('already in progress'),
@@ -1076,8 +1262,8 @@ describe('useResumeCommand', () => {
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
 
-    const geminiClient = makeSwapSlotClient();
-    const config = makeSwapSlotConfig(geminiClient);
+    const llmClient = makeSwapSlotClient();
+    const config = makeSwapSlotConfig(llmClient);
     const historyManager = {
       addItem: vi.fn(),
       clearItems: vi.fn(),
@@ -1091,6 +1277,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -1117,8 +1304,8 @@ describe('useResumeCommand', () => {
     );
     // The catch settled (committed, never aborted) the transaction this
     // attempt opened.
-    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
-    expect(geminiClient.abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.abortTelemetrySwap).not.toHaveBeenCalled();
 
     // The released slot admits the next swap: it is NOT rejected with
     // "already in progress" and completes the full swap.
@@ -1126,7 +1313,7 @@ describe('useResumeCommand', () => {
     await act(async () => {
       await result.current.handleResume('session-2');
     });
-    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(llmClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
     expect(historyManager.addItem).not.toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('already in progress'),
@@ -1145,8 +1332,8 @@ describe('useResumeCommand', () => {
     // the transaction on top of the forward commit instead (#9844).
     resumeMocks.reset();
 
-    const geminiClient = makeSwapSlotClient();
-    const config = makeSwapSlotConfig(geminiClient);
+    const llmClient = makeSwapSlotClient();
+    const config = makeSwapSlotConfig(llmClient);
     const loadHistory = vi.fn().mockImplementation(() => {
       throw new Error('history items failed after commit');
     });
@@ -1163,6 +1350,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -1187,8 +1375,8 @@ describe('useResumeCommand', () => {
     expect(config.startNewSession).toHaveBeenCalledTimes(1);
     // Never an abort (which would drop the committed session's replay), and
     // the catch's settle ran on top of the forward commit.
-    expect(geminiClient.abortTelemetrySwap).not.toHaveBeenCalled();
-    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(llmClient.abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledTimes(2);
 
     // The slot is free for the next swap: NOT rejected with "already in
     // progress".
@@ -1196,7 +1384,7 @@ describe('useResumeCommand', () => {
     await act(async () => {
       await result.current.handleResume('session-2');
     });
-    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(llmClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
     expect(historyManager.addItem).not.toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('already in progress'),

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { formatMemoryUsage } from './formatters.js';
+import { escapeJsonTagCharacters, formatMemoryUsage } from './formatters.js';
 
 describe('formatMemoryUsage', () => {
   it.each([
@@ -40,5 +40,25 @@ describe('formatMemoryUsage', () => {
     [1024 * 1024 - 100, '1023.9 KB'],
   ])('keeps %d in its own unit', (bytes, expected) => {
     expect(formatMemoryUsage(bytes)).toBe(expected);
+  });
+});
+
+describe('escapeJsonTagCharacters', () => {
+  it('escapes JSON tag boundary characters without changing parse result', () => {
+    const value = {
+      text: '</function><script>alert("x")</script>',
+      comparison: 'a < b && c > d',
+      ampersand: 'Tom & Jerry',
+    };
+
+    const json = JSON.stringify(value);
+    const escaped = escapeJsonTagCharacters(json);
+
+    expect(escaped).not.toContain('<');
+    expect(escaped).not.toContain('>');
+    expect(escaped).not.toContain('&');
+    expect(escaped).toContain('\\u003c/function\\u003e');
+    expect(escaped).toContain('\\u0026');
+    expect(JSON.parse(escaped)).toEqual(value);
   });
 });

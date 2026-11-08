@@ -17,9 +17,10 @@ active chat session.
   MCP management page.
 - Selecting a skill opens its details in the same page.
 - Returning from details preserves the active scope filter and search query.
-- The details page exposes the daemon's per-skill enable/disable action. Skills
-  that are not user-invocable cannot be toggled; extension skills can be
-  toggled unless their parent extension is inactive.
+- The details page exposes the daemon's per-skill settings action. Runtime
+  catalog metadata such as user invocability and parent Extension activation
+  does not gate workspace declaration writes; authoritative availability may
+  remain unchanged after a successful write.
 - “Reference skill” returns to chat and places `/<skill-name>` in the composer
   without submitting it.
 - The list header exposes an Upload action for GitHub, daemon-local folder, and

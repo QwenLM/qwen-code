@@ -1,5 +1,14 @@
 # Session writer lease P0a
 
+> **Conversations-runtime update (2026-09-06):**
+> [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
+> is implemented by [#10924](https://github.com/QwenLM/qwen-code/pull/10924)'s
+> mandatory writer fences and [#11207](https://github.com/QwenLM/qwen-code/pull/11207)'s
+> global-owner cutover. Every writer hosted by Conversations uses this lease
+> independently of the experimental setting, with hardened local stale recovery
+> restricted to the same identity domain, including boot and PID namespace on
+> Linux. Other ACP, interactive, and headless gates remain unchanged.
+
 ## Problem
 
 A persisted session can currently be loaded by a second Qwen process while the original process is still producing and recording a turn. Both recorders cache the same parent UUID. When they append independently, the JSONL transcript gains two unmarked children from that parent. Resume follows the physical tail and can therefore hide the first process's complete answer.
@@ -21,7 +30,7 @@ P0a establishes one cross-process writer for each ACP/daemon `(runtime base, ses
 
 P0a does not make session switching, rewind, branch/fork, working-directory migration, archive/delete/rename maintenance, or transcript repair transactional. It also does not introduce an initializing registry entry that serializes every same-daemon load/resume against close; a repeated load reuses the owner after that owner is registered, while the cross-process lease still rejects a second writer during initialization. Full load/close outcome coalescing belongs to P0b. Session switching and persistence-root migration fail closed while an ACP Config owns a lease. ACP's logical working-directory change remains supported because it keeps the recorder and SessionService bound to the original persistence root. Same-owner rewind loads through that Config-pinned SessionService under the recorder write barrier; rename and branch retain their existing recorder or flush-before-copy paths. Daemon archive/delete and maintenance of non-live sessions retain their existing semantics. Concurrent maintenance from outside the live owner remains unsupported and is part of the P0b boundary. Interactive and headless CLI recorders retain their existing unleased behavior so `/clear`, `/resume`, `/branch`, and `/cd` do not regress; they must not write the same session concurrently with an ACP owner until P0b broadens the protocol.
 
-The protocol is gated by `experimental.sessionWriterLease` and is disabled by default. The effective value is snapshotted from the bootstrap Config when the ACP child starts and remains fixed for every session served by that process; per-session settings reloads cannot change it. Enabling it requires a process restart. The setting affects only ACP/daemon recorders; interactive and headless recorders continue to use the legacy path even when the setting is enabled.
+For ACP/daemon recorders outside Conversations, the protocol is gated by `experimental.sessionWriterLease` and is disabled by default. Conversations-hosted writers always use the lease regardless of that setting. The effective value is snapshotted from the bootstrap Config when the ACP child starts and remains fixed for every session served by that process; per-session settings reloads cannot change it. Enabling it requires a process restart. The setting affects only ACP/daemon recorders; interactive and headless recorders continue to use the legacy path even when the setting is enabled.
 
 ## Invariants
 

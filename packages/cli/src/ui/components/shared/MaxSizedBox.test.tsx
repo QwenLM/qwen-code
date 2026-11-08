@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type React from 'react';
 import { render } from 'ink-testing-library';
-import { OverflowProvider } from '../../contexts/OverflowContext.js';
+import {
+  OverflowProvider,
+  useOverflowState,
+} from '../../contexts/OverflowContext.js';
 import { MaxSizedBox, setMaxSizedBoxDebugging } from './MaxSizedBox.js';
 import { Box, Text } from 'ink';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { getScreenBuffer } from '../../selection/screen-buffer.js';
 import { getSelectedText } from '../../selection/selection-text.js';
 
@@ -552,5 +556,124 @@ Line 3 direct child`);
     expect(gutters).toEqual(
       Array.from({ length: gutters.length }, (_, i) => i + 1),
     );
+  });
+});
+
+const OverflowProbe: React.FC = () => {
+  const state = useOverflowState();
+  return <Text>{`overflowing:${state ? state.overflowingIds.size : -1}`}</Text>;
+};
+
+// ink flushes the post-effect re-render on its own throttle, which can take
+// longer than any fixed sleep under load, so poll for the expected frame
+// with a bounded timeout instead (repo convention; see AuthDialog.test.tsx).
+const WAIT_FOR_OPTIONS = { timeout: 2000, interval: 10 };
+
+describe('<MaxSizedBox /> overflow registration (#10640)', () => {
+  it('registers overflow so the ctrl+s hint shows when lines are hidden', async () => {
+    const { lastFrame } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('... first 2 lines hidden ...');
+    }, WAIT_FOR_OPTIONS);
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('overflowing:1');
+    }, WAIT_FOR_OPTIONS);
+  });
+
+  it('keeps the hidden-lines marker but skips registration when registerOverflow is false', async () => {
+    const { lastFrame } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2} registerOverflow={false}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('... first 2 lines hidden ...');
+    }, WAIT_FOR_OPTIONS);
+    // Negative assertion: the registration must never land, and
+    // waitFor-toContain cannot prove an absence (it passes trivially while
+    // the content stays missing). Poll a bounded window instead, failing
+    // fast if the probe ever flips to 1, then assert it stayed at zero.
+    const deadline = Date.now() + 300;
+    while (Date.now() < deadline) {
+      expect(lastFrame()).not.toContain('overflowing:1');
+      await new Promise((resolve) =>
+        setTimeout(resolve, WAIT_FOR_OPTIONS.interval),
+      );
+    }
+    // Truncation and its marker are unchanged ...
+    expect(lastFrame()).toContain('... first 2 lines hidden ...');
+    expect(lastFrame()).toContain('Line 3');
+    // ... but the box no longer advertises lines to the ctrl+s hint.
+    expect(lastFrame()).toContain('overflowing:0');
+  });
+
+  it('drops a stale registration when registerOverflow flips to false', async () => {
+    const { lastFrame, rerender } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('overflowing:1');
+    }, WAIT_FOR_OPTIONS);
+
+    rerender(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2} registerOverflow={false}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    // The probe showed overflowing:1 above, so polling down to zero waits
+    // for a real transition (the stale registration being dropped).
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('overflowing:0');
+    }, WAIT_FOR_OPTIONS);
   });
 });

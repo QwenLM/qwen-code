@@ -20,6 +20,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { summarizeReplayEvent } from './replay-summary.js';
+import {
+  isAvailableCommandsEvent,
+  omitAvailableSkillDetails,
+} from './available-commands-retention.js';
+
+export { omitAvailableSkillDetails } from './available-commands-retention.js';
 
 export interface SessionReplaySnapshot {
   compactedTurns: BridgeEvent[];
@@ -160,6 +167,7 @@ export type EventBusSubscriberDiagnostic =
     };
 
 export interface EventBusOptions {
+  maxRingBytes?: number;
   maxQueuedBytes?: number;
   /**
    * Total serialized-byte budget for the `Last-Event-ID` replay burst a
@@ -187,19 +195,29 @@ export interface EventBusOptions {
 const DEFAULT_MAX_QUEUED = 256;
 export const DEFAULT_MAX_QUEUED_BYTES = 2 * 1024 * 1024;
 export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
+export const DEFAULT_RING_MAX_BYTES = 8 * 1024 * 1024;
+export const MAX_RING_MAX_BYTES = 256 * 1024 * 1024;
+
+export function normalizeMaxRingBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_RING_MAX_BYTES;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_RING_MAX_BYTES) {
+    throw new TypeError(
+      `Invalid eventRingMaxBytes: ${value}. Must be a positive safe integer no larger than ${MAX_RING_MAX_BYTES}.`,
+    );
+  }
+  return value;
+}
 /**
  * Default replay-ring depth per session. Sized for a 5-second
  * reconnect window over a chatty turn — a single long-running prompt
  * can emit hundreds of frames (test plan reports 13 for a short
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
- * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set for chatty Stage 1
- * sessions, with ~30–60× headroom over a typical-but-busy turn at
- * the cost of a few hundred KB of RAM per session. Operators can
- * override per-daemon via `qwen serve --event-ring-size <n>`.
+ * be exhausted by a moderate turn before the client reconnected.
+ * 8000 is the current daemon design target; operators with very
+ * long agentic turns can raise it via `qwen serve --event-ring-size <n>`.
  */
-export const DEFAULT_RING_SIZE = 8000;
+export const DEFAULT_RING_SIZE = 8_000;
 /**
  * Fraction of the frame and byte caps at which a `slow_client_warning`
  * synthetic frame is force-pushed to the at-risk subscriber. The warning
@@ -260,6 +278,53 @@ export function serializedBridgeEventByteLength(
   } catch {
     return undefined;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The over-budget degrade for an MCP App frame: blank the optional HTML,
+ * keep the text result. `html: ''` is the renderer's degrade sentinel
+ * (the App iframe mounts only when `html` is non-empty), so a frame whose
+ * `fallbackText` is empty would degrade to zero renderable content —
+ * those are left to the byte cap's eviction, which keeps the original
+ * resumable from the replay ring. Matches both `tool_call_update` (live
+ * delivery) and `tool_call` (the compacted replay window normalizes to
+ * it) so the replay window can apply the same degrade.
+ */
+export function mcpAppTextFallback(
+  event: BridgeEvent,
+): BridgeEvent | undefined {
+  if (event.type !== 'session_update' || !isRecord(event.data))
+    return undefined;
+  const update = event.data['update'];
+  if (
+    !isRecord(update) ||
+    (update['sessionUpdate'] !== 'tool_call_update' &&
+      update['sessionUpdate'] !== 'tool_call')
+  ) {
+    return undefined;
+  }
+  const output = update['rawOutput'];
+  if (
+    !isRecord(output) ||
+    output['type'] !== 'mcp_app' ||
+    typeof output['html'] !== 'string' ||
+    !output['html'] ||
+    typeof output['fallbackText'] !== 'string' ||
+    !output['fallbackText']
+  ) {
+    return undefined;
+  }
+  return {
+    ...event,
+    data: {
+      ...event.data,
+      update: { ...update, rawOutput: { ...output, html: '' } },
+    },
+  };
 }
 
 export function logEventSizingFailed(type: string): void {
@@ -385,7 +450,12 @@ export class EventBus {
   readonly epoch: string = randomUUID();
   private compactionDegraded = false;
   private readonly onCompactionError?: (err: unknown) => void;
-  private readonly ring: BridgeEvent[] = [];
+  private readonly ring: Array<{ event: BridgeEvent; bytes: number }> = [];
+  private ringBytes = 0;
+  private ringEvictedEvents = 0;
+  private ringEvictedBytes = 0;
+  private latestAvailableCommands?: { event: BridgeEvent; bytes: number };
+  private readonly maxRingBytes: number;
   private readonly subs = new Set<InternalSub>();
   private readonly maxQueuedBytes: number;
   private readonly replayBudgetBytes: number;
@@ -397,6 +467,7 @@ export class EventBus {
     private readonly compactionEngine?: CompactionEngine,
     opts: EventBusOptions = {},
   ) {
+    this.maxRingBytes = normalizeMaxRingBytes(opts.maxRingBytes);
     this.maxQueuedBytes = normalizeMaxQueuedBytes(opts.maxQueuedBytes);
     this.replayBudgetBytes = normalizeReplayBudgetBytes(opts.replayBudgetBytes);
     this.onCompactionError = opts.onCompactionError;
@@ -406,10 +477,17 @@ export class EventBus {
     liveReplayMode: LiveReplayMode = 'full',
   ): SessionReplaySnapshot | undefined {
     const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
-    if (snapshot && this.compactionDegraded) {
-      return { ...snapshot, degraded: true };
-    }
-    return snapshot;
+    if (!snapshot) return undefined;
+    return {
+      ...snapshot,
+      compactedTurns: snapshot.compactedTurns.map((event) =>
+        this.restoreLatestCommandSnapshot(event),
+      ),
+      liveJournal: snapshot.liveJournal.map((event) =>
+        this.restoreLatestCommandSnapshot(event),
+      ),
+      ...(this.compactionDegraded ? { degraded: true as const } : {}),
+    };
   }
 
   /**
@@ -421,7 +499,9 @@ export class EventBus {
   liveJournalSnapshot(
     liveReplayMode: LiveReplayMode = 'full',
   ): BridgeEvent[] | undefined {
-    return this.compactionEngine?.liveJournalSnapshot?.(liveReplayMode);
+    return this.compactionEngine
+      ?.liveJournalSnapshot?.(liveReplayMode)
+      .map((event) => this.restoreLatestCommandSnapshot(event));
   }
 
   /**
@@ -460,6 +540,57 @@ export class EventBus {
     return this.subs.size;
   }
 
+  retentionSnapshot(): {
+    ringCount: number;
+    ringBytes: number;
+    earliestEventId?: number;
+    evictedEvents: number;
+    evictedBytes: number;
+    availableCommandsSnapshotBytes: number;
+  } {
+    return {
+      ringCount: this.ring.length,
+      ringBytes: this.retainedBytes(),
+      ...(this.ring[0]?.event.id !== undefined
+        ? { earliestEventId: this.ring[0].event.id }
+        : {}),
+      evictedEvents: this.ringEvictedEvents,
+      evictedBytes: this.ringEvictedBytes,
+      availableCommandsSnapshotBytes: this.latestAvailableCommands?.bytes ?? 0,
+    };
+  }
+
+  private retainedBytes(): number {
+    return this.ringBytes + (this.latestAvailableCommands?.bytes ?? 0);
+  }
+
+  private restoreLatestCommandSnapshot(event: BridgeEvent): BridgeEvent {
+    const latest = this.latestAvailableCommands;
+    return latest && latest.event.id === event.id ? latest.event : event;
+  }
+
+  private retainCommandSnapshot(event: BridgeEvent): BridgeEvent {
+    const retained = omitAvailableSkillDetails(event);
+    if (isAvailableCommandsEvent(event)) {
+      this.latestAvailableCommands =
+        retained === event
+          ? undefined
+          : { event, bytes: serializedBridgeEventByteLength(event) ?? 0 };
+    }
+    return retained;
+  }
+
+  private clearRetention(): void {
+    this.ring.length = 0;
+    this.ringBytes = 0;
+    this.latestAvailableCommands = undefined;
+  }
+
+  resetReplay(): void {
+    this.compactionEngine?.seedReplayEvents([]);
+    this.clearRetention();
+  }
+
   seedReplayEvents(
     inputs: Array<Omit<BridgeEvent, 'id' | 'v'>>,
   ): BridgeEvent[] {
@@ -480,9 +611,14 @@ export class EventBus {
       };
       events.push(event);
     }
+    this.clearRetention();
     try {
-      this.compactionEngine?.seedReplayEvents(events);
+      const retainedEvents = events.map((event) =>
+        this.retainCommandSnapshot(event),
+      );
+      this.compactionEngine?.seedReplayEvents(retainedEvents);
     } catch (err) {
+      this.latestAvailableCommands = undefined;
       // CompactionEngine is best-effort; mirror publish()'s never-throws
       // contract for bulk replay seeding. Mark the snapshot degraded so
       // consumers stop trusting it silently (DAEMON-008).
@@ -493,18 +629,24 @@ export class EventBus {
     // partially retained ring would no longer be a contiguous suffix of all ids
     // this bus produced, so clear it and let subscribe() surface resync for
     // stale cursors.
-    this.ring.length = 0;
     return events;
+  }
+
+  private eventDetailMode: LiveReplayMode = 'full';
+
+  setEventDetailMode(mode: LiveReplayMode): void {
+    this.eventDetailMode = mode;
   }
 
   /**
    * Publish an event to the bus. Returns the constructed `BridgeEvent`
-   * (with `id` + `v` assigned) on success, or `undefined` when the
-   * bus is closed.
+   * (with `id` + `v` assigned) on success, or `undefined` when the bus
+   * is closed, the event is unserializable, or summary mode filters it.
+   * Filtering is a normal no-op; rejected events do not consume an ID.
    *
-   * **Never throws** (never-throws contract). Closing the bus mid-publish
-   * is the only abnormal path and is handled as a return-undefined
-   * no-op; subscriber-enqueue failures are caught internally and
+   * **Never throws** (never-throws contract). Closed-bus and unserializable
+   * events are handled as return-undefined no-ops;
+   * subscriber-enqueue failures are caught internally and
    * translated to per-subscriber eviction. Call sites can rely on
    * this — the historical `try { publish(...) } catch {}` blocks in
    * `httpAcpBridge.ts` are defense-in-depth, not load-bearing, and
@@ -525,7 +667,7 @@ export class EventBus {
     // to anyway.
     if (this.closed) return undefined;
     const existingMeta = input._meta;
-    const event: BridgeEvent = {
+    let event: BridgeEvent = {
       // Read WITHOUT incrementing: a rejected event must not burn an id —
       // other subscribers would see a sequence gap (3 → 5) that resume
       // logic misreads as ring eviction. `nextId` advances only after the
@@ -538,6 +680,11 @@ export class EventBus {
         serverTimestamp: getServerTimestamp(existingMeta),
       },
     };
+    if (this.eventDetailMode === 'summary') {
+      const projected = summarizeReplayEvent(event);
+      if (!projected) return undefined;
+      event = projected;
+    }
     // Eager sizing doubles as the serializability gate (DAEMON-011): an
     // event JSON.stringify cannot represent would bypass every byte cap
     // at weight 0 and then fail at SSE send time anyway. Reject it here —
@@ -551,10 +698,33 @@ export class EventBus {
       logEventSizingFailed(event.type);
       return undefined;
     }
-    this.nextId += 1;
-    this.ring.push(event);
+    let retained: BridgeEvent;
+    let retainedBytes: number | undefined;
+    let commandSnapshot: boolean;
     try {
-      this.compactionEngine?.ingest(event, eventBytes);
+      retained = omitAvailableSkillDetails(event);
+      commandSnapshot = isAvailableCommandsEvent(event);
+      retainedBytes =
+        retained === event
+          ? eventBytes
+          : serializedBridgeEventByteLength(retained);
+    } catch {
+      logEventSizingFailed(event.type);
+      return undefined;
+    }
+    if (retainedBytes === undefined) {
+      logEventSizingFailed(event.type);
+      return undefined;
+    }
+    if (commandSnapshot) {
+      this.latestAvailableCommands =
+        retained === event ? undefined : { event, bytes: eventBytes };
+    }
+    this.nextId += 1;
+    this.ring.push({ event: retained, bytes: retainedBytes });
+    this.ringBytes += retainedBytes;
+    try {
+      this.compactionEngine?.ingest(retained, retainedBytes);
     } catch (err) {
       // CompactionEngine is best-effort; a throw must not break the
       // publish() never-throws contract (never-throws). Mark the snapshot
@@ -568,14 +738,30 @@ export class EventBus {
     // would push it to O(1) but adds index bookkeeping; deferred until
     // profiling actually flags it, or the operator bumps
     // `--event-ring-size` to an order of magnitude larger.
-    if (this.ring.length > this.ringSize) this.ring.shift();
+    while (
+      this.ring.length > this.ringSize ||
+      (this.retainedBytes() > this.maxRingBytes && this.ring.length > 1)
+    ) {
+      const dropped = this.ring.shift()!;
+      this.ringBytes -= dropped.bytes;
+      this.ringEvictedEvents += 1;
+      this.ringEvictedBytes += dropped.bytes;
+    }
     const getEventBytes = () => eventBytes;
     // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
     // (the new immediate-eviction cleanup below) doesn't mutate the
     // Set we're iterating.
     for (const sub of Array.from(this.subs)) {
       if (sub.evicted) continue;
-      const pushResult = sub.queue.push(event, getEventBytes);
+      const pushResult = sub.queue.push(event, getEventBytes, () => {
+        // Only queued subscribers lose optional HTML; direct delivery and
+        // the replay ring retain the original App. Keep both queue caps.
+        const fallback = mcpAppTextFallback(event);
+        const bytes = fallback && serializedBridgeEventByteLength(fallback);
+        return fallback && bytes !== undefined
+          ? { value: fallback, bytes }
+          : undefined;
+      });
       if (!pushResult.ok) {
         sub.evicted = true;
         // Synthetic terminal frame: NO `id` field. Otherwise it would
@@ -826,11 +1012,11 @@ export class EventBus {
             // Ring is typically empty right after a restart; fall back to
             // `nextId` (the first id this epoch will assign) so the field
             // stays meaningful ("fresh sequence starts here").
-            earliestAvailableId: this.ring[0]?.id ?? this.nextId,
+            earliestAvailableId: this.ring[0]?.event.id ?? this.nextId,
           },
         });
       } else {
-        const earliestInRing = this.ring[0]?.id;
+        const earliestInRing = this.ring[0]?.event.id;
         if (
           earliestInRing === undefined &&
           opts.lastEventId < this.nextId - 1
@@ -876,7 +1062,8 @@ export class EventBus {
       let lastReplayedId: number | undefined;
       let replayBytes = 0;
       let budgetExceededAtId: number | undefined;
-      for (const e of this.ring) {
+      for (const entry of this.ring) {
+        const e = this.restoreLatestCommandSnapshot(entry.event);
         // The ring only ever contains live events (publish() always
         // assigns an id before pushing to ring), so `e.id` is never
         // undefined here — but the type system can't see that since
@@ -1025,6 +1212,7 @@ export class EventBus {
       sub.dispose();
     }
     this.subs.clear();
+    this.clearRetention();
     this.compactionEngine?.close();
   }
 }
@@ -1123,7 +1311,11 @@ class BoundedAsyncQueue<T> {
     return this.liveBytes;
   }
 
-  push(value: T, getBytes: () => number): PushResult {
+  push(
+    value: T,
+    getBytes: () => number,
+    fallback?: () => { value: T; bytes: number } | undefined,
+  ): PushResult {
     if (this.closed) {
       return {
         ok: false,
@@ -1150,7 +1342,20 @@ class BoundedAsyncQueue<T> {
         liveBytes: this.liveBytes,
       };
     }
-    const bytes = getBytes();
+    let bytes = getBytes();
+    const reduced =
+      this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes
+        ? fallback?.()
+        : undefined;
+    if (reduced) {
+      value = reduced.value;
+      bytes = reduced.bytes;
+    }
+    // First-item rule: an empty queue admits one over-budget frame
+    // without degrading it (parity with the replay path's `replayedCount > 0`
+    // guarantee). A subscriber with an empty backlog is keeping up;
+    // evicting it buys nothing — the ring keeps the original frame and a
+    // resume would replay the identical bytes.
     if (this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes) {
       return {
         ok: false,

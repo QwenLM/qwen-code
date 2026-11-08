@@ -3,12 +3,15 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
 import { makeSwapSlotClient } from '../../test-utils/mock-swap-slot-client.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { ModSession } from '../../services/mod-session.js';
 
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
@@ -26,6 +29,7 @@ describe('useBranchCommand', () => {
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
+  let seedPromptCount: ReturnType<typeof vi.fn>;
   let clearPendingState: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
@@ -50,6 +54,7 @@ describe('useBranchCommand', () => {
   let workflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
+    listStartingRunIds: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
@@ -62,6 +67,7 @@ describe('useBranchCommand', () => {
     settings: mockSettings,
     historyManager: { clearItems, loadHistory, addItem },
     startNewSession: startNewSessionUI,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -103,6 +109,7 @@ describe('useBranchCommand', () => {
     startNewSessionConfig = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
+    seedPromptCount = vi.fn();
     clearPendingState = vi.fn();
     clearItems = vi.fn();
     loadHistory = vi.fn();
@@ -126,6 +133,7 @@ describe('useBranchCommand', () => {
     workflowRunRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
       list: vi.fn().mockReturnValue([]),
+      listStartingRunIds: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
       abortAll: vi.fn(),
     };
@@ -144,7 +152,7 @@ describe('useBranchCommand', () => {
         flush,
         getCurrentCustomTitle,
       }),
-      getGeminiClient: () => ({ initialize: vi.fn() }),
+      getLlmClient: () => ({ initialize: vi.fn() }),
       getBackgroundTaskRegistry: () => backgroundTaskRegistry,
       getMonitorRegistry: () => monitorRegistry,
       getBackgroundShellRegistry: () => backgroundShellRegistry,
@@ -153,6 +161,108 @@ describe('useBranchCommand', () => {
       getGoalRuntimeReady,
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
+  });
+
+  it('waits for the mode snapshot under the swap latch before forking', async () => {
+    const client = makeSwapSlotClient();
+    client.initialize.mockRejectedValueOnce(new Error('destination failed'));
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: true,
+      turns: 0,
+    };
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const restore = vi.fn();
+    Object.assign(config, {
+      getLlmClient: () => client,
+      captureWorkflowModeState: async () => {
+        expect(client.isTelemetrySwapInProgress()).toBe(true);
+        await held;
+        return snapshot;
+      },
+      restoreWorkflowModeState: restore,
+    });
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handleBranch();
+    });
+    const forksBeforeSnapshot = forkSession.mock.calls.length;
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(forksBeforeSnapshot).toBe(0);
+    expect(restore).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(client.isTelemetrySwapInProgress()).toBe(false);
+  });
+
+  it.each([
+    'rollback-init',
+    'forward-old',
+    'forward-target',
+    'before-invalidate',
+  ])('restores eligible Mod ownership after %s', async (mode) => {
+    let sessionId = config.getSessionId();
+    const oldSessionId = sessionId;
+    Object.assign(config, {
+      getSessionId: () => sessionId,
+      isInteractive: () => true,
+    });
+    const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+    const old = owner.captureToolSignal();
+    const restore = vi.fn(() => owner.restoreTools());
+    const binding = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue({
+        invalidateTools: () => owner.invalidateTools(),
+        restoreTools: restore,
+        syncSession: vi.fn(),
+      } as unknown as interactiveMods.InteractiveModSession);
+    const settle = vi.fn(() => {
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+    });
+    const client = {
+      beginTelemetrySwap: () => true,
+      abortTelemetrySwap: settle,
+      commitTelemetrySwap: settle,
+      initialize: vi.fn(async () => {
+        throw new Error('init failed');
+      }),
+    };
+    startNewSessionConfig.mockImplementation((id) => {
+      if (!id) throw new Error('missing session ID');
+      if (mode === 'forward-old')
+        throw new Error('start failed before mutation');
+      sessionId = id;
+      if (mode === 'forward-target')
+        throw new Error('start failed after mutation');
+      return sessionId;
+    });
+    config.getLlmClient = () => client;
+    if (mode === 'before-invalidate')
+      forkSession.mockRejectedValue(new Error('fork failed'));
+    try {
+      const { result } = renderHook(() => useBranchCommand(makeOptions()));
+      await act(async () => {
+        await result.current.handleBranch('recovery');
+      });
+      const renew = mode === 'rollback-init' || mode === 'forward-old';
+      expect(restore).toHaveBeenCalledTimes(renew ? 1 : 0);
+      expect(old.aborted).toBe(mode !== 'before-invalidate');
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+      if (renew) expect(owner.captureToolSignal()).not.toBe(old);
+      else expect(owner.captureToolSignal()).toBe(old);
+      expect(sessionId === oldSessionId).toBe(mode !== 'forward-target');
+      expect(settle).toHaveBeenCalledOnce();
+    } finally {
+      binding.mockRestore();
+      await owner.close();
+    }
   });
 
   it('refuses to branch while background work is running', async () => {
@@ -183,6 +293,69 @@ describe('useBranchCommand', () => {
     expect(blockedItem.type).toBe('error');
     expect(blockedItem.text).toContain('running background tasks');
     expect(blockedItem.text).toContain('[bg_ab12cd34]');
+  });
+
+  it.each([false, true])(
+    'synchronizes Mods only after a committed branch (failed: %s)',
+    async (failed) => {
+      const syncSession = vi.fn().mockResolvedValue(undefined);
+      const binding = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          syncSession,
+          invalidateTools: vi.fn(),
+          restoreTools: vi.fn().mockResolvedValue(undefined),
+        } as unknown as interactiveMods.InteractiveModSession);
+      if (failed)
+        getGoalRuntimeReady.mockRejectedValueOnce(new Error('invalid branch'));
+      try {
+        const { result } = renderHook(() => useBranchCommand(makeOptions()));
+        await act(async () => {
+          await result.current.handleBranch('mod-lifecycle');
+        });
+        if (failed) {
+          expect(syncSession).not.toHaveBeenCalled();
+          expect(startNewSessionUI).not.toHaveBeenCalled();
+        } else {
+          expect(binding).toHaveBeenCalledWith(config);
+          expect(syncSession).toHaveBeenCalledExactlyOnceWith('resume');
+          expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
+            syncSession.mock.invocationCallOrder[0],
+          );
+        }
+      } finally {
+        binding.mockRestore();
+      }
+    },
+  );
+
+  it('seeds the prompt counter past the forked transcript claims', async () => {
+    // The fork's records are remapped to the new session id by forkSession;
+    // startNewSession reinstalls promptCount 0, so without a seed the next
+    // pre-increment mint re-uses an id the forked transcript still wears.
+    // The seed is highestClaim + 1, computed against the NEW session id, and
+    // must land AFTER the stats reset.
+    loadSession.mockImplementation(async (id: string) => ({
+      conversation: {
+        messages: [0, 1].map((turn) => ({
+          ...userRecord(`turn ${turn}`),
+          sessionId: id,
+          promptId: `${id}########${turn}`,
+        })),
+      },
+      filePath: '/tmp/new.jsonl',
+      lastCompletedUuid: 'u2',
+    }));
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('seeded');
+    });
+
+    expect(seedPromptCount).toHaveBeenCalledWith(2);
+    expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
+      seedPromptCount.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('clears terminal background state after the branch initializes', async () => {
@@ -543,9 +716,9 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('initializes GeminiClient with SessionStartSource.Branch', async () => {
+  it('initializes LlmClient with SessionStartSource.Branch', async () => {
     const initialize = vi.fn().mockResolvedValue(undefined);
-    config.getGeminiClient = () => ({ initialize });
+    config.getLlmClient = () => ({ initialize });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -629,7 +802,7 @@ describe('useBranchCommand', () => {
     const beginTelemetrySwap = vi.fn().mockReturnValue(false);
     const commitTelemetrySwap = vi.fn();
     const abortTelemetrySwap = vi.fn();
-    config.getGeminiClient = () => ({
+    config.getLlmClient = () => ({
       initialize: vi.fn(),
       beginTelemetrySwap,
       commitTelemetrySwap,
@@ -667,8 +840,8 @@ describe('useBranchCommand', () => {
     // there is an optional-chained no-op — observe the release through a
     // stateful slot fake instead.
     forkSession.mockRejectedValue(new Error('disk full'));
-    const geminiClient = makeSwapSlotClient();
-    config.getGeminiClient = () => geminiClient;
+    const llmClient = makeSwapSlotClient();
+    config.getLlmClient = () => llmClient;
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -687,8 +860,8 @@ describe('useBranchCommand', () => {
     );
     // ...and the catch settled (committed, never aborted) the transaction
     // this attempt opened.
-    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
-    expect(geminiClient.abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.abortTelemetrySwap).not.toHaveBeenCalled();
 
     // The released slot admits the next attempt: the retry is NOT rejected
     // with "already in progress" and completes the full swap.
@@ -699,7 +872,7 @@ describe('useBranchCommand', () => {
     await act(async () => {
       await result.current.handleBranch('x');
     });
-    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(llmClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
     expect(addItem).not.toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('already in progress'),
@@ -755,9 +928,9 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
   });
 
-  it('rolls core back to the parent session when getGeminiClient().initialize() rejects after swap', async () => {
+  it('rolls core back to the parent session when getLlmClient().initialize() rejects after swap', async () => {
     // The reviewer's scenario: config.startNewSession succeeds (core is now
-    // on the fork), but then getGeminiClient().initialize() rejects. Without
+    // on the fork), but then getLlmClient().initialize() rejects. Without
     // rollback, core stays on the fork while UI is still on the parent, so
     // the recorder silently writes subsequent user input into an orphan
     // JSONL. This test pins the rollback invariant — after the failure core
@@ -779,11 +952,11 @@ describe('useBranchCommand', () => {
       sid === oldSessionId ? parentResumed : forkResumed,
     );
 
-    const geminiClient = makeSwapSlotClient();
-    geminiClient.initialize
+    const llmClient = makeSwapSlotClient();
+    llmClient.initialize
       .mockRejectedValueOnce(new Error('init boom')) // fork init fails
       .mockResolvedValueOnce(undefined); // rollback re-init succeeds
-    config.getGeminiClient = () => geminiClient;
+    config.getLlmClient = () => llmClient;
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -803,16 +976,16 @@ describe('useBranchCommand', () => {
     );
     // Client was re-initialized after rollback so chat history re-hydrates
     // against the parent session.
-    expect(geminiClient.initialize).toHaveBeenCalledTimes(2);
+    expect(llmClient.initialize).toHaveBeenCalledTimes(2);
     // The rollback aborted the transaction this attempt opened — never
     // committed it. The true return is safe to assert here: initialize ran
     // during the open transaction, so the real client armed an undo and
     // also returns true — unlike the open-but-unarmed shape, which the
     // slot fake over-approximates (#9844 review; see
     // mock-swap-slot-client.ts).
-    expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
-    expect(geminiClient.abortTelemetrySwap).toHaveReturnedWith(true);
-    expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
+    expect(llmClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.abortTelemetrySwap).toHaveReturnedWith(true);
+    expect(llmClient.commitTelemetrySwap).not.toHaveBeenCalled();
     // UI never switched — no cleared history, no UI sessionId swap.
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
@@ -847,7 +1020,7 @@ describe('useBranchCommand', () => {
       .fn()
       .mockRejectedValueOnce(new Error('init boom'))
       .mockRejectedValueOnce(new Error('rollback boom'));
-    config.getGeminiClient = () => ({ initialize });
+    config.getLlmClient = () => ({ initialize });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {

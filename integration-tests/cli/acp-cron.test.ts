@@ -74,6 +74,20 @@ type PermissionRequest = {
   }>;
 };
 
+const CRON_CREATE_INSTRUCTION = 'Call cron_create with cron expression';
+
+function isCronCreateRequest(body: Record<string, unknown>): boolean {
+  const messages = body['messages'];
+  const latestMessage = Array.isArray(messages) ? messages.at(-1) : undefined;
+  return (
+    typeof latestMessage === 'object' &&
+    latestMessage !== null &&
+    'role' in latestMessage &&
+    latestMessage.role === 'user' &&
+    JSON.stringify(latestMessage)?.includes(CRON_CREATE_INSTRUCTION) === true
+  );
+}
+
 /**
  * Sets up an ACP test environment with cron support enabled, backed by
  * a fake-openai-server for deterministic model responses.
@@ -400,14 +414,8 @@ async function initSession(
       const rig = new TestRig();
       await rig.setup('acp-cron-e2e');
 
-      // Only requestIndex 0 is load-bearing: it returns the cron_create
-      // tool call. The CLI makes internal model calls (tool-call
-      // classification, suggestion mode) between user-facing turns, so
-      // later indices do not map 1:1 to the prompts sent below. No
-      // assertion reads scripted response content, so the default reply
-      // suffices for every other turn.
-      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        if (requestIndex === 0) {
+      const fakeServer = await startFakeOpenAIServer(({ body }) => {
+        if (isCronCreateRequest(body)) {
           return {
             toolCalls: [
               fakeToolCall('cron_create', {
@@ -440,14 +448,12 @@ async function initSession(
           })) as { stopReason: string };
           expect(createResult.stopReason).toBe('end_turn');
 
-          // Fail fast if the cron_create tool call was not served to the first
-          // user prompt. An internal model call before the first prompt (title
-          // generation, a classifier pass) would shift dispatch and otherwise
-          // surface only as an opaque 75s timeout in Part 3a.
+          // Fail fast instead of surfacing a missing tool call as an opaque
+          // 75s timeout in Part 3a.
           expect(
-            JSON.stringify(fakeServer.requests[0]?.body['messages']),
-            'requestIndex 0 was not the cron_create prompt — dispatch shifted',
-          ).toContain('CRONFIRE7742');
+            fakeServer.requests.some(({ body }) => isCronCreateRequest(body)),
+            'fake server did not receive the cron_create prompt',
+          ).toBe(true);
 
           // --- Part 2: Session stays responsive while cron is pending ---
           const interactiveResult = (await sendRequest('session/prompt', {

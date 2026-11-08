@@ -94,6 +94,10 @@ function formatAuth(info: ExtendedSystemInfo): string {
     return '';
   }
 
+  if (info.selectedAuthType === 'qwen-subscription') {
+    return 'Qwen Subscription';
+  }
+
   const managedProvider = findProviderByCredentials(
     info.baseUrl,
     info.apiKeyEnvKey,
@@ -134,7 +138,7 @@ function formatProxy(proxy?: string): string {
   return redactProxy(proxy);
 }
 
-function redactProxy(proxy: string): string {
+export function redactProxy(proxy: string): string {
   try {
     const url = new URL(proxy);
     if (url.username || url.password) {

@@ -256,6 +256,7 @@ export const directoryCommand: SlashCommand = {
                   context.services.settings.merged.context?.importFormat ||
                     'tree',
                   config.getContextRuleExcludes(),
+                  { extensionRuleSources: config.getExtensionRuleSources() },
                 );
                 config.setUserMemory(memoryContent);
                 config.setMemoryFileCount(fileCount);
@@ -281,7 +282,7 @@ export const directoryCommand: SlashCommand = {
           }
 
           if (added.length > 0) {
-            const gemini = config.getGeminiClient();
+            const gemini = config.getLlmClient();
             if (gemini) {
               try {
                 await gemini.addDirectoryContext();

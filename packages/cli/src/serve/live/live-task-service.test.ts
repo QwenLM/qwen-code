@@ -307,7 +307,7 @@ function makeHarness() {
     async (sessionId: string) => `/conversations/${sessionId}`,
   );
   const standaloneSessionService = {
-    get: vi.fn(async (targetSessionId: string) => {
+    getForInternalTask: vi.fn(async (targetSessionId: string) => {
       const canonicalSessionId = normalizeSessionIdForLookup(targetSessionId);
       const storageSessionId = [...persistedSessions.keys()].find(
         (candidate) =>
@@ -379,7 +379,7 @@ function makeHarness() {
         workingDirectory: { state: 'ready' as const },
       }),
     ),
-    resume: vi.fn(async (sessionId: string) => {
+    resumeForInternalTask: vi.fn(async (sessionId: string) => {
       const canonicalSessionId = normalizeSessionIdForLookup(sessionId);
       resident.add(canonicalSessionId);
       return {
@@ -500,7 +500,9 @@ describe('LiveTaskService', () => {
     };
     persistedSessions.set(sessionId, persisted(sessionId));
     persistedSessionOwners.set(sessionId, '/project');
-    harness.standaloneSessionService.get.mockRejectedValueOnce(makeError());
+    harness.standaloneSessionService.getForInternalTask.mockRejectedValueOnce(
+      makeError(),
+    );
     listWorkspaceSessionsForResponse.mockResolvedValue({
       sessions: [summary],
     });
@@ -838,6 +840,138 @@ describe('LiveTaskService', () => {
     ]);
   });
 
+  it('does not wake on a background terminal while the user prompt is active', async () => {
+    const harness = makeHarness();
+    harness.summaries.set('task-1', {
+      sessionId: 'task-1',
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      clientCount: 1,
+      hasActivePrompt: true,
+    });
+    harness.resident.add('task-1');
+    persistedSessions.set('task-1', persisted('task-1'));
+    const originalSubscribe = harness.bridge.subscribeEvents;
+    vi.spyOn(harness.bridge, 'subscribeEvents').mockImplementation(
+      async function* (sessionId, options) {
+        yield {
+          v: 1,
+          eventId: 8,
+          type: 'turn_complete',
+          sessionId,
+          timestamp: '2026-07-30T00:00:05.000Z',
+          data: {
+            promptId: 'background-1',
+            backgroundTurn: { turnId: 'background-1' },
+          },
+        };
+        yield* originalSubscribe(sessionId, options);
+      },
+    );
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: { targets: [{ threadId: 'task-1' }], timeoutMs: 20 },
+    });
+    expect(result).toMatchObject({ timedOut: true });
+    expect(result['wake']).toBeNull();
+  });
+
+  it('wakes when the background turn was the only remaining active work', async () => {
+    const harness = makeHarness();
+    const backgroundTurn = {
+      turnId: 'background-1',
+      taskId: 'agent-1',
+      kind: 'agent' as const,
+      startedAt: 1_785_369_603_000,
+    };
+    const summary: BridgeSessionSummary = {
+      sessionId: 'task-1',
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      clientCount: 1,
+      hasActivePrompt: true,
+      backgroundTurn,
+    };
+    harness.summaries.set('task-1', summary);
+    harness.resident.add('task-1');
+    persistedSessions.set('task-1', persisted('task-1'));
+    const originalSubscribe = harness.bridge.subscribeEvents;
+    vi.spyOn(harness.bridge, 'subscribeEvents').mockImplementation(
+      async function* (sessionId, options) {
+        harness.summaries.set('task-1', {
+          ...summary,
+          hasActivePrompt: false,
+          backgroundTurn: undefined,
+        });
+        yield {
+          v: 1,
+          eventId: 8,
+          type: 'turn_complete',
+          sessionId,
+          timestamp: '2026-07-30T00:00:05.000Z',
+          data: { promptId: backgroundTurn.turnId, backgroundTurn },
+        };
+        yield* originalSubscribe(sessionId, options);
+      },
+    );
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: { targets: [{ threadId: 'task-1' }], timeoutMs: 20 },
+    });
+    expect(result).toMatchObject({
+      timedOut: false,
+      wake: { reason: 'turnCompleted', threadId: 'task-1', hostId: 'local' },
+    });
+  });
+
+  it('wakes on a background terminal when the session left the bridge mid-stream', async () => {
+    const harness = makeHarness();
+    const backgroundTurn = {
+      turnId: 'background-1',
+      taskId: 'agent-1',
+      kind: 'agent' as const,
+      startedAt: 1_785_369_603_000,
+    };
+    harness.summaries.set('task-1', {
+      sessionId: 'task-1',
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      clientCount: 1,
+      hasActivePrompt: true,
+      backgroundTurn,
+    });
+    harness.resident.add('task-1');
+    persistedSessions.set('task-1', persisted('task-1'));
+    const originalSubscribe = harness.bridge.subscribeEvents;
+    vi.spyOn(harness.bridge, 'subscribeEvents').mockImplementation(
+      async function* (sessionId, options) {
+        // The session leaves the bridge after the wait has subscribed; the
+        // wake-suppression summary lookup then throws SessionNotFoundError.
+        harness.resident.delete('task-1');
+        yield {
+          v: 1,
+          eventId: 8,
+          type: 'turn_complete',
+          sessionId,
+          timestamp: '2026-07-30T00:00:05.000Z',
+          data: { promptId: backgroundTurn.turnId, backgroundTurn },
+        };
+        yield* originalSubscribe(sessionId, options);
+      },
+    );
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: { targets: [{ threadId: 'task-1' }], timeoutMs: 20 },
+    });
+    expect(result).toMatchObject({
+      timedOut: false,
+      wake: { reason: 'turnCompleted', threadId: 'task-1', hostId: 'local' },
+    });
+  });
+
   it('returns inactive snapshots and per-target errors without creating tasks', async () => {
     const harness = makeHarness();
     const summary: BridgeSessionSummary = {
@@ -1147,11 +1281,40 @@ describe('LiveTaskService', () => {
     });
 
     expect(result).toEqual({ threadId: 'task-1' });
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      'task-1',
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith('task-1');
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
+    expect(harness.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it('locates and resumes a cold child standalone task', async () => {
+    const harness = makeHarness();
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    persistedSessions.set(childSessionId, persisted(childSessionId));
+    persistedSessionOwners.set(childSessionId, '/conversations');
+    sessionSources.set(childSessionId, {
+      sourceType: 'standalone',
+      parentSessionId: '11111111-1111-4111-8111-111111111111',
+    });
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: childSessionId,
+        prompt: 'continue this child task',
+      },
+    });
+
+    expect(result).toEqual({ threadId: childSessionId });
+    expect(
+      harness.standaloneSessionService.getForInternalTask,
+    ).toHaveBeenCalledWith(childSessionId);
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith(childSessionId);
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
   });
 
@@ -1298,9 +1461,9 @@ describe('LiveTaskService', () => {
       },
     });
 
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      sessionId,
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith(sessionId);
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.materializeConversationDirectory).not.toHaveBeenCalled();
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
@@ -1370,9 +1533,9 @@ describe('LiveTaskService', () => {
       arguments: { threadId: 'task-1', prompt: 'continue standalone' },
     });
 
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      'task-1',
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith('task-1');
     expect(
       harness.standaloneSessionService.dispatchPrompt,
     ).toHaveBeenCalledWith('task-1', expect.any(Function));

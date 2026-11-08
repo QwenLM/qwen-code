@@ -9,14 +9,14 @@ use cua_driver_contract::{
     ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DoubleClickInput, DragInput,
     EndSessionInput, EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput,
     GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput,
-    GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput,
-    ListSessionsInput, ListSessionsOutput, ListWindowsInput, MoveCursorInput,
-    PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollInput, SessionOutput,
-    SessionStateOutput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput,
-    SetAgentCursorThemeInput, SetValueInput, SetWindowFrameInput, StartSessionInput,
-    StartSessionOutput, ToolInput, TypeTextInput, VerifyStateInput, VerifyStateOutput,
-    WindowClickInput, WindowDragInput, WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput,
-    WindowTypeTextInput,
+    GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, LaunchAppInput,
+    ListAppsInput, ListSessionsInput, ListSessionsOutput, ListWindowsInput, MoveCursorInput,
+    PasteInput, PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollInput,
+    SelectTextInput, SessionOutput, SessionStateOutput, SetAgentCursorEnabledInput,
+    SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetValueInput, SetWindowFrameInput,
+    StartSessionInput, StartSessionOutput, ToolInput, TypeTextInput, VerifyStateInput,
+    VerifyStateOutput, WindowClickInput, WindowDragInput, WindowHotkeyInput, WindowPressKeyInput,
+    WindowScrollInput, WindowTypeTextInput,
 };
 use cua_driver_core::daemon::{
     is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,
@@ -47,6 +47,18 @@ use remote::{DriverEnvelopeChannel, RemoteBoundSession, RemoteDriverClient};
 use runtime::RuntimeOptions;
 use service_session::ServiceSessionClient;
 use worker::{ActionCompletion, PrivateWorkerClient};
+
+/// Host event-loop liveness only; this does not expose desktop state.
+#[uniffi::export]
+pub fn native_ui_needs_pump() -> bool {
+    runtime::native_ui_needs_pump()
+}
+
+/// Constructor-scoped declaration by a host that services the native UI loop.
+#[uniffi::export]
+pub fn set_native_ui_host_available(available: bool) -> bool {
+    runtime::set_native_ui_host_available(available)
+}
 
 fn host_sessions_json_for_prefix(runtime_prefix: &str) -> Value {
     let sessions = cua_driver_core::session::list_session_snapshots_with_prefix(
@@ -412,7 +424,9 @@ pub struct RuntimeAuthorizationOptions {
     /// Deprecated alias for `compatibility_capability_manifest_path`.
     pub compatibility_bounded_manifest_path: Option<String>,
     pub unrestricted_acknowledged: bool,
+    /// Zero together with `max_idle_ttl_seconds` permits owner-lifetime sessions.
     pub max_session_ttl_seconds: u64,
+    /// Zero together with `max_session_ttl_seconds` permits owner-lifetime sessions.
     pub max_idle_ttl_seconds: u64,
 }
 
@@ -450,7 +464,9 @@ fn configured_driver_options_json(options: &ConfiguredDriverOptions) -> Value {
 pub struct TrustedSessionOptions {
     pub public_session: String,
     pub mode: SessionPermissionMode,
+    /// Zero together with `idle_ttl_seconds` binds the session to owner lifetime.
     pub ttl_seconds: u64,
+    /// Zero together with `ttl_seconds` disables idle expiration.
     pub idle_ttl_seconds: u64,
     #[uniffi(default = None)]
     pub capability_manifest_path: Option<String>,
@@ -619,6 +635,7 @@ macro_rules! desktop_tool_methods {
     ($callback:ident) => {
         $callback! {
             list_apps: ListAppsInput,
+            launch_app: LaunchAppInput,
             list_windows: ListWindowsInput,
             get_desktop_state: GetDesktopStateInput,
             get_window_state: GetWindowStateInput,
@@ -645,6 +662,8 @@ macro_rules! desktop_tool_methods {
             hotkey: HotkeyInput,
             window_hotkey: WindowHotkeyInput,
             set_value: SetValueInput,
+            paste: PasteInput,
+            select_text: SelectTextInput,
             perform_secondary_action: PerformSecondaryActionInput,
             set_agent_cursor_enabled: SetAgentCursorEnabledInput,
             set_agent_cursor_motion: SetAgentCursorMotionInput,
@@ -1190,8 +1209,8 @@ impl CuaDriver {
             cua_driver_core::session_authorization::SessionModeCeiling::for_trusted_sessions(
                 [mode],
                 mode == cua_driver_core::authorization::PermissionMode::Unrestricted,
-                std::time::Duration::from_secs(24 * 60 * 60),
-                std::time::Duration::from_secs(60 * 60),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
             )
             .map_err(|reason| DriverError::Configuration { reason })?;
         Ok(Arc::new(Self {
@@ -1270,6 +1289,18 @@ pub fn create_trusted_session(
     options: TrustedSessionOptions,
 ) -> Result<Arc<CuaDriverSession>, DriverError> {
     driver.create_trusted_session(options)
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn create_trusted_session_async(
+    driver: Arc<CuaDriver>,
+    options: TrustedSessionOptions,
+) -> Result<Arc<CuaDriverSession>, DriverError> {
+    tokio::task::spawn_blocking(move || driver.create_trusted_session(options))
+        .await
+        .map_err(|error| DriverError::Protocol {
+            reason: format!("join trusted session creation: {error}"),
+        })?
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -1468,6 +1499,10 @@ desktop_tool_methods!(define_session_desktop_tool_methods);
 
 #[uniffi::export(async_runtime = "tokio")]
 impl CuaDriverSession {
+    pub async fn close_async(&self) {
+        self.backend.close_async().await;
+    }
+
     pub async fn call_tool(
         &self,
         name: String,
@@ -1523,10 +1558,18 @@ impl CuaDriverSession {
         &self,
         input: EndSessionInput,
     ) -> Result<EndSessionOutput, DriverError> {
-        let result = self
-            .invoke_typed(EndSessionInput::TOOL_NAME, input)
-            .await?
-            .typed_success(EndSessionInput::TOOL_NAME);
+        let result = loop {
+            let result = self
+                .invoke_typed(EndSessionInput::TOOL_NAME, input.clone())
+                .await?
+                .typed_success(EndSessionInput::TOOL_NAME);
+            if !matches!(&result, Err(DriverError::Tool { error_code, .. }) if error_code == "session_cleanup_pending")
+            {
+                break result;
+            }
+            // Keep the bound handle alive until the in-flight native tail finishes.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
         self.backend.close_async().await;
         result
     }
@@ -1776,7 +1819,19 @@ fn normalize_result(tool: &str, raw: Value) -> Result<ToolResult, DriverError> {
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let action = if !is_error && cua_driver_core::action_record::is_action_tool(tool) {
+    let app_action =
+        structured.is_some_and(|value| value.get("computer_use") == Some(&serde_json::json!(1)));
+    if !is_error && app_action {
+        serde_json::from_value::<cua_driver_contract::computer_use::AppActionOutput>(
+            structured.unwrap().clone(),
+        )
+        .and_then(|value| value.validate().map_err(serde::de::Error::custom))
+        .map_err(|error| DriverError::Protocol {
+            reason: format!("{tool} returned an invalid Computer Use acknowledgement: {error}"),
+        })?;
+    }
+    let action = if !is_error && !app_action && cua_driver_core::action_record::is_action_tool(tool)
+    {
         let structured = structured.ok_or_else(|| DriverError::Protocol {
             reason: format!("{tool} response omitted ActionResult"),
         })?;
@@ -2061,9 +2116,11 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        for published in EXPORTED_TOOL_NAMES {
-            assert!(names.contains(published), "missing {published}");
+        for spec in cua_driver_contract::computer_use::tools() {
+            assert!(names.contains(spec.name), "missing {}", spec.name);
         }
+        assert!(!names.contains("start_recording"));
+        assert!(!names.contains("get_browser_state"));
 
         driver.shutdown().await.unwrap();
         driver.shutdown().await.unwrap();
@@ -2410,6 +2467,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_end_session_waits_for_native_tail_and_reports_cleanup_failure() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        for fail_cleanup in [false, true] {
+            let driver = configured_standard_driver();
+            let public = format!("pending-close-{}", uuid::Uuid::new_v4());
+            let session = driver
+                .create_trusted_session(TrustedSessionOptions {
+                    public_session: public.clone(),
+                    mode: SessionPermissionMode::Standard,
+                    ttl_seconds: 60,
+                    idle_ttl_seconds: 30,
+                    capability_manifest_path: None,
+                    bounded_manifest_path: None,
+                })
+                .unwrap();
+            let started = session
+                .call_tool("start_session".into(), "{}".into())
+                .await
+                .unwrap();
+            assert!(!started.is_error, "{}", started.text);
+            let snapshot = cua_driver_core::session::list_session_snapshots_with_prefix(
+                "__cua_runtime_",
+                std::time::Duration::from_secs(30),
+            )
+            .into_iter()
+            .find(|snapshot| snapshot.public_label.as_deref() == Some(public.as_str()))
+            .unwrap();
+            let tail = cua_driver_core::session::begin_session_dispatch(
+                &snapshot.runtime_id,
+                Some(&public),
+                &snapshot.owner_transport,
+                snapshot.implicit,
+                snapshot.transport,
+                snapshot.client_kind,
+            )
+            .unwrap();
+            let hook_session = snapshot.runtime_id.clone();
+            let cleanup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls = cleanup_calls.clone();
+            let hook = cua_driver_core::session::register_scoped_fallible_session_end_hook(
+                "typed-close-fixture",
+                move |ended| {
+                    if ended != hook_session {
+                        return Ok(());
+                    }
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if fail_cleanup {
+                        Err("synthetic final cleanup failure".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            let closing_session = session.clone();
+            let closing = tokio::spawn(async move {
+                closing_session
+                    .end_session(EndSessionInput { session: None })
+                    .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let returned_before_tail = closing.is_finished();
+            let cleanup_before_tail = cleanup_calls.load(std::sync::atomic::Ordering::SeqCst);
+            drop(tail);
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+                .await
+                .expect("end_session did not finish after native dispatch released")
+                .unwrap();
+            session.close();
+            driver.shutdown().await.unwrap();
+            drop(hook);
+            drop(session);
+            drop(driver);
+            assert!(
+                !returned_before_tail,
+                "returned a pending cleanup result as terminal"
+            );
+            assert_eq!(cleanup_before_tail, 0, "cleanup raced the native tail");
+            if fail_cleanup {
+                assert!(
+                    matches!(ended, Err(DriverError::Tool { error_code, .. }) if error_code == "session_cleanup_partial")
+                );
+            } else {
+                assert!(!ended.unwrap().active);
+                assert_eq!(cleanup_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_lifetime_trusted_session_has_no_timer_expiration() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        let driver = CuaDriver::create_configured(ConfiguredDriverOptions {
+            claude_code_compatibility: false,
+            authorization: RuntimeAuthorizationOptions {
+                allowed_modes: vec![SessionPermissionMode::Standard],
+                compatibility_mode: SessionPermissionMode::Standard,
+                compatibility_capability_manifest_path: None,
+                compatibility_bounded_manifest_path: None,
+                unrestricted_acknowledged: false,
+                max_session_ttl_seconds: 0,
+                max_idle_ttl_seconds: 0,
+            },
+        })
+        .unwrap();
+        let session = driver
+            .create_trusted_session(TrustedSessionOptions {
+                public_session: "owner-lifetime-session".into(),
+                mode: SessionPermissionMode::Standard,
+                ttl_seconds: 0,
+                idle_ttl_seconds: 0,
+                capability_manifest_path: None,
+                bounded_manifest_path: None,
+            })
+            .unwrap();
+
+        let started = session
+            .call_tool("start_session".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!started.is_error, "{}", started.text);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let inspected = session
+            .call_tool("get_session".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!inspected.is_error, "{}", inspected.text);
+        let lifecycle: Value =
+            serde_json::from_str(inspected.structured_json.as_deref().unwrap()).unwrap();
+        assert!(
+            lifecycle["expires_in_seconds"].as_u64().unwrap() > 24 * 60 * 60,
+            "owner-lifetime session inherited a finite default TTL: {lifecycle}"
+        );
+
+        session.close();
+        driver.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn trusted_session_can_rebind_its_public_label_after_close() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        let driver = configured_standard_driver();
+        let options = TrustedSessionOptions {
+            public_session: "trusted-reconnect".into(),
+            mode: SessionPermissionMode::Standard,
+            ttl_seconds: 60,
+            idle_ttl_seconds: 30,
+            capability_manifest_path: None,
+            bounded_manifest_path: None,
+        };
+        let first = driver.create_trusted_session(options.clone()).unwrap();
+        first.close();
+
+        let replacement = driver.create_trusted_session(options).unwrap();
+        let result = replacement
+            .call_tool("health_report".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.text);
+
+        replacement.close();
+        driver.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn authorization_expiry_in_one_runtime_does_not_affect_another() {
         let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
         let expiring = CuaDriver::create_configured(ConfiguredDriverOptions {
@@ -2452,7 +2673,10 @@ mod tests {
             .call_tool("health_report".into(), "{}".into())
             .await
             .unwrap();
-        assert_eq!(expired.error_code.as_deref(), Some("permission_denied"));
+        assert_eq!(
+            expired.error_code.as_deref(),
+            Some("authorization_context_expired")
+        );
         let live = stable_session
             .call_tool("health_report".into(), "{}".into())
             .await
@@ -2747,6 +2971,13 @@ mod tests {
             DriverError::Protocol { reason }
                 if reason.contains("omitted ActionResult")
         ));
+    }
+
+    #[test]
+    fn generic_app_action_acknowledgement_does_not_claim_a_legacy_action_effect() {
+        let result = normalize_result("click", serde_json::json!({"content":[{"type":"text","text":"Sent but not confirmed."}],"structuredContent":{"computer_use":1,"sent":true}})).unwrap();
+        assert!(result.action.is_none());
+        assert_eq!(result.text, "Sent but not confirmed.");
     }
 
     #[tokio::test]

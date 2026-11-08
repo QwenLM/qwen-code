@@ -222,12 +222,12 @@ export class AsyncHookRegistry {
     }
 
     hook.status = 'timeout';
-    hook.error = new Error(`Hook timed out after ${hook.timeout}ms`);
+    hook.error = new Error(`Hook timed out after ${hook.timeout / 1000}s`);
 
     // Add timeout message to outputs
     this.completedOutputs.push({
       type: 'warning',
-      message: `Async hook ${hook.hookName} timed out after ${hook.timeout}ms`,
+      message: `Async hook ${hook.hookName} timed out after ${hook.timeout / 1000}s`,
       hookName: hook.hookName,
       hookId,
       timestamp: Date.now(),

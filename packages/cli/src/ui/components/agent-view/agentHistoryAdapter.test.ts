@@ -27,7 +27,11 @@ const noApprovals = new Map<string, ToolCallConfirmationDetails>();
 function toolCallMsg(
   callId: string,
   toolName: string,
-  opts?: { description?: string; renderOutputAsMarkdown?: boolean },
+  opts?: {
+    description?: string;
+    renderOutputAsMarkdown?: boolean;
+    args?: Record<string, unknown>;
+  },
 ): AgentMessage {
   return msg('tool_call', `Tool call: ${toolName}`, {
     metadata: {
@@ -35,6 +39,7 @@ function toolCallMsg(
       toolName,
       description: opts?.description ?? '',
       renderOutputAsMarkdown: opts?.renderOutputAsMarkdown,
+      ...(opts?.args ? { args: opts.args } : {}),
     },
   });
 }
@@ -344,6 +349,21 @@ describe('agentMessagesToHistoryItems — tool metadata', () => {
       { type: 'tool_group' }
     >;
     expect(group.tools[0]!.renderOutputAsMarkdown).toBe(true);
+  });
+
+  it('forwards args from tool_call so ui.showToolCallArgs works in the agent view', () => {
+    // Without this the setting half-applies: the same call shows its args in
+    // the main transcript but silently never does inside the agent view.
+    const args = { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' };
+    const items = agentMessagesToHistoryItems(
+      [toolCallMsg('c1', 'replace', { args })],
+      noApprovals,
+    );
+    const group = items[0] as Extract<
+      (typeof items)[0],
+      { type: 'tool_group' }
+    >;
+    expect(group.tools[0]!.args).toEqual(args);
   });
 
   it('forwards description from tool_call', () => {

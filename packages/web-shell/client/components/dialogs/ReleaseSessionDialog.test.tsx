@@ -48,7 +48,7 @@ const initialSessions = sessions.slice();
 const releaseSessionMock = vi.fn().mockResolvedValue(undefined);
 let scopedSessionsOptions: unknown;
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
 }));
 
@@ -128,6 +128,9 @@ describe('ReleaseSessionDialog selection', () => {
     expect(scopedSessionsOptions).toEqual({
       autoLoad: true,
       maxAgeMs: 1_000,
+      pageSize: 1_000,
+      sourceType: null,
+      liveOnly: true,
     });
     // The dialog opens with no highlight at all; Enter has nothing to act on.
     expect(rows().some(isCursor)).toBe(false);
@@ -218,6 +221,76 @@ describe('ReleaseSessionDialog selection', () => {
     });
     expect(isConfirmed(rows()[3])).toBe(false);
     expect(dangerButton().disabled).toBe(true);
+  });
+
+  it('lists channel sessions without dropping existing live sources', async () => {
+    sessions.splice(
+      0,
+      sessions.length,
+      {
+        sessionId: 'channel-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Channel session',
+        sourceType: 'channel',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        sessionId: 'live-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Live session',
+        sourceType: 'qwen-live',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        sessionId: 'side-task-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Side task',
+        sourceType: 'side_task',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        sessionId: 'scheduled-task-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Scheduled task',
+        sourceType: 'scheduled_task',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        sessionId: 'standalone-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Standalone session',
+        sourceType: 'standalone',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        sessionId: 'agent-1',
+        workspaceCwd: '/work/repo',
+        displayName: 'Agent session',
+        sourceType: 'agent',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    );
+    releaseSessionMock.mockClear();
+    mount();
+
+    expect(rows()).toHaveLength(2);
+    expect(rows()[0].textContent).toContain('Channel session');
+    expect(rows()[1].textContent).toContain('Live session');
+    act(() => {
+      rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(dangerButton().disabled).toBe(false);
+    await act(async () => {
+      dangerButton().click();
+      await Promise.resolve();
+    });
+    expect(releaseSessionMock).toHaveBeenCalledWith('channel-1');
   });
 
   it('clears the confirmed target and disarms release when the filter changes', () => {

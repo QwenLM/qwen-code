@@ -4,12 +4,13 @@ import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
 import {
   useConnection,
   type DaemonSessionSummary,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 
 interface ReleaseSessionDialogProps {
   onReleased: (sessionId: string) => void;
@@ -20,6 +21,11 @@ interface ReleaseSessionDialogProps {
 
 const LIST_ID = 'release-session-list';
 const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
+
+// Channel sessions consume the workspace cap but are hidden from the normal
+// sidebar query; the release dialog must include them to free a slot. The
+// default sidebar filter also admits qwen-live, so preserve that here.
+const RELEASABLE_SOURCE_TYPES = new Set(['default', 'channel', 'qwen-live']);
 
 export function ReleaseSessionDialog({
   onReleased,
@@ -37,6 +43,12 @@ export function ReleaseSessionDialog({
   } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     maxAgeMs: 1_000,
+    // The daemon caps the live page at 100 rows. Request the shared max so a
+    // full workspace usually fits; above 100 live rows this dialog does not
+    // follow nextCursor.
+    pageSize: SESSION_LIST_PAGE_SIZE,
+    sourceType: null,
+    liveOnly: true,
   });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
@@ -57,8 +69,12 @@ export function ReleaseSessionDialog({
     if (sessionsError) setMessage(sessionsError.message);
   }, [sessionsError]);
 
+  const releaseCandidates = sessions.filter(
+    (s) =>
+      s.sourceType === undefined || RELEASABLE_SOURCE_TYPES.has(s.sourceType),
+  );
   const filtered = filterQuery
-    ? sessions.filter((s) => {
+    ? releaseCandidates.filter((s) => {
         const q = filterQuery.toLowerCase();
         return (
           (s.displayName || '').toLowerCase().includes(q) ||
@@ -66,7 +82,7 @@ export function ReleaseSessionDialog({
           sessionMatchesGitQuery(s, q)
         );
       })
-    : sessions;
+    : releaseCandidates;
 
   const confirmRow = (index: number) => {
     const session = filtered[index];

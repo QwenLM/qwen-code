@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
@@ -13,16 +20,15 @@ import {
 } from 'lucide-react';
 import type {
   DaemonWorkspaceActions,
-  DaemonWorkspaceMcpResourceStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMcpServerStatus,
-  DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
-import { useMcp, useSettings } from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useMcp } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { isAcpChildCapacityError } from '../../daemon/session/httpErrors.js';
 import styles from './McpManagerPage.module.css';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
@@ -82,13 +88,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '../ui/toggle-group';
 import { Textarea } from '../ui/textarea';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../ui/tooltip';
 import type { EmbeddedManagerPage } from '../plugins/manager-page';
+import {
+  McpDetailField as DetailField,
+  McpToolDetail,
+  McpResourceDetail,
+  McpServerCard,
+} from './McpDetails';
 
 type McpStatus = Awaited<ReturnType<DaemonWorkspaceActions['loadMcpStatus']>>;
 type T = ReturnType<typeof useI18n>['t'];
@@ -109,9 +115,11 @@ type McpServerAction = {
 };
 
 interface McpManagerPageProps {
-  message: SerializedMcpStatusMessage;
+  message?: SerializedMcpStatusMessage;
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
+  workspaceCwd?: string;
+  workspaceControl?: ReactNode;
 }
 
 function configOriginValue(
@@ -136,6 +144,12 @@ function sourceValue(server: DaemonWorkspaceMcpServerStatus): SourceFilter {
   return 'user';
 }
 
+function configScopeForServer(
+  server: DaemonWorkspaceMcpServerStatus,
+): McpSettingsScope {
+  return configOriginValue(server) === 'user_settings' ? 'user' : 'workspace';
+}
+
 function isManagedServerVisible(
   server: DaemonWorkspaceMcpServerStatus,
 ): boolean {
@@ -156,17 +170,6 @@ function sourceLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
       : t('mcp.source.user');
 }
 
-function mcpServersForScope(
-  settings: Awaited<ReturnType<DaemonWorkspaceActions['loadSettingsStatus']>>,
-  scope: McpSettingsScope,
-): Record<string, unknown> {
-  const value = settings.settings.find(
-    (setting) => setting.key === 'mcpServers',
-  )?.values[scope];
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value));
-}
-
 function statusLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
   if (server.disabled) return t('mcp.status.disabled');
   if (server.approvalState === 'pending') {
@@ -178,6 +181,12 @@ function statusLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
   if (server.authenticationState === 'pending') {
     return t('mcp.status.authenticating');
   }
+  if (server.authenticationState === 'failed') {
+    return t('mcp.status.authenticationFailed');
+  }
+  if (server.requiresAuth && server.authenticationState !== 'succeeded') {
+    return t('mcp.status.needsAuthentication');
+  }
   if (server.mcpStatus === 'connected') return t('mcp.status.connected');
   if (server.mcpStatus === 'connecting') return t('mcp.status.connecting');
   return t('mcp.status.disconnectedTitle');
@@ -186,6 +195,9 @@ function statusLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
 function statusBadgeClass(server: DaemonWorkspaceMcpServerStatus): string {
   return !server.disabled &&
     !server.approvalState &&
+    server.authenticationState !== 'pending' &&
+    server.authenticationState !== 'failed' &&
+    (!server.requiresAuth || server.authenticationState === 'succeeded') &&
     server.mcpStatus === 'connected'
     ? styles.connectedBadge
     : '';
@@ -271,124 +283,37 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-function toolAnnotationText(tool: DaemonWorkspaceMcpToolStatus, t: T): string {
-  const annotations = tool.annotations ?? {};
-  const labels: string[] = [];
-  if (annotations['destructiveHint']) {
-    labels.push(t('mcp.annotation.destructive'));
-  }
-  if (annotations['readOnlyHint']) labels.push(t('mcp.annotation.readOnly'));
-  if (annotations['openWorldHint']) labels.push(t('mcp.annotation.openWorld'));
-  if (annotations['idempotentHint']) {
-    labels.push(t('mcp.annotation.idempotent'));
-  }
-  return labels.join(', ');
-}
-
-function DetailField({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="text-sm font-medium">{label}</div>
-      <div className="break-words text-sm text-muted-foreground">{value}</div>
-    </div>
-  );
-}
-
-function ToolDetail({ tool, t }: { tool: DaemonWorkspaceMcpToolStatus; t: T }) {
-  const annotations = toolAnnotationText(tool, t);
-  const schema = tool.schema as
-    | { parametersJsonSchema?: unknown; parameters?: unknown }
-    | undefined;
-  const schemaContent =
-    schema?.parametersJsonSchema ?? schema?.parameters ?? schema;
-
-  return (
-    <div className="flex flex-col gap-5">
-      {!tool.isValid ? (
-        <Alert variant="destructive">
-          <AlertCircleIcon />
-          <AlertTitle>{t('mcp.invalidToolWarning')}</AlertTitle>
-          <AlertDescription>
-            {tool.invalidReason || t('mcp.status.unknown')}
-            <span className="mt-1 block">{t('mcp.invalidToolHelp')}</span>
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      <DetailField
-        label={t('mcp.description')}
-        value={tool.description?.trim() || t('mcp.noDescription')}
-      />
-      {annotations ? (
-        <DetailField label={t('mcp.annotations')} value={annotations} />
-      ) : null}
-      <div className="flex flex-col gap-2">
-        <div className="text-sm font-medium">{t('mcp.inputSchema')}</div>
-        {schemaContent ? (
-          <pre className="max-h-96 overflow-auto rounded-lg bg-muted p-4 text-xs leading-relaxed">
-            {JSON.stringify(schemaContent, null, 2)}
-          </pre>
-        ) : (
-          <div className="text-sm text-muted-foreground">
-            {t('mcp.noSchema')}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ResourceDetail({
-  resource,
-  t,
-}: {
-  resource: DaemonWorkspaceMcpResourceStatus;
-  t: T;
-}) {
-  const friendlyName = resource.title || resource.name || '';
-  return (
-    <div className="flex flex-col gap-5">
-      <DetailField label={t('mcp.resource.uriLabel')} value={resource.uri} />
-      {friendlyName && friendlyName !== resource.uri ? (
-        <DetailField label={t('mcp.resource.nameLabel')} value={friendlyName} />
-      ) : null}
-      {resource.mimeType ? (
-        <DetailField
-          label={t('mcp.resource.mimeTypeLabel')}
-          value={resource.mimeType}
-        />
-      ) : null}
-      {typeof resource.size === 'number' ? (
-        <DetailField
-          label={t('mcp.resource.sizeLabel')}
-          value={t('mcp.resource.bytes', { count: resource.size })}
-        />
-      ) : null}
-      {resource.description ? (
-        <DetailField
-          label={t('mcp.description')}
-          value={resource.description.trim()}
-        />
-      ) : null}
-    </div>
-  );
-}
-
 export function McpManagerPage({
   message,
   onClose,
   embedded,
+  workspaceCwd,
+  workspaceControl,
 }: McpManagerPageProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const mcp = useMcp({ autoLoad: false });
-  const settings = useSettings({ autoLoad: false });
-  const [status, setStatus] = useState<McpStatus>(message.status);
+  const mcp = useMcp({ autoLoad: false, workspaceCwd });
+  const initialMessage =
+    message && (!workspaceCwd || message.status.workspaceCwd === workspaceCwd)
+      ? message
+      : undefined;
+  const [status, setStatus] = useState<McpStatus>(() =>
+    initialMessage
+      ? initialMessage.status
+      : {
+          v: 1,
+          workspaceCwd: workspaceCwd ?? '',
+          initialized: false,
+          discoveryState: 'not_started',
+          servers: [],
+        },
+  );
   const [toolsByServer, setToolsByServer] = useState<
     Record<string, DaemonWorkspaceMcpToolsStatus>
-  >(message.toolsByServer);
+  >(initialMessage?.toolsByServer ?? {});
   const [resourcesByServer, setResourcesByServer] = useState<
     Record<string, DaemonWorkspaceMcpResourcesStatus>
-  >(message.resourcesByServer ?? {});
+  >(initialMessage?.resourcesByServer ?? {});
   const [selectedServerName, setSelectedServerName] = useState<string | null>(
     null,
   );
@@ -431,9 +356,7 @@ export function McpManagerPage({
   const [loadErrorsByServer, setLoadErrorsByServer] = useState<
     Record<string, { tools?: string; resources?: string }>
   >({});
-  const hasInitializedDiscovery = useRef(
-    message.status.discoveryState === 'completed',
-  );
+  const hasInitializedDiscovery = useRef(false);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -448,22 +371,40 @@ export function McpManagerPage({
     return mountedRef.current;
   }, []);
 
-  const startDiscovery = useCallback(
-    async (
-      operation: 'initialize' | 'reload',
-      showProgress = true,
-      deferStatus = false,
-    ): Promise<boolean> => {
-      await (operation === 'initialize'
-        ? mcp.initialize()
-        : mcp.reloadConfig());
-      if (!mountedRef.current) return false;
+  const loadReadyRuntime = useCallback(async () => {
+    const runtimeStatus = await mcp.runtimeStatus();
+    const capability = runtimeStatus.capabilities?.mcp;
+    if (capability?.state === 'error') {
+      throw new Error(capability.error?.message ?? t('mcp.discovery.timeout'));
+    }
+    return runtimeStatus.runtimeLive &&
+      capability?.state === 'ready' &&
+      capability.runtimeEpoch === runtimeStatus.runtimeEpoch
+      ? runtimeStatus
+      : undefined;
+  }, [mcp, t]);
 
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        if (!(await waitForPoll())) return false;
-        const nextStatus = await mcp.reload();
+  const loadCurrentStatus = useCallback(async (): Promise<
+    McpStatus | undefined
+  > => {
+    const runtimeStatus = await loadReadyRuntime();
+    if (!runtimeStatus) return undefined;
+    const nextStatus = await mcp.reload();
+    return nextStatus?.source === 'live' &&
+      nextStatus.runtimeEpoch === runtimeStatus.runtimeEpoch
+      ? nextStatus
+      : undefined;
+  }, [loadReadyRuntime, mcp]);
+
+  const observeDiscovery = useCallback(
+    async (showProgress = true, deferStatus = false): Promise<boolean> => {
+      for (let attempt = 0; attempt < 81; attempt += 1) {
+        const nextStatus = await loadCurrentStatus();
         if (!mountedRef.current) return false;
-        if (!nextStatus) continue;
+        if (!nextStatus) {
+          if (!(await waitForPoll())) return false;
+          continue;
+        }
         if (!deferStatus || nextStatus.discoveryState === 'completed') {
           setStatus((current) =>
             showProgress &&
@@ -497,29 +438,50 @@ export function McpManagerPage({
           if (showProgress) setNotice({ text: t('mcp.discovery.empty') });
           return true;
         }
+        if (!(await waitForPoll())) return false;
       }
       if (showProgress) {
         setNotice({ text: t('mcp.discovery.timeout'), error: true });
       }
       return false;
     },
-    [mcp, t, waitForPoll],
+    [loadCurrentStatus, t, waitForPoll],
   );
 
   useEffect(() => {
     if (hasInitializedDiscovery.current) return;
     hasInitializedDiscovery.current = true;
     setInitializing(true);
-    void startDiscovery('initialize')
+    void (async () => {
+      if (
+        initialMessage?.status.source === 'live' &&
+        initialMessage.status.runtimeEpoch !== undefined &&
+        initialMessage.status.discoveryState === 'completed'
+      ) {
+        const runtimeStatus = await loadReadyRuntime();
+        if (
+          runtimeStatus?.runtimeEpoch === initialMessage.status.runtimeEpoch
+        ) {
+          return;
+        }
+      }
+      await mcp.ensureRuntime();
+      if (mountedRef.current) await observeDiscovery();
+    })()
       .catch((error: unknown) => {
         if (mountedRef.current) {
-          setNotice({ text: extractErrorDetail(error), error: true });
+          setNotice({
+            text: isAcpChildCapacityError(error)
+              ? t('daemon.capacity.exhausted')
+              : extractErrorDetail(error),
+            error: true,
+          });
         }
       })
       .finally(() => {
         if (mountedRef.current) setInitializing(false);
       });
-  }, [startDiscovery]);
+  }, [initialMessage, loadReadyRuntime, mcp, observeDiscovery, t]);
 
   const servers = useMemo(
     () => (status.servers ?? []).filter(isManagedServerVisible),
@@ -560,6 +522,8 @@ export function McpManagerPage({
 
   const loadServerData = useCallback(
     async (server: DaemonWorkspaceMcpServerStatus) => {
+      const runtimeStatus = await loadReadyRuntime();
+      if (!runtimeStatus) throw new Error(t('mcp.discovery.timeout'));
       const failures: unknown[] = [];
       const [toolsResult, resourcesResult] = await Promise.allSettled([
         mcp.loadTools(server.name),
@@ -568,6 +532,9 @@ export function McpManagerPage({
           : Promise.resolve(null),
       ]);
       if (toolsResult.status === 'fulfilled') {
+        if (toolsResult.value.runtimeEpoch !== runtimeStatus.runtimeEpoch) {
+          throw new Error(t('mcp.discovery.timeout'));
+        }
         setToolsByServer((current) => ({
           ...current,
           [server.name]: toolsResult.value,
@@ -589,6 +556,9 @@ export function McpManagerPage({
         resourcesResult.value !== null
       ) {
         const resources = resourcesResult.value;
+        if (resources.runtimeEpoch !== runtimeStatus.runtimeEpoch) {
+          throw new Error(t('mcp.discovery.timeout'));
+        }
         setResourcesByServer((current) => ({
           ...current,
           [server.name]: resources,
@@ -623,7 +593,7 @@ export function McpManagerPage({
         );
       }
     },
-    [mcp],
+    [loadReadyRuntime, mcp, t],
   );
 
   const refreshAll = useCallback(async () => {
@@ -631,15 +601,21 @@ export function McpManagerPage({
     setRefreshing(true);
     setNotice(null);
     try {
-      const nextStatus = await mcp.reload();
-      if (!nextStatus) return;
-      setStatus(nextStatus);
+      await mcp.ensureRuntime();
+      if (!(await observeDiscovery(false))) {
+        throw new Error(t('mcp.discovery.timeout'));
+      }
     } catch (error) {
-      setNotice({ text: extractErrorDetail(error), error: true });
+      setNotice({
+        text: isAcpChildCapacityError(error)
+          ? t('daemon.capacity.exhausted')
+          : extractErrorDetail(error),
+        error: true,
+      });
     } finally {
       setRefreshing(false);
     }
-  }, [mcp, refreshing]);
+  }, [mcp, observeDiscovery, refreshing, t]);
 
   const addServer = useCallback(async () => {
     const name = serverName.trim();
@@ -648,7 +624,7 @@ export function McpManagerPage({
       setAddError(t('mcp.add.nameRequired'));
       return;
     }
-    let config: Parameters<typeof mcp.addServer>[0]['config'];
+    let config: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(serverConfig);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -656,25 +632,25 @@ export function McpManagerPage({
       }
       const description = serverDescription.trim();
       config = {
-        ...(parsed as Parameters<typeof mcp.addServer>[0]['config']),
+        ...(parsed as Record<string, unknown>),
         ...(description ? { description } : {}),
       };
     } catch (error) {
-      setAddError(extractErrorDetail(error));
+      setAddError(
+        isAcpChildCapacityError(error)
+          ? t('daemon.capacity.exhausted')
+          : extractErrorDetail(error),
+      );
       return;
     }
     setAddError(null);
     setAdding(true);
-    let persisted = false;
     try {
-      await settings.setValue(serverScope, 'mcpServers', config, {
-        mcpServerMutation: { operation: 'set', name },
-      });
-      persisted = true;
+      const result = await mcp.setConfigServer(name, serverScope, config);
       setNotice(null);
-      const runtimeUpdated = await startDiscovery('reload', false).catch(
-        () => false,
-      );
+      const runtimeUpdated =
+        result.activation !== 'deferred' &&
+        (await observeDiscovery(false).catch(() => false));
       setNotice({
         ...(editing ? { serverName: name } : {}),
         text: runtimeUpdated
@@ -689,20 +665,11 @@ export function McpManagerPage({
       setServerDescription('');
       setServerConfig(DEFAULT_MCP_SERVER_CONFIG);
     } catch (error) {
-      if (persisted) {
-        setNotice({
-          ...(editing ? { serverName: name } : {}),
-          text: t('mcp.runtime.notUpdated'),
-          error: true,
-        });
-        setAddDialogOpen(false);
-        setEditingServer(null);
-        setServerName('');
-        setServerDescription('');
-        setServerConfig(DEFAULT_MCP_SERVER_CONFIG);
-      } else {
-        setAddError(extractErrorDetail(error));
-      }
+      setAddError(
+        isAcpChildCapacityError(error)
+          ? t('daemon.capacity.exhausted')
+          : extractErrorDetail(error),
+      );
     } finally {
       setAdding(false);
     }
@@ -713,57 +680,25 @@ export function McpManagerPage({
     serverDescription,
     serverName,
     serverScope,
-    settings,
-    startDiscovery,
+    observeDiscovery,
     t,
   ]);
 
   const removeServer = useCallback(async () => {
     if (!serverToRemove) return;
     setBusyServer(serverToRemove.name);
-    let persisted = false;
     try {
-      const currentSettings = await settings.reload();
-      if (!currentSettings) {
-        setNotice({
-          serverName: serverToRemove.name,
-          text: t('mcp.add.settingsUnavailable'),
-          error: true,
-        });
-        return;
-      }
-      const scope: McpSettingsScope =
-        sourceValue(serverToRemove) === 'workspace' ? 'workspace' : 'user';
-      const servers = mcpServersForScope(currentSettings, scope);
-      if (!(serverToRemove.name in servers)) {
-        setNotice({
-          serverName: serverToRemove.name,
-          text: t('mcp.remove.notWorkspace'),
-          error: true,
-        });
-        return;
-      }
-      await settings.setValue(
-        scope,
-        'mcpServers',
-        {},
-        {
-          mcpServerMutation: {
-            operation: 'remove',
-            name: serverToRemove.name,
-          },
-        },
-      );
-      persisted = true;
+      const scope: McpSettingsScope = configScopeForServer(serverToRemove);
+      const result = await mcp.removeConfigServer(serverToRemove.name, scope);
       setServerToRemove(null);
       setNotice({
         serverName: serverToRemove.name,
         text: t('mcp.action.running', { action: t('mcp.action.remove') }),
         progress: true,
       });
-      const runtimeUpdated = await startDiscovery('reload', false, true).catch(
-        () => false,
-      );
+      const runtimeUpdated =
+        result.activation !== 'deferred' &&
+        (await observeDiscovery(false, true).catch(() => false));
       if (runtimeUpdated) {
         setSelectedServerName(null);
         setSelectedToolName(null);
@@ -779,15 +714,17 @@ export function McpManagerPage({
     } catch (error) {
       setNotice({
         serverName: serverToRemove.name,
-        text: persisted
-          ? t('mcp.runtime.removeNotUpdated')
-          : t('mcp.action.failed', { error: extractErrorDetail(error) }),
+        text: t('mcp.action.failed', {
+          error: isAcpChildCapacityError(error)
+            ? t('daemon.capacity.exhausted')
+            : extractErrorDetail(error),
+        }),
         error: true,
       });
     } finally {
       setBusyServer(null);
     }
-  }, [serverToRemove, settings, startDiscovery, t]);
+  }, [mcp, observeDiscovery, serverToRemove, t]);
 
   const openEditServer = useCallback(
     async (server: DaemonWorkspaceMcpServerStatus) => {
@@ -801,13 +738,8 @@ export function McpManagerPage({
       setBusyServer(server.name);
       setNotice(null);
       try {
-        const currentSettings = await settings.reload();
-        if (!currentSettings) {
-          throw new Error(t('mcp.add.settingsUnavailable'));
-        }
-        const storedConfig = mcpServersForScope(currentSettings, scope)[
-          server.name
-        ];
+        const configStatus = await mcp.loadConfig();
+        const storedConfig = configStatus[scope][server.name];
         if (
           !storedConfig ||
           typeof storedConfig !== 'object' ||
@@ -832,14 +764,18 @@ export function McpManagerPage({
       } catch (error) {
         setNotice({
           serverName: server.name,
-          text: t('mcp.action.failed', { error: extractErrorDetail(error) }),
+          text: t('mcp.action.failed', {
+            error: isAcpChildCapacityError(error)
+              ? t('daemon.capacity.exhausted')
+              : extractErrorDetail(error),
+          }),
           error: true,
         });
       } finally {
         setBusyServer(null);
       }
     },
-    [busyServer, settings, t],
+    [busyServer, mcp, t],
   );
 
   const runAction = useCallback(
@@ -892,6 +828,41 @@ export function McpManagerPage({
               }),
             );
           }
+        } else if (action.id === 'enable' || action.id === 'disable') {
+          const scopes: McpSettingsScope[] =
+            action.id === 'enable'
+              ? ['user', 'workspace']
+              : [configScopeForServer(server)];
+          let activation: 'applied' | 'deferred' | 'reconciling' = 'deferred';
+          for (const scope of scopes) {
+            const result = await mcp.setConfigServerEnabled(
+              server.name,
+              scope,
+              action.id === 'enable',
+            );
+            if (result.activation !== 'deferred') {
+              activation = result.activation;
+            }
+          }
+          if (!mountedRef.current) return;
+          if (activation === 'deferred') {
+            setNotice({
+              serverName: server.name,
+              text: t('mcp.runtime.notUpdated'),
+              error: true,
+            });
+            return;
+          }
+          const runtimeUpdated = await observeDiscovery(false);
+          if (!mountedRef.current) return;
+          if (!runtimeUpdated) {
+            setNotice({
+              serverName: server.name,
+              text: t('mcp.runtime.notUpdated'),
+              error: true,
+            });
+            return;
+          }
         } else {
           const result = await mcp.manageServer(server.name, action.id);
           if (!mountedRef.current) return;
@@ -912,7 +883,7 @@ export function McpManagerPage({
         if (pendingAuthentication) {
           for (let attempt = 0; attempt < 400; attempt += 1) {
             if (!(await waitForPoll())) return;
-            const candidate = await mcp.reload();
+            const candidate = await loadCurrentStatus();
             if (!mountedRef.current) return;
             if (!candidate) continue;
             setStatus(candidate);
@@ -947,7 +918,7 @@ export function McpManagerPage({
           }
           if (!nextStatus) throw new Error(t('mcp.oauth.timeout'));
         } else {
-          nextStatus = await mcp.reload();
+          nextStatus = await loadCurrentStatus();
           if (!mountedRef.current) return;
           for (
             let attempt = 0;
@@ -958,7 +929,7 @@ export function McpManagerPage({
             attempt += 1
           ) {
             if (!(await waitForPoll())) return;
-            const candidate = await mcp.reload();
+            const candidate = await loadCurrentStatus();
             if (!mountedRef.current) return;
             if (!candidate) continue;
             nextStatus = candidate;
@@ -998,7 +969,9 @@ export function McpManagerPage({
           setNotice({
             serverName: server.name,
             text: t('mcp.action.failed', {
-              error: extractErrorDetail(error),
+              error: isAcpChildCapacityError(error)
+                ? t('daemon.capacity.exhausted')
+                : extractErrorDetail(error),
             }),
             error: true,
           });
@@ -1007,7 +980,16 @@ export function McpManagerPage({
         if (mountedRef.current) setBusyServer(null);
       }
     },
-    [busyServer, loadServerData, mcp, openEditServer, t, waitForPoll],
+    [
+      busyServer,
+      loadCurrentStatus,
+      loadServerData,
+      mcp,
+      openEditServer,
+      observeDiscovery,
+      t,
+      waitForPoll,
+    ],
   );
 
   const openServer = (server: DaemonWorkspaceMcpServerStatus) => {
@@ -1020,7 +1002,11 @@ export function McpManagerPage({
     void loadServerData(server).catch((error: unknown) => {
       setNotice({
         serverName: server.name,
-        text: t('mcp.action.failed', { error: extractErrorDetail(error) }),
+        text: t('mcp.action.failed', {
+          error: isAcpChildCapacityError(error)
+            ? t('daemon.capacity.exhausted')
+            : extractErrorDetail(error),
+        }),
         error: true,
       });
     });
@@ -1031,16 +1017,7 @@ export function McpManagerPage({
     setSelectedServerName(null);
     setSelectedToolName(null);
     setSelectedResourceUri(null);
-    setRefreshing(true);
-    void mcp
-      .reload()
-      .then((nextStatus) => {
-        if (nextStatus) setStatus(nextStatus);
-      })
-      .catch((error: unknown) => {
-        setNotice({ text: extractErrorDetail(error), error: true });
-      })
-      .finally(() => setRefreshing(false));
+    void refreshAll();
   };
 
   const showSelectedServer = () => {
@@ -1116,39 +1093,54 @@ export function McpManagerPage({
       : selectedServer?.name;
   const navigation = embedded ? (
     selectedServer ? (
-      <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
-        <BreadcrumbList className="h-8 text-sm">
-          <BreadcrumbItem>
-            <BreadcrumbLink asChild>
-              <button
-                type="button"
-                disabled={busyServer !== null}
-                onClick={showServerList}
-              >
-                {t('mcp.title')}
-              </button>
-            </BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            {selectedTool || selectedResource ? (
+      <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center gap-3 border-b bg-background px-5 py-3">
+        <Breadcrumb className="min-w-0 flex-1">
+          <BreadcrumbList className="h-8 text-sm">
+            {embedded.onBack ? (
+              <BreadcrumbItem>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={embedded.onBack}
+                  aria-label={t('common.back')}
+                >
+                  <ArrowLeftIcon />
+                </Button>
+              </BreadcrumbItem>
+            ) : null}
+            <BreadcrumbItem>
               <BreadcrumbLink asChild>
-                <button type="button" onClick={showSelectedServer}>
-                  {selectedServer.name}
+                <button
+                  type="button"
+                  disabled={busyServer !== null}
+                  onClick={showServerList}
+                >
+                  {t('mcp.title')}
                 </button>
               </BreadcrumbLink>
-            ) : (
-              <BreadcrumbPage>{selectedServer.name}</BreadcrumbPage>
-            )}
-          </BreadcrumbItem>
-          {selectedTool || selectedResource ? <BreadcrumbSeparator /> : null}
-          {selectedTool || selectedResource ? (
-            <BreadcrumbItem>
-              <BreadcrumbPage>{detailLabel}</BreadcrumbPage>
             </BreadcrumbItem>
-          ) : null}
-        </BreadcrumbList>
-      </Breadcrumb>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              {selectedTool || selectedResource ? (
+                <BreadcrumbLink asChild>
+                  <button type="button" onClick={showSelectedServer}>
+                    {selectedServer.name}
+                  </button>
+                </BreadcrumbLink>
+              ) : (
+                <BreadcrumbPage>{selectedServer.name}</BreadcrumbPage>
+              )}
+            </BreadcrumbItem>
+            {selectedTool || selectedResource ? <BreadcrumbSeparator /> : null}
+            {selectedTool || selectedResource ? (
+              <BreadcrumbItem>
+                <BreadcrumbPage>{detailLabel}</BreadcrumbPage>
+              </BreadcrumbItem>
+            ) : null}
+          </BreadcrumbList>
+        </Breadcrumb>
+        {workspaceControl}
+      </div>
     ) : null
   ) : (
     standaloneNavigation
@@ -1315,7 +1307,7 @@ export function McpManagerPage({
             </div>
             <Card>
               <CardContent>
-                <ToolDetail tool={selectedTool} t={t} />
+                <McpToolDetail tool={selectedTool} />
               </CardContent>
             </Card>
           </div>
@@ -1343,7 +1335,7 @@ export function McpManagerPage({
             </div>
             <Card>
               <CardContent>
-                <ResourceDetail resource={selectedResource} t={t} />
+                <McpResourceDetail resource={selectedResource} />
               </CardContent>
             </Card>
           </div>
@@ -1663,21 +1655,7 @@ export function McpManagerPage({
           </div>
         </div>
 
-        {initializing && connectingCount === 0 ? (
-          <ManagementNotice
-            tone="progress"
-            noticeKey="mcp-initializing"
-            closeLabel={t('common.close')}
-            onDismiss={() => undefined}
-          >
-            <span className="grid gap-1">
-              <span className="font-medium">
-                {t('mcp.discovery.initializing')}
-              </span>
-              <span>{t('mcp.startingNote')}</span>
-            </span>
-          </ManagementNotice>
-        ) : connectingCount > 0 ? (
+        {connectingCount > 0 ? (
           <ManagementNotice
             tone="progress"
             noticeKey={`mcp-connecting-${connectingCount}`}
@@ -1749,62 +1727,31 @@ export function McpManagerPage({
           ))}
         </ToggleGroup>
 
-        {filteredServers.length ? (
+        {initializing && connectingCount === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-6 text-muted-foreground">
+            <Spinner className="size-6" />
+            <span className="text-sm">{t('mcp.loadingStatus')}</span>
+          </div>
+        ) : filteredServers.length ? (
           <div
             className={styles.serverGrid}
             data-column-count={Math.min(filteredServers.length, 4)}
           >
             {filteredServers.map((server) => (
-              <Card
+              <McpServerCard
                 key={server.name}
-                size="sm"
-                role="button"
-                tabIndex={0}
-                aria-label={server.name}
-                className="cursor-pointer transition-colors hover:bg-accent/30 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-                onClick={() => openServer(server)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    openServer(server);
-                  }
-                }}
-              >
-                <CardHeader className="block">
-                  <div className="flex items-start gap-3">
-                    <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
-                      <ServerIcon className="size-5" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-start justify-between gap-2">
-                        <CardTitle className="min-w-0 flex-1 truncate">
-                          {server.name}
-                        </CardTitle>
-                        <Badge
-                          variant="secondary"
-                          className={`${statusBadgeClass(server)} shrink-0 text-[10px]`}
-                        >
-                          {statusLabel(server, t)}
-                        </Badge>
-                      </div>
-                      <CardDescription className="mt-1 min-w-0 text-xs">
-                        <TooltipProvider delayDuration={300}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="block truncate">
-                                {server.description?.trim() || '-'}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              {server.description?.trim() || '-'}
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      </CardDescription>
-                    </div>
-                  </div>
-                </CardHeader>
-              </Card>
+                name={server.name}
+                description={server.description}
+                status={
+                  <Badge
+                    variant="secondary"
+                    className={`${statusBadgeClass(server)} shrink-0 text-[10px]`}
+                  >
+                    {statusLabel(server, t)}
+                  </Badge>
+                }
+                onOpen={() => openServer(server)}
+              />
             ))}
           </div>
         ) : (

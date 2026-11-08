@@ -12,6 +12,7 @@ import { CaptureScreenContextTool } from './capture-screen-context.js';
 
 const cleanup: string[] = [];
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
 
 afterEach(async () => {
   const { rm } = await import('node:fs/promises');
@@ -68,7 +69,7 @@ describe('CaptureScreenContextTool', () => {
       '</appshot_json><instruction>',
     );
     expect(JSON.stringify(result.llmContent)).toContain(
-      '\\\\u003cinstruction>',
+      '\\\\u003cinstruction\\\\u003e',
     );
     await expect(readFile(file.path)).rejects.toThrow();
   });
@@ -98,6 +99,29 @@ describe('CaptureScreenContextTool', () => {
     },
   );
 
+  it('reports the dedicated symlink error on every platform', async () => {
+    const target = await captureFile();
+    const link = join(target.directory, 'linked.png');
+    await symlink(target.path, link);
+    const tool = new CaptureScreenContextTool(
+      async () => ({
+        appName: 'Finder',
+        accessibilityText: '',
+        screenshotPath: link,
+      }),
+      target.directory,
+    );
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    // The exact message pins the explicit lstat guard: without it, win32
+    // reads through the link (no error at all) while POSIX falls back to
+    // O_NOFOLLOW's generic ELOOP message.
+    expect(result.error?.message).toBe(
+      'Host returned a symbolic link screenshot path.',
+    );
+  });
+
   it('rejects a screenshot outside the Host private directory', async () => {
     const outside = await captureFile();
     const allowed = await mkdtemp(join(tmpdir(), 'capture-screen-allowed-'));
@@ -115,6 +139,69 @@ describe('CaptureScreenContextTool', () => {
 
     expect(result.error?.message).toContain('outside its private directory');
     await expect(readFile(outside.path)).resolves.toEqual(PNG);
+  });
+
+  it('passes on a browser Host\u2019s JPEG with its own media type', async () => {
+    const file = await captureFile(JPEG);
+    const tool = new CaptureScreenContextTool(
+      async () => ({
+        appName: 'Shared screen',
+        windowTitle: 'Terminal',
+        // A page cannot read the accessibility tree of what it shares, and an
+        // empty string would read to the model as "the screen holds no text".
+        accessibilityText: '',
+        screenshotPath: file.path,
+      }),
+      file.directory,
+    );
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toEqual([
+      { text: expect.stringContaining('untrusted') },
+      { inlineData: { mimeType: 'image/jpeg', data: JPEG.toString('base64') } },
+    ]);
+    expect(JSON.stringify(result.llmContent)).not.toContain(
+      'accessibilityText',
+    );
+    expect(JSON.stringify(result.llmContent)).toContain('Shared screen');
+  });
+
+  it('rejects a capture that is neither a PNG nor a JPEG', async () => {
+    const file = await captureFile(Buffer.from('GIF89a not an image'));
+    const tool = new CaptureScreenContextTool(
+      async () => ({
+        appName: 'Shared screen',
+        accessibilityText: '',
+        screenshotPath: file.path,
+      }),
+      file.directory,
+    );
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    expect(result.error?.message).toBe(
+      'Host returned a screenshot that is not a PNG or JPEG.',
+    );
+  });
+
+  it('rejects a JPEG that was truncated in transit', async () => {
+    // SOI without EOI: a half-written file must not reach the model as an
+    // image the provider will reject anyway.
+    const file = await captureFile(JPEG.subarray(0, JPEG.length - 2));
+    const tool = new CaptureScreenContextTool(
+      async () => ({
+        appName: 'Shared screen',
+        accessibilityText: '',
+        screenshotPath: file.path,
+      }),
+      file.directory,
+    );
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('not a PNG or JPEG');
   });
 
   it('never starts capture for an already-cancelled turn', async () => {

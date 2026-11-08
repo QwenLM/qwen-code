@@ -15,7 +15,9 @@ import {
 } from 'vitest';
 import yargs from 'yargs';
 import { join } from 'node:path';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import {
+  deadlineOption,
   parseArgsCommand,
   parseReviewArgs,
   tokenizeArgs,
@@ -23,6 +25,7 @@ import {
 } from './parse-args.js';
 import { reviewCommand } from '../review.js';
 import { reviewSourceRoots, reviewSourcesDigest } from './lib/stale-bundle.js';
+import { lastReviewEffortPath } from './lib/paths.js';
 import {
   FOREIGN_DIGEST,
   makeStaleBundleFixture,
@@ -32,6 +35,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 // The handler reads the raw string from fd 0 (`--stdin`) and writes the
 // verdict to `--out`; both are intercepted so the wiring tests below can run
@@ -39,23 +43,56 @@ import {
 const fsState = vi.hoisted(() => ({
   stdin: '',
   written: new Map<string, string>(),
+  effortReadError: undefined as Error | undefined,
 }));
+
+const ensureReviewTmpDirMock = vi.hoisted(() => vi.fn());
+vi.mock('./lib/paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/paths.js')>();
+  return { ...actual, ensureReviewTmpDir: ensureReviewTmpDirMock };
+});
 
 vi.mock('node:fs', async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
   const mock = {
     ...real,
-    readFileSync: vi.fn((path: unknown, ...rest: unknown[]) =>
-      path === 0
-        ? fsState.stdin
-        : (real['readFileSync'] as (...a: unknown[]) => unknown)(path, ...rest),
-    ),
+    readFileSync: vi.fn((path: unknown, ...rest: unknown[]) => {
+      if (path === 0) return fsState.stdin;
+      const key = String(path);
+      if (key.endsWith('review-last-effort')) {
+        if (fsState.effortReadError !== undefined) {
+          throw fsState.effortReadError;
+        }
+        return fsState.written.get(key);
+      }
+      return (real['readFileSync'] as (...a: unknown[]) => unknown)(
+        path,
+        ...rest,
+      );
+    }),
+    existsSync: vi.fn((path: unknown) => {
+      const key = String(path);
+      return key.endsWith('review-last-effort')
+        ? fsState.written.has(key)
+        : (real['existsSync'] as (path: unknown) => boolean)(path);
+    }),
     writeFileSync: vi.fn((path: unknown, data: unknown) => {
       fsState.written.set(String(path), String(data));
     }),
     mkdirSync: vi.fn(),
   };
   return { ...mock, default: mock };
+});
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    atomicWriteFileSync: vi.fn((path: unknown, data: unknown) => {
+      fsState.written.set(String(path), String(data));
+    }),
+  };
 });
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -242,6 +279,106 @@ const CASES: Case[] = [
     },
   },
   {
+    name: '--deadline is a capture-command option: consumed with its value, never a target',
+    raw: '--deadline 90',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline beside a real target leaves the target alone',
+    raw: '6711 --deadline 90',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline none (space form) is consumed with its value',
+    raw: '--deadline none',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline followed by a PR URL: the URL is not a deadline, so it stays the target',
+    raw: '--deadline https://github.com/QwenLM/qwen-code/pull/6711',
+    expect: {
+      targetType: 'pr-url',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline=<PR URL>: the value is not a deadline, so the disposal pool rescues it',
+    raw: '--deadline=https://github.com/QwenLM/qwen-code/pull/6711',
+    expect: {
+      targetType: 'pr-url',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline=<typo>: reported, never a target — the sibling flags’ `=` rule',
+    raw: '--deadline=90m',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline <typo> alone: disposed like an invalid --effort value (a sole file-shaped token survives)',
+    raw: '--deadline 90m',
+    expect: {
+      targetType: 'file',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline <typo> beside a real target: the typo is discarded, the target stands',
+    raw: '6711 --deadline 90m',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline=90 (equals form, valid value) is consumed — the bare number never reaches the target pool',
+    raw: '--deadline=90',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline=none is consumed whole; a following flag is not its value',
+    raw: '--deadline=none --deadline --comment 6711',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: true },
+      unknownFlags: ['--deadline', '--deadline'],
+      warningCount: 2,
+    },
+  },
+  {
     name: '--commentary is not --comment (substring guard)',
     raw: '6711 --commentary',
     expect: {
@@ -257,6 +394,196 @@ const CASES: Case[] = [
     expect: {
       targetType: 'pr-number',
       extraTokens: ['typo2'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose typed before a PR number never steals the target (re-review intent)',
+    raw: '有更新了，重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['有更新了，重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose alone stays a file target — fail-closed, never guessed into a PR',
+    raw: '有更新了，重新评审',
+    expect: {
+      targetType: 'file',
+      extraTokens: [],
+    },
+  },
+  {
+    name: 'an explicit path spelling of a number stays a file target',
+    raw: './6711',
+    expect: {
+      targetType: 'file',
+      extraTokens: [],
+    },
+  },
+  {
+    name: 'a PR number outranks a file path typed before it',
+    raw: 'src/foo.ts 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['src/foo.ts'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose beside a number and its URL: the URL wins, the number restates it',
+    raw: '重新评审 6711 https://github.com/QwenLM/qwen-code/pull/6711',
+    expect: {
+      targetType: 'pr-url',
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose before an Aone CR URL never steals the target',
+    raw: '重新评审 https://code.alibaba-inc.com/group/repo/codereview/12345',
+    expect: {
+      targetType: 'pr-url',
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'two different numbers with prose: the first PR-shaped wins, the rest disclosed',
+    raw: '有更新 6711 6712',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['有更新', '6712'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose as an invalid --effort value beside a number: the flag warning discloses it, the number is the target',
+    raw: '--effort 有更新 6711',
+    expect: {
+      targetType: 'pr-number',
+      effort: 'high',
+      extraTokens: [],
+      warningCount: 1,
+    },
+  },
+  {
+    // Review R2-1 on #15998: a promoted bare number never grants a public
+    // write — comment.effective stays false and the withholding is warned.
+    name: '--comment beside prose and a promoted number withholds posting authority',
+    raw: '--comment 重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: false },
+      promotedNumberTarget: true,
+      effort: 'high',
+      extraTokens: ['重新评审'],
+      // The promotion-withholding warning plus the disclosed prose extra.
+      warningCount: 2,
+    },
+  },
+  {
+    name: 'a number typed first keeps its posting authority (explicit target)',
+    raw: '6711 --comment',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: true },
+      promotedNumberTarget: false,
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
+  {
+    // Review R2-4 on #15998: the sentence's own trailing punctuation does
+    // not demote the number — the mark is normalised for classification
+    // only, and the original spelling stays in extraTokens.
+    name: 'a PR number carrying trailing sentence punctuation is still PR-shaped',
+    raw: '有更新了，重新评审 6711。',
+    expect: {
+      targetType: 'pr-number',
+      target: { type: 'pr-number', number: 6711 },
+      extraTokens: ['有更新了，重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'ASCII trailing punctuation normalises the same way',
+    raw: 're-review 6711.',
+    expect: {
+      targetType: 'pr-number',
+      target: { type: 'pr-number', number: 6711 },
+      extraTokens: ['re-review'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--resume beside prose and a number stays effective on the PR target',
+    raw: '--resume 重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      resume: { requested: true, effective: true },
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'an invalid URL beside a number never becomes the target',
+    raw: 'https://github.com/QwenLM/qwen-code/pull/42oops 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['https://github.com/QwenLM/qwen-code/pull/42oops'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'number-shaped prose (第6711号) is never guessed into a PR',
+    raw: '重新评审 第6711号',
+    expect: {
+      targetType: 'file',
+      extraTokens: ['第6711号'],
+      warningCount: 1,
+    },
+  },
+  {
+    // Verification F1 on #15998: a prose LOCAL-write request keeps fix
+    // effective on its file target — the routing clause's mechanical guard
+    // reads this verdict and must never resolve a PR into it.
+    name: 'prose local-write request keeps --fix effective (routing guard input)',
+    raw: 'review my local changes --fix',
+    expect: {
+      targetType: 'file',
+      target: { type: 'file', path: 'review' },
+      fix: { requested: true, effective: true },
+      extraTokens: ['my', 'local', 'changes'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'the same --fix on a PR target is ineffective (what resolution would do)',
+    raw: '15998 --fix',
+    expect: {
+      targetType: 'pr-number',
+      fix: { requested: true, effective: false },
+      extraTokens: [],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'a hash-prefixed number is not PR-shaped; the routing clause owns the rescue',
+    raw: '有更新了，重新评审 #15998',
+    expect: {
+      targetType: 'file',
+      extraTokens: ['#15998'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'the ./ escape hatch does not survive a second PR-shaped token',
+    raw: './6711 6712',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['./6711'],
       warningCount: 1,
     },
   },
@@ -278,6 +605,30 @@ const CASES: Case[] = [
       warningCount: 1,
     },
   },
+  {
+    // Review P2 on #15998: option-only invocations are supported local
+    // reviews. The skill's routing clause must never resolve a PR into
+    // them — these pin the parser contract the clause has to leave alone.
+    name: 'option-only --fix stays a local review with fix effective',
+    raw: '--fix',
+    expect: {
+      targetType: 'local',
+      fix: { requested: true, effective: true },
+      effort: 'medium',
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
+  {
+    name: 'option-only --effort low stays a local review at low',
+    raw: '--effort low',
+    expect: {
+      targetType: 'local',
+      effort: 'low',
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
 ];
 
 describe('parseReviewArgs', () => {
@@ -291,6 +642,112 @@ describe('parseReviewArgs', () => {
     for (const [key, value] of Object.entries(rest)) {
       expect(got[key as keyof ParsedReviewArgs]).toEqual(value);
     }
+  });
+
+  it('keeps the specific invalid-URL diagnostic when a number outranks it', () => {
+    // Review nit on #15998, confirmed as a real regression once pinned:
+    // the PR-shape reorder moved the malformed URL behind the assigned
+    // target, where it fed the generic "Ignoring extra argument(s)" line
+    // and lost its specific diagnostic. The invalid-url refusal is now
+    // hoisted ahead of the target-assigned branch, so the warning is
+    // position-independent.
+    const got = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/42oops 6711',
+    );
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      got.warnings.some(
+        (w) => w.includes('Unrecognized URL') && w.includes('not a PR/CR URL'),
+      ),
+    ).toBe(true);
+    expect(got.warnings.some((w) => w.includes('Ignoring extra'))).toBe(false);
+    // The reverse order is what pins the HOIST: on the base (no preference)
+    // the number wins first and the malformed URL lands in trailingExtras
+    // with only the generic line — this assertion reds under a full revert,
+    // which the forward order alone does not (verification round-5 note).
+    const reversed = parseReviewArgs(
+      '6711 https://github.com/QwenLM/qwen-code/pull/42oops',
+    );
+    expect(reversed.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      reversed.warnings.some(
+        (w) => w.includes('Unrecognized URL') && w.includes('not a PR/CR URL'),
+      ),
+    ).toBe(true);
+    expect(reversed.warnings.some((w) => w.includes('Ignoring extra'))).toBe(
+      false,
+    );
+  });
+
+  it('withholds posting authority from a promoted number and warns exactly then', () => {
+    // Review R2-1 on #15998 (Critical): a positional guess never grants a
+    // public write. Both word orders — mid-sentence count AND sentence-final
+    // count — withhold comment.effective; deleting `!promotedNumberFinal`
+    // reds the effective assertions.
+    const midSentence = parseReviewArgs('review the last 3 commits --comment');
+    expect(midSentence.target).toEqual({ type: 'pr-number', number: 3 });
+    expect(midSentence.comment.effective).toBe(false);
+    expect(midSentence.promotedNumberTarget).toBe(true);
+    expect(
+      midSentence.warnings.some((w) =>
+        w.includes('Bare number 3 was promoted to the PR target'),
+      ),
+    ).toBe(true);
+    const sentenceFinal = parseReviewArgs('review the last 3 --comment');
+    expect(sentenceFinal.target).toEqual({ type: 'pr-number', number: 3 });
+    expect(sentenceFinal.comment.effective).toBe(false);
+    expect(
+      sentenceFinal.warnings.some((w) =>
+        w.includes('Bare number 3 was promoted to the PR target'),
+      ),
+    ).toBe(true);
+    // The setting-driven arm withholds the same way — no flag typed at all.
+    const bySetting = parseReviewArgs('review the last 3', { comment: true });
+    expect(bySetting.comment.effective).toBe(false);
+    const settingWarning = bySetting.warnings.find((w) =>
+      w.includes('Bare number 3 was promoted to the PR target'),
+    );
+    expect(settingWarning).toContain('`review.comment` setting');
+    expect(settingWarning).toContain('posting authority is withheld');
+    expect(settingWarning).not.toContain('--comment');
+    // Review R2-2: the warning is decided AFTER the URL preference, from the
+    // token that actually became the target — a demoted number never draws
+    // it, and a courtesy particle after an unposted re-review costs nothing.
+    const urlSupersedes = parseReviewArgs(
+      '重新评审 6711 备注 https://github.com/o/r/pull/9000 --comment',
+    );
+    expect(urlSupersedes.target).toMatchObject({
+      type: 'pr-url',
+      number: 9000,
+    });
+    expect(urlSupersedes.comment.effective).toBe(true);
+    expect(
+      urlSupersedes.warnings.some((w) => w.includes('Bare number 6711')),
+    ).toBe(false);
+    const courtesy = parseReviewArgs('重新评审 6711 谢谢');
+    expect(courtesy.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      courtesy.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
+    // The canonical prose-rescue shape without posting intent stays silent.
+    const canonical = parseReviewArgs('有更新了，重新评审 6711');
+    expect(canonical.promotedNumberTarget).toBe(true);
+    expect(
+      canonical.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
+    // A same-number URL confirms the target; no warning either.
+    const urlConfirmed = parseReviewArgs(
+      '重新评审 6711 https://github.com/QwenLM/qwen-code/pull/6711',
+    );
+    expect(
+      urlConfirmed.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
   });
 
   it('extracts host/owner/repo/number from a PR URL', () => {
@@ -390,6 +847,54 @@ describe('parseReviewArgs', () => {
     expect(got.warnings[0]).toContain('not a PR/CR URL');
   });
 
+  it('--deadline warnings say what happened to the value', () => {
+    // Consumed: the value is named, so a caller sees what was dropped.
+    const consumed = parseReviewArgs('--deadline 90');
+    expect(consumed.target).toEqual({ type: 'local' });
+    expect(consumed.warnings[0]).toContain(
+      'not of /review; ignored together with its value "90"',
+    );
+    // Missing: no value to name.
+    const bare = parseReviewArgs('6711 --deadline');
+    expect(bare.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(bare.warnings[0]).toContain('(it had no value)');
+    // Not a deadline, rescued: the sibling flags' wording.
+    const rescued = parseReviewArgs(
+      '--deadline https://github.com/QwenLM/qwen-code/pull/6711',
+    );
+    expect(rescued.target.type).toBe('pr-url');
+    expect(rescued.warnings[0]).toContain(
+      'is not a deadline — treating it as the review target',
+    );
+    // Not a deadline, discarded beside a real target.
+    const discarded = parseReviewArgs('6711 --deadline 90m');
+    expect(discarded.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(discarded.warnings[0]).toContain(
+      '"90m" is not a deadline and was discarded',
+    );
+    expect(discarded.extraTokens).toEqual([]);
+    // The `=` form with a non-PR value: reported, not pooled.
+    const eq = parseReviewArgs('--deadline=90m');
+    expect(eq.target).toEqual({ type: 'local' });
+    expect(eq.warnings[0]).toContain('its value "90m" is not a deadline.');
+    // A quoted-empty value is consumed as missing, never a candidate target
+    // — the sibling arms' rule for the spaced form (an empty string would
+    // otherwise survive as the sole candidate and become an empty file
+    // target); the `=` form is stricter than the siblings' here, reading an
+    // empty value as missing too, since an unknown flag has no resolution
+    // to report an invalid value against.
+    for (const raw of ['--deadline ""', '--deadline=']) {
+      const empty = parseReviewArgs(raw);
+      expect(empty.target).toEqual({ type: 'local' });
+      expect(empty.unknownFlags).toEqual(['--deadline']);
+      expect(empty.warnings).toHaveLength(1);
+      expect(empty.warnings[0]).toContain('(it had no value)');
+    }
+    const emptyBeside = parseReviewArgs('--deadline "" 6711');
+    expect(emptyBeside.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(emptyBeside.warnings).toHaveLength(1);
+  });
+
   it('a /pull/ URL on an AONE host is refused — Aone serves no /pull/ pages', () => {
     // The Aone CR grammar is …/codereview/<global-id>; a /pull/<n> URL on
     // an Aone host is a fabrication and must fail closed, not become a live
@@ -453,6 +958,33 @@ describe('parseReviewArgs', () => {
     const got = parseReviewArgs('6711 --effort low --effort medium');
     expect(got.effort).toBe('medium');
     expect(got.effortSource).toBe('explicit');
+  });
+});
+
+describe('deadlineOption — one grammar, help that names only the flags each command takes', () => {
+  it('speaks of --resume only on the command that has one', () => {
+    const resumable = deadlineOption({ resumes: true }).describe;
+    const plain = deadlineOption({ resumes: false }).describe;
+    expect(resumable).toContain('a `--resume` from a new session renews it');
+    expect(resumable).toContain(
+      'Ignored on a resumed run once it parses (the grammar and the default rule still apply',
+    );
+    expect(plain).not.toMatch(/resume/i);
+    // Everything else — the default, `none`, the refusal rule, the
+    // environment's precedence, the huge tier's reduction — is shared.
+    for (const text of [resumable, plain]) {
+      expect(text).toContain("Omit for the topology's default");
+      expect(text).toContain('`none` records no wall');
+      expect(text).toContain('is refused up front');
+      // The idle tolerance, quoted from the gate (pinned in deadline.test).
+      expect(text).toContain(
+        'Pauses count against the wall and also price the next round; the Review Deadline section of the code-review docs gives the ceilings (about 3h20m / 5h20m / 7h20m on the 8h / 12h / 16h defaults).',
+      );
+      expect(text).toContain(
+        'QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over the flag and the default.',
+      );
+      expect(text).toContain('the default does not.');
+    }
   });
 });
 
@@ -1118,6 +1650,91 @@ describe('parseReviewArgs — settings-provided defaults', () => {
   });
 });
 
+describe('parseReviewArgs — remembered effort', () => {
+  it('reuses the last explicitly typed level when no flag or setting applies', () => {
+    const got = parseReviewArgs('src/foo.ts', { lastUsedEffort: 'high' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('last_used');
+    expect(got.warnings).toContain(
+      'No effort level given — reusing high, the level you typed last time. Type a level like `/review --effort medium` to change it.',
+    );
+  });
+
+  it('keeps the precedence explicit > remembered > configured > target default', () => {
+    expect(
+      parseReviewArgs('6711 --effort low', {
+        effort: 'medium',
+        lastUsedEffort: 'high',
+      }),
+    ).toMatchObject({ effort: 'low', effortSource: 'explicit' });
+    expect(
+      parseReviewArgs('6711', {
+        effort: 'medium',
+        lastUsedEffort: 'high',
+      }),
+    ).toMatchObject({ effort: 'high', effortSource: 'last_used' });
+    expect(parseReviewArgs('6711', { lastUsedEffort: 'medium' })).toMatchObject(
+      { effort: 'medium', effortSource: 'last_used' },
+    );
+    expect(parseReviewArgs('6711')).toMatchObject({
+      effort: 'high',
+      effortSource: 'default',
+    });
+  });
+
+  it('records an explicitly typed target default without re-recording memory', () => {
+    const remember = vi.fn();
+    parseReviewArgs('6711 --effort high', { lastUsedEffort: 'low' }, remember);
+    expect(remember).toHaveBeenCalledOnce();
+    expect(remember).toHaveBeenCalledWith('high');
+
+    remember.mockClear();
+    parseReviewArgs('6711', { lastUsedEffort: 'high' }, remember);
+    expect(remember).not.toHaveBeenCalled();
+  });
+
+  it('falls back to memory without recording an invalid explicit value', () => {
+    const remember = vi.fn();
+    const got = parseReviewArgs(
+      '6711 --effort bogus',
+      { lastUsedEffort: 'medium' },
+      remember,
+    );
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('last_used');
+    expect(got.warnings.some((warning) => warning.includes('"bogus"'))).toBe(
+      true,
+    );
+    expect(remember).not.toHaveBeenCalled();
+  });
+
+  it('lets the posting and fix safety floors override a remembered level', () => {
+    expect(
+      parseReviewArgs('6711 --comment', { lastUsedEffort: 'low' }),
+    ).toMatchObject({ effort: 'high', effortSource: 'forced-by-comment' });
+    expect(parseReviewArgs('--fix', { lastUsedEffort: 'low' })).toMatchObject({
+      effort: 'medium',
+      effortSource: 'forced-by-fix',
+    });
+  });
+
+  it('keeps remembered effort across effective and ignored --resume shapes', () => {
+    for (const raw of [
+      '6711 --resume',
+      'https://github.com/QwenLM/qwen-code/pull/6711 --resume',
+      '--resume',
+      'src/foo.ts --resume',
+    ]) {
+      const got = parseReviewArgs(raw, { lastUsedEffort: 'high' });
+      expect(got.effort).toBe('high');
+      expect(got.effortSource).toBe('last_used');
+      expect(got.warnings.some((warning) => warning.includes('reusing'))).toBe(
+        true,
+      );
+    }
+  });
+});
+
 describe('parseReviewArgs — `--fix` is `--comment` reflected: it needs a tree, not a PR', () => {
   // The two flags are gated on opposite targets, and each is *ignored with a
   // warning* on the other's. A PR review's tree is the ephemeral worktree Step 9
@@ -1275,6 +1892,7 @@ describe('parseArgsCommand wiring', () => {
   beforeEach(() => {
     fsState.stdin = '';
     fsState.written.clear();
+    fsState.effortReadError = undefined;
     vi.mocked(writeStdoutLine).mockClear();
   });
 
@@ -1405,8 +2023,11 @@ describe('parseArgsCommand — configured defaults wiring', () => {
   beforeEach(() => {
     fsState.stdin = '';
     fsState.written.clear();
+    fsState.effortReadError = undefined;
     vi.mocked(writeStdoutLine).mockClear();
+    vi.mocked(writeStderrLineSafe).mockClear();
     reviewSettingsMock.mockReturnValue({});
+    vi.mocked(atomicWriteFileSync).mockClear();
   });
 
   async function verdictFor(stdin: string): Promise<ParsedReviewArgs> {
@@ -1523,6 +2144,179 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     expect(got.effort).toBe('high');
     expect(got.effortSource).toBe('default');
   });
+
+  it('persists an explicit effort and reuses it on the next invocation', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    const first = await verdictFor('src/foo.ts --effort high\n');
+    expect(first.effortSource).toBe('explicit');
+    expect(fsState.written.get(storedEffort)).toBe('high\n');
+    expect(atomicWriteFileSync).toHaveBeenCalledWith(storedEffort, 'high\n', {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+
+    const second = await verdictFor('src/foo.ts\n');
+    expect(second.effort).toBe('high');
+    expect(second.effortSource).toBe('last_used');
+    expect(second.warnings).toContain(
+      'No effort level given — reusing high, the level you typed last time. Type a level like `/review --effort medium` to change it.',
+    );
+  });
+
+  it('lets remembered effort outrank configured effort before comment forcing', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'high\n');
+    reviewSettingsMock.mockReturnValue({ effort: 'low', comment: true });
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('last_used');
+    expect(
+      got.warnings.some((warning) => warning.includes('reusing high')),
+    ).toBe(true);
+  });
+
+  it('keeps remembered effort when an explicit value is invalid', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'medium\n');
+
+    const got = await verdictFor('6711 --effort bogus\n');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('last_used');
+    expect(got.warnings).toContain(
+      'No effort level given — reusing medium, the level you typed last time. Type a level like `/review --effort high` to change it.',
+    );
+    expect(got.warnings).toContain(
+      'Invalid --effort value "bogus" discarded; using the last explicitly typed effort.',
+    );
+    expect(fsState.written.get(storedEffort)).toBe('medium\n');
+    expect(atomicWriteFileSync).not.toHaveBeenCalled();
+  });
+
+  it('lets an explicit effort replace malformed remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'not-an-effort\n');
+
+    const got = await verdictFor('src/foo.ts --effort medium\n');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('explicit');
+    expect(fsState.written.get(storedEffort)).toBe('medium\n');
+  });
+
+  it('lets an explicit effort replace valid remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'high\n');
+
+    const got = await verdictFor('src/foo.ts --effort low\n');
+    expect(got.effort).toBe('low');
+    expect(got.effortSource).toBe('explicit');
+    expect(fsState.written.get(storedEffort)).toBe('low\n');
+  });
+
+  it('ignores malformed remembered state when no explicit effort replaces it', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'not-an-effort\n');
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(fsState.written.get(storedEffort)).toBe('not-an-effort\n');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      `${storedEffort} must contain low, medium, or high`,
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'resolving from review.effort and the target default instead',
+    );
+  });
+
+  it('ignores unreadable remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'low\n');
+    fsState.effortReadError = new Error('EACCES: permission denied');
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      `${storedEffort} could not be read`,
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'EACCES: permission denied',
+    );
+  });
+
+  it('reports the resolved effort when remembering an explicit effort fails', async () => {
+    vi.mocked(atomicWriteFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC: no space left on device');
+    });
+
+    const got = await verdictFor('6711 --comment --effort low\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not be remembered',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'ENOSPC: no space left on device',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'this review still uses high',
+    );
+  });
+
+  it('uses the project storage owner exported by the parent session', async () => {
+    const previous = process.env['QWEN_CODE_PROJECT_DIR'];
+    const owner = '/runtime/session-project-owner';
+    process.env['QWEN_CODE_PROJECT_DIR'] = owner;
+    try {
+      const got = await verdictFor('src/foo.ts --effort high\n');
+      expect(got.effortSource).toBe('explicit');
+      expect(
+        fsState.written.get(lastReviewEffortPath(process.cwd(), owner)),
+      ).toBe('high\n');
+    } finally {
+      if (previous === undefined) {
+        delete process.env['QWEN_CODE_PROJECT_DIR'];
+      } else {
+        process.env['QWEN_CODE_PROJECT_DIR'] = previous;
+      }
+    }
+  });
+
+  it('does not persist a target default', async () => {
+    const got = await verdictFor('6711\n');
+    expect(got.effortSource).toBe('default');
+    expect(
+      fsState.written.has(
+        lastReviewEffortPath(
+          process.cwd(),
+          process.env['QWEN_CODE_PROJECT_DIR'],
+        ),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('parse-args warns when the bundle is not built from these sources', () => {
@@ -1636,12 +2430,12 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     );
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the OTHER branch — a
-  // readable tree, whose digest merely differs — and failing red against
-  // assertions that match only the unmeasured message.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under test
+  // is unreachable there. The case skips rather than running into the OTHER
+  // branch — a readable tree, whose digest merely differs — and failing red
+  // against assertions that match only the unmeasured message.
+  it.skipIf(!arePermissionBitsEnforced())(
     'says it could not check when a source cannot be read',
     () => {
       // Distinct from an installed package: the roots are on disk, so the
@@ -1676,7 +2470,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'says it could not check when the roots cannot even be statted',
     () => {
       // An archive extracted with the wrong ownership, or a cache restored
@@ -1864,5 +2658,60 @@ describe('--resume', () => {
     const d = parseReviewArgs('--resume');
     expect(d.effort).toBe('medium'); // the local default, untouched
     expect(d.effortSource).toBe('default');
+  });
+});
+
+describe('parse-args — the scratch directory guard', () => {
+  it('guards a --out under .qwen/tmp, and only there', () => {
+    // Step 0's write is the round's first into `.qwen/tmp`: the shared
+    // entry guard refuses a workspace-planted link before it lands. A
+    // `--out` elsewhere is the caller's directory, not the scratch one.
+    const out = join('.qwen', 'tmp', 'qwen-review-parse-args.json');
+    ensureReviewTmpDirMock.mockClear();
+    fsState.written.delete(out);
+    ensureReviewTmpDirMock.mockImplementationOnce(() => {
+      throw new Error('parse-args: .qwen/tmp is a symbolic link');
+    });
+    expect(() =>
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '',
+        out,
+        _: ['review', 'parse-args'],
+      }),
+    ).toThrow(/symbolic link/);
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+    // …and the refusal came BEFORE the write, or the guard is decoration.
+    expect(fsState.written.has(out)).toBe(false);
+    // …and the spelling a case-insensitive filesystem resolves through:
+    // `--out .QWEN/tmp/x` reaches the very directory the guard is about to
+    // check, so the predicate folds case. Over-matching on a case-sensitive
+    // filesystem is the safe direction — the answer only decides whether to
+    // CHECK.
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('.QWEN', 'tmp', 'qwen-review-parse-args.json'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+
+    // The scratch directory ITSELF must reach the guard: it is equal to the
+    // guard's path rather than under it, and the predicate has to admit
+    // that shape. (The write that follows would then die EISDIR — this
+    // pins which paths are GUARDED, not which are usable.)
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('.qwen', 'tmp'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('elsewhere', 'parse-args.json'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).not.toHaveBeenCalled();
   });
 });

@@ -139,9 +139,16 @@ function parseTranscriptReplayState(
             {
               callId: pending.callId,
               toolName: pending.toolName,
+              ...(pending.resolvedToolName
+                ? { resolvedToolName: pending.resolvedToolName }
+                : {}),
               recordId: pending.sourceRecordId,
               ...(pending.sourceTimestamp
                 ? { timestamp: pending.sourceTimestamp }
+                : {}),
+              ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+              ...(pending.timingMatched
+                ? { timingMatched: true as const }
                 : {}),
             },
           ];
@@ -182,6 +189,74 @@ function parseTranscriptReplayState(
   };
 }
 
+/**
+ * Copy a replayed update with its MCP App `html` blanked, or undefined
+ * when the update carries no App html to lose. `fallbackText` stays: the
+ * client renders it in place of the App. App html is the one replay field
+ * that can reach multiple MiB (bounded only by the per-server App
+ * resource limit), so it is the field a page-level byte budget degrades.
+ */
+export function blankReplayedMcpAppHtml(
+  update: SessionUpdate,
+): SessionUpdate | undefined {
+  const record = update as unknown as Record<string, unknown>;
+  if (record['sessionUpdate'] !== 'tool_call_update') return undefined;
+  const rawOutput = record['rawOutput'];
+  if (
+    !isObjectRecord(rawOutput) ||
+    rawOutput['type'] !== 'mcp_app' ||
+    typeof rawOutput['html'] !== 'string' ||
+    rawOutput['html'] === ''
+  ) {
+    return undefined;
+  }
+  const blanked = {
+    ...record,
+    rawOutput: {
+      ...rawOutput,
+      html: '',
+      fallbackText:
+        rawOutput['fallbackText'] ||
+        'MCP App HTML omitted because the restored page exceeds its size limit.',
+    },
+  };
+  // Blanking can inject `fallbackText`, so the swapped frame may serialize
+  // larger than the one it replaces; the reclaim loops apply that signed
+  // delta. Compare whole frames, and report no App html to lose when the
+  // swap would not shrink one.
+  if (
+    Buffer.byteLength(JSON.stringify(blanked), 'utf8') >=
+    Buffer.byteLength(JSON.stringify(record), 'utf8')
+  ) {
+    return undefined;
+  }
+  return blanked as unknown as SessionUpdate;
+}
+
+/**
+ * Blank replayed MCP App `html` oldest-first until the serialized
+ * envelope fits `maxBytes`. The replay accounting bounds the updates
+ * array itself; this backstop covers the envelope wrapper so validation
+ * cannot fail closed on a page whose App documents degrade cleanly. A
+ * page that still does not fit after every App is degraded is left for
+ * the caller's validator.
+ */
+export function degradeReplayEnvelopeAppHtml(
+  envelope: { updates: SessionUpdate[] },
+  maxBytes: number,
+): void {
+  let pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  for (let i = 0; i < envelope.updates.length && pageBytes > maxBytes; i++) {
+    const update = envelope.updates[i]!;
+    const blanked = blankReplayedMcpAppHtml(update);
+    if (blanked === undefined) continue;
+    pageBytes +=
+      Buffer.byteLength(JSON.stringify(blanked), 'utf8') -
+      Buffer.byteLength(JSON.stringify(update), 'utf8');
+    envelope.updates[i] = blanked;
+  }
+}
+
 function replayContext(
   sessionId: string,
   updates: SessionUpdate[],
@@ -204,7 +279,7 @@ function replayContext(
           _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
         } as unknown as SessionUpdate;
       })();
-      const deliveredUpdate = liftSessionUpdateTimestamp(updateWithRecordId);
+      let deliveredUpdate = liftSessionUpdateTimestamp(updateWithRecordId);
       observeAcpToolResultProjection(
         update,
         projectedUpdate,
@@ -221,9 +296,38 @@ function replayContext(
             limits.maxUpdates,
           );
         }
-        serializedUpdateBytes +=
+        let updateBytes =
           (updates.length === 0 ? 0 : 1) +
           Buffer.byteLength(JSON.stringify(deliveredUpdate), 'utf8');
+        if (serializedUpdateBytes + updateBytes > limits.maxBytes) {
+          // A page holding several ceiling-size App documents serializes
+          // past the envelope cap; blank App html oldest-first — the
+          // client renders `fallbackText` instead — rather than failing
+          // the whole load closed.
+          for (
+            let i = 0;
+            i < updates.length &&
+            serializedUpdateBytes + updateBytes > limits.maxBytes;
+            i++
+          ) {
+            const blanked = blankReplayedMcpAppHtml(updates[i]!);
+            if (blanked === undefined) continue;
+            serializedUpdateBytes -=
+              Buffer.byteLength(JSON.stringify(updates[i]!), 'utf8') -
+              Buffer.byteLength(JSON.stringify(blanked), 'utf8');
+            updates[i] = blanked;
+          }
+          if (serializedUpdateBytes + updateBytes > limits.maxBytes) {
+            const blanked = blankReplayedMcpAppHtml(deliveredUpdate);
+            if (blanked !== undefined) {
+              deliveredUpdate = blanked;
+              updateBytes =
+                (updates.length === 0 ? 0 : 1) +
+                Buffer.byteLength(JSON.stringify(blanked), 'utf8');
+            }
+          }
+        }
+        serializedUpdateBytes += updateBytes;
         if (serializedUpdateBytes > limits.maxBytes) {
           throw new HistoryReplayLimitError(
             sessionId,
@@ -255,6 +359,7 @@ export async function collectHistoryReplayUpdates({
   limits,
   suppressRestoreAskUserQuestion,
   finalizeDangling,
+  branchPointsByAssistantUuid,
 }: {
   sessionId: string;
   config?: Config;
@@ -279,8 +384,14 @@ export async function collectHistoryReplayUpdates({
    * path and non-live loads pass true.
    */
   finalizeDangling?: boolean;
+  /**
+   * Branch checkpoints keyed by assistant record uuid, stamped onto the
+   * replayed updates so a session restored from disk still offers Branch.
+   */
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
+  let replayError: string | undefined;
   try {
     const initial = parseTranscriptReplayState(replayState, logger);
     // Prefer live chat when it is initialized (authoritative after startChat
@@ -292,7 +403,7 @@ export async function collectHistoryReplayUpdates({
       suppressRestoreAskUserQuestion !== true &&
       config?.getRestoreAskUserQuestion?.() === true
     ) {
-      const replayClient = config.getGeminiClient?.();
+      const replayClient = config.getLlmClient?.();
       const lastHistoryContent =
         replayClient?.isInitialized?.() === true
           ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
@@ -312,16 +423,18 @@ export async function collectHistoryReplayUpdates({
     });
   } catch (error) {
     if (error instanceof HistoryReplayLimitError) throw error;
-    const replayError = error instanceof Error ? error.message : String(error);
+    replayError = error instanceof Error ? error.message : String(error);
     logger?.warn(
       '[historyReplay] History replay failed for session %s (partial updates: %d):',
       sessionId,
       updates.length,
       error,
     );
-    return { updates, replayError };
   }
-  return { updates };
+  if (branchPointsByAssistantUuid) {
+    stampBranchPoints(updates, branchPointsByAssistantUuid);
+  }
+  return replayError === undefined ? { updates } : { updates, replayError };
 }
 
 function liftSessionUpdateTimestamp(update: SessionUpdate): SessionUpdate {
@@ -360,6 +473,52 @@ function readTranscriptSourceRecordIds(
   return sourceRecordIds.filter((id): id is string => typeof id === 'string');
 }
 
+// A checkpoint marks the END of its source record, which can replay as
+// several chunks (text/thought/text). Only the LAST visible assistant chunk
+// of the record may expose the branch point: an earlier chunk would restore
+// the record's later content when branched from, and an empty-text usage
+// chunk normalizes to `assistant.usage`, which drops the metadata.
+function stampBranchPoints(
+  updates: SessionUpdate[],
+  branchPoints: Readonly<Record<string, string>>,
+): void {
+  const lastChunkIndexByRecordId = new Map<string, number>();
+  updates.forEach((update, index) => {
+    if (update.sessionUpdate !== 'agent_message_chunk') return;
+    const text = (update as { content?: { text?: unknown } }).content?.text;
+    if (typeof text !== 'string' || text.length === 0) return;
+    for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+      // Own-property check: transcript record uuids are untrusted input,
+      // and names like 'toString' would otherwise pass via the prototype
+      // chain.
+      if (Object.hasOwn(branchPoints, recordId)) {
+        lastChunkIndexByRecordId.set(recordId, index);
+      }
+    }
+  });
+  const decoratedIndexes = new Set<number>();
+  for (const [recordId, index] of lastChunkIndexByRecordId) {
+    if (decoratedIndexes.has(index)) continue;
+    decoratedIndexes.add(index);
+    const value = updates[index] as unknown as Record<string, unknown>;
+    const meta =
+      value['_meta'] && typeof value['_meta'] === 'object'
+        ? (value['_meta'] as Record<string, unknown>)
+        : undefined;
+    const transcript =
+      meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+        ? (meta['qwenTranscript'] as Record<string, unknown>)
+        : undefined;
+    value['_meta'] = {
+      ...meta,
+      qwenTranscript: {
+        ...transcript,
+        branchRecordId: branchPoints[recordId],
+      },
+    };
+  }
+}
+
 export async function replayTranscriptRecordPage({
   sessionId,
   page,
@@ -389,6 +548,9 @@ export async function replayTranscriptRecordPage({
       finalizeDangling:
         finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
+      // Paged replay is where trajectory inspection reads from, and its pages
+      // are bounded by records and bytes rather than by an update count.
+      includeTiming: true,
       ...(state.goalState ? { goalState: state.goalState } : {}),
       ...(state.goalCause ? { goalCause: state.goalCause } : {}),
     });
@@ -405,48 +567,7 @@ export async function replayTranscriptRecordPage({
   }
 
   if (page.branchPointsByAssistantUuid) {
-    const branchPoints = page.branchPointsByAssistantUuid;
-    // A checkpoint marks the END of its source record, which can replay as
-    // several chunks (text/thought/text). Only the LAST visible assistant
-    // chunk of the record may expose the branch point: an earlier chunk
-    // would restore the record's later content when branched from, and an
-    // empty-text usage chunk normalizes to `assistant.usage`, which drops
-    // the metadata.
-    const lastChunkIndexByRecordId = new Map<string, number>();
-    updates.forEach((update, index) => {
-      if (update.sessionUpdate !== 'agent_message_chunk') return;
-      const text = (update as { content?: { text?: unknown } }).content?.text;
-      if (typeof text !== 'string' || text.length === 0) return;
-      for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
-        // Own-property check: transcript record uuids are untrusted input,
-        // and names like 'toString' would otherwise pass via the prototype
-        // chain.
-        if (Object.hasOwn(branchPoints, recordId)) {
-          lastChunkIndexByRecordId.set(recordId, index);
-        }
-      }
-    });
-    const decoratedIndexes = new Set<number>();
-    for (const [recordId, index] of lastChunkIndexByRecordId) {
-      if (decoratedIndexes.has(index)) continue;
-      decoratedIndexes.add(index);
-      const value = updates[index] as unknown as Record<string, unknown>;
-      const meta =
-        value['_meta'] && typeof value['_meta'] === 'object'
-          ? (value['_meta'] as Record<string, unknown>)
-          : undefined;
-      const transcript =
-        meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
-          ? (meta['qwenTranscript'] as Record<string, unknown>)
-          : undefined;
-      value['_meta'] = {
-        ...meta,
-        qwenTranscript: {
-          ...transcript,
-          branchRecordId: branchPoints[recordId],
-        },
-      };
-    }
+    stampBranchPoints(updates, page.branchPointsByAssistantUuid);
   }
 
   const nextCursor =

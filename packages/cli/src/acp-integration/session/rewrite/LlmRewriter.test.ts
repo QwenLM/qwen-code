@@ -45,7 +45,7 @@ const { LlmRewriter } = await import('./LlmRewriter.js');
 function makeConfig(): Config {
   return {
     getModel: () => 'test-model',
-    getGeminiClient: () => ({}),
+    getLlmClient: () => ({}),
   } as unknown as Config;
 }
 

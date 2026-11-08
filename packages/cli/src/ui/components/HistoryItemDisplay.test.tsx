@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Text } from 'ink';
+import { createRequire } from 'node:module';
+import type chalk from 'chalk';
+import stripAnsi from 'strip-ansi';
+import { theme } from '../semantic-colors.js';
+import { subscriptionSuccessMessage } from '../auth/subscription-success.js';
+import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
@@ -15,7 +21,7 @@ import type {
   ToolExecuteConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
@@ -46,6 +52,11 @@ vi.mock('../utils/measure-element-position.js', () => ({
   measureElementPosition: vi.fn(),
 }));
 
+vi.mock('../utils/hyperlink-at.js', () => ({
+  hyperlinkAtCell: vi.fn(),
+}));
+
+import { hyperlinkAtCell } from '../utils/hyperlink-at.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 
 import { toggleKeyHint } from './messages/ConversationMessages.js';
@@ -389,7 +400,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini',
@@ -401,7 +412,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 
@@ -426,7 +437,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini_content item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini_content item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_content',
@@ -438,7 +449,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 
@@ -480,6 +491,92 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Thought for');
     expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Inspecting the repository');
+  });
+
+  it('renders a completed staged summary collapsed while later output is pending', () => {
+    const item: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought',
+      text: 'Completed summary',
+      durationMs: 1200,
+      isStreaming: false,
+      thoughtGroupId: -1,
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending />,
+    );
+    expect(lastFrame()).toContain('Thought for');
+    expect(lastFrame()).toContain(`${toggleKeyHint} to expand`);
+    expect(lastFrame()).not.toContain('Thinking…');
+    expect(lastFrame()).not.toContain('Completed summary');
+  });
+
+  it('keeps staged summary groups separate and expanded across their history commit', () => {
+    const head: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought',
+      text: 'Summary head',
+      durationMs: 1200,
+      isStreaming: false,
+      thoughtGroupId: -7,
+    };
+    const continuation: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought_content',
+      text: 'Summary continuation',
+      isStreaming: false,
+      thoughtGroupId: -7,
+    };
+    const other: HistoryItem = {
+      ...head,
+      text: 'Other summary',
+      thoughtGroupId: -8,
+    };
+    const renderItems = (committed: boolean) => (
+      <ThoughtExpandedProvider
+        value={{
+          allExpanded: false,
+          expandedHeadIds: new Set([-7]),
+          toggle: () => {},
+        }}
+      >
+        {[head, continuation, other].map((item, index) => (
+          <HistoryItemDisplay
+            key={index}
+            item={{ ...item, id: committed ? index + 101 : 0 }}
+            terminalWidth={100}
+            isPending={!committed}
+            thoughtHeadId={committed ? 101 : undefined}
+          />
+        ))}
+      </ThoughtExpandedProvider>
+    );
+    const { lastFrame, rerender } = renderWithProviders(renderItems(false));
+    expect(lastFrame()).toContain('Summary head');
+    expect(lastFrame()).toContain('Summary continuation');
+    expect(lastFrame()).not.toContain('Other summary');
+    rerender(withProviders(renderItems(true)));
+    expect(lastFrame()).toContain('Summary head');
+    expect(lastFrame()).toContain('Summary continuation');
+    expect(lastFrame()).not.toContain('Other summary');
+  });
+
+  it('keeps an active staged summary in its thinking state', () => {
+    const item: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought',
+      text: 'Active summary',
+      isStreaming: true,
+      thoughtGroupId: -9,
+    };
+    vi.mocked(useMouseEvents).mockClear();
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending />,
+    );
+    expect(lastFrame()).toContain('Thinking…');
+    expect(vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1]?.isActive).toBe(
+      false,
+    );
   });
 
   it('renders committed thinking continuations hidden by default', () => {
@@ -690,7 +787,11 @@ describe('<HistoryItemDisplay />', () => {
       button: 'left',
     });
 
-    const renderThoughtWithToggle = (toggle: (headId: number) => void) => {
+    const renderThoughtWithToggle = (
+      toggle: (headId: number) => void,
+      item: HistoryItem = thoughtItem,
+      isPending = false,
+    ) => {
       vi.mocked(measureElementPosition).mockReturnValue({
         x: 0,
         y: 0,
@@ -707,9 +808,9 @@ describe('<HistoryItemDisplay />', () => {
           }}
         >
           <HistoryItemDisplay
-            item={thoughtItem}
+            item={item}
             terminalWidth={100}
-            isPending={false}
+            isPending={isPending}
           />
         </ThoughtExpandedProvider>,
       );
@@ -772,6 +873,21 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
     });
 
+    it('allows clicking a completed staged summary using its stable group id', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(
+        toggle,
+        { ...thoughtItem, id: 0, thoughtGroupId: -5, isStreaming: false },
+        true,
+      );
+      expect(vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1]?.isActive).toBe(
+        true,
+      );
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+      expect(toggle).toHaveBeenCalledWith(-5);
+    });
+
     it('does not toggle when selecting text by dragging', () => {
       const toggle = vi.fn();
       const handler = renderThoughtWithToggle(toggle);
@@ -779,6 +895,17 @@ describe('<HistoryItemDisplay />', () => {
       handler?.(mouseEvent('left-press', 5));
       handler?.(mouseEvent('move', 20));
       handler?.(mouseEvent('left-release', 20));
+
+      expect(toggle).not.toHaveBeenCalled();
+    });
+
+    it('does not toggle on a plain click over an OSC 8 hyperlink (reserved for the link gesture)', () => {
+      vi.mocked(hyperlinkAtCell).mockReturnValue('https://example.com');
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle);
+
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
 
       expect(toggle).not.toHaveBeenCalled();
     });
@@ -808,4 +935,124 @@ describe('<HistoryItemDisplay />', () => {
       expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
     });
   });
+});
+
+it.each([
+  ['free', 'Free'],
+  ['lite', 'Lite'],
+  ['PRO', 'Pro'],
+  ['pLuS', 'Plus'],
+  ['future-plan', 'Future-plan'],
+])('uses backend membership %s as %s in the summary', (member_type, plan) => {
+  const text = subscriptionSuccessMessage(
+    {
+      sub: 'synthetic',
+      name: 'Builder',
+      email: 'builder@example.com',
+      member_type,
+    },
+    'server-model',
+  );
+  expect(text).toContain(`Current plan: Qwen ${plan}. Qwen Code is ready.`);
+});
+
+it.each([true, false])(
+  'renders subscription styling only with an explicit presentation flag (%s)',
+  async (subscriptionPresentation) => {
+    const inkRequire = createRequire(
+      createRequire(import.meta.url).resolve('ink'),
+    );
+    const inkChalk: typeof chalk = (await import(inkRequire.resolve('chalk')))
+      .default;
+    const previousLevel = inkChalk.level;
+    inkChalk.level = 3;
+    const text = subscriptionSuccessMessage(
+      {
+        sub: 'synthetic',
+        name: 'Builder',
+        email: 'builder@example.com',
+        member_type: 'pro',
+      },
+      'qwen3.8-max',
+    );
+    const ui = renderWithProviders(
+      <Box width={140}>
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'info',
+            text,
+            ...(subscriptionPresentation
+              ? { presentation: 'subscription-success' as const }
+              : {}),
+          }}
+          terminalWidth={140}
+          isPending={false}
+        />
+      </Box>,
+    );
+    try {
+      const frame = ui.lastFrame() ?? '';
+      const check = inkChalk.hex(theme.status.success)('✓');
+      if (subscriptionPresentation) {
+        expect(stripAnsi(frame)).not.toMatch(/[●•]/u);
+        expect(frame).toContain(
+          `${check} Signed in successfully · builder@example.com`,
+        );
+        expect(frame).toContain(
+          `${check} Current plan: Qwen Pro. Qwen Code is ready.`,
+        );
+        expect(frame).toContain(
+          inkChalk.hex(theme.text.secondary)(
+            'Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
+          ),
+        );
+        expect(frame).toContain(
+          '/usage   /upgrade   /model   /status   /logout',
+        );
+      } else {
+        expect(stripAnsi(frame)).toMatch(/[●•]/u);
+        expect(frame).not.toContain(check);
+      }
+    } finally {
+      ui.unmount();
+      inkChalk.level = previousLevel;
+    }
+  },
+);
+
+it('keeps both checks and all subscription summary text at a narrow width', () => {
+  const text = subscriptionSuccessMessage(
+    {
+      sub: 'synthetic',
+      name: 'Builder',
+      email: 'builder@example.com',
+      member_type: 'pro',
+    },
+    'qwen3.8-max',
+  );
+  const ui = renderWithProviders(
+    <Box width={45}>
+      <HistoryItemDisplay
+        item={{
+          id: 1,
+          type: 'info',
+          text,
+          presentation: 'subscription-success',
+        }}
+        terminalWidth={45}
+        isPending={false}
+      />
+    </Box>,
+  );
+  try {
+    const frame = stripAnsi(ui.lastFrame() ?? '');
+    expect(frame.match(/✓/gu)).toHaveLength(2);
+    for (const line of frame.split('\n')) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(45);
+    }
+    expect(frame.replace(/\s/gu, '')).toBe(text.replace(/\s/gu, ''));
+  } finally {
+    ui.unmount();
+  }
 });

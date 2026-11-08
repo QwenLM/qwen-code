@@ -9,7 +9,7 @@ import {
   useUsageDashboard,
   type DaemonUsageRange,
   type DaemonUsageModelShare,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { formatMegaTokens } from '../../utils/formatTokenCount';
 import { TokenHeatmap } from './TokenHeatmap';

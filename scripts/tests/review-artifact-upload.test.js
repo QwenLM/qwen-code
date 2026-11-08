@@ -303,6 +303,14 @@ describe('review artifact upload — naming contract', () => {
     expect(runStep).toBeDefined();
     expect(runStep.run).toContain('GITHUB_PATH="$PROXY_BIN/decoy.github-path"');
     expect(runStep.run).toContain('GITHUB_ENV="$PROXY_BIN/decoy.github-env"');
+    // All four runner command files are decoyed — aligned with the copy in
+    // resolve-pr's 'Resolve conflicts'; edit the pins together with it.
+    expect(runStep.run).toContain(
+      'GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output"',
+    );
+    expect(runStep.run).toContain(
+      'GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary"',
+    );
     expect(runStep.run).not.toContain(': > "$GITHUB_PATH"');
     expect(stageStep.shell).toContain('/bin/bash');
     expect(stageBlock).toContain('PATH=/usr/bin:/bin');
