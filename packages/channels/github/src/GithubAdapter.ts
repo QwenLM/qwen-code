@@ -824,12 +824,9 @@ export function validateBoundSessionConfig(
   ) {
     return `[Channel:${channelName}] prCommentWatch must be a boolean.`;
   }
-  if (
-    config.prCommentWatch !== undefined &&
-    config.deliverToBoundSessions !== true
-  ) {
-    return `prCommentWatch for channel ${channelName} requires deliverToBoundSessions: true.`;
-  }
+  // No deliverToBoundSessions dependency: prCommentWatch is default-on, so the
+  // editor emits it even for channels without bound delivery. It is inert there
+  // (the watch is gated on deliverToBoundSessions at runtime), not an error.
   try {
     normalizePrWatchEvents(config, channelName);
     normalizeBoundSessionActions(config, channelName);
