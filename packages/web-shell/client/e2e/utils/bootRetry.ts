@@ -38,10 +38,17 @@ export async function installBootRetry(page: Page): Promise<void> {
   let reloads = 0;
 
   page.on('request', (request) => {
+    bootOf.set(request, boot);
+  });
+  // Advance on the document's response rather than its request: the outgoing
+  // document keeps running while the next response is pending, and a request
+  // it starts in that window belongs to the page being left, not the one that
+  // is about to commit.
+  page.on('response', (response) => {
+    const request = response.request();
     if (mainFrame(request) && request.resourceType() === 'document') {
       boot += 1;
     }
-    bootOf.set(request, boot);
   });
   page.on('requestfailed', (request) => {
     if (!mainFrame(request) || request.resourceType() !== 'script') return;

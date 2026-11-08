@@ -1,4 +1,7 @@
 import { expect, type Page, type TestInfo } from '@playwright/test';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { installBootRetry } from './bootRetry';
 import { createWebShellDaemonScenario, installMockDaemon } from './mockDaemon';
 
 const SHELL = '[data-web-shell-root]:not([data-web-shell-gate])';
@@ -225,6 +228,68 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       });
 
       expect(documents).toHaveLength(1);
+    },
+  },
+  {
+    // A request issued by the outgoing document *while the next response is
+    // pending* also belongs to the page being left. A real server is needed:
+    // routed documents commit early enough that the effect disappears.
+    title:
+      'a module started during a pending navigation does not reload the destination @smoke',
+    async run(page) {
+      const server = http.createServer((request, response) => {
+        const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/a.html') {
+          // The timer fires while the destination's response is in flight.
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            '<!doctype html><script>setTimeout(() => {' +
+              'void import("/slow.js").catch(() => {});' +
+              '}, 200);</script>',
+          );
+          return;
+        }
+        if (url.pathname === '/b.html') {
+          setTimeout(() => {
+            response.writeHead(200, { 'content-type': 'text/html' });
+            response.end('<!doctype html><h1>destination</h1>');
+          }, 1_000);
+          return;
+        }
+        if (url.pathname === '/slow.js') {
+          // Never ends: committing the destination cancels it.
+          response.writeHead(200, { 'content-type': 'text/javascript' });
+          response.write('export const slow = 1;');
+          return;
+        }
+        response.writeHead(404);
+        response.end('not found');
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+      try {
+        const destinationRequests: string[] = [];
+        page.on('request', (request) => {
+          if (
+            request.frame() === page.mainFrame() &&
+            request.resourceType() === 'document' &&
+            request.url() === `${origin}/b.html`
+          ) {
+            destinationRequests.push(request.url());
+          }
+        });
+        await installBootRetry(page);
+        await page.goto(`${origin}/a.html`);
+        await page.goto(`${origin}/b.html`);
+        // A spurious reload starts as the destination's load event fires.
+        await page.waitForTimeout(500);
+        expect(destinationRequests).toHaveLength(1);
+      } finally {
+        server.close();
+      }
     },
   },
 ];
