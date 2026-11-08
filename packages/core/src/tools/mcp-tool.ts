@@ -45,9 +45,11 @@ import {
 } from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
+  addMCPStatusChangeListener,
   getAllMCPServerStatuses,
   getMCPServerStatus,
   MCPServerStatus,
+  removeMCPStatusChangeListener,
 } from './mcp-status.js';
 import {
   getInvocationContext,
@@ -364,6 +366,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
 > {
+  /** How long a post-abort repair listener waits for the teardown to surface. */
+  private static readonly REPAIR_LISTENER_TTL_MS = 60_000;
   private static readonly MAX_RECONNECT_RETRIES = 3;
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
@@ -491,6 +495,56 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * An abort tore this transport down. Do not wait for the disconnect: the
+   * cancelled invocation must reject immediately, and the transport reports
+   * the failure later. Watch the status registry and repair when the server
+   * actually leaves `CONNECTED`, leaving a session that survives the cancel
+   * with a live connection instead of a dead one (issue #12160).
+   */
+  private repairConnectionOnDisconnectAfterAbort(): void {
+    if (!this.cliConfig) {
+      return;
+    }
+    let wasConnected =
+      getMCPServerStatus(this.serverName) === MCPServerStatus.CONNECTED;
+    const detach = () => {
+      clearTimeout(expiry);
+      removeMCPStatusChangeListener(listener);
+    };
+    const listener = (
+      serverName: string,
+      status: MCPServerStatus | undefined,
+    ) => {
+      if (serverName !== this.serverName) {
+        return;
+      }
+      // Only a live connection dropping to DISCONNECTED is the teardown the
+      // abort causes. A move into CONNECTING is an ordinary reconnect, and
+      // `undefined` means the server was disabled or removed.
+      const connected = status === MCPServerStatus.CONNECTED;
+      const tornDown = wasConnected && status === MCPServerStatus.DISCONNECTED;
+      wasConnected = connected;
+      if (!tornDown) {
+        return;
+      }
+      detach();
+      // Best-effort and detached from the caller: `attemptReconnect` needs
+      // this invocation only for its name and config, and a late failure must
+      // not surface anywhere.
+      void this.attemptReconnect().catch(() => undefined);
+    };
+    // A cancel whose teardown never reaches this process (the server kept the
+    // connection, or the session ends first) must not leak a registry
+    // listener for the life of the process.
+    const expiry = setTimeout(
+      detach,
+      DiscoveredMCPToolInvocation.REPAIR_LISTENER_TTL_MS,
+    );
+    expiry.unref?.();
+    addMCPStatusChangeListener(listener);
+  }
+
   private async handleReconnectOnError(
     error: unknown,
     signal: AbortSignal,
@@ -499,17 +553,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
     if (signal.aborted) {
-      // The cancelled call itself must not be replayed, but an abort can tear
-      // the transport down: the SDK's `onerror` fires and `McpClient` flips
-      // the server to `DISCONNECTED`. Left alone, every later call in a
-      // session that survives the cancel inherits the dead connection until
-      // the health monitor's budget expires (issue #12160). Repair without
-      // replaying — the retry path below would replay it.
-      if (
-        getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED
-      ) {
-        await this.attemptReconnect();
-      }
+      // The cancelled call must not be replayed, but an abort can tear the
+      // transport down. The status cannot be read here: the transport only
+      // reports the failure after the server reacts to
+      // `notifications/cancelled`, one round trip after the local rejection,
+      // so a read at this point always sees the stale `connected` value.
+      // Repair on the later transition instead, and never make this
+      // invocation's rejection wait for a reconnect (issue #12160).
+      this.repairConnectionOnDisconnectAfterAbort();
       throw error;
     }
 
