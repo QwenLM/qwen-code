@@ -1105,6 +1105,36 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should surface a failed TodoWrite result as a tool update', async () => {
+      const record = createToolResultRecord(
+        'todo_write',
+        'Error writing todos: dependency graph contains a cycle',
+        true,
+      );
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-123',
+          status: 'failed',
+        }),
+      );
+    });
+
+    it('should not synthesize a tool update for a successful TodoWrite without a plan', async () => {
+      const record = createToolResultRecord('todo_write', 'Some string result');
+
+      await replayer.replay([record]);
+
+      expect(
+        sendUpdateSpy.mock.calls.filter(
+          ([update]) => update['sessionUpdate'] === 'tool_call_update',
+        ),
+      ).toHaveLength(0);
+    });
+
     it('should synthesize a stable callId when a tool result has no callId', async () => {
       const record: ChatRecord = {
         ...createToolResultRecord('test_tool'),
