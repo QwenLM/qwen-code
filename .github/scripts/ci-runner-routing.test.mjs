@@ -797,6 +797,105 @@ describe('ci.yml lint HOME isolation', () => {
   });
 });
 
+describe('credential-free jobs on the disposable pool', () => {
+  const EPHEMERAL = ['self-hosted', 'ecs-qwen-ephemeral'];
+
+  it('ci.yml test_ubuntu: the checkout-free gate rides the disposable pool', () => {
+    // The gate runs one `test` shell line and checks out nothing, so every
+    // trigger and association may share the disposable pool with the fork
+    // shards; only the kill-switch reverts it to hosted.
+    const job = ciDoc.jobs.test_ubuntu;
+    const runsOn = String(job['runs-on']);
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    for (const eventName of [
+      'pull_request',
+      'push',
+      'merge_group',
+      'workflow_dispatch',
+    ]) {
+      for (const sameRepo of [true, false]) {
+        for (const assoc of ASSOCIATIONS) {
+          assert.deepEqual(
+            evalRunsOn(runsOn, {
+              ecsDisabled: false,
+              eventName,
+              sameRepo,
+              assoc,
+            }),
+            EPHEMERAL,
+            `gate ${eventName} sameRepo=${sameRepo} assoc='${assoc}'`,
+          );
+          assert.deepEqual(
+            evalRunsOn(runsOn, {
+              ecsDisabled: true,
+              eventName,
+              sameRepo,
+              assoc,
+            }),
+            JSON.parse(HOSTED),
+            `kill-switch must revert the gate on ${eventName}`,
+          );
+        }
+      }
+    }
+    assert.ok(
+      !job.steps.some((s) =>
+        String(s.uses || '').startsWith('actions/checkout'),
+      ),
+      'the gate must stay checkout-free to keep the disposable-pool routing',
+    );
+  });
+
+  it('web-shell-visuals.yml capture: untrusted renders ride the disposable pool', () => {
+    // The capture builds and renders untrusted PR code with a read-only
+    // token and no secrets — the disposable pool's exact security model.
+    // The privileged publisher stays wherever it was; only capture moves.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
+    );
+    const runsOn = String(doc.jobs.capture['runs-on']);
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    for (const assoc of ASSOCIATIONS) {
+      for (const sameRepo of [true, false]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: false,
+            eventName: 'pull_request',
+            sameRepo,
+            assoc,
+          }),
+          EPHEMERAL,
+          `capture sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: true,
+            eventName: 'pull_request',
+            sameRepo,
+            assoc,
+          }),
+          JSON.parse(HOSTED),
+          'kill-switch must revert capture to hosted',
+        );
+      }
+    }
+    // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
+    // pool through this workflow; any other secret reference breaks the
+    // pool's no-long-lived-secrets boundary.
+    const text = readFileSync(
+      join(workflowsDir, 'web-shell-visuals.yml'),
+      'utf8',
+    );
+    const secretRefs = text.match(/secrets\.[A-Za-z_]+/g) ?? [];
+    assert.deepEqual(
+      [...new Set(secretRefs)],
+      ['secrets.GITHUB_TOKEN'],
+      'capture must not reference any secret beyond the read-only event token',
+    );
+    assert.equal(doc.permissions.contents, 'read');
+  });
+});
+
 describe('ci.yml web_shell_e2e_smoke runner routing', () => {
   const expression = String(ciDoc.jobs.web_shell_e2e_smoke['runs-on'])
     .replace(/^\$\{\{\s*/, '')

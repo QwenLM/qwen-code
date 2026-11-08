@@ -390,10 +390,10 @@ it('reports the required Linux check only when the build and every shard pass', 
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
   expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
-  // The gate remains on the original association-gated runner, while test
-  // shards can opt into the disposable pool for untrusted forks.
+  // The gate checks out nothing, so it rides the disposable pool on every
+  // trigger; only the kill-switch reverts it to hosted.
   expect(gate['runs-on']).toBe(
-    '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"ecs-qwen-ephemeral\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
   );
   expect(condOf('test_ubuntu')).toBe(condOf('test'));
   expect(gate.steps[0].run).toBe(

@@ -9,8 +9,9 @@ name: 'Web-shell Visuals'
 #
 # Security model: this workflow BUILDS AND RENDERS untrusted PR code, so it runs
 # on the `pull_request` trigger (fork PRs get a read-only token and NO secrets),
-# on an ephemeral hosted runner, with `contents: read` and no secrets of its
-# own. It produces only image/video bytes as an artifact. The privileged step
+# on a disposable runner (the ecs-qwen-ephemeral pool; hosted only under the
+# kill-switch), with `contents: read` and no secrets of its own.
+# It produces only image/video bytes as an artifact. The privileged step
 # that needs a write token — pushing the images and commenting on the PR — lives
 # in the separate workflow_run workflow that never checks out PR code.
 on:
@@ -55,7 +56,10 @@ jobs:
   capture:
     name: 'Capture web-shell visuals (ubuntu-latest, Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
+    # The disposable pool matches this job's security model exactly (untrusted
+    # PR code, read-only token, no secrets) and takes it off the hosted queue.
+    # The kill-switch reverts to hosted, where every step behaves as before.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Leave room for cold dependency setup before both render passes.
     timeout-minutes: 45
     steps:
