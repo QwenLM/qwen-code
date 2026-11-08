@@ -490,7 +490,10 @@ function ArtifactCard({
   );
   // Rendered artifacts (HTML, Markdown, images) open straight into a rendered
   // preview tab, so label the action Preview rather than the generic Open.
-  const rendered = isRenderedArtifact(artifact);
+  // External-URL artifacts only show metadata and an Open link in the panel,
+  // so they keep Open even when their kind would otherwise render.
+  const rendered =
+    isRenderedArtifact(artifact) && artifact.storage !== 'external_url';
   return (
     <div className={styles.card}>
       <div className={`${styles.summary} ${styles.artifactSummary}`}>

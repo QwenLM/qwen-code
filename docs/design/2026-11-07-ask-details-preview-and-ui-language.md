@@ -66,7 +66,10 @@ preview renderer, sandbox/CSP, and large-document gate are unchanged.
 Markdown, and image artifact card in every session reads "Preview", not only the
 ask-details card. This is intentional for consistency: those artifacts all open
 in a rendered preview tab. Non-rendered artifacts (e.g. CSV, PPTX) and external
-link artifacts keep "Open". `isRenderedArtifact` mirrors the panel's predicates
+link artifacts keep "Open". An `external_url` artifact (e.g. an image recorded
+with a `url` and no workspace path) also keeps "Open" even though its kind would
+render: the panel shows only metadata and an Open link for it, so the card must
+not promise a preview. `isRenderedArtifact` mirrors the panel's predicates
 for the relabelled kinds — it normalises mime parameters (`text/html; charset=utf-8`
 → `text/html`) and honours `image/*` mime even without a path extension
 (`getArtifactImageMimeType`) — so HTML, Markdown, and image cards agree with the

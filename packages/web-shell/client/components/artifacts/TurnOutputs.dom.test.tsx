@@ -967,6 +967,52 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('keeps Open for an external-URL image that only shows metadata', () => {
+    // record_artifact accepts an image with a url and no workspace path, which
+    // lands as storage:'external_url'. The panel shows metadata and an Open
+    // link for it (no rendered preview), so the card must not promise Preview.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-external-image"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'external-image-artifact',
+                kind: 'image',
+                storage: 'external_url',
+                status: 'available',
+                title: 'External diagram',
+                url: 'https://example.com/diagram.png',
+                mimeType: 'image/png',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
   it('marks only changed workspace artifacts as modified since recorded', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
