@@ -46,6 +46,7 @@ export interface GoalsSessionBridge {
 export interface RegisterGoalsRoutesDeps {
   boundWorkspace: string;
   bridge: GoalsSessionBridge;
+  getSessionDisplayName?: (sessionId: string) => Promise<string | undefined>;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
 }
@@ -127,10 +128,15 @@ export function registerGoalsRoutes(
       const settled = await allSettledWithLimit(
         sessions,
         PROBE_CONCURRENCY,
-        async (session) => ({
-          session,
-          goal: await bridge.getSessionGoal(session.sessionId),
-        }),
+        async (session) => {
+          const goal = await bridge.getSessionGoal(session.sessionId);
+          const record = goal.snapshot.goal;
+          const persistedDisplayName =
+            !session.displayName && record && record.status !== 'complete'
+              ? await deps.getSessionDisplayName?.(session.sessionId)
+              : undefined;
+          return { session, goal, persistedDisplayName };
+        },
       );
 
       const goals: GoalView[] = [];
@@ -149,12 +155,13 @@ export function registerGoalsRoutes(
           dropped.push(`${sessionId}: ${reason}`);
           continue;
         }
-        const { session, goal } = outcome.value;
+        const { session, goal, persistedDisplayName } = outcome.value;
         const record = goal.snapshot.goal;
         if (!record || record.status === 'complete') continue;
         goals.push({
           sessionId: session.sessionId,
-          displayName: session.displayName ?? null,
+          displayName:
+            session.displayName || persistedDisplayName || record.objective,
           condition: record.objective,
           iterations: record.turnCount,
           setAt: record.createdAt,

@@ -29,6 +29,39 @@ beforeEach(() => {
 });
 
 describe('getSessionSuggestions', () => {
+  it('labels and filters Goal-only sessions by objective without changing mention values', async () => {
+    mockListSessions.mockResolvedValue({
+      items: [
+        {
+          sessionId: 'goal-only',
+          prompt: '',
+          goalObjective: 'Write release notes',
+        },
+        {
+          sessionId: 'prompt',
+          prompt: 'First prompt',
+          goalObjective: 'Write release notes',
+        },
+        {
+          sessionId: 'title',
+          customTitle: 'Manual title',
+          prompt: 'First prompt',
+          goalObjective: 'Write release notes',
+        },
+      ],
+      hasMore: false,
+    });
+    expect(await getSessionSuggestions('/proj', 'release')).toEqual([
+      expect.objectContaining({
+        label: 'Write release notes',
+        value: 'session:goal-only',
+      }),
+    ]);
+    expect(
+      (await getSessionSuggestions('/proj', '')).map((s) => s.label),
+    ).toEqual(['Write release notes', 'First prompt', 'Manual title']);
+  });
+
   it('maps sessions to category:session suggestions with @session: values', async () => {
     mockListSessions.mockResolvedValue({
       items: [

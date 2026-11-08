@@ -123,7 +123,9 @@ function outputHuman(items: SessionListItem[]): void {
     const time = truncate(sanitize(formatTime(item.startTime)), TIME_COL);
     const sanitizedPrompt = sanitize(item.prompt ?? '');
     const title = truncate(
-      item.customTitle != null ? sanitize(item.customTitle) : sanitizedPrompt,
+      item.customTitle != null
+        ? sanitize(item.customTitle)
+        : sanitize(item.prompt || item.goalObjective || ''),
       TITLE_COL,
     );
     const branch = truncate(
