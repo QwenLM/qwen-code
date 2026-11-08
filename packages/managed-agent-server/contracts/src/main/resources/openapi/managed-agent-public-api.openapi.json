@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.101.0",
+    "version": "1.102.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
   },
   "servers": [
@@ -204,7 +204,7 @@
         "tags": ["Public Sessions"],
         "operationId": "createSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the server-selected profile, and a Session pinned to a stored definition may include initial input when its single tools entry selected a profile from the deployment's definition tool-profile allowlist. Otherwise Workspace creation must have empty input. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports idle ACTIVE Sessions through their admitted Workspace lifecycle protocol, including v2 Shell/MCP, or reliably CLOSED/ARCHIVED Sessions; directory-change submission is retired; previously admitted durable cwd_change operations remain queryable and continue settling. This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn — 403 session_operation_forbidden below the role and 409 workspace_unavailable past it, or 404 session_not_found without Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness. A stored AgentDefinition may be selected by agent_id: an explicit agent_revision pins that revision, an omitted one resolves the latest revision at admission and pins it for the Session's life, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported with error.field naming the refused field. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Invalid approval or files-off can refuse attachment. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof. ",
+        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the server-selected profile, and a Session pinned to a stored definition may include initial input when its single tools entry selected a profile from the deployment's definition tool-profile allowlist. Otherwise Workspace creation must have empty input. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports idle ACTIVE Sessions through their admitted Workspace lifecycle protocol, including v2 Shell/MCP, or reliably CLOSED/ARCHIVED Sessions; directory-change submission is retired; previously admitted durable cwd_change operations remain queryable and continue settling. This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn \u2014 403 session_operation_forbidden below the role and 409 workspace_unavailable past it, or 404 session_not_found without Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness. A stored AgentDefinition may be selected by agent_id: an explicit agent_revision pins that revision, an omitted one resolves the latest revision at admission and pins it for the Session's life, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported with error.field naming the refused field. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Invalid approval or files-off can refuse attachment. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof. ",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1979,7 +1979,7 @@
         "tags": ["Public Sessions"],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible — its pre-delete status — rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible \u2014 its pre-delete status \u2014 rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2369,7 +2369,7 @@
         "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from the record domains the server projects — Monitor runs today, the others arrive with their stages. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view.",
+            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from the record domains the server projects \u2014 Monitor runs today, the others arrive with their stages. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3075,7 +3075,7 @@
       "delete": {
         "tags": ["Public Resources"],
         "operationId": "retireAgentAutomation",
-        "description": "Retires the definition: its chain ends and freezes, no later occurrence fires, and committed runs keep their history. Idempotent under its Idempotency-Key and for an already retired definition. 409 automation_unavailable when the deployment has not enabled automation — a 503 of the same code means the Harness is unavailable and is retryable.",
+        "description": "Retires the definition: its chain ends and freezes, no later occurrence fires, and committed runs keep their history. Idempotent under its Idempotency-Key and for an already retired definition. 409 automation_unavailable when the deployment has not enabled automation \u2014 a 503 of the same code means the Harness is unavailable and is retryable.",
         "x-qwen-implementation-status": "partial",
         "parameters": [
           {
@@ -3679,7 +3679,7 @@
             }
           }
         },
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible — its pre-delete status — rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made."
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible \u2014 its pre-delete status \u2014 rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made."
       }
     },
     "/v1/agent-channels/{channelId}/deliveries/{deliveryId}": {
@@ -7527,6 +7527,228 @@
         "summary": "Read recent current Session Items and page toward older Items"
       }
     },
+    "/v1/agents/sessions/{sessionId}/resources": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "description": "Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticResources"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["Public Sessions"],
+        "operationId": "getSessionDiagnosticResources"
+      }
+    },
+    "/api/agent/web-shell/v1/session-resources/query": {
+      "post": {
+        "description": "Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticResources"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["WebShell"],
+        "operationId": "querySessionDiagnosticResources",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/agent-trace": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "description": "Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticAgentTrace"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["Public Sessions"],
+        "operationId": "getSessionDiagnosticAgentTrace",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/session-agent-trace/query": {
+      "post": {
+        "description": "Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticAgentTrace"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["WebShell"],
+        "operationId": "querySessionDiagnosticAgentTrace",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellDiagnosticTraceRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/agents/workspaces/{workspaceId}/extensions/imports": {
       "post": {
         "tags": ["Public Resources"],
@@ -8320,7 +8542,7 @@
         "schema": {
           "type": "boolean"
         },
-        "description": "True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and answers the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route, which does not re-read it; operation responses represent the original operation at its current state."
+        "description": "True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible \u2014 a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and answers the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route, which does not re-read it; operation responses represent the original operation at its current state."
       },
       "RequestId": {
         "schema": {
@@ -8650,7 +8872,11 @@
             "type": "string",
             "enum": ["openai", "openai-responses", "anthropic", "gemini"]
           },
-          "model": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
           "base_url": {
             "type": "string",
             "minLength": 1,
@@ -8667,8 +8893,16 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-              "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
+              "temperature": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "top_p": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
               "top_k": {
                 "type": "integer",
                 "minimum": 1,
@@ -10196,6 +10430,12 @@
             "type": "boolean",
             "default": false,
             "description": "Public child orchestration support for this persisted Session; launch and caller authorization are checked separately."
+          },
+          "diagnostics": {
+            "type": "boolean",
+            "default": false,
+            "description": "Passive persisted context, model statistics, resource inventory and direct child invocation queries are available. Each response declares its observation coverage independently of Runtime readiness or fresh Turn admission.",
+            "x-qwen-implementation-status": "implemented"
           }
         }
       },
@@ -14340,7 +14580,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "The target Session; required on create. On update it must be absent or equal to the created Session — a different value is refused with 400 invalid_automation."
+            "description": "The target Session; required on create. On update it must be absent or equal to the created Session \u2014 a different value is refused with 400 invalid_automation."
           },
           "goal": {
             "type": "string",
@@ -17639,6 +17879,546 @@
           }
         },
         "required": ["workspaceId", "worktreeId", "idempotencyKey"]
+      },
+      "ManagedDiagnosticSkill": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "description",
+          "kind",
+          "origin",
+          "extensionId",
+          "modelInvocable",
+          "userInvocable"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["skill", "command"]
+          },
+          "origin": {
+            "type": "string",
+            "enum": ["base", "extension"]
+          },
+          "extensionId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modelInvocable": {
+            "type": "boolean"
+          },
+          "userInvocable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ManagedDiagnosticMcpServer": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "serverId",
+          "serverRevision",
+          "origin",
+          "extensionId",
+          "selectionState",
+          "liveState",
+          "catalogRevision",
+          "catalogServerRevision",
+          "attemptRevision",
+          "attemptServerRevision",
+          "lastAttemptState",
+          "lastExecutionState",
+          "releaseState",
+          "historical",
+          "discovery",
+          "tools",
+          "resources",
+          "prompts"
+        ],
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "serverRevision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "origin": {
+            "type": "string",
+            "enum": ["base", "extension", "independent"]
+          },
+          "extensionId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "selectionState": {
+            "type": "string",
+            "enum": ["enabled", "disabled", "removed", "unknown"]
+          },
+          "liveState": {
+            "type": "string",
+            "const": "unknown"
+          },
+          "catalogRevision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "catalogServerRevision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attemptRevision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attemptServerRevision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lastAttemptState": {
+            "type": ["string", "null"],
+            "description": "Last persisted configuration attempt state, distinct from physical execution evidence."
+          },
+          "lastExecutionState": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "releaseState": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "historical": {
+            "type": "boolean"
+          },
+          "discovery": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tools", "resources", "prompts"],
+            "properties": {
+              "tools": {
+                "type": "string",
+                "enum": ["complete", "partial", "failed", "stale", "unknown"]
+              },
+              "resources": {
+                "type": "string",
+                "enum": ["complete", "partial", "failed", "stale", "unknown"]
+              },
+              "prompts": {
+                "type": "string",
+                "enum": ["complete", "partial", "failed", "stale", "unknown"]
+              }
+            }
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "uri": {
+                  "type": "string"
+                },
+                "mimeType": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "uri": {
+                  "type": "string"
+                },
+                "mimeType": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "prompts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "uri": {
+                  "type": "string"
+                },
+                "mimeType": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ManagedDiagnosticResources": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "readRevision",
+          "availability",
+          "coverageReasons",
+          "configCoverage",
+          "historyCoverage",
+          "activeConfigRevision",
+          "activeOperationPhase",
+          "outputTruncated",
+          "skills",
+          "servers"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "configCoverage": {
+            "type": "string",
+            "enum": ["complete", "partial"]
+          },
+          "historyCoverage": {
+            "type": "string",
+            "enum": ["complete", "partial"]
+          },
+          "activeConfigRevision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "activeOperationPhase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outputTruncated": {
+            "type": "boolean"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedDiagnosticSkill"
+            }
+          },
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedDiagnosticMcpServer"
+            }
+          }
+        }
+      },
+      "ManagedDiagnosticAgentInvocation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "taskId",
+          "parentSessionId",
+          "childSessionId",
+          "description",
+          "state",
+          "runtimeState",
+          "createdAt",
+          "startedAt",
+          "settledAt"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "childSessionId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "runtimeState": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "settledAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedDiagnosticAgentTrace": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "readRevision",
+          "availability",
+          "coverageReasons",
+          "scope",
+          "items",
+          "nextCursor",
+          "hasMore"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scope": {
+            "type": "string",
+            "const": "direct-invocations"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedDiagnosticAgentInvocation"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WebShellDiagnosticTraceRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 20
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
       },
       "ManagedExtensionImportMetadata": {
         "type": "object",

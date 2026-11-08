@@ -1147,6 +1147,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-resources/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticResources"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-agent-trace/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticAgentTrace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/workspace-extensions/imports": {
         parameters: {
             query?: never;
@@ -1549,6 +1583,11 @@ export interface components {
              * @default false
              */
             childAgents?: boolean;
+            /**
+             * @description Passive persisted context, model statistics, resource inventory and direct child invocation queries are available. Each response declares its observation coverage independently of Runtime readiness or fresh Turn admission.
+             * @default false
+             */
+            diagnostics?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -2793,6 +2832,112 @@ export interface components {
             workspaceId: string;
             worktreeId: string;
             idempotencyKey: string;
+        };
+        ManagedDiagnosticSkill: {
+            name: string;
+            description: string;
+            /** @enum {string} */
+            kind: "skill" | "command";
+            /** @enum {string} */
+            origin: "base" | "extension";
+            extensionId: string | null;
+            modelInvocable: boolean;
+            userInvocable: boolean;
+        };
+        ManagedDiagnosticMcpServer: {
+            serverId: string;
+            serverRevision: number;
+            /** @enum {string} */
+            origin: "base" | "extension" | "independent";
+            extensionId: string | null;
+            /** @enum {string} */
+            selectionState: "enabled" | "disabled" | "removed" | "unknown";
+            /** @constant */
+            liveState: "unknown";
+            catalogRevision: number | null;
+            catalogServerRevision: number | null;
+            attemptRevision: number | null;
+            attemptServerRevision: number | null;
+            /** @description Last persisted configuration attempt state, distinct from physical execution evidence. */
+            lastAttemptState: string | null;
+            lastExecutionState: string | null;
+            releaseState: string | null;
+            historical: boolean;
+            discovery: {
+                /** @enum {string} */
+                tools: "complete" | "partial" | "failed" | "stale" | "unknown";
+                /** @enum {string} */
+                resources: "complete" | "partial" | "failed" | "stale" | "unknown";
+                /** @enum {string} */
+                prompts: "complete" | "partial" | "failed" | "stale" | "unknown";
+            };
+            tools: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+            resources: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+            prompts: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+        };
+        ManagedDiagnosticResources: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @enum {string} */
+            configCoverage: "complete" | "partial";
+            /** @enum {string} */
+            historyCoverage: "complete" | "partial";
+            activeConfigRevision: number | null;
+            activeOperationPhase: string | null;
+            outputTruncated: boolean;
+            skills: components["schemas"]["ManagedDiagnosticSkill"][];
+            servers: components["schemas"]["ManagedDiagnosticMcpServer"][];
+        };
+        ManagedDiagnosticAgentInvocation: {
+            taskId: string;
+            parentSessionId: string;
+            childSessionId: string | null;
+            description: string | null;
+            state: string;
+            runtimeState: string | null;
+            createdAt: number;
+            startedAt: number | null;
+            settledAt: number | null;
+        };
+        ManagedDiagnosticAgentTrace: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            scope: "direct-invocations";
+            items: components["schemas"]["ManagedDiagnosticAgentInvocation"][];
+            nextCursor: string | null;
+            hasMore: boolean;
+        };
+        WebShellDiagnosticTraceRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string | null;
+            limit?: number | null;
         };
         ManagedExtensionImportMetadata: {
             /** @enum {string} */
@@ -5219,6 +5364,68 @@ export interface operations {
             409: components["responses"]["MessageProjectionChanged"];
             413: components["responses"]["MessagePageTooLarge"];
             503: components["responses"]["MessageProjectionPending"];
+        };
+    };
+    querySessionDiagnosticResources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticResources"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionDiagnosticAgentTrace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellDiagnosticTraceRequest"];
+            };
+        };
+        responses: {
+            /** @description Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticAgentTrace"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     importWebShellExtensionPackage: {

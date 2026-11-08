@@ -488,6 +488,25 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getDiagnosticResources(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticResources']>(
+      '/session-resources/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  listDiagnosticAgentTrace(
+    request: Schemas['WebShellDiagnosticTraceRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['ManagedDiagnosticAgentTrace']>(
+      '/session-agent-trace/query',
+      request,
+      signal,
+    );
+  }
+
   getSessionMcp(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['PublicMcpCatalog']>(
       '/session-mcp/query',
