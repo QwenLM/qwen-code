@@ -449,7 +449,10 @@ function useLineInputKeys(
   // composer's editor is unfocused while a dialog owns input, so consume the
   // paste here instead of letting it drop.
   usePaste((event: PasteEvent) => {
-    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    const text = normalizePastedText(decodePasteBytes(event.bytes)).replace(
+      /[\r\n]+/g,
+      ' ',
+    );
     if (!text) return;
     event.preventDefault();
     line.insert(text);

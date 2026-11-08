@@ -560,7 +560,10 @@ export function OpenTuiExtensionSourcesTab({
       (viewRef.current !== 'add' && viewRef.current !== 'install-extension')
     )
       return;
-    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    const text = normalizePastedText(decodePasteBytes(event.bytes)).replace(
+      /[\r\n]+/g,
+      ' ',
+    );
     if (text) {
       event.preventDefault();
       line.insert(text);
