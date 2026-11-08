@@ -114,6 +114,10 @@ session deletion/retention policy. A new publication never overwrites an earlier
 snapshot; snapshots remain until their final retained record is removed. Older live-link records cannot be
 retroactively reconstructed. Missing local snapshot bytes are reported as
 unavailable, including when moving a transcript without its runtime storage.
+Local published `file://` pages that are not snapshot descriptors are live-only:
+the store writes them as ephemeral even if a caller asks for restorable, and
+restore quietly drops matching Artifact-tool journal records. See
+[local-published-file-retention.md](../daemon-session-artifacts/local-published-file-retention.md).
 
 ## Affected components and validation
 

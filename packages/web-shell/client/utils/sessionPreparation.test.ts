@@ -616,6 +616,31 @@ describe('createAndAttachSessionForPrompt', () => {
     );
   });
 
+  it('keeps the created session when the attach is superseded by a newer request', async () => {
+    const superseded = new DOMException(
+      'Session load superseded by a newer request',
+      'AbortError',
+    );
+    const actions = createActions({
+      attachSession: vi.fn(() => Promise.reject(superseded)),
+    });
+    const warn = vi.fn();
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        warn,
+      }),
+    ).rejects.toBe(superseded);
+
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] first-prompt preparation superseded; keeping session for later attach:',
+      'session-1',
+    );
+  });
+
   it('cleans up the created session when onSessionCreated rejects', async () => {
     const error = new Error('callback failed');
     const actions = createActions();

@@ -8,10 +8,7 @@ import {
   useState,
   type CSSProperties,
 } from 'react';
-import type {
-  DaemonSessionAgentTaskStatus,
-  DaemonSessionTaskStatus,
-} from '@qwen-code/sdk/daemon';
+import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import { useI18n } from '../../i18n';
@@ -20,19 +17,38 @@ import { formatRuntime } from '../../utils/formatRuntime';
 import {
   getAgentDescription,
   getSubagentDetailsUnavailableReason,
-  getAgentDisplayStatus,
-  isAgentCancelled,
   sanitizeControlChars,
 } from './toolFormatting';
+import {
+  executionStatus,
+  nestedAgentToolsForTool,
+  nestedTasksFromIndex,
+  taskForTool,
+  toolForNestedTask,
+  type PlanNodeStatus,
+} from './taskExecutionIndex';
+import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
+import { buildSessionWorkflowProjection } from '../workflow/session-workflow-model';
 import styles from './PlanExecutionView.module.css';
 
-export type PlanNodeStatus =
-  | 'running'
-  | 'paused'
-  | 'completed'
-  | 'blocked'
-  | 'in_progress'
-  | 'ready';
+// The task-execution lookups this view used to own now live in
+// `taskExecutionIndex` so the workflow projection can share them without a
+// circular import. Re-exported here to keep this module's public surface
+// stable for its existing importers (tests included).
+export {
+  createTaskExecutionIndex,
+  getActiveAgents,
+  getActiveAgentsFromIndex,
+  getAttentionAgentStatuses,
+  getAttentionAgentTool,
+  getPlanNodeState,
+  getPlanNodeStateFromIndex,
+  nestedAgentToolsForTool,
+  nestedTasksFromIndex,
+  nestedTasksForTool,
+  todoIdOf,
+} from './taskExecutionIndex';
+export type { PlanNodeStatus, TaskExecutionIndex } from './taskExecutionIndex';
 
 interface PlanEdgePath {
   from: string;
@@ -62,6 +78,12 @@ const EMPTY_GRAPH_LAYOUT: PlanGraphLayout = {
 const EDGE_LANE_HEIGHT = 9;
 /** Corner radius where an orthogonal edge turns. */
 const EDGE_CORNER = 6;
+/**
+ * Widest horizontal shoulder a layer-spanning edge runs before turning down
+ * into its return lane. It is a ceiling, never a floor: a narrow gutter takes
+ * half of its own run instead. See the router for why.
+ */
+const EDGE_SHOULDER = 24;
 
 const MAX_RENDERED_PLAN_EDGES = 500;
 
@@ -129,328 +151,6 @@ export function layerPlanTodos(todos: readonly TodoItem[]): TodoItem[][] {
   return layers;
 }
 
-export interface TaskExecutionIndex {
-  rootByToolCallId: ReadonlyMap<string, DaemonSessionAgentTaskStatus>;
-  childrenByParentId: ReadonlyMap<string, DaemonSessionAgentTaskStatus[]>;
-  nestedByRootId: Map<
-    string,
-    Array<{ task: DaemonSessionAgentTaskStatus; depth: number }>
-  >;
-}
-
-export function createTaskExecutionIndex(
-  tasks: readonly DaemonSessionTaskStatus[],
-): TaskExecutionIndex {
-  const rootByToolCallId = new Map<string, DaemonSessionAgentTaskStatus>();
-  const childrenByParentId = new Map<string, DaemonSessionAgentTaskStatus[]>();
-  for (const task of tasks) {
-    if (task.kind !== 'agent') continue;
-    if (task.parentAgentId == null) {
-      if (!task.toolUseId || rootByToolCallId.has(task.toolUseId)) continue;
-      rootByToolCallId.set(task.toolUseId, task);
-      continue;
-    }
-    const siblings = childrenByParentId.get(task.parentAgentId) ?? [];
-    siblings.push(task);
-    childrenByParentId.set(task.parentAgentId, siblings);
-  }
-  return {
-    rootByToolCallId,
-    childrenByParentId,
-    nestedByRootId: new Map(),
-  };
-}
-
-function taskForTool(
-  tool: ACPToolCall,
-  taskIndex: TaskExecutionIndex,
-): DaemonSessionAgentTaskStatus | undefined {
-  return taskIndex.rootByToolCallId.get(tool.callId);
-}
-
-function executionStatus(
-  tool: ACPToolCall,
-  taskIndex: TaskExecutionIndex,
-): string {
-  const liveStatus = taskForTool(tool, taskIndex)?.status;
-  if (liveStatus) return liveStatus;
-  const persistedStatus =
-    tool.rawOutput && typeof tool.rawOutput === 'object'
-      ? (tool.rawOutput as Record<string, unknown>)['status']
-      : undefined;
-  if (persistedStatus === 'paused') return persistedStatus;
-  return isAgentCancelled(tool) ? 'cancelled' : getAgentDisplayStatus(tool);
-}
-
-/**
- * Whether an executionStatus counts toward the overview strip's "Active
- * agents". Deliberately the same statuses that make
- * `getPlanNodeStateFromIndex` render a node running/paused: the live task
- * statuses ('running' / 'paused') plus the transcript 'in_progress' that
- * `executionStatus` reports for an in-flight tool call with no live daemon
- * task — so the strip and the node badges never contradict each other.
- */
-function isAgentExecutionActive(status: string): boolean {
-  return (
-    status === 'running' || status === 'in_progress' || status === 'paused'
-  );
-}
-
-export function nestedTasksFromIndex(
-  tool: ACPToolCall,
-  taskIndex: TaskExecutionIndex,
-): Array<{ task: DaemonSessionAgentTaskStatus; depth: number }> {
-  const root = taskForTool(tool, taskIndex);
-  if (!root) return [];
-  const cached = taskIndex.nestedByRootId.get(root.id);
-  if (cached) return cached;
-
-  const nested: Array<{
-    task: DaemonSessionAgentTaskStatus;
-    depth: number;
-  }> = [];
-  const visited = new Set([root.id]);
-  const stack = (taskIndex.childrenByParentId.get(root.id) ?? [])
-    .slice()
-    .reverse()
-    .map((task) => ({ task, depth: 1 }));
-  while (stack.length > 0) {
-    const entry = stack.pop()!;
-    if (visited.has(entry.task.id)) continue;
-    visited.add(entry.task.id);
-    nested.push(entry);
-    const descendants = taskIndex.childrenByParentId.get(entry.task.id) ?? [];
-    for (let index = descendants.length - 1; index >= 0; index--) {
-      stack.push({ task: descendants[index], depth: entry.depth + 1 });
-    }
-  }
-  taskIndex.nestedByRootId.set(root.id, nested);
-  return nested;
-}
-
-export function nestedTasksForTool(
-  tool: ACPToolCall,
-  tasks: readonly DaemonSessionTaskStatus[],
-): Array<{ task: DaemonSessionAgentTaskStatus; depth: number }> {
-  return nestedTasksFromIndex(tool, createTaskExecutionIndex(tasks));
-}
-
-/**
- * Deliberately uncached. Keying on the tool object would be wrong the moment
- * a reused object gains a sub-tool — `appendSubTool` mutates `subTools` in
- * place — and the only thing standing between that and a stale render is
- * `useMessages`' prefix-reuse rule in another module. The callers' own
- * derivations are memoized, so the repetition this would remove is bounded to
- * a single derivation; a silent wrong subtree is not worth that.
- */
-export function nestedAgentToolsForTool(
-  tool: ACPToolCall,
-): Array<{ tool: ACPToolCall; depth: number }> {
-  const result: Array<{ tool: ACPToolCall; depth: number }> = [];
-  const visit = (parent: ACPToolCall, depth: number) => {
-    for (const child of parent.subTools ?? []) {
-      if (!isSubAgentToolCall(child)) continue;
-      result.push({ tool: child, depth });
-      visit(child, depth + 1);
-    }
-  };
-  visit(tool, 1);
-  return result;
-}
-
-/**
- * The execution status observed for every agent under one tool: the tool's
- * own execution, every nested live task, and every nested transcript agent.
- * An agent observed through BOTH a live task and a persisted transcript tool
- * (a nested task whose toolUseId matches the nested tool's callId) counts
- * once, keeping the actionable observation: getAttentionAgentTool opens the
- * failed/cancelled surface when either reports one, so the tally must agree
- * with the affordance. getPlanNodeStateFromIndex decides attention on
- * exactly these statuses and the cockpit's attention stats tally them, so
- * the triage strip and the queue can never contradict each other.
- */
-function attentionAgentStatuses(
-  tool: ACPToolCall,
-  taskIndex: TaskExecutionIndex,
-): string[] {
-  const byAgent = new Map<string, string>();
-  const record = (agentKey: string, status: string) => {
-    const existing = byAgent.get(agentKey);
-    if (
-      existing === undefined ||
-      (existing !== 'failed' &&
-        existing !== 'cancelled' &&
-        (status === 'failed' || status === 'cancelled'))
-    ) {
-      byAgent.set(agentKey, status);
-    }
-  };
-  const root = taskForTool(tool, taskIndex);
-  record(
-    root ? `task:${root.id}` : `tool:${tool.callId}`,
-    executionStatus(tool, taskIndex),
-  );
-  const liveTaskIdByToolCallId = new Map<string, string>();
-  for (const { task } of nestedTasksFromIndex(tool, taskIndex)) {
-    record(`task:${task.id}`, task.status);
-    if (task.toolUseId) liveTaskIdByToolCallId.set(task.toolUseId, task.id);
-  }
-  for (const { tool: nestedTool } of nestedAgentToolsForTool(tool)) {
-    const liveTaskId = liveTaskIdByToolCallId.get(nestedTool.callId);
-    record(
-      liveTaskId ? `task:${liveTaskId}` : `tool:${nestedTool.callId}`,
-      executionStatus(nestedTool, taskIndex),
-    );
-  }
-  return [...byAgent.values()];
-}
-
-/**
- * Same agent-status walk as {@link attentionAgentStatuses}, for callers that
- * hold the raw task list instead of a prebuilt index (the cockpit's stats
- * strip, which must tally exactly what the attention queue shows).
- */
-export function getAttentionAgentStatuses(
-  tool: ACPToolCall,
-  tasks: readonly DaemonSessionTaskStatus[],
-): string[] {
-  return attentionAgentStatuses(tool, createTaskExecutionIndex(tasks));
-}
-
-function transcriptAgentTask(
-  tool: ACPToolCall,
-  status: string,
-  depth?: number,
-): DaemonSessionAgentTaskStatus {
-  return {
-    kind: 'agent',
-    id: `tool:${tool.callId}`,
-    label: tool.title || String(tool.args?.description ?? 'Agent'),
-    description:
-      typeof tool.args?.description === 'string' ? tool.args.description : '',
-    status: status === 'paused' ? 'paused' : 'running',
-    startTime: 0,
-    runtimeMs: 0,
-    isBackgrounded: false,
-    toolUseId: tool.callId,
-    ...(depth === undefined ? {} : { depth }),
-  };
-}
-
-function activeAgentEntry(
-  tool: ACPToolCall,
-  taskIndex: TaskExecutionIndex,
-  depth?: number,
-): DaemonSessionAgentTaskStatus | undefined {
-  const status = executionStatus(tool, taskIndex);
-  if (!isAgentExecutionActive(status)) return undefined;
-  const liveTask = taskForTool(tool, taskIndex);
-  if (liveTask) return liveTask;
-  return transcriptAgentTask(tool, status, depth);
-}
-
-/**
- * One entry per agent the overview strip reports as active, and the single
- * source the workflow inspector summary counts: the live daemon task when
- * one exists, otherwise a transcript-derived stand-in for an in-flight tool
- * call with no live task (the replay shape). The walk mirrors the node
- * badges (executionStatus), so the strip, the badges, and the inspector can
- * never contradict each other. An agent observed through BOTH a live task
- * and a persisted transcript tool counts once (dedup by toolUseId).
- */
-export function getActiveAgents(
-  tools: readonly ACPToolCall[],
-  tasks: readonly DaemonSessionTaskStatus[],
-): DaemonSessionAgentTaskStatus[] {
-  return getActiveAgentsFromIndex(tools, createTaskExecutionIndex(tasks));
-}
-
-/**
- * {@link getActiveAgents} for callers that already hold an index. Building the
- * index is O(tasks); doing it per todo and per tool — as the workflow
- * projection used to — makes the walk O((todos + tools) x tasks) for a result
- * that never varies with the todo or the tool.
- */
-export function getActiveAgentsFromIndex(
-  tools: readonly ACPToolCall[],
-  taskIndex: TaskExecutionIndex,
-): DaemonSessionAgentTaskStatus[] {
-  const active: DaemonSessionAgentTaskStatus[] = [];
-  for (const tool of tools) {
-    const root = activeAgentEntry(tool, taskIndex);
-    if (root) active.push(root);
-    const nestedLiveTasks = nestedTasksFromIndex(tool, taskIndex);
-    for (const { task } of nestedLiveTasks) {
-      if (task.status === 'running' || task.status === 'paused') {
-        active.push(task);
-      }
-    }
-    const liveNestedToolUseIds = new Set(
-      nestedLiveTasks
-        .map(({ task }) => task.toolUseId)
-        .filter((toolUseId): toolUseId is string => toolUseId !== undefined),
-    );
-    for (const { tool: nestedTool, depth } of nestedAgentToolsForTool(tool)) {
-      if (liveNestedToolUseIds.has(nestedTool.callId)) continue;
-      const nested = activeAgentEntry(nestedTool, taskIndex, depth);
-      if (nested) active.push(nested);
-    }
-  }
-  return active;
-}
-
-export function getPlanNodeStateFromIndex(
-  todo: TodoItem,
-  todosById: ReadonlyMap<string, TodoItem>,
-  tools: readonly ACPToolCall[],
-  taskIndex: TaskExecutionIndex,
-): { status: PlanNodeStatus; attention: boolean } {
-  const executionStatuses = tools.map((tool) =>
-    executionStatus(tool, taskIndex),
-  );
-  const attention = tools.some((tool) =>
-    attentionAgentStatuses(tool, taskIndex).some(
-      (status) => status === 'failed' || status === 'cancelled',
-    ),
-  );
-  if (
-    executionStatuses.includes('running') ||
-    executionStatuses.includes('in_progress')
-  )
-    return { status: 'running', attention };
-  if (executionStatuses.includes('paused'))
-    return { status: 'paused', attention };
-  if (todo.status === 'completed')
-    return { status: 'completed', attention: false };
-  const blocked = (todo.blockedBy ?? []).some(
-    (id) => todosById.has(id) && todosById.get(id)?.status !== 'completed',
-  );
-  if (blocked) return { status: 'blocked', attention };
-  if (todo.status === 'in_progress')
-    return { status: 'in_progress', attention };
-  return { status: 'ready', attention };
-}
-
-export function getPlanNodeState(
-  todo: TodoItem,
-  todosById: ReadonlyMap<string, TodoItem>,
-  tools: readonly ACPToolCall[],
-  tasks: readonly DaemonSessionTaskStatus[],
-): { status: PlanNodeStatus; attention: boolean } {
-  return getPlanNodeStateFromIndex(
-    todo,
-    todosById,
-    tools,
-    createTaskExecutionIndex(tasks),
-  );
-}
-
-/** The plan step a tool call was issued for, when it declares one. */
-export function todoIdOf(tool: ACPToolCall): string | undefined {
-  const value = tool.args?.todo_id;
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
 function statusKey(status: PlanNodeStatus) {
   return `planExecution.status.${status}` as const;
 }
@@ -473,59 +173,11 @@ function executionStatusKey(status: string) {
   }
 }
 
-function toolForNestedTask(
-  task: DaemonSessionAgentTaskStatus,
-): ACPToolCall | undefined {
-  if (!task.toolUseId) return undefined;
-  const status: ACPToolCall['status'] =
-    task.status === 'failed'
-      ? 'failed'
-      : task.status === 'running' || task.status === 'paused'
-        ? 'in_progress'
-        : 'completed';
-  return {
-    callId: task.toolUseId,
-    toolName: 'Agent',
-    title: task.label,
-    args: { description: task.description },
-    status,
-    rawOutput: { type: 'task_execution', status: task.status },
-  };
-}
-
-export function getAttentionAgentTool(
-  tool: ACPToolCall,
-  tasks: readonly DaemonSessionTaskStatus[],
-): ACPToolCall | undefined {
-  const taskIndex = createTaskExecutionIndex(tasks);
-  const nestedTools = nestedAgentToolsForTool(tool);
-  const nestedToolByCallId = new Map(
-    nestedTools.map(({ tool: nestedTool }) => [nestedTool.callId, nestedTool]),
-  );
-  const failedTask = [...nestedTasksFromIndex(tool, taskIndex)]
-    .reverse()
-    .find(
-      ({ task }) => task.status === 'failed' || task.status === 'cancelled',
-    )?.task;
-  if (failedTask?.toolUseId) {
-    return (
-      nestedToolByCallId.get(failedTask.toolUseId) ??
-      toolForNestedTask(failedTask)
-    );
-  }
-  const failedTool = [...nestedTools].reverse().find(({ tool: nestedTool }) => {
-    const status = executionStatus(nestedTool, taskIndex);
-    return status === 'failed' || status === 'cancelled';
-  })?.tool;
-  if (failedTool) return failedTool;
-  const status = executionStatus(tool, taskIndex);
-  return status === 'failed' || status === 'cancelled' ? tool : undefined;
-}
-
 export function PlanExecutionView({
   todos,
   tools,
   tasks,
+  projection: sharedProjection,
   onOpenSubagent,
   hideTitle = false,
   selection,
@@ -534,6 +186,14 @@ export function PlanExecutionView({
   todos: readonly TodoItem[];
   tools: readonly ACPToolCall[];
   tasks: readonly DaemonSessionTaskStatus[];
+  /**
+   * A host that already derives the workflow projection (the cockpit, which
+   * mounts this graph beside the inspector) passes its own, so the whole
+   * surface shares one projection — and one task-execution index — per
+   * render instead of each component privately rebuilding both. Standalone
+   * mounts derive it from `todos` / `tools` / `tasks` here.
+   */
+  projection?: SessionWorkflowProjection;
   onOpenSubagent?: (tool: ACPToolCall) => void;
   /**
    * Drop the "Plan execution" caption when the host already titles the region.
@@ -550,23 +210,29 @@ export function PlanExecutionView({
 }) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
-  const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
+  const projection = useMemo(
+    () =>
+      sharedProjection ?? buildSessionWorkflowProjection(todos, tools, tasks),
+    [sharedProjection, tasks, todos, tools],
+  );
+  const taskIndex = projection.taskIndex;
 
-  // One derivation for the whole graph, so a hover — which only flips
-  // `data-focused` / `data-active` — no longer re-runs the topological sort,
-  // the topology serialization, and the per-todo x per-tool attention walk.
-  // `todos` arrives with a stable identity from `useStableArray`, and `tools`
-  // is rebuilt whenever the transcript changes, so this memo tracks content
-  // rather than defeating itself on fresh array identities.
+  // Grouping, node states, counts and dependents all come from the shared
+  // projection — one derivation per render across every workflow surface.
+  // Only the graph-specific layering and topology serialization are derived
+  // here, so a hover — which only flips `data-focused` / `data-active` —
+  // re-renders without re-running the topological sort or the serialization.
+  // `todos` arrives with a stable identity from `useStableArray`, and the
+  // projection rebuilds whenever the transcript does, so the memo tracks
+  // content rather than defeating itself on fresh array identities.
+  const { todosById, toolsByTodo, states: statesByTodo } = projection;
+  const unassigned = projection.unassignedTools;
+  const completedCount = projection.completedCount;
+  const progressPercent = projection.progressPercent;
+  const activeAgentCount = projection.activeAgents.length;
+  const attentionCount = projection.attentionTodos.length;
   const {
-    todosById,
-    toolsByTodo,
-    unassigned,
-    statesByTodo,
-    completedCount,
-    progressPercent,
-    activeAgentCount,
-    attentionCount,
+    stepNumberByTodo,
     topology,
     dependencyIdsByTodo,
     topologyKey,
@@ -577,58 +243,17 @@ export function PlanExecutionView({
     layerByTodo,
     dependentsByTodo,
   } = useMemo(() => {
-    const knownIds = new Set(todos.map((todo) => todo.id));
-    const todosById = new Map(todos.map((todo) => [todo.id, todo]));
-    const toolsByTodo = new Map<string, ACPToolCall[]>();
-    const unassigned: ACPToolCall[] = [];
-    for (const tool of tools) {
-      const todoId = todoIdOf(tool);
-      if (!todoId || !knownIds.has(todoId)) {
-        unassigned.push(tool);
-        continue;
-      }
-      const grouped = toolsByTodo.get(todoId) ?? [];
-      grouped.push(tool);
-      toolsByTodo.set(todoId, grouped);
-    }
-    const statesByTodo = new Map(
-      todos.map((todo) => [
-        todo.id,
-        getPlanNodeStateFromIndex(
-          todo,
-          todosById,
-          toolsByTodo.get(todo.id) ?? [],
-          taskIndex,
-        ),
-      ]),
+    // The step number addresses a step in the inspector list and in the
+    // dependency chips, so the graph shows the same number or the three
+    // surfaces name the same step differently.
+    const stepNumberByTodo = new Map(
+      todos.map((todo, index) => [todo.id, index + 1]),
     );
-    const completedCount = todos.filter(
-      (todo) => todo.status === 'completed',
-    ).length;
-    // floor, not round: (N-1)/N rounds up to 100% on long plans, reporting
-    // completion (including to aria-valuenow) while a step is still
-    // outstanding.
-    const progressPercent =
-      todos.length === 0
-        ? 0
-        : Math.floor((completedCount / todos.length) * 100);
-    // Derive from the same source as the node badges (executionStatus): the
-    // live daemon index when a task exists, otherwise the tool call's
-    // persisted/transcript status. Counting only live tasks contradicted the
-    // badges on a replayed transcript of an interrupted session — the node
-    // rendered Running off an in_progress tool call while this strip reported
-    // "Active agents: 0" because no live daemon task existed. The workflow
-    // inspector summary counts the very same helper output, so the two
-    // surfaces can never contradict each other.
-    const activeAgentCount = getActiveAgentsFromIndex(tools, taskIndex).length;
-    const attentionCount = [...statesByTodo.values()].filter(
-      (state) => state.attention,
-    ).length;
     const topology = todos.map((todo): [string, string[]] => [
       todo.id,
       [...new Set(todo.blockedBy ?? [])].filter(
         (dependencyId) =>
-          dependencyId !== todo.id && knownIds.has(dependencyId),
+          dependencyId !== todo.id && projection.todosById.has(dependencyId),
       ),
     ]);
     const dependencyIdsByTodo = new Map(topology);
@@ -646,22 +271,18 @@ export function PlanExecutionView({
     layers.forEach((layer, index) => {
       for (const todo of layer) layerByTodo.set(todo.id, index);
     });
-    for (const [todoId, dependencies] of topology) {
-      for (const dependencyId of dependencies) {
-        const dependents = dependentsByTodo.get(dependencyId) ?? [];
-        dependents.push(todoId);
-        dependentsByTodo.set(dependencyId, dependents);
-      }
+    // Downstream step ids straight from the projection's own derivation —
+    // the graph used to rebuild this from the topology it had just
+    // serialized, a third copy of the same `blockedBy` walk (after the
+    // projection's own and the one it replaced in the inspector).
+    for (const [todoId, dependents] of projection.dependentsByTodo) {
+      dependentsByTodo.set(
+        todoId,
+        dependents.map((dependent) => dependent.id),
+      );
     }
     return {
-      todosById,
-      toolsByTodo,
-      unassigned,
-      statesByTodo,
-      completedCount,
-      progressPercent,
-      activeAgentCount,
-      attentionCount,
+      stepNumberByTodo,
       topology,
       dependencyIdsByTodo,
       topologyKey,
@@ -672,7 +293,7 @@ export function PlanExecutionView({
       layerByTodo,
       dependentsByTodo,
     };
-  }, [taskIndex, todos, tools]);
+  }, [projection, todos]);
   const graphId = useId().replaceAll(':', '');
   const markerId = `plan-arrow-${graphId}`;
   const dimMarkerId = `plan-arrow-dim-${graphId}`;
@@ -783,6 +404,9 @@ export function PlanExecutionView({
           ? graphRect.height / graphElement.offsetHeight
           : 1;
       const measuredNodes = new Map<string, DOMRect>();
+      // Horizontal extent of every topological layer, so an edge that skips
+      // a layer can size its shoulders from the gutter it really crosses.
+      const layerBounds = new Map<number, { left: number; right: number }>();
       let maxNodeBottom = 0;
       for (const [todoId, node] of nodeRefs.current) {
         const rect = node.getBoundingClientRect();
@@ -797,6 +421,17 @@ export function PlanExecutionView({
         } as DOMRect;
         measuredNodes.set(todoId, normalizedRect);
         maxNodeBottom = Math.max(maxNodeBottom, normalizedRect.bottom);
+        const layer = layerByTodoRef.current.get(todoId) ?? 0;
+        const bounds = layerBounds.get(layer);
+        if (bounds) {
+          bounds.left = Math.min(bounds.left, normalizedRect.left);
+          bounds.right = Math.max(bounds.right, normalizedRect.right);
+        } else {
+          layerBounds.set(layer, {
+            left: normalizedRect.left,
+            right: normalizedRect.right,
+          });
+        }
       }
       const edges: PlanEdgePath[] = [];
       const spanning: Array<{
@@ -833,7 +468,16 @@ export function PlanExecutionView({
             });
             continue;
           }
-          const controlX = startX + Math.max(24, (endX - startX) / 2);
+          // Half the run, not the old fixed 24px floor. The ≤720px gutter
+          // leaves a 24px run and the ≤480px gutter a 10px one, so a 24px
+          // shoulder put the control point exactly on the end point (zero
+          // tangent) or past it (negative tangent) — and `orient="auto"` then
+          // flips the arrowhead back at its source, which is the only
+          // direction cue left now that the input port is gone. Every gutter
+          // wide enough to afford the floor already resolved to run / 2, so
+          // wide lanes keep their exact curve while the end tangent's x stays
+          // strictly positive at every tier.
+          const controlX = startX + (endX - startX) / 2;
           edges.push({
             from: dependencyId,
             to: todoId,
@@ -851,8 +495,40 @@ export function PlanExecutionView({
           maxNodeBottom + 14 + lane * EDGE_LANE_HEIGHT,
           Math.max(graphHeight - 6, maxNodeBottom + 14),
         );
-        const dropX = edge.startX + 24;
-        const riseX = edge.endX - 24;
+        // Shoulders derived from the gutter each side actually has, the same
+        // way the adjacent-layer edge already does it — not a fixed 24px. The
+        // ≤480px gutter is 18px, so a 24px shoulder left a 10px run and put
+        // the vertical segment inside the intervening lane: a dependency from
+        // step 3 to step 5 looked like it entered step 4, and the SVG paints
+        // under the nodes so the lane just vanished into it. Halving the run
+        // centres the segment in its own gutter. EDGE_SHOULDER still wins
+        // wherever the gutter can afford it (the 64px desktop tier has a 56px
+        // run), so wide lanes keep the exact curve they had.
+        const sourceLayer = layerByTodoRef.current.get(edge.from) ?? 0;
+        const targetLayer = layerByTodoRef.current.get(edge.to) ?? 0;
+        // An unmeasured neighbouring layer falls back to the full shoulder.
+        const nextLayerLeft =
+          layerBounds.get(sourceLayer + 1)?.left ?? Number.POSITIVE_INFINITY;
+        const prevLayerRight =
+          layerBounds.get(targetLayer - 1)?.right ?? Number.NEGATIVE_INFINITY;
+        const dropShoulder = Math.min(
+          EDGE_SHOULDER,
+          (nextLayerLeft - 4 - edge.startX) / 2,
+        );
+        const riseShoulder = Math.min(
+          EDGE_SHOULDER,
+          (edge.endX - prevLayerRight - 4) / 2,
+        );
+        // The corner has to fit inside both shoulders. At 18px the shoulder
+        // is 5, so the unhalved 6px radius left a zero-length final segment
+        // and the arrowhead lost its direction again.
+        const corner = Math.min(
+          EDGE_CORNER,
+          dropShoulder / 2,
+          riseShoulder / 2,
+        );
+        const dropX = edge.startX + dropShoulder;
+        const riseX = edge.endX - riseShoulder;
         const down = routeY > edge.startY ? 1 : -1;
         const up = edge.endY > routeY ? 1 : -1;
         edges.push({
@@ -860,14 +536,14 @@ export function PlanExecutionView({
           to: edge.to,
           d:
             `M ${edge.startX} ${edge.startY} ` +
-            `H ${dropX - EDGE_CORNER} ` +
-            `Q ${dropX} ${edge.startY} ${dropX} ${edge.startY + EDGE_CORNER * down} ` +
-            `V ${routeY - EDGE_CORNER * down} ` +
-            `Q ${dropX} ${routeY} ${dropX + EDGE_CORNER} ${routeY} ` +
-            `H ${riseX - EDGE_CORNER} ` +
-            `Q ${riseX} ${routeY} ${riseX} ${routeY + EDGE_CORNER * up} ` +
-            `V ${edge.endY - EDGE_CORNER * up} ` +
-            `Q ${riseX} ${edge.endY} ${riseX + EDGE_CORNER} ${edge.endY} ` +
+            `H ${dropX - corner} ` +
+            `Q ${dropX} ${edge.startY} ${dropX} ${edge.startY + corner * down} ` +
+            `V ${routeY - corner * down} ` +
+            `Q ${dropX} ${routeY} ${dropX + corner} ${routeY} ` +
+            `H ${riseX - corner} ` +
+            `Q ${riseX} ${routeY} ${riseX} ${routeY + corner * up} ` +
+            `V ${edge.endY - corner * up} ` +
+            `Q ${riseX} ${edge.endY} ${riseX + corner} ${edge.endY} ` +
             `H ${edge.endX}`,
         });
       });
@@ -935,6 +611,12 @@ export function PlanExecutionView({
     : undefined;
   const selectedDependents = selectedTodo
     ? (dependentsByTodo.get(selectedTodo.id) ?? [])
+    : [];
+  // The same filtered projection the edges draw from: the topology builder
+  // drops ids that name no step (and self-references), so no control here
+  // can select a ghost id and hide this panel mid-navigation.
+  const selectedDependencies = selectedTodo
+    ? (dependencyIdsByTodo.get(selectedTodo.id) ?? [])
     : [];
   const detailsId = `plan-step-details-${graphId}`;
   const overallProgressId = `plan-overall-progress-${graphId}`;
@@ -1183,7 +865,12 @@ export function PlanExecutionView({
           ref={hasDependencies ? graphRef : undefined}
           style={
             hasDependencies
-              ? ({ '--plan-edge-lanes': graph.lanes } as CSSProperties)
+              ? ({
+                  '--plan-edge-lanes': graph.lanes,
+                  // Publish the lane pitch so .dagCanvas reserves bottom
+                  // padding from the same constant that places the lanes.
+                  '--plan-edge-lane-height': `${EDGE_LANE_HEIGHT}px`,
+                } as CSSProperties)
               : undefined
           }
         >
@@ -1254,10 +941,63 @@ export function PlanExecutionView({
               {layer.map((todo) => {
                 const executions = toolsByTodo.get(todo.id) ?? [];
                 const state = statesByTodo.get(todo.id)!;
+                // Agent time this step has taken, summed across its root
+                // agent tasks. It is the node's "is this alive" signal, so it
+                // is on the face rather than only in the inspector.
+                const nodeRuntimeMs = executions.reduce(
+                  (total, tool) =>
+                    total + (taskForTool(tool, taskIndex)?.runtimeMs ?? 0),
+                  0,
+                );
+                // Agents, not bare executions: a nested subagent counts too,
+                // matching the rows this node renders and the inspector's
+                // Subagents list for the same step. The runtime above stays
+                // on roots, so nested time is not summed twice. Count from
+                // the same two sources renderExecution draws the rows from —
+                // live child tasks from the task index plus transcript
+                // subTools, deduped by toolUseId exactly as the rows are —
+                // otherwise a live child task with no transcript entry
+                // renders a row the count never sees.
+                const agentCount = executions.reduce((count, tool) => {
+                  const liveNested = nestedTasksFromIndex(tool, taskIndex);
+                  const liveCallIds = new Set(
+                    liveNested.flatMap(({ task }) =>
+                      task.toolUseId ? [task.toolUseId] : [],
+                    ),
+                  );
+                  const transcriptOnly = nestedAgentToolsForTool(tool).filter(
+                    ({ tool: nested }) => !liveCallIds.has(nested.callId),
+                  );
+                  return (
+                    count +
+                    (isSubAgentToolCall(tool) ? 1 : 0) +
+                    liveNested.length +
+                    transcriptOnly.length
+                  );
+                }, 0);
+                // blockedBy is model-authored and can repeat an id — or name
+                // the todo itself. Dedup and drop self-references like the
+                // topology builder; ghost ids stay, because above the edge
+                // budget this row is the dependency's only statement.
+                const faceDependencies = [
+                  ...new Set(todo.blockedBy ?? []),
+                ].filter((id) => id !== todo.id);
+                // Whether the visible chip row carries the dependency. It is
+                // rendered whenever nothing else can: drawn edges are
+                // aria-hidden, so they state it only visually; above
+                // MAX_RENDERED_PLAN_EDGES no edges draw at all; and with the
+                // details panel off (the cockpit) or selection disabled
+                // (document mode) the panel never states it either. When this
+                // is false the sr-only summary below carries the same fact to
+                // assistive tech instead, so the dependency is stated exactly
+                // once either way.
+                const statesDependenciesVisibly =
+                  !drawsDependencyEdges || !showStepDetails || documentMode;
                 return (
                   <article
                     className={styles.node}
                     data-status={state.status}
+                    data-attention={state.attention || undefined}
                     onPointerEnter={() => setHoveredTodoId(todo.id)}
                     onPointerLeave={() =>
                       setHoveredTodoId((current) =>
@@ -1272,11 +1012,11 @@ export function PlanExecutionView({
                         current === todo.id ? undefined : current,
                       )
                     }
-                    data-plan-input={
-                      (drawsDependencyEdges &&
-                        (dependencyIdsByTodo.get(todo.id)?.length ?? 0) > 0) ||
-                      undefined
-                    }
+                    // No input port: the left edge now carries the status
+                    // rule, and an incoming edge already terminates in an
+                    // arrowhead at the node — that arrowhead is the input
+                    // marker. Outgoing edges leave their source unmarked, so
+                    // the output port stays.
                     data-plan-output={
                       (drawsDependencyEdges &&
                         (dependentsByTodo.get(todo.id)?.length ?? 0) > 0) ||
@@ -1317,29 +1057,96 @@ export function PlanExecutionView({
                       }
                       disabled={documentMode}
                     >
+                      {/* Status reaches assistive tech as words; the left
+                          rule that carries it visually is colour only.
+                          Attention is announced beside the status word,
+                          never instead of it. */}
+                      <span className={styles.nodeStatusText}>
+                        {t(statusKey(state.status))}
+                        {state.attention
+                          ? `, ${t('planExecution.attention')}`
+                          : ''}
+                      </span>
                       <div className={styles.nodeTop}>
+                        <span className={styles.nodeNumber}>
+                          {(stepNumberByTodo.get(todo.id) ?? 0) || ''}
+                        </span>
+                        <span className={styles.nodeContent}>
+                          {todo.content}
+                        </span>
+                      </div>
+                      <div className={styles.nodeMeta}>
+                        {/* The glyph is the non-colour status channel, kept
+                            for every status so the graph still survives
+                            colour-blindness, high-contrast mode and a
+                            greyscale screenshot. It moved off the first line
+                            so the step's content leads, and it is muted so
+                            the left rule remains the only carrier of the
+                            status *colour*. */}
                         <i aria-hidden="true" className={styles.nodeGlyph}>
                           {PLAN_STATUS_GLYPH[state.status]}
                         </i>
-                        <span className={styles.nodeId}>{todo.id}</span>
-                        <span
-                          className={`${styles.nodeStatus} ${styles[state.status]}`}
-                        >
-                          {t(statusKey(state.status))}
-                        </span>
+                        {/* Attention's shape channel: on a paused node the
+                            data-attention rule re-declares the token paused
+                            already wears, so colour alone cannot tell it
+                            apart from healthy. */}
                         {state.attention && (
-                          <span className={styles.attention}>
-                            {t('planExecution.attention')}
+                          <i
+                            aria-hidden="true"
+                            className={styles.nodeAttentionMark}
+                          >
+                            !
+                          </i>
+                        )}
+                        {agentCount > 0 && (
+                          <span>
+                            {t('planExecution.agentCount', {
+                              count: agentCount,
+                            })}
                           </span>
                         )}
+                        {nodeRuntimeMs > 0 && (
+                          <span>{formatRuntime(nodeRuntimeMs)}</span>
+                        )}
                       </div>
-                      <div className={styles.nodeContent}>{todo.content}</div>
-                      {(todo.blockedBy?.length ?? 0) > 0 && (
-                        <div className={styles.dependencies}>
-                          {t('planExecution.dependsOn')}{' '}
-                          {todo.blockedBy!.join(', ')}
-                        </div>
-                      )}
+                      {statesDependenciesVisibly &&
+                        faceDependencies.length > 0 && (
+                          <div className={styles.dependencies}>
+                            <span>{t('planExecution.dependsOn')}</span>
+                            {faceDependencies.map((id) => (
+                              <span className={styles.dependencyChip} key={id}>
+                                <span>
+                                  {(stepNumberByTodo.get(id) ?? 0) || '?'}
+                                </span>
+                                <span className={styles.dependencyTitle}>
+                                  {todosById.get(id)?.content ?? id}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      {/* The interactive graph draws the dependency instead
+                          of stating it, and drawn edges are aria-hidden — so
+                          without this the node's accessible name stops
+                          naming its blockers and a screen-reader user has to
+                          activate every node to find out what blocks it.
+                          Same sr-only channel as the status word, same
+                          step-number-plus-title labels as the chips, and it
+                          never brings the visible row back. */}
+                      {!statesDependenciesVisibly &&
+                        faceDependencies.length > 0 && (
+                          <span className={styles.nodeDependencyText}>
+                            {t('planExecution.dependsOn')}{' '}
+                            {faceDependencies
+                              .map(
+                                (id) =>
+                                  `${(stepNumberByTodo.get(id) ?? 0) || '?'} ${
+                                    todosById.get(id)?.content ?? id
+                                  }`,
+                              )
+                              .join(', ')}
+                          </span>
+                        )}
                     </button>
                     {executions.length > 0 && (
                       <div className={styles.executions}>
@@ -1375,15 +1182,50 @@ export function PlanExecutionView({
             )}
           </div>
           <div className={styles.nodeContent}>{selectedTodo.content}</div>
-          {(selectedTodo.blockedBy?.length ?? 0) > 0 && (
+          {/* This panel is outside the node's own button, so unlike the
+              chips on the node face these references can be controls: each
+              one selects the step it names, which is what makes the
+              dependency list the graph's navigation. */}
+          {selectedDependencies.length > 0 && (
             <div className={styles.dependencies}>
-              {t('planExecution.dependsOn')}{' '}
-              {selectedTodo.blockedBy!.join(', ')}
+              <span>{t('planExecution.dependsOn')}</span>
+              {selectedDependencies.map((id) => (
+                <button
+                  className={styles.dependencyLink}
+                  data-plan-interactive
+                  data-plan-dependency={id}
+                  key={id}
+                  onClick={() => updateSelectedTodoId(id)}
+                  title={todosById.get(id)?.content}
+                  type="button"
+                >
+                  <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
+                  <span className={styles.dependencyTitle}>
+                    {todosById.get(id)?.content ?? id}
+                  </span>
+                </button>
+              ))}
             </div>
           )}
           {selectedDependents.length > 0 && (
             <div className={styles.dependencies}>
-              {t('planExecution.unblocks')} {selectedDependents.join(', ')}
+              <span>{t('planExecution.unblocks')}</span>
+              {selectedDependents.map((id) => (
+                <button
+                  className={styles.dependencyLink}
+                  data-plan-interactive
+                  data-plan-dependency={id}
+                  key={id}
+                  onClick={() => updateSelectedTodoId(id)}
+                  title={todosById.get(id)?.content}
+                  type="button"
+                >
+                  <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
+                  <span className={styles.dependencyTitle}>
+                    {todosById.get(id)?.content ?? id}
+                  </span>
+                </button>
+              ))}
             </div>
           )}
           {selectedExecutions.length > 0 && (

@@ -189,6 +189,27 @@ describe('localizeToolDisplayName', () => {
     expect(localizeToolDisplayName('MysteryTool')).toBe('MysteryTool');
   });
 
+  // Both translating locales, not just zh: `t()` has no cross-locale
+  // fallback, so a tool added to zh.js alone renders its raw English badge
+  // in a zh-TW session, next to fully-translated siblings.
+  it.each(['zh', 'zh-TW'] as const)(
+    'has a %s translation for every core tool display name',
+    async (locale) => {
+      const { setLanguageAsync, localizeToolDisplayName } = await import(
+        './index.js'
+      );
+      const { ToolDisplayNames } = await import('@qwen-code/qwen-code-core');
+      await setLanguageAsync(locale);
+
+      const KEEP_ENGLISH = new Set(['Agent', 'Grep', 'Glob']);
+      const untranslated = Object.values(ToolDisplayNames).filter(
+        (name) =>
+          !KEEP_ENGLISH.has(name) && localizeToolDisplayName(name) === name,
+      );
+      expect(untranslated).toEqual([]);
+    },
+  );
+
   it('has a zh translation for every core tool display name', async () => {
     const { setLanguageAsync, localizeToolDisplayName } = await import(
       './index.js'

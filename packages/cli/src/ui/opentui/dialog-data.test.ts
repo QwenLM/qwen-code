@@ -12,6 +12,13 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = () => true;
+  },
+}));
 
 // theme.ts (via the dialog modules) builds a SyntaxStyle at module scope,
 // which needs the OpenTUI native FFI — unavailable in the test runtime. Stub
@@ -133,6 +140,30 @@ function stubConfig(overrides: Partial<Config>): Config {
 }
 
 describe('buildModelEntries', () => {
+  it('prioritizes authorized Qwen entries in the primary picker', () => {
+    const catalog = [
+      { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+      { id: 'future', label: 'Future', authType: AuthType.QWEN_SUBSCRIPTION },
+      {
+        id: 'qwen3.8-flash',
+        label: 'Flash',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      },
+      { id: 'qwen3.8-max', label: 'Max', authType: AuthType.QWEN_SUBSCRIPTION },
+      { id: 'qwen3.8-max', label: 'API Max', authType: AuthType.USE_OPENAI },
+    ];
+    const config = stubConfig({
+      getAuthType: () => AuthType.USE_OPENAI,
+      getAllConfiguredModels: () => catalog,
+    });
+    expect(
+      buildModelEntries(config, 'primary').map(({ label }) => label),
+    ).toEqual(['Max', 'Flash', 'Future', 'API', 'API Max']);
+    expect(buildModelEntries(config, 'fast').map(({ label }) => label)).toEqual(
+      catalog.map(({ label }) => label),
+    );
+  });
+
   const models = [
     {
       id: 'm1',
@@ -344,7 +375,87 @@ describe('applyModelSelection', () => {
     } as Partial<Config>);
   }
 
+  it('hides signed-out subscription entries while retaining an API-key model with the same id', () => {
+    const config = resolvedConfig({
+      getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+      getModel: () => 'qwen3.8-max',
+      getAllConfiguredModels: () => [
+        {
+          id: 'qwen3.8-max',
+          label: 'Subscription',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        },
+        {
+          id: 'qwen3.8-max',
+          label: 'API key model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ],
+    });
+    expect(
+      buildModelEntries(config, 'primary', false).map(
+        ({ authType }) => authType,
+      ),
+    ).toEqual([AuthType.USE_OPENAI]);
+    expect(
+      buildModelEntries(config, 'primary', true).map(
+        ({ authType }) => authType,
+      ),
+    ).toEqual([AuthType.QWEN_SUBSCRIPTION, AuthType.USE_OPENAI]);
+    expect(config.getModel()).toBe('qwen3.8-max');
+    expect(config.getAuthType()).toBe(AuthType.QWEN_SUBSCRIPTION);
+  });
+
   describe('primary mode (default selection)', () => {
+    it.each([undefined, 'workspace', 'user'] as const)(
+      'shows only the subscription model selection with scope %s',
+      async (persistScope) => {
+        const switchModel = vi.fn(async () => {});
+        const config = resolvedConfig({
+          switchModel,
+          getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+            baseUrl: 'https://gateway.example/v1',
+            apiKey: 'SUBSCRIPTION_TOKEN',
+          }),
+        });
+        const { settings, written } = createFakeSettings({ isTrusted: true });
+        const entry = modelRow({
+          id: 'qwen3.8-max',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        });
+        const outcome = await applyModelSelection({
+          config,
+          settings,
+          entries: [entry],
+          mode: 'primary',
+          selectionKey: entry.key,
+          persistScope,
+        });
+        const suffix =
+          persistScope === 'workspace'
+            ? ' (this project)'
+            : persistScope === 'user'
+              ? ' (global)'
+              : '';
+        expect(outcome).toEqual({
+          ok: true,
+          message: `Model: qwen3.8-max${suffix}`,
+        });
+        expect(switchModel).toHaveBeenCalled();
+        expect(written).toContainEqual({
+          scope:
+            persistScope === 'workspace'
+              ? SettingScope.Workspace
+              : SettingScope.User,
+          key: 'model.name',
+          value: 'qwen3.8-max',
+        });
+      },
+    );
+
     it('switches the runtime model before persisting model.name', async () => {
       const switchModel = vi.fn(async () => {});
       const config = resolvedConfig({
@@ -441,6 +552,47 @@ describe('applyModelSelection', () => {
         expect(outcome.error).toContain("Failed to switch model to 'm2'.");
         expect(outcome.error).toContain('network down');
       }
+    });
+
+    it('explains expired subscription selection and still permits another provider', async () => {
+      const config = resolvedConfig({
+        getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+        switchModel: vi.fn(async (authType: AuthType) => {
+          if (authType === AuthType.QWEN_SUBSCRIPTION)
+            throw new SubscriptionOAuthError('session_changed');
+        }),
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({ id: 'qwen3.8-flash', authType: AuthType.QWEN_SUBSCRIPTION }),
+        modelRow({ id: 'm2' }),
+      ];
+      const failed = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'primary',
+        selectionKey: entries[0].key,
+      });
+      expect(failed).toEqual({
+        ok: false,
+        error:
+          'Your login credentials are no longer valid. Run /auth to sign in again.',
+      });
+      expect(written).toEqual([]);
+      const switched = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'primary',
+        selectionKey: entries[1].key,
+      });
+      expect(switched.ok).toBe(true);
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'model.name',
+        value: 'm2',
+      });
     });
 
     it('honors an explicit persist scope and falls back for untrusted workspaces', async () => {
@@ -560,6 +712,223 @@ describe('applyModelSelection', () => {
       expect(outcome.ok).toBe(true);
       if (outcome.ok) {
         expect(outcome.message).toContain('Fast Model: openai:fast1');
+      }
+    });
+
+    it('fast mode keeps the endpoint disambiguator in the persisted selector (#12760)', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({ id: 'shared-fast', baseUrl: 'https://a.example/v1' }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[1].key,
+      });
+
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://b.example/v1',
+      );
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'fastModel',
+        value: 'openai:shared-fast\0https://b.example/v1',
+      });
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toContain('Fast Model: openai:shared-fast');
+        expect(outcome.message).not.toContain('\0');
+      }
+    });
+
+    it('fast mode keeps a credential endpoint out of workspace-scope settings', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+        }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      // The shareable .qwen/settings.json only gets the bare selector.
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'fastModel',
+        value: 'openai:shared-fast',
+      });
+      expect(
+        written.find((write) => write.key === 'fastModel')?.value,
+      ).not.toContain('\0');
+      // This session's in-memory pin still binds the row the user picked.
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe(
+          'Fast Model: openai:shared-fast (this project) (endpoint not saved: project settings are shared)',
+        );
+      }
+    });
+
+    it('fast mode keeps a public endpoint disambiguator in workspace-scope settings', async () => {
+      const config = resolvedConfig({
+        setFastModel: vi.fn() as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({ id: 'shared-fast', baseUrl: 'https://a.example/v1' }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[1].key,
+        persistScope: 'workspace',
+      });
+
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'fastModel',
+        value: 'openai:shared-fast\0https://b.example/v1',
+      });
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe(
+          'Fast Model: openai:shared-fast (this project)',
+        );
+      }
+    });
+
+    it('fast mode keeps a query-secret endpoint out of workspace-scope settings', async () => {
+      const config = resolvedConfig({
+        setFastModel: vi.fn() as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://gw.example/v1?key=sk-1',
+        }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      // Fail closed: the userinfo-stripping predicate alone would call this URL
+      // clean and copy the query secret into the shared file.
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'fastModel',
+        value: 'openai:shared-fast',
+      });
+      expect(outcome.ok).toBe(true);
+    });
+
+    it('fast mode keeps a credential endpoint byte-identical at user scope', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+        }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[0].key,
+        persistScope: 'user',
+      });
+
+      // Config.pinnedAuxEndpoint resolves the pin by exact compare, so the
+      // private user file keeps the suffix untouched.
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'fastModel',
+        value: 'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      });
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe('Fast Model: openai:shared-fast (global)');
+      }
+    });
+
+    it('compaction mode keeps a credential endpoint out of workspace-scope settings', async () => {
+      const setCompactionModel = vi.fn();
+      const config = resolvedConfig({
+        setCompactionModel: setCompactionModel as Config['setCompactionModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+        }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'compaction',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'compactionModel',
+        value: 'openai:shared-fast',
+      });
+      expect(setCompactionModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe(
+          'Compaction Model: openai:shared-fast (this project) (endpoint not saved: project settings are shared)',
+        );
       }
     });
 
@@ -1057,6 +1426,7 @@ describe('mcp and extension feeds', () => {
             },
             mcpServers: { a: {}, b: {} },
             skills: [{}],
+            workflows: [{}, {}],
           },
           {
             name: 'proj-ext',
@@ -1072,7 +1442,7 @@ describe('mcp and extension feeds', () => {
       version: '1.2.3',
       source: 'https://github.com/a/b',
       origin: 'GitHub',
-      components: '2 MCP · 1 Skills',
+      components: '2 MCP · 1 Skills · 2 Workflows',
     });
     expect(rows[1]).toMatchObject({
       favorite: false,
@@ -1696,5 +2066,98 @@ describe('extension management actions (audit 01 G-4)', () => {
       changed: false,
       level: 'error',
     });
+  });
+});
+
+describe('Advisor model selection', () => {
+  it('keeps Off available without models and disables without switching the executor', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(true);
+    const switchModel = vi.fn();
+    const config = stubConfig({
+      getAllConfiguredModels: () => [],
+      setAdvisorModel,
+      switchModel,
+    });
+    const { settings, written } = createFakeSettings();
+    const entries = buildModelEntries(config, 'advisor');
+    expect(entries.map((entry) => entry.key)).toEqual(['$advisor-off']);
+    expect(
+      await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'advisor',
+        selectionKey: '$advisor-off',
+      }),
+    ).toMatchObject({ ok: true });
+    expect(setAdvisorModel).toHaveBeenCalledWith(undefined);
+    expect(written).toEqual([
+      { scope: SettingScope.User, key: 'advisorModel', value: '' },
+    ]);
+    expect(switchModel).not.toHaveBeenCalled();
+  });
+
+  it('pins and highlights the selected registry endpoint, persisting only after acceptance', async () => {
+    const models: AvailableModel[] = [
+      {
+        id: 'shared',
+        label: 'Default',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+      },
+      {
+        id: 'shared',
+        label: 'Explicit',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+        registryBaseUrl: 'https://api.openai.com/v1',
+      },
+      {
+        id: 'vision',
+        label: 'Vision',
+        authType: AuthType.USE_OPENAI,
+        visionOnly: true,
+      },
+    ];
+    const selector = `${AuthType.USE_OPENAI}:shared\0https://api.openai.com/v1`;
+    const setAdvisorModel = vi.fn().mockResolvedValue(false);
+    const switchModel = vi.fn();
+    const config = stubConfig({
+      getAllConfiguredModels: () => models,
+      getAdvisorModel: () => selector,
+      setAdvisorModel,
+      switchModel,
+    });
+    const { settings, written } = createFakeSettings();
+    const entries = buildModelEntries(config, 'advisor');
+    expect(entries.map((entry) => entry.key)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}:shared\0`,
+      selector,
+    ]);
+    expect(
+      computeModelDialogInitialKey({
+        config,
+        settings,
+        entries,
+        mode: 'advisor',
+      }),
+    ).toBe(selector);
+    const params = {
+      config,
+      settings,
+      entries,
+      mode: 'advisor' as const,
+      selectionKey: selector,
+    };
+    expect(await applyModelSelection(params)).toMatchObject({ ok: false });
+    expect(written).toEqual([]);
+    setAdvisorModel.mockResolvedValue(true);
+    expect(await applyModelSelection(params)).toMatchObject({ ok: true });
+    expect(setAdvisorModel).toHaveBeenLastCalledWith(selector);
+    expect(written).toEqual([
+      { scope: SettingScope.User, key: 'advisorModel', value: selector },
+    ]);
+    expect(switchModel).not.toHaveBeenCalled();
   });
 });

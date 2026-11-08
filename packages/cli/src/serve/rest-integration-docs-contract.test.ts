@@ -7,11 +7,24 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_TRANSCRIPT_MAX_LIMIT } from '@qwen-code/qwen-code-core';
-import { DaemonClient } from '@qwen-code/sdk/daemon';
+import {
+  APPROVAL_MODES,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  REASONING_EFFORT_TIERS,
+} from '@qwen-code/qwen-code-core';
+import { DaemonClient, WorkspaceDaemonClient } from '@qwen-code/sdk/daemon';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
+import {
+  RESTORE_LOAD_REQUEST_FIELDS,
+  RESTORE_RESUME_REQUEST_FIELDS,
+} from './routes/restore-request-fields.js';
+import {
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
+} from './workspace-route-runtime.js';
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -26,6 +39,10 @@ const REFERENCE = path.join(
 const OPENAPI = path.join(
   REPO_ROOT,
   'docs/developers/daemon-rest-api.openapi.json',
+);
+const QUICKSTART = path.join(
+  REPO_ROOT,
+  'docs/developers/examples/daemon-client-quickstart.md',
 );
 const SERVE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -57,6 +74,35 @@ const GUIDE_OPERATIONS: readonly string[] = [
   'GET /list',
   'GET /glob',
 ];
+
+const SDK_METHOD_BY_OPERATION: Readonly<Record<string, string>> = {
+  'GET /health': 'DaemonClient.health',
+  'GET /capabilities': 'DaemonClient.capabilities',
+  'POST /session': 'DaemonClient.createOrAttachSession',
+  'DELETE /session/:id': 'DaemonClient.closeSession',
+  'POST /session/:id/load': 'DaemonClient.loadSession',
+  'POST /session/:id/resume': 'DaemonClient.resumeSession',
+  'POST /session/:id/heartbeat': 'DaemonClient.heartbeat',
+  'PATCH /session/:id/metadata': 'DaemonClient.updateSessionMetadata',
+  'POST /session/:id/model': 'DaemonClient.setSessionModel',
+  'GET /session/:id/status': 'DaemonClient.sessionStatus',
+  'POST /session/:id/prompt': 'DaemonClient.promptNonBlocking',
+  'POST /session/:id/cancel': 'DaemonClient.cancel',
+  'GET /session/:id/events': 'DaemonClient.subscribeEvents',
+  'GET /session/:id/transcript': 'DaemonClient.getSessionTranscriptPage',
+  'GET /session/:id/context': 'DaemonClient.sessionContext',
+  'GET /session/:id/export': 'DaemonClient.exportSession',
+  'GET /session/:id/pending-prompts': 'DaemonClient.getPendingPrompts',
+  'POST /session/:id/permission/:requestId':
+    'DaemonClient.respondToSessionPermission',
+  'POST /permission/:requestId': 'DaemonClient.respondToPermission',
+  'GET /workspace/tools': 'DaemonClient.workspaceTools',
+  'GET /file': 'DaemonClient.readWorkspaceFile',
+  'GET /file/bytes': 'DaemonClient.readWorkspaceFileBytes',
+  'GET /stat': 'DaemonClient.fileStat',
+  'GET /list': 'DaemonClient.dirList',
+  'GET /glob': 'DaemonClient.glob',
+};
 
 const HTTP_METHODS = ['get', 'post', 'patch', 'put', 'delete'] as const;
 const REGISTERED_METHODS = new Set<string>([...HTTP_METHODS, 'all']);
@@ -220,14 +266,21 @@ function slug(heading: string): string {
     .replace(/ /g, '-');
 }
 
-/** Protocol headings outside fenced code blocks, where # starts a comment. */
-function protocolHeadings(): string[] {
+/** Markdown headings outside fenced code blocks, where # starts a comment. */
+function markdownHeadings(source: string): string[] {
   const headings: string[] = [];
-  let fence: string | undefined;
-  for (const line of readFileSync(PROTOCOL, 'utf8').split('\n')) {
-    const marker = /^\s*(```|~~~)/.exec(line)?.[1];
+  let fence: '`' | '~' | undefined;
+  for (const line of readFileSync(source, 'utf8').split('\n')) {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0] as
+      | '`'
+      | '~'
+      | undefined;
     if (marker) {
-      fence = fence === undefined ? marker : undefined;
+      if (fence === undefined) {
+        fence = marker;
+      } else if (marker === fence) {
+        fence = undefined;
+      }
       continue;
     }
     if (fence !== undefined) {
@@ -239,6 +292,10 @@ function protocolHeadings(): string[] {
     }
   }
   return headings;
+}
+
+function protocolHeadings(): string[] {
+  return markdownHeadings(PROTOCOL);
 }
 
 function protocolAnchors(): Set<string> {
@@ -293,14 +350,16 @@ function resolvesPointer(document: unknown, ref: string): boolean {
 }
 
 /** Every member the client exposes, including inherited accessors. */
-function sdkMethods(): Set<string> {
+function sdkMethods(root: object = DaemonClient.prototype): Set<string> {
   const names = new Set<string>();
   for (
-    let proto: object | null = DaemonClient.prototype;
+    let proto: object | null = root;
     proto && proto !== Object.prototype;
     proto = Object.getPrototypeOf(proto) as object | null
   ) {
-    Object.getOwnPropertyNames(proto).forEach((name) => names.add(name));
+    Object.getOwnPropertyNames(proto)
+      .filter((name) => name !== 'constructor')
+      .forEach((name) => names.add(name));
   }
   return names;
 }
@@ -326,19 +385,51 @@ describe('REST integration documentation contract', () => {
     expect([...openApiOperations(openApi).keys()].sort()).toEqual(expected);
   });
 
+  it('links every guide operation to its own protocol section', () => {
+    const guide = readFileSync(GUIDE, 'utf8');
+    const links = guideRouteRows(guide).flatMap((row) => [
+      ...routeCell(row).matchAll(/\[`([^`]+)`\]\(([^)\s]+)\)/g),
+    ]);
+    expect(
+      links.length,
+      'guide operation links must not be empty',
+    ).toBeGreaterThan(0);
+    expect(links.map((link) => link[1]).sort()).toEqual(
+      [...GUIDE_OPERATIONS].sort(),
+    );
+
+    const headings = protocolHeadings();
+    const routePattern = new RegExp('^' + ROUTE_METHODS + ' /[^`]+$');
+    const routeLinks = [...guide.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)];
+    for (const link of routeLinks) {
+      const operation = link[1].replace(/^`([^`]+)`$/, '$1');
+      if (!routePattern.test(operation)) {
+        continue;
+      }
+      const ownHeadings = headings.filter((heading) =>
+        heading.startsWith(`\`${operation}\``),
+      );
+      expect(
+        ownHeadings,
+        `${operation} must have exactly one heading in qwen-serve-protocol.md`,
+      ).toHaveLength(1);
+      expect(link[2]).toBe(`./qwen-serve-protocol.md#${slug(ownHeadings[0])}`);
+    }
+  });
+
   it('keeps the OpenAPI contract self-describing', () => {
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
     ) as OpenApiDocument;
     expect(openApi.openapi).toBe('3.1.0');
-    const anchors = protocolAnchors();
+    const protocol = protocolHeadings();
     const capabilities = new Set(Object.keys(SERVE_CAPABILITY_REGISTRY));
     const schemes = new Set(
       Object.keys(openApi.components?.securitySchemes ?? {}),
     );
     const methods = sdkMethods();
     const operationIds: string[] = [];
-    for (const operation of openApiOperations(openApi).values()) {
+    for (const [name, operation] of openApiOperations(openApi)) {
       const operationId = operation.operationId;
       expect(operationId).toBeTruthy();
       if (operationId) {
@@ -351,18 +442,21 @@ describe('REST integration documentation contract', () => {
       ).toBe(true);
       expect(SCOPES.has(operation['x-qwen-scope'] as string)).toBe(true);
       expect(operation['x-qwen-stability']).toBe('stable');
+      expect(operation['x-qwen-sdk-method']).toBe(
+        SDK_METHOD_BY_OPERATION[name],
+      );
       expect(
         methods.has(
           (operation['x-qwen-sdk-method'] ?? '').replace(/^DaemonClient\./, ''),
         ),
       ).toBe(true);
-      const anchor = operation.externalDocs?.url?.match(
-        /qwen-serve-protocol\/#([a-z0-9_-]+)$/,
-      )?.[1];
-      expect(anchor).toBeTruthy();
-      if (anchor) {
-        expect(anchors.has(anchor)).toBe(true);
-      }
+      const ownHeadings = protocol.filter((heading) =>
+        heading.startsWith(`\`${name}\``),
+      );
+      expect(ownHeadings).toHaveLength(1);
+      expect(operation.externalDocs?.url).toBe(
+        `https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#${slug(ownHeadings[0])}`,
+      );
       const security = operation.security ?? [];
       expect(security.length).toBeGreaterThan(0);
       for (const requirement of security) {
@@ -479,16 +573,177 @@ describe('REST integration documentation contract', () => {
     expect([...operations.keys()].filter((key) => !seen.has(key))).toEqual([]);
   });
 
+  it('pins the grouped reference rows to registered capabilities and SDK methods', () => {
+    // The grouped "Additional documented APIs" rows begin with an Area name
+    // rather than a link, so the OpenAPI row check above never sees them.
+    const capabilities = new Set(Object.keys(SERVE_CAPABILITY_REGISTRY));
+    const sdkMethodSets = {
+      DaemonClient: sdkMethods(DaemonClient.prototype),
+      WorkspaceDaemonClient: sdkMethods(WorkspaceDaemonClient.prototype),
+    };
+    const lines = readFileSync(REFERENCE, 'utf8').split('\n');
+    // Header-derived column indices make a column insert or reorder fail
+    // loudly instead of silently emptying both assertion loops.
+    const headerIndex = lines.findIndex((line) => /^\| Area\s*\|/.test(line));
+    const headerCells = (lines[headerIndex] ?? '')
+      .split('|')
+      .map((cell) => cell.trim());
+    const capabilityColumn = headerCells.indexOf('Capability and scope');
+    const sdkColumn = headerCells.indexOf('TypeScript SDK');
+    expect(
+      capabilityColumn,
+      'grouped table must have a "Capability and scope" column',
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      sdkColumn,
+      'grouped table must have a "TypeScript SDK" column',
+    ).toBeGreaterThanOrEqual(0);
+    // Rows come from the body of that one table rather than a document-wide
+    // line shape, so a row the shape heuristic would skip is still checked
+    // and another table's rows are never read at these columns.
+    const rows: string[] = [];
+    for (const line of lines.slice(headerIndex + 2)) {
+      if (!line.startsWith('|')) {
+        break;
+      }
+      rows.push(line);
+    }
+    expect(rows.length).toBeGreaterThan(0);
+    // Deriving the qualifier alternation from sdkMethodSets keeps a third
+    // client class from silently going un-asserted.
+    const sdkToken = new RegExp(
+      `\`(?:(${Object.keys(sdkMethodSets).join('|')})\\.)?([A-Za-z0-9_]+)\``,
+      'g',
+    );
+    const backtickSpans = /`[^`]*`/g;
+    for (const row of rows) {
+      const cells = row.split('|').map((cell) => cell.trim());
+      const area = cells[1];
+      expect(
+        cells.length,
+        `${area}: grouped row must have ${headerCells.length} columns`,
+      ).toBe(headerCells.length);
+      const capabilityCell = cells[capabilityColumn] ?? '';
+      let capabilityMatched = 0;
+      for (const match of capabilityCell.matchAll(/`([a-z][a-z0-9_]*)`/g)) {
+        capabilityMatched += 1;
+        expect(
+          capabilities.has(match[1]),
+          `${area}: \`${match[1]}\` is not a registered serve capability`,
+        ).toBe(true);
+      }
+      expect(
+        capabilityMatched,
+        `${area}: row must name at least one backticked capability`,
+      ).toBeGreaterThan(0);
+      expect(
+        capabilityMatched,
+        `${area}: capability cell has backticked spans this test cannot read`,
+      ).toBe([...capabilityCell.matchAll(backtickSpans)].length);
+      // A bare method name continues the class the cell last qualified; one
+      // cell can switch classes mid-way. A bare name that exists on more
+      // than one client routes differently per client, so it must always be
+      // qualified.
+      let sdkClass: keyof typeof sdkMethodSets | undefined;
+      const sdkCell = cells[sdkColumn] ?? '';
+      let sdkMatched = 0;
+      for (const match of sdkCell.matchAll(sdkToken)) {
+        const [, className, method] = match;
+        if (className) {
+          sdkClass = className as keyof typeof sdkMethodSets;
+        } else {
+          expect(
+            sdkClass,
+            `${area}: \`${method}\` must follow a class-qualified SDK method`,
+          ).toBeDefined();
+          const owners = Object.values(sdkMethodSets).filter((methods) =>
+            methods.has(method),
+          ).length;
+          expect(
+            owners,
+            `${area}: \`${method}\` exists on more than one SDK client and must be qualified`,
+          ).toBeLessThanOrEqual(1);
+        }
+        sdkMatched += 1;
+        if (sdkClass) {
+          expect(
+            sdkMethodSets[sdkClass].has(method),
+            `${area}: \`${method}\` is not an SDK method`,
+          ).toBe(true);
+        }
+      }
+      expect(
+        sdkMatched,
+        `${area}: row must name at least one backticked SDK method`,
+      ).toBeGreaterThan(0);
+      expect(
+        sdkMatched,
+        `${area}: SDK cell has backticked spans this test cannot read`,
+      ).toBe([...sdkCell.matchAll(backtickSpans)].length);
+    }
+  });
+
+  it('indexes every operation with a dedicated protocol section', () => {
+    const headings = protocolHeadings();
+    const operationPattern = /`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`/g;
+    const expected = headings.flatMap((heading) =>
+      [...heading.matchAll(operationPattern)].map((match) => match[1]),
+    );
+    const links = [
+      ...readFileSync(REFERENCE, 'utf8').matchAll(
+        /\[`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)/g,
+      ),
+    ];
+    expect(links.map((link) => link[1]).sort()).toEqual(expected.sort());
+
+    for (const link of links) {
+      const ownHeadings = headings.filter((heading) =>
+        [...heading.matchAll(operationPattern)].some(
+          (match) => match[1] === link[1],
+        ),
+      );
+      expect(ownHeadings).toHaveLength(1);
+      expect(link[2]).toBe(slug(ownHeadings[0]));
+    }
+  });
+
+  it('keeps the quickstart versioned and lifecycle-complete', () => {
+    const quickstart = readFileSync(QUICKSTART, 'utf8');
+    const sdkVersion = quickstart.match(
+      /targets Qwen Code `v\d+\.\d+\.\d+` and\s+`@qwen-code\/sdk@(\d+\.\d+\.\d+)`/,
+    )?.[1];
+    expect(sdkVersion).toBeTruthy();
+    expect(quickstart).toContain(`npm install @qwen-code/sdk@${sdkVersion}`);
+    for (const method of [
+      'loadSession',
+      'resumeSession',
+      'sessionStatus',
+      'getSessionTranscriptPage',
+    ]) {
+      expect(quickstart).toContain(`client.${method}(`);
+    }
+  });
+
   it('links only to documentation files and protocol anchors that exist', () => {
     const guide = readFileSync(GUIDE, 'utf8');
     const targets = [
-      ...guide.matchAll(/\]\((\.\.?\/[^)#\s]+\.md)(?:#[^)]*)?\)/g),
-    ].map((match) => match[1]);
+      ...guide.matchAll(/\]\((\.\.?\/[^)#\s]+\.md)(?:#([^)]*))?\)/g),
+    ].map((match) => ({ file: match[1], fragment: match[2] }));
     expect(targets.length).toBeGreaterThan(0);
     expect(
       targets.filter(
-        (target) => !existsSync(path.resolve(path.dirname(GUIDE), target)),
+        ({ file }) => !existsSync(path.resolve(path.dirname(GUIDE), file)),
       ),
+    ).toEqual([]);
+    expect(
+      targets.filter(({ file, fragment }) => {
+        const target = path.resolve(path.dirname(GUIDE), file);
+        return (
+          fragment !== undefined &&
+          existsSync(target) &&
+          !new Set(markdownHeadings(target).map(slug)).has(fragment)
+        );
+      }),
     ).toEqual([]);
 
     const repoLinks = [
@@ -500,17 +755,23 @@ describe('REST integration documentation contract', () => {
     expect(
       repoLinks.filter((target) => !existsSync(path.join(REPO_ROOT, target))),
     ).toEqual([]);
-
-    const anchors = protocolAnchors();
-    const protocolLinks = [
-      ...guide.matchAll(/\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)/g),
-    ].map((match) => match[1]);
-    expect(protocolLinks.length).toBeGreaterThan(0);
-    expect(protocolLinks.filter((anchor) => !anchors.has(anchor))).toEqual([]);
   });
 
   it('points every guide flow command at the published server', () => {
     const guide = readFileSync(GUIDE, 'utf8');
+    const minimalFlow = guide.match(
+      /## Minimal flow\n([\s\S]*?)\n## Operations/,
+    )?.[1];
+    expect(minimalFlow).toBeTruthy();
+    const flowCommands = [
+      ...(minimalFlow ?? '').matchAll(/```bash\n([\s\S]*?)```/g),
+    ]
+      .map((match) => match[1])
+      .filter((block) => /\bcurl\s+-/.test(block));
+    expect(flowCommands).toHaveLength(5);
+    expect(
+      flowCommands.filter((command) => !command.includes('$DAEMON_URL/')),
+    ).toEqual([]);
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
     ) as OpenApiDocument;
@@ -535,25 +796,103 @@ describe('REST integration documentation contract', () => {
     ).toEqual([]);
   });
 
+  it('documents exactly the environment variables the MCP bridge reads', () => {
+    const bridgeBin = readFileSync(
+      path.join(
+        REPO_ROOT,
+        'packages/sdk-typescript/src/daemon-mcp/serve-bridge/bin.ts',
+      ),
+      'utf8',
+    );
+    const bridgeVars = [
+      ...new Set(
+        [...bridgeBin.matchAll(/process\.env\['([A-Z0-9_]+)'\]/g)].map(
+          (match) => match[1],
+        ),
+      ),
+    ];
+    expect(bridgeVars.length).toBeGreaterThan(0);
+
+    const guide = readFileSync(GUIDE, 'utf8');
+    expect(bridgeVars.filter((name) => !guide.includes(`\`${name}\``))).toEqual(
+      [],
+    );
+
+    // The copy-pasteable env block must not name a variable the bridge never
+    // reads.
+    const mcpSection = guide.slice(
+      guide.indexOf('### Drive the daemon through MCP'),
+      guide.indexOf('### Embed the Web Shell'),
+    );
+    const documentedVars = [
+      ...(mcpSection.match(/```json\n([\s\S]*?)```/)?.[1] ?? '').matchAll(
+        /"([A-Z0-9_]+)":/g,
+      ),
+    ].map((match) => match[1]);
+    expect(documentedVars.length).toBeGreaterThan(0);
+    expect(documentedVars.filter((name) => !bridgeVars.includes(name))).toEqual(
+      [],
+    );
+  });
+
   it('gives every supported operation a dedicated protocol heading', () => {
     const headings = new Set(
-      [
-        ...readFileSync(PROTOCOL, 'utf8').matchAll(
-          /^#{3,4} `(GET|POST|PATCH|PUT|DELETE) ([^`]+)`/gm,
-        ),
-      ].map((match) => `${match[1]} ${match[2]}`),
+      protocolHeadings().flatMap((heading) => {
+        const match = /^`(GET|POST|PATCH|PUT|DELETE) ([^`]+)`/.exec(heading);
+        return match ? [`${match[1]} ${match[2]}`] : [];
+      }),
     );
-    const unfenced = readFileSync(PROTOCOL, 'utf8').replace(
-      /```[\s\S]*?```/g,
-      '',
-    );
-    const outside = new Set(
-      [...unfenced.matchAll(/^#{1,6} (.+)$/gm)].map((match) => slug(match[1])),
-    );
-    expect([...protocolAnchors()].sort()).toEqual([...outside].sort());
     expect(GUIDE_OPERATIONS.filter((entry) => !headings.has(entry))).toEqual(
       [],
     );
+  });
+
+  it('publishes startup request and acknowledgment schemas without opening unknown properties', () => {
+    const api = JSON.parse(readFileSync(OPENAPI, 'utf8')) as OpenApiDocument;
+    const schemas = api.components?.schemas ?? {};
+    for (const name of [
+      'CreateSessionRequest',
+      'CreateStandaloneSessionRequest',
+    ]) {
+      expect(schemas[name]).toMatchObject({
+        additionalProperties: false,
+        properties: {
+          startupConfig: { $ref: '#/components/schemas/SessionStartupConfig' },
+        },
+      });
+    }
+    expect(schemas['SessionStartupConfig']).toMatchObject({
+      required: ['modelServiceId'],
+      additionalProperties: false,
+      properties: {
+        modelServiceId: { maxLength: 256 },
+        reasoningEffort: {
+          enum: ['none', 'default', ...REASONING_EFFORT_TIERS],
+        },
+      },
+    });
+    // The published enum must cover every approval mode the standalone
+    // route's parseApprovalMode accepts — a narrower list certifies a
+    // request set the daemon implements but generated clients refuse.
+    const standalone = schemas['CreateStandaloneSessionRequest'] as {
+      properties?: Record<string, { enum?: string[] }>;
+    };
+    expect(standalone.properties?.['approvalMode']?.enum).toEqual([
+      ...APPROVAL_MODES,
+    ]);
+    expect(schemas['Session']).toMatchObject({
+      properties: {
+        startupConfigApplied: {
+          $ref: '#/components/schemas/SessionStartupConfigApplied',
+        },
+      },
+    });
+    expect(api.paths?.['/session']?.post?.responses).toHaveProperty('422');
+    for (const filename of [PROTOCOL, REFERENCE, GUIDE]) {
+      expect(readFileSync(filename, 'utf8')).toContain(
+        'session_startup_config',
+      );
+    }
   });
 
   it('publishes the resume request schema without the load-only fields', () => {
@@ -574,18 +913,14 @@ describe('REST integration documentation contract', () => {
         (schema['properties'] ?? {}) as Record<string, unknown>,
       ).sort();
     };
+    // Field lists come from the runtime-owned definition, not a second
+    // hardcoded literal, so the published schema cannot drift from what the
+    // handler parses.
     expect(
       requestFields(openApi.paths?.['/session/{id}/resume']?.post),
-    ).toEqual(['approvalMode', 'cwd', 'sourceId', 'sourceType']);
+    ).toEqual(RESTORE_RESUME_REQUEST_FIELDS);
     const loadPost = openApi.paths?.['/session/{id}/load']?.post;
-    expect(requestFields(loadPost)).toEqual([
-      'approvalMode',
-      'cwd',
-      'historyPageSize',
-      'liveReplayMode',
-      'sourceId',
-      'sourceType',
-    ]);
+    expect(requestFields(loadPost)).toEqual(RESTORE_LOAD_REQUEST_FIELDS);
     const loadSchema = resolveRef(
       openApi,
       (
@@ -594,6 +929,36 @@ describe('REST integration documentation contract', () => {
           | undefined
       )?.content?.['application/json']?.schema?.$ref as string,
     ) as { properties?: Record<string, { maximum?: number }> };
+    const schemas = openApi.components?.schemas ?? {};
+    for (const [schemaName, field] of [
+      ['RestoreSessionRequest', 'compactedReplayMode'],
+      ['PromptRequest', 'eventDetailMode'],
+    ]) {
+      expect(schemas[schemaName!]).toMatchObject({
+        properties: {
+          [field!]: {
+            type: 'string',
+            enum: ['full', 'summary'],
+            default: 'full',
+          },
+        },
+      });
+    }
+    expect(
+      openApi.paths?.['/session/{id}/transcript']?.get?.parameters,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          in: 'query',
+          name: 'compactedReplayMode',
+          schema: {
+            type: 'string',
+            enum: ['full', 'summary'],
+            default: 'full',
+          },
+        }),
+      ]),
+    );
     expect(loadSchema.properties?.['historyPageSize']?.maximum).toBe(
       SESSION_TRANSCRIPT_MAX_LIMIT,
     );
@@ -603,6 +968,16 @@ describe('REST integration documentation contract', () => {
       (parameter) => parameter.in === 'query' && parameter.name === 'limit',
     );
     expect(transcriptLimit?.schema?.maximum).toBe(SESSION_TRANSCRIPT_MAX_LIMIT);
+  });
+
+  it('publishes the runtime-owned batch bounds in the protocol prose', () => {
+    const protocol = readFileSync(PROTOCOL, 'utf8');
+    expect(protocol).toContain(
+      `1–${MAX_BATCH_WORKSPACES} explicitly selected registered workspaces`,
+    );
+    expect(protocol).toContain(`more than ${MAX_BATCH_WORKSPACES} selectors`);
+    expect(protocol).toContain(`longer than ${MAX_SELECTOR_CHARS} characters`);
+    expect(protocol).toContain(`exceeding ${MAX_MEMBER_BYTES / 1024} KiB`);
   });
 
   it('still sees the bulk of the route surface', () => {

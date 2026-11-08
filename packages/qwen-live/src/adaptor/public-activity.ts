@@ -15,6 +15,13 @@ export function publicActivity(
   let activity: 'message' | 'plan' | 'tool';
   let text = '';
   if (kind === 'agent_message_chunk') {
+    const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+    if (
+      meta?.['source'] === 'background_task_completed' ||
+      meta?.['source'] === 'background_notification' ||
+      meta?.['source'] === 'background_notification_turn_started'
+    )
+      return;
     const content = update['content'];
     if (!isRecord(content) || typeof content['text'] !== 'string') return;
     activity = 'message';

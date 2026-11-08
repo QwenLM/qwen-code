@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs false-positive baseline for the high-confidence gate (see
+  pom.xml). The gate starts from zero findings; keep it that way:
+  - false positive: add a <Match> block here and justify it in the PR;
+  - anything else: fix the code — never silence a real warning here.
+-->
+<FindBugsFilter/>

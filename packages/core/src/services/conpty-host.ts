@@ -10,20 +10,22 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('CONPTY_HOST');
 
 /**
- * The `WindowsPtyAgent` internals `releaseConPtyHost` needs, at
+ * The `WindowsPtyAgent` internals used for host cleanup and input queues, at
  * `@lydell/node-pty` 1.2.0-beta.10 (the exact pin in `packages/core/package.json`).
  *
- * The JS field names below were re-checked on 1.2.0-beta.15 and are unchanged.
+ * The cleanup JS field names below were re-checked on 1.2.0-beta.15 and are
+ * unchanged. Input queue verification is documented in pty-input-queue.ts.
  * The NATIVE teardown semantics were **not** verified there and do differ:
  * from 1.2.0-beta.14 upstream erases the pty baton with an unconditional
  * `std::erase_if` rather than under `assert`. A bump therefore has to be
  * re-checked against `src/win/conpty.cc`, not only against the JS shape.
  *
- * Every field is optional and the release degrades to a no-op if the shape ever
+ * Every cleanup field is optional and release degrades to a no-op if its shape
  * changes, so a bump can only bring the leak back — never a kill we did not
  * intend.
  */
-interface WindowsPtyAgentInternals {
+export interface WindowsPtyAgentInternals {
+  inSocket?: { writableLength?: number };
   _pty?: number;
   _useConptyDll?: boolean;
   _ptyNative?: { kill?: (pty: number, useConptyDll: boolean) => void };
@@ -108,10 +110,11 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
  * Releases what node-pty leaves behind when a Windows PTY finishes.
  *
  * **What this function itself reliably frees is the conout worker thread.**
- * Shell PTYs now use node-pty's bundled ConPTY backend, which releases its host
- * reference immediately after spawn so the host exits with its last client.
- * Web-terminal PTYs still use the Windows inbox backend, whose natural-exit
- * host leak is not fixed here.
+ * Shell, web-terminal, and agent-view PTYs now use node-pty's bundled ConPTY
+ * backend, which releases its host reference immediately after spawn so the
+ * host exits with its last client. The web terminal keeps the Windows inbox
+ * backend only as a spawn-failure retry (#11352); that fallback's
+ * natural-exit host leak is not fixed here.
  *
  * With the inbox backend, a finished PTY strands both the ConPTY host and the
  * `worker_threads` Worker node-pty runs to read the conout pipe. With bundled
@@ -146,10 +149,11 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
  *   `kill()` stays the single closer. The inbox conhost half of #11303 is
  *   therefore not fixed by this function on the natural-exit path.
  *
- * The web-terminal PTY (`web-terminal-registry.ts`) and agent-view PTY host do
- * not use the bundled backend, so they can still strand an inbox host per
- * exited terminal. Do not add a test that treats a stubbed `_ptyNative.kill`
- * call as evidence that the inbox host was released.
+ * The web-terminal PTY (`web-terminal-registry.ts`) and the agent-view PTY
+ * host spawn with the bundled backend too (#11352); only the web terminal's
+ * inbox spawn-failure retry can still strand an inbox host per exited
+ * terminal. Do not add a test that treats a stubbed `_ptyNative.kill` call as
+ * evidence that the inbox host was released.
  *
  * **Why not just call `ptyProcess.kill()`.** On the inbox backend it forks a
  * helper that can fall back after a natural exit to terminating a recycled

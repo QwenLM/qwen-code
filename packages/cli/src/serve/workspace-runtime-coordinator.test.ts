@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
+  AcpChildCapacityExceededError,
   WorkspaceDrainingError,
   type AcpSessionBridge,
   type BridgeWorkspaceRuntimeLifecycleSnapshot,
@@ -110,6 +111,119 @@ function makeRuntime() {
 }
 
 describe('WorkspaceRuntimeCoordinator', () => {
+  it('re-reads User settings when a cold runtime next starts', async () => {
+    const h = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    expect(
+      coordinator.reconcileSkillsConfiguration({ userSettings: true }),
+    ).toBe('deferred');
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { skills: { state: 'ready', revision: 1 } },
+    });
+    expect(h.invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/skills/refresh',
+      { cwd: '/workspace', reason: 'all', includeUserSettings: true },
+    );
+  });
+
+  it('does not let an older successful refresh clear a newer failed User request', async () => {
+    const h = makeRuntime();
+    h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    let finishFirst!: (
+      result: Awaited<ReturnType<typeof h.invokeWorkspaceCommand>>,
+    ) => void;
+    const first = new Promise<
+      Awaited<ReturnType<typeof h.invokeWorkspaceCommand>>
+    >((resolve) => {
+      finishFirst = resolve;
+    });
+    h.invokeWorkspaceCommand.mockImplementationOnce(() => first);
+    coordinator.reconcileSkillsConfiguration({ userSettings: true });
+    await vi.waitFor(() =>
+      expect(h.invokeWorkspaceCommand).toHaveBeenCalledOnce(),
+    );
+    coordinator.reconcileSkillsConfiguration({ userSettings: true });
+    h.invokeWorkspaceCommand.mockResolvedValueOnce({
+      configsRefreshed: 1,
+      configsFailed: 0,
+      sessionsRefreshed: 1,
+      sessionsFailed: 1,
+    });
+    finishFirst({
+      configsRefreshed: 1,
+      configsFailed: 0,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    });
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('error'),
+    );
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { skills: { state: 'ready', revision: 2 } },
+    });
+    expect(h.invokeWorkspaceCommand).toHaveBeenCalledTimes(3);
+    for (const call of h.invokeWorkspaceCommand.mock.calls) {
+      expect(call).toEqual([
+        'qwen/control/workspace/skills/refresh',
+        {
+          cwd: '/workspace',
+          reason: 'all',
+          includeUserSettings: true,
+        },
+      ]);
+    }
+    coordinator.reconcileSkillsConfiguration();
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.revision).toBe(3),
+    );
+    await vi.waitFor(() =>
+      expect(h.invokeWorkspaceCommand).toHaveBeenCalledTimes(4),
+    );
+    expect(h.invokeWorkspaceCommand).toHaveBeenLastCalledWith(
+      'qwen/control/workspace/skills/refresh',
+      { cwd: '/workspace', reason: 'all' },
+    );
+  });
+
+  it.each(['config', 'session'] as const)(
+    'retains User refresh after %s failure with bounded retries',
+    async (failure) => {
+      const h = makeRuntime();
+      h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
+      h.invokeWorkspaceCommand.mockResolvedValue({
+        configsRefreshed: 0,
+        configsFailed: failure === 'config' ? 1 : 0,
+        sessionsRefreshed: 0,
+        sessionsFailed: failure === 'session' ? 1 : 0,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+      coordinator.reconcileSkillsConfiguration({ userSettings: true });
+      await vi.waitFor(() =>
+        expect(coordinator.status().capabilities?.skills?.state).toBe('error'),
+      );
+      await coordinator.ensure();
+      await coordinator.ensure();
+      expect(h.invokeWorkspaceCommand).toHaveBeenCalledTimes(2);
+      h.setSnapshot({ state: 'cold', runtimeLive: false });
+      h.invokeWorkspaceCommand.mockResolvedValue({
+        configsRefreshed: 1,
+        configsFailed: 0,
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+      });
+      await expect(coordinator.ensure()).resolves.toMatchObject({
+        capabilities: {
+          skills: { state: 'ready', revision: 1, runtimeEpoch: 2 },
+        },
+      });
+      expect(h.invokeWorkspaceCommand).toHaveBeenLastCalledWith(
+        'qwen/control/workspace/skills/refresh',
+        { cwd: '/workspace', reason: 'all', includeUserSettings: true },
+      );
+    },
+  );
+
   it('starts one workspace runtime without creating a session', async () => {
     const harness = makeRuntime();
     const coordinator = new WorkspaceRuntimeCoordinator(
@@ -555,6 +669,17 @@ describe('WorkspaceRuntimeCoordinator', () => {
         async () => ({ accepted: true }),
       ),
     ).rejects.toBeInstanceOf(WorkspaceRuntimeInitializationError);
+  });
+
+  it('preserves capacity rejection when MCP needs a cold runtime', async () => {
+    const harness = makeRuntime();
+    const error = new AcpChildCapacityExceededError(1, 1);
+    harness.preheat.mockRejectedValueOnce(error);
+    await expect(
+      getWorkspaceRuntimeCoordinator(harness.runtime).runMcpRuntimeMutation(
+        async () => ({ accepted: true }),
+      ),
+    ).rejects.toBe(error);
   });
 
   it('rechecks MCP readiness after a rejected runtime mutation', async () => {
@@ -1007,6 +1132,101 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(coordinator.hasActiveWork()).toBe(true);
   });
 
+  describe('while only another execution engine is live', () => {
+    function otherEngineLive() {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'active',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: true,
+        workspaceControl: 'cold',
+      });
+      harness.preheat.mockImplementation(async () => {
+        harness.setSnapshot({ runtimeEpoch: 2, workspaceControl: 'live' });
+      });
+      return harness;
+    }
+
+    it('reports the workspace-control runtime with aggregate activity', () => {
+      const harness = otherEngineLive();
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      expect(coordinator.status()).toMatchObject({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 1,
+      });
+      expect(coordinator.hasActiveWork()).toBe(true);
+    });
+
+    it.each(['cold', 'starting'] as const)(
+      'refreshes live Managed sessions while control is %s and retains User work',
+      async (workspaceControl) => {
+        const h = otherEngineLive();
+        h.setSnapshot({ workspaceControl });
+        const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+        coordinator.beginDrain();
+        expect(
+          coordinator.reconcileSkillsConfiguration({ userSettings: true }),
+        ).toBe('deferred');
+        expect(h.invokeWorkspaceCommand).not.toHaveBeenCalled();
+        coordinator.cancelDrain();
+        await vi.waitFor(() =>
+          expect(h.invokeWorkspaceCommand).toHaveBeenCalledOnce(),
+        );
+        await vi.waitFor(() =>
+          expect(coordinator.status().capabilities?.skills?.state).toBe(
+            'stale',
+          ),
+        );
+        expect(h.preheat).not.toHaveBeenCalled();
+        expect(h.invokeWorkspaceCommand).toHaveBeenCalledWith(
+          'qwen/control/workspace/skills/refresh',
+          { cwd: '/workspace', reason: 'all', includeUserSettings: true },
+        );
+        await expect(coordinator.ensure()).resolves.toMatchObject({
+          capabilities: {
+            skills: { state: 'ready', revision: 1, runtimeEpoch: 2 },
+          },
+        });
+        expect(h.invokeWorkspaceCommand).toHaveBeenCalledTimes(2);
+        expect(h.invokeWorkspaceCommand).toHaveBeenLastCalledWith(
+          'qwen/control/workspace/skills/refresh',
+          { cwd: '/workspace', reason: 'all', includeUserSettings: true },
+        );
+      },
+    );
+
+    it('defers Skills reconciliation and preheats before preparing it', async () => {
+      const harness = otherEngineLive();
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      expect(coordinator.reconcileSkillsConfiguration()).toBe('deferred');
+      await expect(coordinator.ensure({})).resolves.toMatchObject({
+        runtimeLive: true,
+        runtimeEpoch: 2,
+        capabilities: {
+          skills: { state: 'ready', revision: 1, runtimeEpoch: 2 },
+        },
+      });
+      expect(harness.preheat).toHaveBeenCalledOnce();
+      expect(harness.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    });
+
+    it('retries a Skills refresh requested while workspace control starts', async () => {
+      const harness = otherEngineLive();
+      harness.setSnapshot({ workspaceControl: 'starting' });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      expect(coordinator.reconcileSkillsConfiguration()).toBe('deferred');
+      await expect(coordinator.ensure()).resolves.toMatchObject({
+        capabilities: { skills: { state: 'ready', revision: 1 } },
+      });
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    });
+  });
+
   it('does not project queued Skills work into runtime lifecycle', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
@@ -1262,4 +1482,23 @@ describe('WorkspaceRuntimeCoordinator', () => {
       undefined,
     );
   });
+});
+
+it('runtime-stop completion cannot clear a concurrent removal drain', async () => {
+  const { runtime } = makeRuntime();
+  const coordinator = getWorkspaceRuntimeCoordinator(runtime);
+  const finish = coordinator.beginStop();
+  await expect(coordinator.ensure()).rejects.toBeInstanceOf(
+    WorkspaceDrainingError,
+  );
+  coordinator.beginDrain();
+  expect(finish()).toBe(false);
+  await expect(coordinator.ensure()).rejects.toBeInstanceOf(
+    WorkspaceDrainingError,
+  );
+  coordinator.cancelDrain();
+  await expect(coordinator.ensure()).resolves.toMatchObject({
+    runtimeLive: true,
+  });
+  expect(finish()).toBe(false);
 });

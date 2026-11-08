@@ -21,6 +21,32 @@ function invalidPlugin(
 }
 
 describe('channel registry', () => {
+  it('adds the shared output descriptor only when a plugin opts in', async () => {
+    registerPlugin({
+      channelType: 'valid-output-mode',
+      displayName: 'Shared output mode',
+      supportsOutputMode: true,
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-output-mode',
+    );
+    const fields = entry?.fields.filter((field) => field.key === 'outputMode');
+    expect(fields).toHaveLength(1);
+    expect(fields?.[0]).toMatchObject({
+      kind: 'enum',
+      options: [
+        { value: 'per_task' },
+        { value: 'per_response' },
+        { value: 'per_turn' },
+      ],
+    });
+    expect(fields?.[0]?.default).toBe('per_turn');
+  });
+
   it('publishes a plugin session-scope descriptor once with its runtime default', async () => {
     registerPlugin({
       channelType: 'valid-custom-session-scope',
@@ -74,6 +100,19 @@ describe('channel registry', () => {
   });
 
   it.each([
+    {
+      type: 'invalid-output-mode-descriptor',
+      fields: [
+        {
+          key: 'outputMode',
+          label: 'Output Mode',
+          kind: 'enum',
+          options: [{ value: 'all', label: 'All' }],
+        },
+      ],
+      message:
+        'Channel field "outputMode" is shared; declare supportsOutputMode instead.',
+    },
     {
       type: 'invalid-nested-secret',
       fields: [
@@ -334,6 +373,45 @@ describe('channel registry', () => {
       ],
       message:
         'Channel field "retentionDays" can only declare exclusiveMinimum on number fields.',
+    },
+    {
+      type: 'invalid-maximum-on-string',
+      fields: [
+        {
+          key: 'retentionDays',
+          label: 'Retention days',
+          kind: 'string',
+          maximum: 0,
+        },
+      ],
+      message:
+        'Channel field "retentionDays" can only declare maximum on number fields.',
+    },
+    {
+      type: 'invalid-non-finite-maximum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          maximum: Number.NaN,
+        },
+      ],
+      message: 'Channel field "retries" must declare a finite maximum.',
+    },
+    {
+      type: 'invalid-maximum-leaves-no-valid-value',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          maximum: 5,
+        },
+      ],
+      message:
+        'Channel field "retries" declares a maximum that leaves no valid value.',
     },
     {
       type: 'invalid-env-resolvable-number',
@@ -763,7 +841,9 @@ describe('channel registry', () => {
       'weixin',
       'dingtalk',
       'dws',
+      'email',
       'wecom',
+      'wecom-callback',
       'feishu',
       'qq',
       'github',
@@ -773,7 +853,23 @@ describe('channel registry', () => {
       builtinCatalog
         .filter((entry) => entry.manageable)
         .map((entry) => entry.type),
-    ).toEqual(['dingtalk', 'dws', 'wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual([
+      'dingtalk',
+      'dws',
+      'email',
+      'wecom',
+      'wecom-callback',
+      'feishu',
+      'github',
+      'gitlab',
+    ]);
+    expect(
+      builtinCatalog
+        .filter((entry) =>
+          entry.fields.some((field) => field.key === 'outputMode'),
+        )
+        .map((entry) => entry.type),
+    ).toEqual(['dingtalk']);
     // The registry skips the shared `instructions` injection for any channel
     // that declares its own, so pin the render invariants the editor depends on
     // for every manageable built-in: exactly one field, plus the multiline hint
@@ -822,11 +918,11 @@ describe('channel registry', () => {
       );
       expect(
         fields
-          ?.find((field) => field.key === 'senderPolicy')
+          ?.find((field) => field.key === 'privatePolicy')
           ?.options?.map((option) => option.value),
-      ).toEqual(['pairing', 'allowlist', 'open']);
+      ).toEqual(['disabled', 'pairing', 'allowlist', 'open']);
       expect(
-        fields?.find((field) => field.key === 'senderPolicy'),
+        fields?.find((field) => field.key === 'privatePolicy'),
       ).toMatchObject({ default: 'pairing' });
       expect(fields).toContainEqual(
         expect.objectContaining({
@@ -862,7 +958,7 @@ describe('channel registry', () => {
         }),
       );
       expect(
-        fields?.filter((field) => field.key === 'senderPolicy'),
+        fields?.filter((field) => field.key === 'privatePolicy'),
       ).toHaveLength(1);
       expect(
         fields?.filter((field) => field.key === 'groupPolicy'),
@@ -881,7 +977,7 @@ describe('channel registry', () => {
       ).toContain('pairing');
       expect(fields).toContainEqual(
         expect.objectContaining({
-          key: 'senderPolicy',
+          key: 'privatePolicy',
           kind: 'enum',
           required: true,
         }),

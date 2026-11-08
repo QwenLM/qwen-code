@@ -5,7 +5,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { constants as osConstants } from 'node:os';
 import { delimiter, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,11 +44,28 @@ function pathValue() {
   return envValue('PATH') ?? '';
 }
 
+// A PATH entry only counts when it can actually be executed. `existsSync`
+// alone also accepts a directory named `corepack`, or the file a partially
+// removed Node toolchain leaves without its exec bit: the spawn below then
+// fails with EACCES and the caller loses the actionable message this script
+// prints for a missing Corepack. Windows decides executability by extension
+// rather than a mode bit, so there the file check is the whole test.
+function isExecutableFile(candidate) {
+  try {
+    if (!statSync(candidate).isFile()) return false;
+    if (process.platform === 'win32') return true;
+    accessSync(candidate, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function findOnPath(command) {
   for (const entry of pathValue().split(delimiter)) {
     const directory = entry.replace(/^"(.*)"$/, '$1');
     const candidate = resolve(directory || '.', command);
-    if (existsSync(candidate)) return candidate;
+    if (isExecutableFile(candidate)) return candidate;
   }
 
   return undefined;

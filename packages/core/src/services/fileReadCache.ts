@@ -149,6 +149,7 @@ export type FileReadCheckResult =
 
 export class FileReadCache {
   private readonly byInode = new Map<string, FileReadEntry>();
+  private clearGeneration = 0;
   private static readonly MAX_ENTRIES = 4096;
 
   /** Build the canonical key for a file from its Stats. */
@@ -357,6 +358,13 @@ export class FileReadCache {
     return false;
   }
 
+  /** Disarm quote-back after truncation without revoking prior-read rights. */
+  markAllReadsEvictedFromHistory(): void {
+    for (const entry of this.byInode.values()) {
+      entry.readResidentInHistory = false;
+    }
+  }
+
   /** Remove the entry for the given Stats, if any. */
   invalidate(stats: Stats): void {
     if (!FileReadCache.hasVerifiableIdentity(stats)) {
@@ -391,7 +399,17 @@ export class FileReadCache {
 
   /** Drop every entry. Used by tests and on Config shutdown. */
   clear(): void {
+    this.clearGeneration++;
+    this.dropEntries();
+  }
+
+  /** Reclaim local cache memory without invalidating another runtime's reads. */
+  dropEntries(): void {
     this.byInode.clear();
+  }
+
+  getClearGeneration(): number {
+    return this.clearGeneration;
   }
 
   /**

@@ -47,8 +47,8 @@ export interface SkillConfig {
    * This is an additive grant only: it never hides or restricts the tools the
    * model can see, and since #10075 `permissions.allow` no longer affects
    * registration at all. A tool the `settings.tools.eager` allowlist omits
-   * stays deferred (registered and loadable via `tool_search`) regardless of
-   * this grant. An eager-by-default tool omitted by `tools.eager` needs its
+   * stays deferred — registered, inspectable via `tool_search`, invokable via
+   * `tool_call` — regardless of this grant. An eager-by-default tool omitted by `tools.eager` needs its
    * name added plus a restart; a tool deferred by default needs
    * `tools.visible` instead (#9827).
    * Malformed entries are ignored. See `applySkillAllowedTools`.
@@ -288,6 +288,14 @@ export function parsePathsField(
  * out, which is the actual injection vector this guards against.
  */
 export const SKILL_NAME_PATTERN = /^[\p{L}\p{N}_:.-]+$/u;
+
+/**
+ * Name of the bundled reference that carries the detailed auto-memory
+ * guidance (see `auto-memory-skill.ts`). Kept in this leaf module so the
+ * skill manager, the Skill tool and the daemon's skills catalog can name it
+ * without importing the prompt builders.
+ */
+export const AUTO_MEMORY_SKILL_NAME = 'auto-memory';
 
 /**
  * Parse the `allowedTools` field from skill frontmatter.

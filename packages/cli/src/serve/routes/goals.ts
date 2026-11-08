@@ -27,6 +27,7 @@ import type {
   BridgeSessionGoal,
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   sendGenerationClosedError,
@@ -118,7 +119,11 @@ export function registerGoalsRoutes(
     const assertGenerationOpen = deps.captureGenerationAssertion?.();
     try {
       assertGenerationOpen?.();
-      const sessions = bridge.listWorkspaceSessions(boundWorkspace);
+      const sessions = bridge
+        .listWorkspaceSessions(boundWorkspace)
+        .filter(
+          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+        );
       const settled = await allSettledWithLimit(
         sessions,
         PROBE_CONCURRENCY,

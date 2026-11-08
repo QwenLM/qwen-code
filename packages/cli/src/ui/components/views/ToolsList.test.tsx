@@ -55,4 +55,28 @@ describe('<ToolsList />', () => {
     );
     expect(lastFrame()).toMatchSnapshot();
   });
+
+  it('marks fixed-only media-policy tools and leaves others unmarked', () => {
+    const tools: ToolDefinition[] = [
+      {
+        name: 'omni_downsample_image',
+        displayName: 'DownsampleImage',
+        fixedOnly: true,
+      },
+      { name: 'read_file', displayName: 'ReadFile' },
+    ];
+    const { lastFrame } = render(
+      <ToolsList tools={tools} showDescriptions={false} contentWidth={80} />,
+    );
+    const frame = lastFrame() ?? '';
+    // The marker must be attached to the fixed-only tool's line only.
+    const downsampleLine = frame
+      .split('\n')
+      .find((line) => line.includes('DownsampleImage'));
+    expect(downsampleLine).toContain('[fixed-only');
+    const readFileLine = frame
+      .split('\n')
+      .find((line) => line.includes('ReadFile'));
+    expect(readFileLine).not.toContain('fixed-only');
+  });
 });

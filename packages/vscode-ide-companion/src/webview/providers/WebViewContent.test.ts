@@ -7,7 +7,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
 
-const envMock = vi.hoisted(() => ({ language: 'en' }));
+// `vscode.env.language` is `readonly` in @types/vscode, so the tests mutate this
+// holder instead of the namespace member. It has to be hoisted because the
+// vi.mock factory runs at module load, before anything in this file.
+const envMock = vi.hoisted(() => ({
+  language: 'en',
+  remoteName: undefined as string | undefined,
+}));
 
 vi.mock('vscode', () => ({
   env: envMock,
@@ -39,8 +45,11 @@ function createMockWebview() {
 describe('WebViewContent', () => {
   const fakeExtensionUri = { fsPath: '/ext' } as never;
 
+  // envMock is shared across the whole file, so reset it or a test that sets a
+  // language leaks into whatever runs next.
   beforeEach(() => {
     envMock.language = 'en';
+    envMock.remoteName = undefined;
   });
 
   it('generates HTML when given a raw Webview', () => {
@@ -95,11 +104,40 @@ describe('WebViewContent', () => {
     expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
   });
 
+  it('allows only blob workers without broadening script execution', () => {
+    const html = WebViewContent.generate(
+      createMockWebview() as never,
+      fakeExtensionUri,
+    );
+    expect(html).toContain('worker-src blob:;');
+    expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
+    expect(html).toContain("default-src 'none';");
+  });
+
   it('allows the WebShell transcript to use its inlined fonts', () => {
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).toContain('font-src data:;');
+  });
+
+  it('limits connect-src to the loopback in a local window', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('connect-src http://127.0.0.1:* ws://127.0.0.1:*;');
+  });
+
+  it('grants the tunnelled localhost origins in a remote window', () => {
+    envMock.remoteName = 'ssh-remote';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    // The loopback pair stays alongside the tunnelled one: the extension host
+    // is still co-located with the daemon.
+    expect(html).toContain(
+      'connect-src http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*;',
+    );
   });
 
   it('fills the VS Code webview without inherited body padding', () => {
@@ -135,5 +173,16 @@ describe('WebViewContent', () => {
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).toContain('<html lang="en">');
+  });
+
+  it('escapes the language value in the html lang attribute', () => {
+    envMock.language = '"><script>alert(1)</script>';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain(
+      '<html lang="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">',
+    );
+    expect(html).not.toContain('<html lang=""><script>');
   });
 });

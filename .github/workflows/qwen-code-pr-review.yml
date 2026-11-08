@@ -196,7 +196,7 @@ jobs:
           # A command-triggered run executes against the base branch, so its
           # `review-pr` check attaches to main's commit and never shows under
           # this PR's checks — the link here is the only way to watch it.
-          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is running in [workflow run](%s). A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued for an available runner; follow the [workflow run](%s) for progress. A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
           # One ack per PR, and it must sit right under the command that asked
           # for it. Editing the previous ack in place kept the count at one but
           # left the notice wherever the FIRST request landed — on a 15-comment
@@ -254,9 +254,14 @@ jobs:
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
       needs.authorize.outputs.should_review == 'true'
-    # Stays on hosted: the environment wait timer would otherwise idle a self-hosted ECS slot for the whole wait (GitHub allocates the runner before evaluating the environment timer).
-    runs-on: 'ubuntu-latest'
-    # Wait timer is configured in repo settings (Settings → Environments → qwen-pr-review-delay), currently 10 minutes.
+    # Checks out nothing, runs no repository code and holds only a read-only
+    # token, so the persistent ECS pool is safe and skips the saturated hosted
+    # queue. The environment wait timer below does not hold a runner: GitHub
+    # assigns one only once the timer elapses (run 38656917461: job created
+    # 23:54:53, set up 23:59:56, finished two seconds later).
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Wait timer is configured in repo settings (Settings → Environments → qwen-pr-review-delay), currently 5 minutes.
     environment:
       name: 'qwen-pr-review-delay'
       deployment: false
@@ -346,12 +351,25 @@ jobs:
         startsWith(github.event.comment.body, '@qwen-code /review')) ||
        (github.event_name == 'pull_request_review' &&
         startsWith(github.event.review.body, '@qwen-code /review')))
-    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
-    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner. The job IS the write-permission check, so
-    # it cannot route on its own output; downstream jobs already route on the
-    # repository guard alone.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
+    # but runs no agent, checks out nothing, and processes no untrusted PR
+    # content — it only reads event metadata and calls one read API — so it is
+    # safe on the persistent ECS pool whenever the trigger cannot carry fork
+    # code into it:
+    # - PR-payload events (pull_request_target / pull_request_review /
+    #   pull_request_review_comment) keep the canonical same-repo guard: a fork
+    #   head stays on hosted (ephemeral), an in-repo head uses ECS.
+    # - issue_comment (/review, /resolve) and workflow_dispatch carry no
+    #   github.event.pull_request payload at all, so the same-repo guard alone
+    #   fell through to ubuntu-latest for EVERY command — the gate then sat in
+    #   the hosted queue for hours (PR #15286: 3h10m for a 4-second job) while
+    #   the ECS pool was idle. Route them to ECS like qwen-autofix.yml's
+    #   route/review-scan, which apply the same "no PR payload → no fork code →
+    #   persistent pool" rule to their API-only steps (review-scan there loads
+    #   CI_DEV_BOT_PAT; route only the read-only github.token).
+    # The job IS the write-permission check, so it cannot route on its own
+    # output; downstream jobs already route on the repository guard alone.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -375,6 +393,26 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
+          # Harden gh against the pool's shared, writable HOME config. This
+          # gate runs on the persistent ecs-qwen pool for comment/dispatch
+          # triggers; a planted ~/.config/gh (http_unix_socket) would
+          # otherwise receive CI_BOT_PAT and could forge the permission
+          # response that downstream jobs consume as should_review. Same
+          # pins as qwen-autofix.yml's route/review-scan — but NO
+          # `unset GH_TOKEN` here: it is this step's only credential.
+          export GH_HOST=github.com
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step (the gate
+          # fails closed), not continue with an empty GH_CONFIG_DIR that gh
+          # treats as unset — falling back to the shared config.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the persistent pool; do not
+          # leave the minted config dir behind.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           # Select the principal whose permission gates this trigger.
           case "$EVENT_NAME" in
             pull_request_target)
@@ -495,7 +533,10 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # The schedule switches the managed fleet to `ecs-review` at 17:00
+    # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
+    # is closed.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -639,9 +680,12 @@ jobs:
             if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               chmod -R u+w "$stale_qwen" 2>/dev/null || true
             fi
-            # If a foreign-owned directory cannot move to a different parent,
-            # quarantine the runner-owned workspace and recreate the checkout
-            # root. Warm contents are lost only on this unrecoverable path.
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
             rm -rf -- "$stale_qwen" 2>/dev/null ||
               sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
@@ -985,6 +1029,50 @@ jobs:
           fi
           exit 0
 
+      - name: 'Provision review linters (actionlint + shellcheck)'
+        if: "steps.context.outputs.should_run == 'true'"
+        # The review's deterministic script-lint gate spawns actionlint and
+        # shellcheck from PATH; without them every workflow/shell PR caps as
+        # unreviewed and the real-binary regressions never run (PR #16001
+        # review). Install through the repo's own pinned, SHA-256-verified
+        # installer and promote the fresh job-scoped tool dirs onto
+        # GITHUB_PATH — prepended, so the verified bytes shadow anything a
+        # shared runner left on PATH. The install is unconditional (no
+        # `command -v` shortcut): a pre-existing binary is exactly the plant
+        # the capture-tools step refuses to trust. Failure degrades, not
+        # blocks: the gate caps the review as unreviewed, disclosed.
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |-
+          node --input-type=module -e '
+            import { execSync } from "node:child_process";
+            import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+            import { getLinters, getLinterTempDir } from "./scripts/lint.js";
+            const tempDir = getLinterTempDir();
+            rmSync(tempDir, { recursive: true, force: true });
+            mkdirSync(tempDir, { recursive: true });
+            const linters = getLinters();
+            for (const name of ["actionlint", "shellcheck"]) {
+              execSync(linters[name].installer, { stdio: "inherit" });
+              // Verify the install produced its binary BEFORE promoting the
+              // dir: a silent no-op install must fail this step visibly
+              // (continue-on-error tolerates it, the UI shows it), not
+              // degrade to a review lane without linters (PR #16001 F2).
+              const bin = tempDir + "/" + name + "/" + name;
+              if (!existsSync(bin)) throw new Error(name + " installer produced no binary at " + bin);
+              appendFileSync(process.env.GITHUB_PATH, tempDir + "/" + name + "\n");
+            }
+            console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
+          '
+
+      - name: 'Prepare review scratch directory'
+        id: 'review_scratch'
+        if: "steps.context.outputs.should_run == 'true'"
+        shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
+        run: |-
+          scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
+          echo "dir=$scratch" >> "$GITHUB_OUTPUT"
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
@@ -992,7 +1080,22 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # Review model, plus the canary split that sends a PR-number slice
+          # of reviews to a second model. All three arrive as variables so a
+          # rollout is a repository-variable change, never a workflow edit:
+          # an empty canary or percent keeps today's single model, and
+          # the bucket selection below turns them into OPENAI_MODEL.
+          REVIEW_MODEL_DEFAULT: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          REVIEW_MODEL_CANARY: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}'
+          REVIEW_MODEL_CANARY_PERCENT: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}'
+          # The canary cohort may also carry its own endpoint: a second
+          # gateway with its own quota, or a provider the default gateway
+          # does not serve. The pair is all-or-nothing — a URL without its
+          # own key would send the default key to another provider, so the
+          # override below refuses that shape and keeps the default cohort.
+          REVIEW_BASE_URL_CANARY: '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}'
+          REVIEW_API_KEY_CANARY: '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}'
+          QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           AUTO_REVIEW: '${{ steps.context.outputs.auto_review }}'
@@ -1064,6 +1167,7 @@ jobs:
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
+          TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail
           fail() {
@@ -1130,12 +1234,19 @@ jobs:
           fi
 
           # shellcheck disable=SC2016
+          # Shared by the proxy bypass below and the cohort notice, so the
+          # notice cannot name a host the traffic was not routed through.
+          openai_base_host() {
+            node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)'
+          }
+
+          # shellcheck disable=SC2016
           configure_qwen_network() {
             local openai_host proxy_bin
             if ! command -v node >/dev/null 2>&1; then
               fail "node is required to parse OPENAI_BASE_URL for the proxy bypass."
             fi
-            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            openai_host="$(openai_base_host)"
             if [ -z "$openai_host" ]; then
               fail "Could not parse a hostname from OPENAI_BASE_URL."
             fi
@@ -1370,7 +1481,7 @@ jobs:
 
             echo "qwen_path=$(command -v qwen)"
             qwen --version
-            echo "openai_host=${openai_host}"
+            echo "initial_openai_host=${openai_host}"
             echo "qwen_http_proxy=disabled"
             if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
               echo "child_git_github_proxy=restored"
@@ -1601,6 +1712,96 @@ jobs:
             PROMPT="${PROMPT} --comment"
           fi
 
+          # The percent both consumers read — the bucket test and the cohort
+          # notice below — normalized once so the notice cannot report a split
+          # the bucket test did not apply. Shape follows SALVAGE_ELAPSED_PERCENT
+          # (strip leading zeros, bound the digit count) but clamps to the
+          # opposite pole: there 100 means cede, here it would mean full
+          # rollout, so a typo on a repository variable must land on off. Keep
+          # the digit bound — bash wraps 20-digit values, and
+          # $((10#18446744073709551666)) is 50, a silent half rollout.
+          canary_percent_effective() {
+            local percent="$1"
+            case "$percent" in
+              ''|*[!0-9]*) percent=0 ;;
+            esac
+            percent="${percent#"${percent%%[!0]*}"}"
+            percent="${percent:-0}"
+            if [ "${#percent}" -gt 3 ]; then
+              percent=0
+            fi
+            percent=$((10#$percent))
+            if [ "$percent" -gt 100 ]; then
+              percent=0
+            fi
+            echo "$percent"
+          }
+
+          # A padded canary name (" qwen3-coder-plus ") would reach --model
+          # verbatim, the provider would reject it, and that failure is
+          # terminal for the whole cohort on every re-review round — the same
+          # whitespace class QWEN_REVIEW_ASSETS_REPO above trims for. Trimming
+          # keeps "empty means no split": whitespace-only routes to the
+          # default rather than inventing a cohort.
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY:-}"
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY#"${REVIEW_MODEL_CANARY%%[![:space:]]*}"}"
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY%"${REVIEW_MODEL_CANARY##*[![:space:]]}"}"
+
+          CANARY_PERCENT_EFFECTIVE="$(canary_percent_effective \
+            "${REVIEW_MODEL_CANARY_PERCENT:-}")"
+          REVIEW_BUCKET_COUNT=100
+          if [ "$(( CANARY_PERCENT_EFFECTIVE % 10 ))" -eq 0 ]; then
+            REVIEW_BUCKET_COUNT=10
+          fi
+          REVIEW_BUCKET=unknown
+          REVIEW_COHORT=default
+          case "${PR_NUMBER:-}" in
+            ''|*[!0-9]*) ;;
+            *)
+              REVIEW_BUCKET="$(( 10#$PR_NUMBER % REVIEW_BUCKET_COUNT ))"
+              if [ -n "$REVIEW_MODEL_CANARY" ] &&
+                [ "$(( REVIEW_BUCKET * 100 ))" -lt "$(( CANARY_PERCENT_EFFECTIVE * REVIEW_BUCKET_COUNT ))" ]; then
+                REVIEW_COHORT=canary
+              fi
+              ;;
+          esac
+          OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
+          if [ "$REVIEW_COHORT" = canary ]; then
+            OPENAI_MODEL="$REVIEW_MODEL_CANARY"
+          fi
+
+          # The canary cohort may carry its own endpoint as well as its own
+          # model: REVIEW_BASE_URL_CANARY/REVIEW_API_KEY_CANARY move the
+          # canary's traffic onto a second gateway so its quota is isolated
+          # from the default cohort's. The pair is all-or-nothing — a URL
+          # without its own key would send the default key to another
+          # provider — and an unparseable URL routes nowhere, so both shapes
+          # degrade to the default cohort, the same direction every canary
+          # misconfiguration takes.
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY:-}"
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY#"${REVIEW_BASE_URL_CANARY%%[![:space:]]*}"}"
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY%"${REVIEW_BASE_URL_CANARY##*[![:space:]]}"}"
+          if [ "$REVIEW_COHORT" = canary ] && [ -n "$REVIEW_BASE_URL_CANARY" ]; then
+            if [ -n "${REVIEW_API_KEY_CANARY:-}" ] &&
+              node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
+              OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
+              OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
+            else
+              echo "::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort."
+              OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
+              REVIEW_COHORT=default
+            fi
+          fi
+          export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY
+          REVIEW_ENDPOINT_HOST="$(openai_base_host)"
+          # The run's own record of which cohort served this review: the model
+          # is not carried anywhere else a later comparison could read it (the
+          # cost ledger has tokens, not a model), so a rollout that cannot be
+          # told apart afterwards is unmeasurable. Every field is the resolved
+          # one — the raw percent would certify a split the bucket test
+          # clamped away.
+          echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"
+
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
             MODEL_ARGS=(--model "$OPENAI_MODEL")
@@ -1672,6 +1873,23 @@ jobs:
             mkdir -p "$QWEN_HOME"
             printf '%s\n' '{"tools":{"shell":{"defaultTimeoutMs":2400000}}}' \
               > "$QWEN_HOME/settings.json"
+          fi
+          # vars.QWEN_PR_REVIEW_EFFORT is to model.reasoningEffort what
+          # vars.QWEN_PR_REVIEW_MODEL is to --model (low|medium|high|xhigh|
+          # max); the CLI has no flag for it, so it goes in the same per-run
+          # settings file, merged so it composes with the cover above. Unset
+          # keeps the provider's default. This is the model's thinking depth,
+          # not /review's own --effort (which --comment pins to high).
+          if [ -n "${QWEN_PR_REVIEW_EFFORT:-}" ]; then
+            mkdir -p "$QWEN_HOME"
+            node -e '
+              const fs = require("node:fs");
+              const [file, effort] = process.argv.slice(1);
+              let s = {};
+              try { s = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+              s.model = { ...s.model, reasoningEffort: effort };
+              fs.writeFileSync(file, JSON.stringify(s) + "\n");
+            ' "$QWEN_HOME/settings.json" "$QWEN_PR_REVIEW_EFFORT"
           fi
 
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
@@ -1764,6 +1982,7 @@ jobs:
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
+              --append-system-prompt "Store all temporary verification clones and test files under TMPDIR=${TMPDIR:-/tmp}. Use mktemp -d inside that directory; do not create hardcoded /tmp/verify-* or /tmp/qwen-verify-* paths. Pass this directory requirement to every subagent. Keep final review artifacts in the normal review artifact paths so they are uploaded before cleanup." \
               --prompt "$attempt_prompt" \
               --output-format stream-json \
               | tee "$LOG_PATH"
@@ -2881,6 +3100,29 @@ jobs:
           retention-days: 90
           if-no-files-found: 'ignore'
 
+      - name: 'Clean review scratch directory'
+        if: "always() && steps.review_scratch.outputs.dir != ''"
+        timeout-minutes: 5
+        shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
+        env:
+          REVIEW_SCRATCH: '${{ steps.review_scratch.outputs.dir }}'
+          PATH: '/usr/local/bin:/usr/bin:/bin'
+        run: |-
+          case "$REVIEW_SCRATCH" in
+            "${RUNNER_TEMP:?}"/qwen-review-scratch.*)
+              suffix=${REVIEW_SCRATCH#"$RUNNER_TEMP"/qwen-review-scratch.}
+              case "$suffix" in
+                ''|*[!a-zA-Z0-9]*) echo '::error::Invalid review scratch path'; exit 1 ;;
+              esac
+              ;;
+            *) echo '::error::Review scratch path is outside runner temp'; exit 1 ;;
+          esac
+          if rm -rf -- "$REVIEW_SCRATCH"; then
+            echo 'Removed job-owned review scratch directory'
+          else
+            echo '::error::Could not remove job-owned review scratch directory'
+          fi
+
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
       # Remove both the worktree directories and Git's worktree registrations so
       # the next job on this reused runner can delete qwen-review/* branches.
@@ -2905,16 +3147,17 @@ jobs:
         timeout-minutes: 5
         run: |-
           set -uo pipefail
-          # Sweep the per-run staging dirs 'Stage review artifacts' mints
+          # Sweep the per-run artifact staging and review scratch dirs minted
           # under RUNNER_TEMP, which survives across jobs on this pool: the
           # upload has already run, and a runner executes one job at a time,
-          # so nothing else owns a live staging dir. Runs BEFORE the .git
-          # check so a job that dies before checkout still sweeps. The
-          # legacy fixed path rides along; foreign-uid residue that refuses
-          # removal stays — it can never be published, because the upload
-          # reads only the per-run mktemp path this job output.
+          # so nothing else owns a live directory. Runs BEFORE the .git check
+          # so a job that dies before checkout still sweeps. The legacy fixed
+          # upload path rides along; foreign-uid residue that refuses removal
+          # stays — it can never be published, because the upload reads only
+          # the per-run mktemp path this job output.
           rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-upload.* \
-            "${RUNNER_TEMP:-/tmp}"/qwen-review-upload 2>/dev/null || true
+            "${RUNNER_TEMP:-/tmp}"/qwen-review-upload \
+            "${RUNNER_TEMP:-/tmp}"/qwen-review-scratch.* 2>/dev/null || true
           if [ ! -e .git ]; then
             echo "no Git checkout; nothing to clean"
             exit 0
@@ -3134,6 +3377,24 @@ jobs:
             echo "Could not determine the PR number; skipping fallback comment." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # A review-pr job no runner ever picked up has no runner and no
+          # steps: GitHub ends a job queued for 24 hours (as failure or
+          # cancelled), and the `ecs-review` pool is closed by day
+          # (qwen-review-runner-schedule.yml). The generic body's "did not
+          # complete successfully / retried automatically" would both be
+          # false, and silence is not the alternative: ack-review-request
+          # already promised this requester a result here, and a head nobody
+          # pushes again never queues another run. So it gets its own body
+          # below. An unreadable job list keeps the generic comment (fail
+          # toward telling the author something).
+          never_started="unknown"
+          if [ "$REVIEW_PR_RESULT" = "failure" ] || [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+            never_started="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:?}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "review-pr")] | if length == 0 then "unknown" elif all(.[]; (.runner_name // "") == "" and ((.steps // []) | length) == 0) then "true" else "false" end' 2>/dev/null)" || never_started="unknown"
+            if [ "$never_started" = "true" ]; then
+              echo "review-pr in run ${GITHUB_RUN_ID} was never started by a runner; posting the never-started body." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
           # A push landing mid-review leaves this comment pointing at a dead
           # run while a fresh review of the new head already queues (per-run
           # concurrency groups are not cancelled by pushes). The run's head
@@ -3259,7 +3520,9 @@ jobs:
           # gets one body accurate for both flavors. It keeps the
           # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
           # anchors on, and the retry instruction the timeout flavor needs.
-          if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+          if [ "$never_started" = "true" ]; then
+            body="**Qwen Code review never started.** The job ended before a runner picked it up, so no review ran for this head. This can happen when a queued run is cancelled or expires; this step cannot determine the cause. See [workflow logs](${RUN_URL}). Check the latest \`qwen-review-runner-schedule.yml\` run. If you still want a review, re-request with \`@qwen-code /review\` when the \`ecs-review\` pool is available."
+          elif [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
             body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           else
             body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
@@ -3402,8 +3665,7 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
 
       - name: 'Prepare pull request branch'
         id: 'prepare'

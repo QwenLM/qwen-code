@@ -7,7 +7,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import dotenv from 'dotenv';
-import { getErrorMessage, Storage } from '@qwen-code/qwen-code-core';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 /**
  * Collects environment variables from user-level `.env` files and returns

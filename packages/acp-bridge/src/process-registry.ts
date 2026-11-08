@@ -29,6 +29,9 @@ const STRING_EXEC_OPTIONS: ExecFileOptionsWithStringEncoding = {
   windowsHide: true,
 };
 
+/** A proven exit with a nonzero code or signal, not a failure to prove cleanup. */
+export class ProcessExitError extends Error {}
+
 export interface ProcessAttachmentOptions {
   /**
    * The caller owns the complete process tree rooted at this child. POSIX
@@ -39,6 +42,7 @@ export interface ProcessAttachmentOptions {
 
 export interface TrackedChildProcess {
   readonly exited: Promise<AcpChannelExitInfo | undefined>;
+  readonly registryReleased: Promise<void>;
   terminate(): Promise<void>;
   killSync(): void;
 }
@@ -160,6 +164,10 @@ export class ProcessRegistry {
 }
 
 class TrackedChild implements TrackedChildProcess {
+  private resolveRegistryReleased!: () => void;
+  readonly registryReleased = new Promise<void>((resolve) => {
+    this.resolveRegistryReleased = resolve;
+  });
   readonly exited: Promise<AcpChannelExitInfo | undefined>;
   private readonly knownGroups = new Set<number>();
   private cleanupProofError: Error | undefined;
@@ -302,6 +310,7 @@ class TrackedChild implements TrackedChildProcess {
     this.released = true;
     if (this.releasePollTimer) clearTimeout(this.releasePollTimer);
     this.onRelease();
+    this.resolveRegistryReleased();
   }
 
   private killDirectChildSync(): void {
@@ -644,7 +653,7 @@ class TrackedChild implements TrackedChildProcess {
 
   private throwForUncleanExit(exitInfo: AcpChannelExitInfo | undefined): void {
     if (exitInfo && (exitInfo.exitCode !== 0 || exitInfo.signalCode !== null)) {
-      throw new Error(
+      throw new ProcessExitError(
         `ACP child pid=${this.child.pid ?? 'unknown'} exited uncleanly during shutdown ` +
           `(code=${exitInfo.exitCode ?? 'none'}, signal=${exitInfo.signalCode ?? 'none'})`,
       );
@@ -729,9 +738,32 @@ function collectOwnership(
 function queryProcessTable(
   timeoutMs = PROCESS_QUERY_TIMEOUT_MS,
 ): Promise<string> {
-  return runExecFile(POSIX_PS, posixPsArgs(), {
-    ...STRING_EXEC_OPTIONS,
-    timeout: Math.max(1, Math.min(PROCESS_QUERY_TIMEOUT_MS, timeoutMs)),
+  let timer: NodeJS.Timeout | undefined;
+  const query = new Promise<string>((resolve, reject) => {
+    // execFile's timeout discards unread output even if ps already exited 0.
+    // Signal the child without destroying the pipes so snapshots stay complete.
+    const child = execFile(
+      POSIX_PS,
+      posixPsArgs(),
+      { ...STRING_EXEC_OPTIONS, timeout: 0 },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      },
+    );
+    timer = setTimeout(
+      () => {
+        try {
+          child.kill('SIGTERM');
+        } catch (error) {
+          reject(error);
+        }
+      },
+      Math.max(1, Math.min(PROCESS_QUERY_TIMEOUT_MS, timeoutMs)),
+    );
+  });
+  return query.finally(() => {
+    if (timer) clearTimeout(timer);
   });
 }
 

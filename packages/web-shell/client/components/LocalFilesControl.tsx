@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { FolderOpenIcon } from 'lucide-react';
 import type {
   DaemonCapabilities,
@@ -177,6 +178,8 @@ interface LocalFilesControlProps {
    * neighbours instead of inventing a second button style.
    */
   triggerClassName: string;
+  /** Keep the bridge mounted while its menu trigger is absent. */
+  portalContainer?: HTMLElement | null;
   /**
    * The merged workspace list (capabilities snapshot plus a locked workspace
    * registered before the snapshot). The sidebar already holds it; resolving
@@ -312,6 +315,7 @@ export function createLocalFilesRewarm(options: {
 
 export function LocalFilesControl({
   triggerClassName,
+  portalContainer,
   workspaces,
 }: LocalFilesControlProps) {
   const { t } = useI18n();
@@ -319,6 +323,9 @@ export function LocalFilesControl({
   const actions = useWorkspaceActions();
   const { sessionId, workspaceCwd } = useConnection();
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (portalContainer === null) setOpen(false);
+  }, [portalContainer]);
 
   // The bare /acp socket lands on the primary mount, where a secondary
   // runtime's session cannot register; and an untrusted or live workspace
@@ -371,7 +378,7 @@ export function LocalFilesControl({
     status.phase === 'connected' || status.phase === 'held-elsewhere';
   const busy = BUSY.includes(status.phase);
 
-  return (
+  const control = (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
@@ -394,7 +401,11 @@ export function LocalFilesControl({
           ) : null}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80">
+      <PopoverContent
+        align="end"
+        className="w-80"
+        data-web-shell-local-files-panel
+      >
         <LocalFilesPanel
           status={status}
           onConnect={() => void connect()}
@@ -408,4 +419,9 @@ export function LocalFilesControl({
       </PopoverContent>
     </Popover>
   );
+  return portalContainer === undefined
+    ? control
+    : portalContainer
+      ? createPortal(control, portalContainer)
+      : null;
 }

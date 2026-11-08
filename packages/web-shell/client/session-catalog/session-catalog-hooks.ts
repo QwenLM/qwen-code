@@ -1,5 +1,8 @@
+import { useDaemonAvailability } from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -13,6 +16,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonClient,
+  DaemonBackgroundTurn,
   DaemonSessionArchiveState,
   DaemonSessionListPageOptions,
   DaemonSessionSummary,
@@ -23,6 +27,7 @@ import {
   type SessionCatalogQuery,
   type SessionCatalogSnapshot,
 } from './session-catalog-store';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 
 const EMPTY_SNAPSHOTS: readonly SessionCatalogSnapshot[] = [];
 const EMPTY_QUERIES: readonly SessionCatalogQuery[] = [];
@@ -43,6 +48,7 @@ export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
   sourceType?: string;
   sourceId?: string;
   parentSessionId?: string;
+  liveOnly?: boolean;
 }
 
 export function useSessionCatalogQuery(
@@ -188,9 +194,12 @@ export function useSessionActivePromptState(
 ): {
   hasActivePrompt: boolean;
   activeWorkState: DaemonSessionSummary['activeWorkState'];
+  backgroundTurn?: DaemonBackgroundTurn;
   authoritative: boolean;
   observationRevision: number | undefined;
+  requestStartedAt?: number;
 } {
+  const available = useDaemonAvailability() === 'available';
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const subscribeLiveSessionObservations = useCallback(
     (listener: () => void) =>
@@ -246,6 +255,7 @@ export function useSessionActivePromptState(
     };
   }
   const liveAnswerIsFreshForTarget =
+    available &&
     liveSessionRevision !== undefined &&
     liveSessionRevision !== authorityBaselineRef.current.revision;
   // The live-state response is authoritative and independent of catalog
@@ -288,8 +298,11 @@ export function useSessionActivePromptState(
     return {
       hasActivePrompt: liveActivePrompt,
       activeWorkState: liveActiveWorkState,
+      backgroundTurn: store.getLiveSession(workspaceCwd, sessionId)
+        ?.backgroundTurn,
       authoritative: liveAnswerIsFreshForTarget,
       observationRevision: liveSessionRevision,
+      requestStartedAt: store.getLiveSessionRequestStartedAt(workspaceCwd),
     };
   }
   const row = page
@@ -298,6 +311,7 @@ export function useSessionActivePromptState(
   return {
     hasActivePrompt: row?.hasActivePrompt === true,
     activeWorkState: row?.activeWorkState,
+    backgroundTurn: row?.backgroundTurn,
     // Never settle-grade, whether or not the row is on the page. A row that
     // drops off a bounded page between refetches is indistinguishable from one
     // whose turn ended, and treating that as "the turn ended" is exactly the
@@ -333,6 +347,8 @@ export function useDaemonSessionActivityBridge(
     activeWorkState,
     authoritative,
     observationRevision,
+    backgroundTurn,
+    requestStartedAt,
   } = useSessionActivePromptState(client, workspaceCwd, sessionId);
   // Idempotent, so the main view and its ChatPane sharing one provider both
   // publishing the same value is harmless; a split pane, which renders a
@@ -350,11 +366,18 @@ export function useDaemonSessionActivityBridge(
     // untouched until a fresh response arrives. No revision means coverage was
     // actually lost, so `undefined` must still be published.
     if (!authoritative && observationRevision !== undefined) return;
-    setDaemonActivePrompt(daemonActivePrompt, { workspaceCwd, sessionId });
+    setDaemonActivePrompt(
+      daemonActivePrompt,
+      { workspaceCwd, sessionId },
+      backgroundTurn,
+      requestStartedAt,
+    );
   }, [
     authoritative,
+    backgroundTurn,
     daemonActivePrompt,
     observationRevision,
+    requestStartedAt,
     sessionId,
     setDaemonActivePrompt,
     workspaceCwd,
@@ -396,6 +419,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       refreshQueries(queries: readonly SessionCatalogQuery[]) {
         for (const query of queries) {
           void store.loadOnce(query, { fresh: true }).catch((error) => {
+            if (isDaemonUnavailableError(error)) return;
             console.warn('[session-catalog] failed to refresh catalog:', error);
           });
         }
@@ -434,8 +458,20 @@ export function useSessionCatalogController(client: DaemonClient) {
       },
       renamed(workspaceCwd: string, sessionId: string, displayName: string) {
         update(() => {
+          // A landed rename is authoritative; drop the provisional title so
+          // the following stale snapshot cannot restore it over this name.
+          store.clearPendingSessionTitle(workspaceCwd, sessionId);
           store.patchSession(workspaceCwd, sessionId, { displayName });
           store.invalidateWorkspace(workspaceCwd);
+        });
+      },
+      setPendingSessionTitle(
+        workspaceCwd: string,
+        sessionId: string,
+        displayName: string,
+      ) {
+        update(() => {
+          store.setPendingSessionTitle(workspaceCwd, sessionId, displayName);
         });
       },
       toggleSessionPinned(
@@ -470,6 +506,7 @@ export function useSessionCatalogController(client: DaemonClient) {
 }
 
 export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const {
     autoLoad = false,
     enabled = true,
@@ -483,6 +520,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sourceType,
     sourceId,
     parentSessionId,
+    liveOnly,
   } = options;
   const workspace = useWorkspace();
   const legacy = useSessions({
@@ -508,11 +546,13 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
       ...(sourceType !== undefined ? { sourceType } : {}),
       ...(sourceId !== undefined ? { sourceId } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      ...(liveOnly === true ? { liveOnly: true } : {}),
     }),
     [
       archiveState,
       cursor,
       group,
+      liveOnly,
       pageSize,
       parentSessionId,
       sourceId,
@@ -554,22 +594,30 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const deleteSession = useCallback(
     async (sessionId: string) => {
       try {
-        return await workspace.actions.deleteSession(sessionId);
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
+        const removed = await workspace.actions.deleteSession(sessionId);
+        if (removed) invalidateDeleted?.([sessionId]);
+        return removed;
       } finally {
         invalidate();
       }
     },
-    [invalidate, workspace.actions],
+    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
   );
   const deleteSessions = useCallback(
     async (sessionIds: string[]) => {
       try {
-        return await workspace.actions.deleteSessions(sessionIds);
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
+        const result = await workspace.actions.deleteSessions(sessionIds);
+        invalidateDeleted?.([...result.removed, ...result.notFound]);
+        return result;
       } finally {
         invalidate();
       }
     },
-    [invalidate, workspace.actions],
+    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
   );
   const archiveSession = useCallback(
     async (sessionId: string) => {
@@ -608,6 +656,10 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sessions: result.sessions,
     loading: result.loading,
     error: result.error,
+    // A retained page after a failed refresh (or a hidden-tab deferral) is
+    // not a fresh answer from the daemon — readers that prune on absence must
+    // treat it as "not in this page" rather than "gone".
+    stale: result.stale,
     reload,
     nextCursor: page?.nextCursor,
     liveMergeFailed: page?.liveMergeFailed === true,

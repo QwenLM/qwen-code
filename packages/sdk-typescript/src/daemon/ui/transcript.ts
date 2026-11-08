@@ -6,6 +6,7 @@
 
 import type {
   DaemonPromptCancelledTranscriptBlock,
+  DaemonResourceLink,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextDeltaMeta,
@@ -70,6 +71,7 @@ export function isTrimmedPermissionBlockId(
 }
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
+const MAX_PENDING_TOOL_NAMES = 256;
 const MAX_CLONE_DEPTH = 16;
 const truncationCallbacks = new WeakMap<
   DaemonTranscriptState,
@@ -90,6 +92,7 @@ export function createDaemonTranscriptState(
     blocks: [],
     blockIndexById: createIndex(),
     toolBlockByCallId: createIndex(),
+    pendingToolNameByCallId: createIndex(),
     trimmedToolNotificationByCallId: createIndex(),
     permissionBlockByRequestId: createIndex(),
     activeAssistantBlockByParent: createIndex(),
@@ -219,6 +222,7 @@ export function reduceDaemonTranscriptEvents(
     Object.freeze(result.blocks);
     Object.freeze(result.blockIndexById);
     Object.freeze(result.toolBlockByCallId);
+    Object.freeze(result.pendingToolNameByCallId);
     Object.freeze(result.activeAssistantBlockByParent);
     Object.freeze(result.activeThoughtBlockByParent);
     Object.freeze(result.trimmedToolNotificationByCallId);
@@ -256,7 +260,9 @@ function userBlockForAttachment(
   next: DaemonTranscriptState,
   event: Extract<
     DaemonUiEvent,
-    { type: 'user.image.delta' | 'user.file.delta' }
+    {
+      type: 'user.image.delta' | 'user.file.delta' | 'user.resource_link.delta';
+    }
   >,
 ): DaemonTextTranscriptBlock {
   const activeUserIndex = next.activeUserBlockId
@@ -266,10 +272,20 @@ function userBlockForAttachment(
     activeUserIndex !== undefined ? next.blocks[activeUserIndex] : undefined;
   if (
     activeUser?.kind === 'user' &&
-    stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds)
+    stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds) &&
+    (activeUser.promptId === undefined ||
+      event.promptId === undefined ||
+      activeUser.promptId === event.promptId)
   ) {
     const block = getWritableBlockById(next, activeUser.id);
-    if (block?.kind === 'user') return block;
+    if (block?.kind === 'user') {
+      if (block.promptId === undefined && event.promptId !== undefined) {
+        const bytesBefore = estimateBlockBytes(block);
+        block.promptId = event.promptId;
+        next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+      }
+      return block;
+    }
   }
   const block = createTextBlock(
     next,
@@ -294,7 +310,11 @@ function applyDaemonTranscriptEvent(
   if (event.eventId !== undefined) {
     next.lastEventId = Math.max(next.lastEventId ?? 0, event.eventId);
   }
-  if (next.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
+  if (
+    next.awaitingResync &&
+    !RESYNC_PASSTHROUGH_TYPES.has(event.type) &&
+    !(event.type === 'session.rewound' && event.replay !== undefined)
+  ) {
     // Diagnostic for the "permanently frozen
     // transcript" case. Without this log, consumers debugging a stuck UI
     // had no signal that events were being dropped. The latch is
@@ -365,6 +385,26 @@ function applyDaemonTranscriptEvent(
       next.retainedBytes += estimateBlockBytes(fileBlock) - fileBytesBefore;
       break;
     }
+    case 'user.resource_link.delta': {
+      const block = userBlockForAttachment(next, event);
+      const bytesBefore = estimateBlockBytes(block);
+      if (event.meta) block.meta = { ...block.meta, ...event.meta };
+      const links = block.resourceLinks ?? [];
+      const index = links.findIndex(
+        (link) => link.uri === event.resourceLink.uri,
+      );
+      const resourceLink = mergeResourceLink(links[index], event.resourceLink);
+      block.resourceLinks =
+        index < 0
+          ? [...links, resourceLink]
+          : links.map((link, position) =>
+              position === index ? resourceLink : link,
+            );
+      block.updatedAt = next.now;
+      if (event.eventId !== undefined) block.eventId = event.eventId;
+      next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+      break;
+    }
     case 'assistant.text.delta':
       if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
@@ -412,6 +452,7 @@ function applyDaemonTranscriptEvent(
       }
       break;
     case 'assistant.usage':
+      if (isSubagentUsageDuplicate(next, event)) break;
       if (event.parentToolCallId && !next.retainSubagentBlocks) {
         applySubagentUsageToParentTool(next, event);
       } else {
@@ -519,7 +560,39 @@ function applyDaemonTranscriptEvent(
       // transcript mutation.
       break;
     case 'session.rewound':
-      rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      if (event.replay !== undefined) {
+        const previousLength = next.blocks.length;
+        const previousOldestRecordId = next.blocks.find(
+          (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+        )?.sourceRecordIds?.[0];
+        next.awaitingResync = false;
+        next.lastResyncRequired = undefined;
+        truncateTranscriptBeforeBlock(next, 0, false);
+        for (const frame of event.replay)
+          applyDaemonTranscriptEvent(next, frame);
+        finishAssistant(next);
+        next.activeUserBlockId = undefined;
+        const callback = truncationCallbacks.get(next);
+        // Retention and rewind notifications must observe the installed prefix.
+        trimTranscriptState(next);
+        if (previousLength > 0) {
+          const oldestRetainedRecordId = next.blocks.find(
+            (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+          )?.sourceRecordIds?.[0];
+          callback?.({
+            kind: 'blocks',
+            oldestRetainedRecordId,
+            evictedOldest: oldestRetainedRecordId !== previousOldestRecordId,
+            replacedReplay: true,
+            blockCount: next.blocks.length,
+            retainedBytes: next.retainedBytes,
+            maxBlocks: next.maxBlocks,
+            maxRetainedBytes: next.maxRetainedBytes,
+          });
+        }
+      } else {
+        rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      }
       break;
     case 'session.branched':
       appendStatusBlock(
@@ -651,7 +724,6 @@ function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  if (isLegacySubagentUsageDuplicate(state, event)) return;
   const activeBlockId =
     state.activeAssistantBlockId ??
     (event.parentToolCallId
@@ -668,11 +740,11 @@ function applyAssistantUsage(
   block.updatedAt = state.now;
 }
 
-function isLegacySubagentUsageDuplicate(
+function isSubagentUsageDuplicate(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): boolean {
-  if (event.parentToolCallId || !event.sourceRecordIds?.length) return false;
+  if (!event.sourceRecordIds?.length) return false;
   const sourceRecordIds = new Set(event.sourceRecordIds);
   for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
     const block = state.blocks[i]!;
@@ -688,6 +760,9 @@ function isLegacySubagentUsageDuplicate(
       rawOutput && isRecord(rawOutput['executionSummary'])
         ? rawOutput['executionSummary']
         : undefined;
+    // The same record and parent identify an aggregate already on the card,
+    // even when merging live usage retained larger counts than this snapshot.
+    if (summary && event.parentToolCallId === block.toolCallId) return true;
     return (
       summary?.['inputTokens'] === event.usage.inputTokens &&
       summary['outputTokens'] === event.usage.outputTokens &&
@@ -873,6 +948,11 @@ function appendTextDelta(
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
   }
+  const eventAgent =
+    'agent' in event ? (event as DaemonUiTextEvent).agent : undefined;
+  if (eventAgent) {
+    (block as DaemonTextTranscriptBlock).agent = eventAgent;
+  }
   appendBlock(state, block);
 
   if (parentMap && parentId != null) {
@@ -969,6 +1049,36 @@ function upsertToolBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
+  if (event.nameOnly) {
+    const namedId = state.toolBlockByCallId[event.toolCallId];
+    const index =
+      namedId !== undefined ? state.blockIndexById[namedId] : undefined;
+    const named = index !== undefined ? state.blocks[index] : undefined;
+    // A lifecycle frame can arrive before the block it names (mid-run attach:
+    // the client never saw the create frame). Hold the name until the create
+    // path can seed it, otherwise the card keeps the "unknown Tool" label.
+    // #16301
+    if (named?.kind !== 'tool') {
+      if (event.toolName) {
+        rememberPendingToolName(state, event.toolCallId, event.toolName);
+      }
+      return;
+    }
+    // Every named block's `ended` frame is a no-op; returning before the
+    // copy-on-write path keeps it from swapping identities and bumping the
+    // store revision for nothing.
+    if (named.toolName !== undefined || !event.toolName) {
+      return;
+    }
+    const writable = getWritableBlockById(state, namedId);
+    if (writable?.kind === 'tool') {
+      const bytesBefore = estimateBlockBytes(writable);
+      writable.toolName = event.toolName;
+      writable.updatedAt = state.now;
+      state.retainedBytes += estimateBlockBytes(writable) - bytesBefore;
+    }
+    return;
+  }
   const compactTaskOutput =
     !state.retainSubagentBlocks &&
     isRecord(event.rawOutput) &&
@@ -1007,6 +1117,12 @@ function upsertToolBlock(
   const bytesBefore = retainedBefore ? estimateBlockBytes(retainedBefore) : 0;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
+    const promptId = event.backgroundTurn?.turnId ?? event.promptId;
+    if (existing.promptId === undefined && promptId !== undefined) {
+      existing.promptId = promptId;
+    }
+    if (event.startedAt !== undefined) existing.startedAt = event.startedAt;
+    if (event.durationMs !== undefined) existing.durationMs = event.durationMs;
     if (event.subagentSessionReady !== undefined) {
       existing.subagentSessionReady =
         existing.subagentSessionReady === true || event.subagentSessionReady;
@@ -1120,6 +1236,12 @@ function upsertToolBlock(
     if (event.subagentType && !existing.subagentType) {
       existing.subagentType = event.subagentType;
     }
+    // Same first-wins adoption as subagentType: a replayed result frame
+    // carries the identity its start frame never had — persistence keeps
+    // it only on the closing task_execution display.
+    if (event.agent && !existing.agent) {
+      existing.agent = event.agent;
+    }
     state.retainedBytes += estimateBlockBytes(existing) - bytesBefore;
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
@@ -1140,11 +1262,21 @@ function upsertToolBlock(
       toolName: event.toolName,
       toolKind: event.toolKind,
     });
+  // A lifecycle frame that arrived before this create (mid-run attach) left
+  // its name here; consume it exactly once so the card is named from the
+  // start instead of showing "unknown Tool" until a later frame. #16301
+  const pendingToolName = state.pendingToolNameByCallId[event.toolCallId];
+  if (pendingToolName !== undefined) {
+    delete state.pendingToolNameByCallId[event.toolCallId];
+  }
+  const toolName = event.toolName ?? pendingToolName;
   const block: DaemonToolTranscriptBlock = {
     id: allocateBlockId(state, 'tool'),
     kind: 'tool',
     toolCallId: event.toolCallId,
-    title: event.title ?? event.toolName ?? event.toolKind ?? 'Tool',
+    ...(event.startedAt !== undefined ? { startedAt: event.startedAt } : {}),
+    ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+    title: event.title ?? toolName ?? event.toolKind ?? 'Tool',
     status: event.status ?? 'pending',
     preview: createDaemonToolPreview(event.rawInput, {
       title: event.title,
@@ -1160,6 +1292,13 @@ function upsertToolBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1174,12 +1313,13 @@ function upsertToolBlock(
     ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
-    ...(event.toolName ? { toolName: event.toolName } : {}),
+    ...(toolName ? { toolName } : {}),
     ...(event.toolKind ? { toolKind: event.toolKind } : {}),
     ...(event.parentToolCallId
       ? { parentToolCallId: event.parentToolCallId }
       : {}),
     ...(event.subagentType ? { subagentType: event.subagentType } : {}),
+    ...(event.agent ? { agent: event.agent } : {}),
     ...(parentBlockId ? { parentBlockId } : {}),
   };
   appendBlock(state, block);
@@ -1213,6 +1353,27 @@ function upsertToolBlock(
 
 function isBackgroundToolOutput(value: unknown): boolean {
   return isRecord(value) && value['status'] === 'background';
+}
+
+/**
+ * Park a late lifecycle name until its block is created. Bounded so a stream
+ * of lifecycle frames for call ids that never materialise cannot grow the
+ * snapshot without limit; the oldest entry is evicted first.
+ */
+function rememberPendingToolName(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+  toolName: string,
+): void {
+  const pending = state.pendingToolNameByCallId;
+  if (pending[toolCallId] === undefined) {
+    const parked = Object.keys(pending);
+    if (parked.length >= MAX_PENDING_TOOL_NAMES) {
+      const oldest = parked[0];
+      if (oldest !== undefined) delete pending[oldest];
+    }
+  }
+  pending[toolCallId] = toolName;
 }
 
 function discardToolBlock(
@@ -1377,6 +1538,12 @@ function appendShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1423,6 +1590,12 @@ function appendUserShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1470,6 +1643,12 @@ function upsertPermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1526,6 +1705,12 @@ function resolvePermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1594,6 +1779,12 @@ function appendUnrecognizedDiagnostic(
       ? { originatorClientId: event.originatorClientId }
       : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1612,7 +1803,10 @@ function appendStatusBlock(
   event?: DaemonUiEvent,
   opts: { clearActiveText?: boolean } = {},
 ): void {
-  const blockId = allocateBlockId(state, kind);
+  const allocated = allocateBlockId(state, kind);
+  const blockId = event?.promptId?.startsWith('local-command:')
+    ? `${event.promptId}:${allocated}`
+    : allocated;
   const block: DaemonStatusTranscriptBlock = {
     id: blockId,
     kind,
@@ -1621,24 +1815,31 @@ function appendStatusBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event?.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
     ...(event?.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
-    ...(event?.type === 'error' && event.promptId
-      ? { promptId: event.promptId }
-      : {}),
+    ...(event?.promptId ? { promptId: event.promptId } : {}),
     ...(event?.type === 'error' && event.errorKind
       ? { errorKind: event.errorKind }
       : {}),
+    ...(event?.type === 'error' && event.loop ? { loop: event.loop } : {}),
     ...(event?.type === 'error' && event.source
       ? { source: event.source }
       : {}),
     ...((event?.type === 'status' || event?.type === 'debug') && event.source
       ? { source: event.source }
       : {}),
-    ...((event?.type === 'status' || event?.type === 'debug') &&
+    ...((event?.type === 'status' ||
+      event?.type === 'debug' ||
+      event?.type === 'error') &&
     event.data !== undefined
       ? { data: event.data }
       : {}),
@@ -1703,6 +1904,12 @@ function appendPromptCancelledBlock(
       : {}),
     ...(event.reason ? { reason: event.reason } : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1723,7 +1930,14 @@ function createTextBlock(
   promptId?: string,
   segmentId?: string,
 ): DaemonTextTranscriptBlock {
-  const blockId = allocateBlockId(state, kind);
+  const allocated = allocateBlockId(state, kind);
+  const localCommandId =
+    typeof meta?.['localCommandId'] === 'string'
+      ? meta['localCommandId']
+      : promptId?.startsWith('local-command:')
+        ? promptId
+        : undefined;
+  const blockId = localCommandId ? `${localCommandId}:${allocated}` : allocated;
   return {
     id: blockId,
     kind,
@@ -1769,6 +1983,9 @@ function cloneTranscriptState(
     toolBlockByCallId: shareSideIndexes
       ? state.toolBlockByCallId
       : createIndex(state.toolBlockByCallId),
+    pendingToolNameByCallId: shareSideIndexes
+      ? state.pendingToolNameByCallId
+      : createIndex(state.pendingToolNameByCallId),
     activeAssistantBlockByParent: shareSideIndexes
       ? state.activeAssistantBlockByParent
       : createIndex(state.activeAssistantBlockByParent),
@@ -2041,9 +2258,39 @@ function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
   ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
-// Applies a daemon rewind event to this in-memory transcript only. The target
-// user turn and everything after it are removed so the rendered session view
-// matches the already-rewound backend state.
+/**
+ * Whether a transcript block is a user turn a rewind may target.
+ *
+ * The SDK's legacy ordinal traversal excludes background notifications and
+ * injected mid-turn messages. Prompt-ID lookup uses the same classification
+ * to ignore injected rows that share their owner's identity.
+ */
+export function isDaemonRewindUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  if (block?.kind !== 'user') return false;
+  const source = block.meta?.['source'];
+  return (
+    source !== 'background_notification' &&
+    source !== 'mid_turn_message_injected'
+  );
+}
+
+export function findDaemonRewindUserBlock(
+  blocks: readonly DaemonTranscriptBlock[],
+  promptId: string,
+): DaemonTextTranscriptBlock | undefined {
+  // Injected mid-turn rows may share their owner's prompt ID.
+  const matches = blocks.filter(
+    (block): block is DaemonTextTranscriptBlock =>
+      block.kind === 'user' &&
+      isDaemonRewindUserBlock(block) &&
+      block.promptId === promptId,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+// Applies a legacy daemon rewind event to this in-memory transcript only.
 function rewindTranscriptToUserTurn(
   state: DaemonTranscriptState,
   targetTurnIndex: number,
@@ -2053,10 +2300,9 @@ function rewindTranscriptToUserTurn(
 
   for (let index = 0; index < state.blocks.length; index += 1) {
     const block = state.blocks[index];
-    if (
-      block?.kind !== 'user' ||
-      block.meta?.['source'] === 'background_notification'
-    ) {
+    // Same rule as the renderer, or a legacy turn index resolves onto the
+    // injected row that does not occupy an ordinal.
+    if (!isDaemonRewindUserBlock(block)) {
       continue;
     }
     lastUserIndex = index;
@@ -2075,6 +2321,7 @@ function rewindTranscriptToUserTurn(
 function truncateTranscriptBeforeBlock(
   state: DaemonTranscriptState,
   blockIndex: number,
+  notify = true,
 ): void {
   takeBlocksOwnership(state);
   const originalLength = state.blocks.length;
@@ -2088,7 +2335,7 @@ function truncateTranscriptBeforeBlock(
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
   ownedBlockIndexes.set(state, state.blockIndexById);
-  if (state.blocks.length < originalLength) {
+  if (notify && state.blocks.length < originalLength) {
     // A rewind frees retention capacity just like an eviction does. Fire the
     // same 'blocks' truncation signal so consumers reconciling a pagination
     // capacity latch on freed capacity observe rewinds too. `evictedOldest`
@@ -2112,6 +2359,7 @@ function truncateTranscriptBeforeBlock(
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
   state.toolBlockByCallId = createIndex();
+  state.pendingToolNameByCallId = createIndex();
   state.permissionBlockByRequestId = createIndex();
   state.trimmedToolNotificationByCallId = createIndex();
   state.activeUserBlockId = undefined;
@@ -2190,7 +2438,47 @@ function cloneBlockForWrite(
       rawOutput: cloneJsonLike(block.rawOutput),
     };
   }
+  if (block.kind === 'user' && block.resourceLinks) {
+    return { ...block, resourceLinks: cloneJsonLike(block.resourceLinks) };
+  }
   return { ...block };
+}
+
+function mergeResourceLink(
+  existing: DaemonResourceLink | undefined,
+  incoming: DaemonResourceLink,
+): DaemonResourceLink {
+  if (!existing) return cloneJsonLike(incoming);
+  const merged = { ...incoming, ...existing };
+  for (const key of [
+    'mimeType',
+    'size',
+    'description',
+    'title',
+    'annotations',
+    '_meta',
+  ] as const) {
+    if (existing[key] == null && incoming[key] !== undefined) {
+      Object.assign(merged, { [key]: incoming[key] });
+    }
+  }
+  for (const key of ['annotations', '_meta'] as const) {
+    const previous = existing[key];
+    const next = incoming[key];
+    if (previous && next) {
+      Object.assign(merged, {
+        [key]: {
+          ...next,
+          ...Object.fromEntries(
+            Object.entries(previous).filter(
+              ([field, value]) => value != null || !(field in next),
+            ),
+          ),
+        },
+      });
+    }
+  }
+  return cloneJsonLike(merged);
 }
 
 function allocateBlockId(state: DaemonTranscriptState, prefix: string): string {

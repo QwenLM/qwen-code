@@ -141,6 +141,7 @@ describe('Mem0 Auto Recall local provider', () => {
     const server = createTcpServer((socket) => {
       connected = true;
       sockets.push(socket);
+      socket.on('error', () => undefined);
     });
     servers.push(server);
     await new Promise<void>((resolve) =>

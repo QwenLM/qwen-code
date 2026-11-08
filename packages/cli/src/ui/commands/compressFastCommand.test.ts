@@ -129,13 +129,65 @@ describe('compressFastCommand', () => {
       {
         messageType: 'info',
         content: 'Compressing context (fast)...',
+        contextCompression: { phase: 'progress' },
       },
       {
         messageType: 'info',
         content: 'Context compressed (200 -> 100).',
+        contextCompression: {
+          phase: 'done',
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: false,
+        },
       },
     ]);
     expect(mockTryCompressChatFast).toHaveBeenCalledWith();
+  });
+
+  it('should mark the ACP no-op result as terminal', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 100,
+      newTokenCount: 100,
+      compressionStatus: CompressionStatus.NOOP,
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as LlmClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+    expect(result?.type).toBe('stream_messages');
+    const messages = [];
+    if (result?.type === 'stream_messages') {
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+    }
+
+    expect(messages).toEqual([
+      {
+        messageType: 'info',
+        content: 'Compressing context (fast)...',
+        contextCompression: { phase: 'progress' },
+      },
+      {
+        messageType: 'info',
+        content: 'No compression needed.',
+        // Terminal, so a client replaces its pending row in place instead of
+        // merging this frame into it and losing the sentence.
+        contextCompression: { phase: 'noop' },
+      },
+    ]);
   });
 
   it('should display compression result on success (interactive)', async () => {

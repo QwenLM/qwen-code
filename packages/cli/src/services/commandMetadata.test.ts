@@ -148,6 +148,38 @@ describe('getCommandSourceBadge', () => {
     expect(badge?.length).toBe(MAX_EXTENSION_OWNER_LABEL_WIDTH + 2);
   });
 
+  it('badges an extension workflow command with its owner and leaves project workflows unbadged', () => {
+    expect(
+      getCommandSourceBadge(
+        makeCmd({
+          source: 'workflow-command',
+          sourceLabel: 'Extension: Google Cloud',
+          sourceDetail: 'extension',
+        }),
+      ),
+    ).toBe('[Extension: Google Cloud]');
+    const long = getCommandSourceBadge(
+      makeCmd({
+        source: 'workflow-command',
+        sourceLabel: extensionOwnerLabel({
+          displayName: 'Alibaba Cloud Database Suite for Production Workloads',
+        }),
+        sourceDetail: 'extension',
+      }),
+    );
+    expect(long).toBe('[Extension: Alibaba Cloud Database …]');
+    expect(long?.length).toBe(MAX_EXTENSION_OWNER_LABEL_WIDTH + 2);
+    expect(
+      getCommandSourceBadge(
+        makeCmd({
+          source: 'workflow-command',
+          sourceLabel: 'Workflow',
+          sourceDetail: 'project',
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it('falls back to [Extension] for an extension command with no owner label', () => {
     expect(
       getCommandSourceBadge(

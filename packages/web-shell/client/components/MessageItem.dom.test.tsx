@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { TurnCallsProvider } from '../turnCallsContext';
 import {
   WebShellCustomizationProvider,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -10,6 +11,9 @@ import {
 } from '../customization';
 import type { ACPToolCall, Message } from '../adapters/types';
 import { summaryRunId } from './summaryRunId';
+import messageStyles from './messages/AssistantMessage.module.css';
+import timestampStyles from './MessageTimestamp.module.css';
+import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
 
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -19,8 +23,7 @@ vi.mock('../WebShellContexts', async () => {
 // Stub the message body components so MessageItem's own wiring — not the bodies
 // — is under test. UserMessage/AssistantMessage throw on a sentinel so we can
 // drive the message-level ErrorBoundary (the real one, imported below); the
-// rest are inert. MessageTimestamp is a passthrough so its chrome doesn't
-// interfere with querying the fallback.
+// rest are inert. MessageTimestamp remains real to verify row spacing.
 const captured = vi.hoisted(() => ({
   userMessageProps: null as null | {
     editing?: boolean;
@@ -28,37 +31,6 @@ const captured = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('./MessageTimestamp', async () => {
-  const React = await import('react');
-  return {
-    MessageTimestamp: ({
-      children,
-      toolGroupSpacing,
-      onEdit,
-    }: {
-      children: React.ReactNode;
-      toolGroupSpacing?: boolean;
-      onEdit?: () => void;
-    }) =>
-      React.createElement(
-        'div',
-        { 'data-tool-group-spacing': String(toolGroupSpacing === true) },
-        children,
-        onEdit
-          ? React.createElement(
-              'button',
-              {
-                'data-testid': 'edit-toggle',
-                onClick: onEdit,
-                type: 'button',
-              },
-              'edit',
-            )
-          : null,
-      ),
-    formatTimestamp: () => '',
-  };
-});
 vi.mock('./messages/UserMessage', async () => {
   const React = await import('react');
   return {
@@ -97,10 +69,12 @@ vi.mock('./messages/AssistantMessage', async () => {
       content,
       customFooterInfo,
       onBranchSession,
+      footerAlwaysVisible,
     }: {
       content: string;
       customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       onBranchSession?: () => void | Promise<void>;
+      footerAlwaysVisible?: boolean;
     }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
       const { renderAssistantTurnFooter } = useWebShellCustomization();
@@ -112,6 +86,12 @@ vi.mock('./messages/AssistantMessage', async () => {
         { 'data-testid': 'assistant-ok' },
         content,
         customFooter,
+        React.createElement('div', {
+          'data-testid': 'assistant-footer-visibility',
+          className: footerAlwaysVisible
+            ? messageStyles.messageFooterVisible
+            : undefined,
+        }),
         onBranchSession
           ? React.createElement(
               'button',
@@ -391,20 +371,14 @@ describe('MessageItem tool group spacing', () => {
       <I18nProvider language="en">{item(toolMsg('default'))}</I18nProvider>,
     );
 
-    expect(
-      compact.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('true');
-    expect(
-      regular.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('false');
-    expect(
-      compactAssistant.firstElementChild?.getAttribute(
-        'data-tool-group-spacing',
-      ),
-    ).toBe('false');
-    expect(
-      defaultTool.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('false');
+    expect(compact.firstElementChild?.classList).toContain(
+      timestampStyles.toolGroupSpacing,
+    );
+    for (const container of [regular, compactAssistant, defaultTool]) {
+      expect(container.firstElementChild?.classList).not.toContain(
+        timestampStyles.toolGroupSpacing,
+      );
+    }
   });
 });
 
@@ -517,6 +491,36 @@ describe('MessageItem assistant turn footer', () => {
     ).toBe('u2');
   });
 
+  it('updates assistant footer visibility when only that flag changes', () => {
+    const message = assistantMsg('1', 'hello');
+    const tree = (assistantFooterAlwaysVisible: boolean) => (
+      <I18nProvider language="en">
+        <MessageItem
+          message={message}
+          showAssistantActions
+          assistantFooterAlwaysVisible={assistantFooterAlwaysVisible}
+        />
+      </I18nProvider>
+    );
+    const { root, container } = renderWithRoot(tree(true));
+    const footer = container.querySelector(
+      '[data-testid="assistant-footer-visibility"]',
+    )!;
+    expect(footer.classList.contains(messageStyles.messageFooterVisible)).toBe(
+      true,
+    );
+
+    act(() => root.render(tree(false)));
+
+    const released = container.querySelector(
+      '[data-testid="assistant-footer-visibility"]',
+    )!;
+    expect(released).not.toBeNull();
+    expect(
+      released.classList.contains(messageStyles.messageFooterVisible),
+    ).toBe(false);
+  });
+
   it('degrades a crashing custom footer renderer to an inline notice', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const renderAssistantTurnFooter = vi.fn(() => {
@@ -542,6 +546,59 @@ describe('MessageItem assistant turn footer', () => {
   });
 });
 
+describe('MessageItem background notification spacing', () => {
+  it.each(['interactive', 'document'] as const)(
+    'keeps consecutive notification rows without hover times in %s mode',
+    (mode) => {
+      const messages = [
+        'background_task_completed',
+        'background_notification_turn_started',
+      ].map((source) => ({
+        id: source,
+        role: 'system' as const,
+        content: 'Background task',
+        timestamp: Date.now(),
+        source,
+      }));
+      const container = render(
+        <I18nProvider language="en">
+          <TranscriptRenderModeProvider value={mode}>
+            {messages.map((message) => (
+              <MessageItem key={message.id} message={message} />
+            ))}
+          </TranscriptRenderModeProvider>
+        </I18nProvider>,
+      );
+      const rows = Array.from(container.children).filter((element) =>
+        element.classList.contains(timestampStyles.row),
+      );
+      expect(rows).toHaveLength(mode === 'interactive' ? 2 : 0);
+      expect(container.querySelectorAll('[data-user-selectable]')).toHaveLength(
+        2,
+      );
+      expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
+    },
+  );
+});
+
+function openMessageMenu(container: HTMLElement) {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="More message actions"]',
+  );
+  expect(trigger).not.toBeNull();
+  act(() => {
+    trigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+    );
+  });
+}
+
+function messageMenuItem(label: string) {
+  return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (element) => element.textContent === label,
+  );
+}
+
 describe('MessageItem inline message editing', () => {
   function renderEditableUserMessage(
     onSubmitUserMessageEdit: (content: string) => boolean | Promise<boolean>,
@@ -561,11 +618,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(true);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="edit-toggle"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
     expect(captured.userMessageProps?.editing).toBe(true);
 
     await act(async () => {
@@ -583,11 +637,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(false);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="edit-toggle"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
 
     await act(async () => {
       container
@@ -600,4 +651,63 @@ describe('MessageItem inline message editing', () => {
     expect(captured.userMessageProps?.editing).toBe(true);
     expect(captured.userMessageProps?.submittingEdit).toBe(false);
   });
+});
+
+it.each([
+  [undefined, 'ordinary prompt', true],
+  ['cron', 'scheduled prompt', true],
+  ['goal_runtime', 'continue goal', false],
+  ['goal_control', 'goal card', false],
+  ['cron', '', false],
+] as const)(
+  'exposes Tool calls only for a navigation prompt (%s)',
+  (source, content, visible) => {
+    const onOpen = vi.fn();
+    const view = render(
+      <I18nProvider language="en">
+        <TurnCallsProvider onOpen={onOpen}>
+          <MessageItem
+            message={{
+              id: 'prompt',
+              role: 'user',
+              content,
+              timestamp: 0,
+              ...(source ? { source } : {}),
+            }}
+          />
+        </TurnCallsProvider>
+      </I18nProvider>,
+    );
+    if (visible) openMessageMenu(view);
+    const entry = messageMenuItem('View tool calls');
+    expect(Boolean(entry)).toBe(visible);
+    if (entry) {
+      act(() => entry.click());
+      expect(onOpen).toHaveBeenCalledWith('prompt');
+    }
+  },
+);
+
+it('updates the Tool calls entry when the user message source is filled in', () => {
+  const onOpen = vi.fn();
+  const row = (source?: string) => (
+    <I18nProvider language="en">
+      <TurnCallsProvider onOpen={onOpen}>
+        <MessageItem
+          message={{
+            id: 'prompt',
+            role: 'user',
+            content: 'Same text',
+            timestamp: 0,
+            source,
+          }}
+        />
+      </TurnCallsProvider>
+    </I18nProvider>
+  );
+  const { root, container } = renderWithRoot(row());
+  openMessageMenu(container);
+  expect(messageMenuItem('View tool calls')).toBeDefined();
+  act(() => root.render(row('goal_runtime')));
+  expect(messageMenuItem('View tool calls')).toBeUndefined();
 });

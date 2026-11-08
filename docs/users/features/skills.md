@@ -75,6 +75,8 @@ Personal Skills are available across all your projects. Store them in `~/.qwen/s
 mkdir -p ~/.qwen/skills/my-skill-name
 ```
 
+Qwen Code also reads personal Skills from `~/.agents/skills/`. If both folders contain a Skill with the same name, the one in `~/.qwen/skills/` wins.
+
 Use personal Skills for:
 
 - Your individual workflows and preferences
@@ -88,6 +90,8 @@ Project Skills are shared with your team. Store them in `.qwen/skills/` within y
 ```bash
 mkdir -p .qwen/skills/my-skill-name
 ```
+
+Qwen Code also reads project Skills from `.agents/skills/`. If both folders contain a Skill with the same name, the one in `.qwen/skills/` wins.
 
 Use project Skills for:
 
@@ -223,12 +227,13 @@ exit 0
 Notes:
 
 - Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>`.
-- Session hooks live only in memory, so resuming a session with `--continue` / `--resume` does **not** restore them, on either invocation path. The Skill's instructions can come back with the replayed conversation while the hooks meant to enforce them are gone — re-run the Skill after resuming to re-arm its gate.
+- Resuming a session with `--continue` / `--resume` re-applies both halves — the `allowedTools` allow rules and the `hooks:` — of every Skill the **model** loaded through the Skill tool, because those invocations are recorded in the conversation as tool calls. The grants last for the resumed session only, the same as a live invocation. A Skill you started yourself with `/<skill-name>` is submitted as an ordinary prompt and leaves no tool-call record, so it is not restored — re-run `/<skill-name>` after resuming to re-arm its gate.
+- Resume does not re-apply them for a Skill a fresh tool call would refuse today (disabled, hidden from the model with `disable-model-invocation`, or a `paths:` Skill not yet activated), for a **project** Skill whose folder is no longer trusted, or when the recorded body does not match the body in `SKILL.md` — because it was edited, or because it was too long and was truncated for the model. In these cases a Skill that declares `hooks:` or `allowedTools` leaves a debug log line saying why. Resume also skips, without a log line, a Skill loaded from inside an `exec` script and a Skill that is no longer discovered (for example, one that was removed or renamed). The match covers the body only, so an edit to just the frontmatter is re-applied with the new `allowedTools` and `hooks:`.
 - Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
-- Always give a tool event an explicit `matcher:`. An omitted one is stored as the empty pattern, which is compiled to `^$` and matches no tool name — the hook registers and then never fires, with nothing to say so. Use `*` if you mean every tool.
+- A Skill hook's `matcher:` follows the same rules as a settings hook (see [Hooks](hooks.md)). An omitted or empty `matcher:` matches every tool, and matchers are not anchored, so `edit` also matches `notebook_edit`. Skill hooks used to wrap their matcher in `^…$` and to match nothing when it was omitted: write `^edit$` to match exactly one tool, and write exclusions as `^(?!write_file).*$`.
 - The `command:` runs through the platform shell: `bash` on macOS and Linux, and on Windows Git Bash when it is detected (`MSYSTEM`/`TERM`), otherwise `cmd.exe` or PowerShell. The example above is POSIX shell — under `cmd.exe` `$QWEN_SKILL_ROOT` is not expanded and a `.sh` script is not executable, so the gate fails open there. A hook may set `shell: bash` to force bash, but that resolves to whatever `bash` is on `PATH`, so on Windows outside Git Bash write the gate for the shell you actually have.
 - Sessions that disable hooks register none of them — `disableAllHooks`, safe mode, and an ACP client's `skipHooks`. The Skill's body and its `allowedTools` still apply in those sessions, but its gate does not, so a rule you rely on a hook to enforce is not enforced there. Bare mode goes further: no Skills are discovered at all, so there is no body and no `allowedTools` either.
-- A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and trust is re-read every time a hook fires and every time a permission is decided. With an IDE companion connected that value is live: revoking trust silences an already-registered gate — and suspends the Skill's `allowedTools` — at the next tool call, without a restart. Without an IDE connection the value is fixed when the CLI starts, so a change made through the CLI's own trust dialog takes effect on restart. Granting trust never retro-registers: invoke the Skill again.
+- A **project** Skill's hooks and `allowedTools` require **explicit folder trust**: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE. Disabling folder trust does not authorize these side effects, including in YOLO mode. The skill's instructions still load. Trust is re-read every time a hook fires or a permission is decided: revoking IDE trust suspends registered project hooks and grants. With folder trust disabled, disconnecting the IDE also suspends them. Without an IDE connection, changes through the CLI trust dialog take effect on restart. Granting trust never retro-registers: invoke the Skill again.
 - `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
 - See [Hooks](hooks.md) for the full event list, matcher syntax, and output format.
 
@@ -263,10 +268,22 @@ python scripts/helper.py input.txt
 
 Qwen Code discovers Skills from:
 
-- Personal Skills: `~/.qwen/skills/`
-- Project Skills: `.qwen/skills/`
+- Personal Skills: `~/.qwen/skills/` and `~/.agents/skills/`
+- Project Skills: `.qwen/skills/` and `.agents/skills/`
+- Custom directories: paths listed in [`skills.directories`](../configuration/settings#skills), loaded as personal Skills
 - Extension Skills: Skills provided by installed extensions
 - Bundled Skills: Skills shipped with Qwen Code
+
+When two Skills share a name, the first one found wins: project, then personal (including custom directories), then extension, then bundled.
+
+### Share Skills with other tools
+
+If you also use another agent, you can keep a single skills folder instead of copying Skills into `~/.qwen/skills/`:
+
+- Add the other agent's folder to `skills.directories`, for example `["~/.claude/skills"]`. Use an absolute or `~`-prefixed path: a relative path resolves against the working directory, not the project root. These Skills load as personal Skills, so their `allowedTools` and hooks are not gated by folder trust, even when a trusted project's settings add the directory: only point this at folders you control.
+- Or keep shared Skills in `~/.agents/skills/` or `.agents/skills/`, which Qwen Code reads without any configuration. Symlinked Skill folders are followed, and their target can live anywhere on disk.
+
+Qwen Code reads the `allowedTools` frontmatter field. An `allowed-tools` field written for another agent is ignored.
 
 ### Extension Skills
 
@@ -321,10 +338,10 @@ Or inspect the filesystem:
 
 ```bash
 # List personal Skills
-ls ~/.qwen/skills/
+ls ~/.qwen/skills/ ~/.agents/skills/
 
 # List project Skills (if in a project directory)
-ls .qwen/skills/
+ls .qwen/skills/ .agents/skills/
 
 # View a specific Skill's content
 cat ~/.qwen/skills/my-skill/SKILL.md
@@ -362,15 +379,19 @@ description: Extract text and tables from PDF files, fill forms, merge documents
 
 ### Verify file path
 
-- Personal Skills: `~/.qwen/skills/<skill-name>/SKILL.md`
-- Project Skills: `.qwen/skills/<skill-name>/SKILL.md`
+- Personal Skills: `~/.qwen/skills/<skill-name>/SKILL.md` or `~/.agents/skills/<skill-name>/SKILL.md`
+- Project Skills: `.qwen/skills/<skill-name>/SKILL.md` or `.agents/skills/<skill-name>/SKILL.md`
+- Custom directories: `<directory>/<skill-name>/SKILL.md` for each entry in `skills.directories`. A Skill nested deeper is not found.
 
 ```bash
 # Personal
-ls ~/.qwen/skills/my-skill/SKILL.md
+ls ~/.qwen/skills/my-skill/SKILL.md ~/.agents/skills/my-skill/SKILL.md
 
 # Project
-ls .qwen/skills/my-skill/SKILL.md
+ls .qwen/skills/my-skill/SKILL.md .agents/skills/my-skill/SKILL.md
+
+# Custom directory listed in skills.directories
+ls ~/shared-skills/my-skill/SKILL.md
 ```
 
 ### Check YAML syntax

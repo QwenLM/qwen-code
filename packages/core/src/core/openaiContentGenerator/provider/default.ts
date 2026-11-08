@@ -17,10 +17,19 @@ import {
   REASONING_EFFORT_TIERS,
   clampReasoningEffort,
   getGptReasoningCapabilities,
-  parseModelReasoningCapabilities,
   isReasoningEffortPlaceholder,
 } from '../../reasoning-effort.js';
 import { isOpenRouterHostname } from './openrouter.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningDeclaration,
+  resolveReasoningForModel,
+} from '../../reasoning-overrides.js';
+import {
+  applyDeepSeekReasoningEffort,
+  getBuiltinDeepSeekReasoning,
+  isDeepSeekEstablishedHost,
+} from '../../deepseek-reasoning.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -148,19 +157,21 @@ export class DefaultOpenAICompatibleProvider
   protected supportedReasoningEffortsFor(
     model: string | undefined,
   ): readonly ReasoningEffort[] {
-    const gpt = getGptReasoningCapabilities(model);
-    if (!gpt) return OPENAI_COMPATIBLE_EFFORTS;
-    const { authType, baseUrl } = this.contentGeneratorConfig;
-    const configured =
-      authType && model
-        ? parseModelReasoningCapabilities(
-            this.cliConfig.getResolvedModelConfig?.(authType, model, baseUrl)
-              ?.capabilities.reasoning,
-          )
-        : undefined;
-    return configured && !configured.toggleOnly
-      ? configured.efforts
-      : gpt.efforts;
+    const configured = this.getReasoningCapabilities(model);
+    if (!configured?.profile && !getGptReasoningCapabilities(model))
+      return OPENAI_COMPATIBLE_EFFORTS;
+    if (configured && !configured.toggleOnly) return configured.efforts;
+    return (
+      getGptReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS
+    );
+  }
+
+  protected getReasoningCapabilities(model?: string) {
+    return resolveReasoningForModel(
+      this.cliConfig,
+      this.contentGeneratorConfig,
+      model,
+    );
   }
 
   /**
@@ -176,7 +187,9 @@ export class DefaultOpenAICompatibleProvider
    */
   protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
     if (
-      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined ||
+      this.getReasoningCapabilities((request as { model?: string }).model)
+        ?.profile
     ) {
       return request;
     }
@@ -223,9 +236,12 @@ export class DefaultOpenAICompatibleProvider
     const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
       this.applyOutputTokenLimit(request),
     );
-    const messages = isQwen3Model(request.model)
-      ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
-      : requestWithTokenLimits.messages;
+    const profile = this.getReasoningCapabilities(request.model)?.profile;
+    const messages =
+      (!profile && isQwen3Model(request.model)) ||
+      profile === 'qwen-chat-template'
+        ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
+        : requestWithTokenLimits.messages;
 
     const result = {
       ...requestWithTokenLimits,
@@ -233,11 +249,66 @@ export class DefaultOpenAICompatibleProvider
       ...(extraBody ? extraBody : {}),
     };
     this.flattenGptReasoningEffort(result);
+    return this.flattenDeepSeekReasoningEffort(result);
+  }
+
+  protected flattenDeepSeekReasoningEffort<T extends object>(body: T): T {
+    const model = (body as { model?: string }).model;
+    const resolved = this.getReasoningCapabilities(model);
+    if (
+      !getBuiltinDeepSeekReasoning({ ...this.contentGeneratorConfig, model }) ||
+      !resolved ||
+      resolved.toggleOnly ||
+      (resolved.profile !== undefined && resolved.profile !== 'deepseek-openai')
+    )
+      return body;
+    // On newly recognized routes (third-party hosts, or new aliases on
+    // established hosts) a profile-less declaration governs the wire shape:
+    // the built-in normalizer must not flatten or re-tier its declared or
+    // static effort. Established model/host pairs keep their shipped
+    // interaction.
+    if (
+      !isDeepSeekEstablishedHost(this.contentGeneratorConfig.baseUrl, model) &&
+      resolveReasoningDeclaration(
+        this.cliConfig,
+        this.contentGeneratorConfig,
+        model,
+      ) !== undefined
+    )
+      return body;
+    const reasoning = getEffectiveReasoning(
+      { ...this.contentGeneratorConfig, model },
+      resolved,
+    );
+    const result = applyDeepSeekReasoningEffort(
+      body,
+      this.contentGeneratorConfig.baseUrl,
+      (reasoning || undefined)?.effort,
+    );
+    const loose = result as Record<string, unknown>;
+    if (
+      resolved.canDisable !== false &&
+      (loose['reasoning_effort'] === 'none' ||
+        (resolved.disableField === 'thinking'
+          ? (loose['thinking'] as { type?: string } | undefined)?.type ===
+            'disabled'
+          : loose['enable_thinking'] === false))
+    ) {
+      if (resolved.disableField === 'thinking') {
+        loose['thinking'] = { type: 'disabled' };
+        delete loose['reasoning_effort'];
+      } else if (resolved.disableField === 'enable_thinking') {
+        loose['enable_thinking'] = false;
+        delete loose['reasoning_effort'];
+      }
+    }
     return result;
   }
 
   protected flattenGptReasoningEffort(body: Record<string, unknown>): void {
     if (
+      this.getReasoningCapabilities(body['model'] as string | undefined)
+        ?.profile ||
       !getGptReasoningCapabilities(body['model'] as string | undefined) ||
       isOpenRouterHostname(this.contentGeneratorConfig) ||
       this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined ||

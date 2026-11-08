@@ -24,12 +24,35 @@ describe('loadProjectMcpServers', () => {
   const write = (content: string) =>
     fs.writeFileSync(path.join(dir, PROJECT_MCP_FILENAME), content);
 
-  it('returns empty (no error) when .mcp.json is absent', () => {
-    const result = loadProjectMcpServers(dir);
-    expect(result.servers).toEqual({});
-    expect(result.path).toBeUndefined();
-    expect(result.errors).toEqual([]);
-  });
+  it.each([false, true])(
+    'returns empty when .mcp.json is absent (strict: %s)',
+    (strict) => {
+      const result = loadProjectMcpServers(dir, { strict });
+      expect(result.servers).toEqual({});
+      expect(result.literalServers).toEqual({});
+      expect(result.path).toBeUndefined();
+      expect(result.errors).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'handles a directory at .mcp.json without loading servers (strict: %s)',
+    (strict) => {
+      const filePath = path.join(dir, PROJECT_MCP_FILENAME);
+      fs.mkdirSync(filePath);
+      const result = loadProjectMcpServers(dir, { strict });
+      expect(result.servers).toEqual({});
+      expect(result.literalServers).toEqual({});
+      if (strict) {
+        expect(result.path).toBe(filePath);
+        expect(result.errors).toHaveLength(1);
+        expect(result.errors[0]).toContain('Failed to read');
+      } else {
+        expect(result.path).toBeUndefined();
+        expect(result.errors).toEqual([]);
+      }
+    },
+  );
 
   it('returns a fresh empty result when .mcp.json is absent', () => {
     const first = loadProjectMcpServers(dir);
@@ -125,6 +148,20 @@ describe('loadProjectMcpServers', () => {
       "mcpServers": { "a": { "command": "x" } }
     }`);
     const { servers, errors } = loadProjectMcpServers(dir);
+    expect(errors).toEqual([]);
+    expect(servers['a']).toMatchObject({ command: 'x', scope: 'project' });
+  });
+
+  it('tolerates a UTF-8 BOM written by editors on Windows', () => {
+    write('\uFEFF' + JSON.stringify({ mcpServers: { a: { command: 'x' } } }));
+    const { servers, errors } = loadProjectMcpServers(dir);
+    expect(errors).toEqual([]);
+    expect(servers['a']).toMatchObject({ command: 'x', scope: 'project' });
+  });
+
+  it('tolerates a UTF-8 BOM in strict mode', () => {
+    write('\uFEFF' + JSON.stringify({ mcpServers: { a: { command: 'x' } } }));
+    const { servers, errors } = loadProjectMcpServers(dir, { strict: true });
     expect(errors).toEqual([]);
     expect(servers['a']).toMatchObject({ command: 'x', scope: 'project' });
   });
@@ -267,27 +304,32 @@ describe('loadProjectMcpServers', () => {
       });
     });
 
-    it('reports the pre-expansion literal configs alongside the resolved ones', () => {
-      write(
-        JSON.stringify({
-          mcpServers: {
-            http: {
-              httpUrl: 'https://example.test/mcp',
-              headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+    it.each([false, true])(
+      'reports literal and resolved configs (strict: %s)',
+      (strict) => {
+        write(
+          JSON.stringify({
+            mcpServers: {
+              http: {
+                httpUrl: 'https://example.test/mcp',
+                headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+              },
             },
-          },
-        }),
-      );
-      const { servers, literalServers } = loadProjectMcpServers(dir);
-      expect(servers['http']).toMatchObject({
-        headers: { Authorization: 'Bearer tok-from-process-env' },
-      });
-      expect(literalServers['http']).toMatchObject({
-        httpUrl: 'https://example.test/mcp',
-        headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
-        scope: 'project',
-      });
-    });
+          }),
+        );
+        const { servers, literalServers } = loadProjectMcpServers(dir, {
+          strict,
+        });
+        expect(servers['http']).toMatchObject({
+          headers: { Authorization: 'Bearer tok-from-process-env' },
+        });
+        expect(literalServers['http']).toMatchObject({
+          httpUrl: 'https://example.test/mcp',
+          headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+          scope: 'project',
+        });
+      },
+    );
 
     it('expands after Claude transport normalization (httpUrl carries the placeholder)', () => {
       write(

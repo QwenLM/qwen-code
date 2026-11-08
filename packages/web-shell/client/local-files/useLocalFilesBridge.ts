@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
 import {
   LocalFilesBridge,
   openBrowserSocket,
@@ -100,10 +101,10 @@ export interface UseLocalFilesBridgeOptions {
   withheldBlocker?: LocalFilesBlocker;
 }
 
-function defaultStore(): DirectoryHandleStore | null {
-  return typeof indexedDB === 'undefined'
+function defaultStore(baseUrl: string): DirectoryHandleStore | null {
+  return typeof indexedDB === 'undefined' || typeof window === 'undefined'
     ? null
-    : createDirectoryHandleStore(indexedDB);
+    : createDirectoryHandleStore(indexedDB, baseUrl, window.location.origin);
 }
 
 function defaultWindow(): LocalFilesWindowLike {
@@ -155,9 +156,16 @@ function phaseFromBridge(
 
 export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const { sessionId } = options;
+  const availability = useDaemonAvailabilityController();
+  const availabilityRef = useRef(availability);
+  const bridgeAvailabilityRef = useRef(availability);
+  availabilityRef.current = availability;
   const win = options.win ?? defaultWindow();
   const store = useMemo(
-    () => (options.store === undefined ? defaultStore() : options.store),
+    () =>
+      options.store === undefined
+        ? defaultStore(options.baseUrl)
+        : options.store,
     // Resolved once per mount: the injected store is a stable test seam, and
     // re-creating the real one per render would reopen IndexedDB constantly.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- per-mount seam, not a stale copy
@@ -382,6 +390,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     () =>
       bridgeRef.current !== undefined &&
       LIVE_BRIDGE_PHASES.has(bridgeRef.current.getState().phase) &&
+      bridgeAvailabilityRef.current === availabilityRef.current &&
       bridgeSessionRef.current === optionsRef.current.sessionId &&
       bridgeSelectorKeyRef.current ===
         selectorKeyOf(optionsRef.current.workspaceSelector),
@@ -417,6 +426,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         opts?.force !== true &&
         bound !== undefined &&
         LIVE_BRIDGE_PHASES.has(bound.getState().phase) &&
+        bridgeAvailabilityRef.current === availabilityRef.current &&
         bridgeSessionRef.current === optionsRef.current.sessionId &&
         bridgeSelectorKeyRef.current ===
           selectorKeyOf(optionsRef.current.workspaceSelector) &&
@@ -469,6 +479,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       const current = optionsRef.current;
       ownedRunRef.current = false;
       const bridge = new LocalFilesBridge({
+        availability: availabilityRef.current,
         baseUrl: current.baseUrl,
         sessionId: targetSession,
         server: new LocalFilesMcpServer(new LocalDirectory(handle)),
@@ -498,6 +509,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         },
       });
       bridgeRef.current = bridge;
+      bridgeAvailabilityRef.current = availabilityRef.current;
       bridgeSessionRef.current = targetSession;
       bridgeSelectorKeyRef.current = selectorKeyOf(current.workspaceSelector);
       bridgeHandleNameRef.current = handle.name;
@@ -775,6 +787,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     };
   }, [
     sessionId,
+    availability,
     selectorKey,
     sameEntryOrFalse,
     startBridge,

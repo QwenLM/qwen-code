@@ -17,6 +17,7 @@ import {
   type PromptPipelineContent,
 } from './types.js';
 import { extractInjections } from './injectionParser.js';
+import { markInjectedFilePart } from './injected-file-parts.js';
 
 const debugLogger = createDebugLogger('AT_FILE_PROCESSOR');
 
@@ -65,7 +66,7 @@ export class AtFileProcessor implements IPromptProcessor {
               Date.now(),
             );
           }
-          output.push(...fileContentParts);
+          output.push(...fileContentParts.map(markInjectedFilePart));
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);

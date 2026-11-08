@@ -14,6 +14,7 @@ import {
   type SkillDisablement,
   skillToggleBlockForName,
   updateWorkspaceSkillSettingLists,
+  updateUserSkillSettingLists,
 } from './skill-settings.js';
 
 function fakeSettings({
@@ -46,7 +47,94 @@ function fakeSettings({
   } as never;
 }
 
+describe('updateUserSkillSettingLists', () => {
+  it.each([
+    [{ state: 'enabled' }, 'enabled'],
+    [{ state: 'disabled' }, 'disabled'],
+    [{ state: 'disabled', mode: 'default' }, 'defaultDisabled'],
+  ] as const)('moves only the explicit name for %j', (activation, target) => {
+    const lists = {
+      enabled: ['RUST:PDF', 'other-enabled'],
+      disabled: ['pdf', 'rust:pdf', 'go:pdf'],
+      defaultDisabled: ['rust:pdf', 'other-default'],
+    };
+    const result = updateUserSkillSettingLists(lists, ' rust:PDF ', activation);
+    expect(result.disabled).toContain('pdf');
+    expect(result.disabled).toContain('go:pdf');
+    expect(result.enabled).toContain('other-enabled');
+    expect(result.defaultDisabled).toContain('other-default');
+    for (const key of ['enabled', 'disabled', 'defaultDisabled'] as const) {
+      expect(
+        result[key].filter((name) => name.toLowerCase() === 'rust:pdf'),
+      ).toHaveLength(key === target ? 1 : 0);
+    }
+    expect(lists.enabled).toEqual(['RUST:PDF', 'other-enabled']);
+  });
+
+  it('retains an existing target spelling and supports names not yet installed', () => {
+    const lists = {
+      enabled: ['RUST:PDF'],
+      disabled: ['pdf'],
+      defaultDisabled: [],
+    };
+    expect(
+      updateUserSkillSettingLists(lists, 'rust:pdf', { state: 'enabled' }),
+    ).toEqual(lists);
+    expect(
+      updateUserSkillSettingLists(lists, 'future', { state: 'enabled' }),
+    ).toEqual({ ...lists, enabled: ['RUST:PDF', 'future'] });
+  });
+
+  it('preserves bare-name and System restrictions after a qualified enable', () => {
+    const user = updateUserSkillSettingLists(
+      { enabled: [], disabled: ['pdf', 'rust:pdf'], defaultDisabled: [] },
+      'rust:pdf',
+      { state: 'enabled' },
+    );
+    const resolved = resolveSkillSettings(
+      fakeSettings({
+        merged: { ...user, disabled: [...user.disabled, 'system-skill'] },
+        user,
+        system: { disabled: ['system-skill'] },
+      }),
+    );
+    expect(resolved.disabledNames.has('pdf')).toBe(true);
+    expect(resolved.disabledNames.has('system-skill')).toBe(true);
+    expect(user.disabled).toEqual(['pdf']);
+  });
+});
+
 describe('resolveSkillSettings', () => {
+  it('makes Browser Use and Computer Use available by default', () => {
+    const result = resolveSkillSettings(fakeSettings({ merged: {} }));
+
+    expect(result.disabledNames).toEqual(new Set());
+    expect(result.disablements.has('browser-use')).toBe(false);
+    expect(result.disabledNames.has('computer-use')).toBe(false);
+  });
+
+  it('lets the skills picker enable, disable, and re-enable Browser Use', () => {
+    let lists = { disabled: [] as string[], enabled: [] as string[] };
+    for (const enabled of [true, false, true]) {
+      lists = updateWorkspaceSkillSettingLists(lists, 'browser-use', enabled);
+      const result = resolveSkillSettings(fakeSettings({ merged: lists }));
+      expect(result.disabledNames.has('browser-use')).toBe(!enabled);
+    }
+  });
+
+  it('keeps a hard Browser Use disable authoritative over an explicit opt-in', () => {
+    const result = resolveSkillSettings(
+      fakeSettings({
+        merged: { disabled: ['browser-use'], enabled: [' BROWSER-USE '] },
+        user: { disabled: ['browser-use'] },
+      }),
+    );
+    expect(result.disablements.get('browser-use')).toEqual({
+      reason: 'hard',
+      lockedScope: 'user',
+    });
+  });
+
   it('lets a workspace opt-in override a user default case-insensitively', () => {
     const result = resolveSkillSettings(
       fakeSettings({
@@ -417,14 +505,14 @@ describe('buildHigherDisabled', () => {
 });
 
 describe('skillToggleBlockForName', () => {
-  it('derives the authored spelling from a qualified request name', () => {
+  it('uses the resolved authored spelling for a qualified request name', () => {
     expect(
       skillToggleBlockForName(
         fakeSettings({
           merged: {},
           workspace: { disabled: ['pdf'] },
         }),
-        'demo:pdf',
+        { name: 'demo:pdf', authoredName: 'pdf' },
       ),
     ).toEqual({
       reason: 'hard',
@@ -443,7 +531,7 @@ describe('skillToggleBlockForName', () => {
           merged: {},
           workspace: { disabled: ['demo:pdf'] },
         }),
-        'pdf',
+        { name: 'pdf' },
       ),
     ).toBeNull();
   });

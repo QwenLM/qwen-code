@@ -220,6 +220,26 @@ function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
     return false;
   }
 
+  const billableA = a.billableOutputTokens ?? {};
+  const billableB = b.billableOutputTokens ?? {};
+  if (Object.keys(billableA).length !== Object.keys(billableB).length) {
+    return false;
+  }
+  for (const [model, costA] of Object.entries(billableA)) {
+    const costB = billableB[model];
+    if (
+      !costB ||
+      costA.total !== costB.total ||
+      Object.keys(costA.bySource).length !==
+        Object.keys(costB.bySource).length ||
+      Object.entries(costA.bySource).some(
+        ([source, count]) => costB.bySource[source] !== count,
+      )
+    ) {
+      return false;
+    }
+  }
+
   // Compare models
   const modelsAKeys = Object.keys(a.models);
   const modelsBKeys = Object.keys(b.models);
@@ -290,6 +310,18 @@ function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
         },
       ]),
     ),
+    ...(metrics.billableOutputTokens
+      ? {
+          billableOutputTokens: Object.fromEntries(
+            Object.entries(metrics.billableOutputTokens).map(
+              ([model, cost]) => [
+                model,
+                { total: cost.total, bySource: { ...cost.bySource } },
+              ],
+            ),
+          ),
+        }
+      : {}),
     ...(metrics.generation
       ? {
           generation: {

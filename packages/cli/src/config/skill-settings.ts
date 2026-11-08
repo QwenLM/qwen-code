@@ -14,6 +14,10 @@ export interface SkillDisablement {
 
 export type SkillSettingListKey = 'disabled' | 'defaultDisabled' | 'enabled';
 
+export type UserSkillActivation =
+  | { state: 'enabled' }
+  | { state: 'disabled'; mode?: 'hard' | 'default' };
+
 export interface ResolvedSkillSettings {
   disabledNames: ReadonlySet<string>;
   defaultDisabledNames: ReadonlySet<string>;
@@ -284,22 +288,11 @@ export function buildHigherDisabled(settings: LoadedSettings): {
   };
 }
 
-/**
- * The block decision for a toggle request that arrives as a bare settings
- * string rather than a skill object: the daemon's skill routes persist the
- * name a client sent verbatim. A qualified name carries its authored
- * spelling after the prefix, which is the spelling a legacy entry holds;
- * a name without a prefix has one spelling and no legacy alias.
- */
 export function skillToggleBlockForName(
   settings: LoadedSettings,
-  skillName: string,
+  skill: { name: string; authoredName?: string },
 ): SkillToggleBlock | null {
-  const prefixEnd = skillName.indexOf(':');
-  return buildHigherDisabled(settings).blockIn({
-    name: skillName,
-    ...(prefixEnd > 0 ? { authoredName: skillName.slice(prefixEnd + 1) } : {}),
-  });
+  return buildHigherDisabled(settings).blockIn(skill);
 }
 
 function updateTarget(
@@ -337,6 +330,32 @@ export function updateWorkspaceSkillSettingLists(
   return {
     disabled: updateTarget(lists.disabled, skillName, true),
     enabled: updateTarget(lists.enabled, skillName, false),
+  };
+}
+
+export function updateUserSkillSettingLists(
+  lists: Record<SkillSettingListKey, string[]>,
+  skillName: string,
+  activation: UserSkillActivation,
+): Record<SkillSettingListKey, string[]> {
+  const target =
+    activation.state === 'enabled'
+      ? 'enabled'
+      : activation.mode === 'default'
+        ? 'defaultDisabled'
+        : 'disabled';
+  const normalized = skillName.trim().toLowerCase();
+  const spelling =
+    lists[target].find((name) => name.trim().toLowerCase() === normalized) ??
+    skillName.trim();
+  return {
+    disabled: updateTarget(lists.disabled, spelling, target === 'disabled'),
+    defaultDisabled: updateTarget(
+      lists.defaultDisabled,
+      spelling,
+      target === 'defaultDisabled',
+    ),
+    enabled: updateTarget(lists.enabled, spelling, target === 'enabled'),
   };
 }
 

@@ -7,6 +7,7 @@
 import type { Config } from '../config/config.js';
 import { normalize } from './tokenLimits.js';
 import type { ModelReasoningCapabilities } from '../models/types.js';
+import type { ContentGeneratorConfig } from './contentGenerator.js';
 
 /**
  * Unified reasoning-effort ladder exposed to users (e.g. via `/effort`).
@@ -229,6 +230,65 @@ export function applyReasoningEffort(
 ): boolean {
   config.setReasoningEffort(effort);
   return config.getReasoningEffort() === effort;
+}
+
+/**
+ * Write `effort` onto a content-generator config's `reasoning` block. This is
+ * the one rule for putting a tier on a config: `/effort` applies it to the
+ * session (`Config.setReasoningEffort`) and a workflow `agent({ effort })`
+ * applies it to that agent's own copy of the config.
+ *
+ * A config with thinking explicitly turned off (`reasoning: false`) is left
+ * alone and `false` is returned. Otherwise the tier replaces `reasoning.effort`
+ * while sibling fields such as `budget_tokens` survive, and `undefined`
+ * removes the tier. Removing the last key collapses `reasoning` back to
+ * `undefined` rather than leaving an empty `{}`: an empty object is truthy, so
+ * downstream `if (cfg.reasoning)` checks would treat reasoning as active and
+ * the pipeline would emit `reasoning: {}` as wire noise.
+ *
+ * The block is replaced, never mutated, so a config that shares its
+ * `reasoning` object with another — a per-agent config spread from the
+ * session's — never changes the other one. No clamping happens here: each
+ * provider maps the tier onto what the target model accepts when it builds a
+ * request.
+ */
+export function setGeneratorReasoningEffort(
+  cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+  effort: ReasoningEffort | undefined,
+): boolean {
+  if (!cfg || cfg.reasoning === false) {
+    return false;
+  }
+  const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
+    ...(cfg.reasoning ?? {}),
+  };
+  if (effort) {
+    next.effort = effort;
+  } else {
+    delete next.effort;
+  }
+  cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
+  return true;
+}
+
+/**
+ * The tiers `/effort` offers for a model with this parsed reasoning
+ * capability: none for a toggle-only model, the declared list otherwise, and
+ * the whole ladder when the model declares nothing (the provider clamps then).
+ * The one tier rule shared by `/effort` (the CLI's picker and command) and a
+ * workflow agent's per-call effort; each site keeps its own capability lookup.
+ */
+export function reasoningEffortsForCapability(
+  reasoning:
+    | { readonly toggleOnly: true }
+    | {
+        readonly toggleOnly?: false;
+        readonly efforts: readonly ReasoningEffort[];
+      }
+    | undefined,
+): readonly ReasoningEffort[] {
+  if (!reasoning) return REASONING_EFFORT_TIERS;
+  return reasoning.toggleOnly ? [] : reasoning.efforts;
 }
 
 /**

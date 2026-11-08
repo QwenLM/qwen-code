@@ -5,13 +5,14 @@
  */
 
 import type { ToolErrorType } from './tool-error.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 
 /**
  * Resolved endpoint and credentials for the search side request, as produced
  * by the gate in `web-search.ts` and consumed by a backend implementation.
  * `kind` selects that implementation.
  */
-export interface WebSearchBackendConfig {
+export interface DashScopeWebSearchBackendConfig {
   kind: 'dashscope';
   modelId: string;
   /** Environment variable name holding the API key. */
@@ -22,11 +23,20 @@ export interface WebSearchBackendConfig {
   /** Whether the search agent may open result pages (web_extractor). */
   webExtractor: boolean;
   /**
+   * Total wall-clock budget for one search in ms, covering every attempt.
+   * Resolved by the gate from `tools.webSearch.timeoutMs`.
+   */
+  timeoutMs: number;
+  /**
    * Custom headers from the entry's generationConfig — internal gateways
    * accepted by the baseUrl check may require routing/auth headers.
    */
   customHeaders?: Record<string, string>;
 }
+
+export type WebSearchBackendConfig =
+  | DashScopeWebSearchBackendConfig
+  | { kind: 'qwen-subscription'; timeoutMs: number };
 
 /** One page the search produced. */
 export interface WebSearchSource {
@@ -59,7 +69,12 @@ export interface WebSearchOutcome {
 
 export type WebSearchBackendResult =
   | { ok: true; outcome: WebSearchOutcome }
-  | { ok: false; message: string; errorType: ToolErrorType };
+  | {
+      ok: false;
+      message: string;
+      errorType: ToolErrorType;
+      quota?: SubscriptionQuotaDisplay;
+    };
 
 export interface WebSearchBackendRequest {
   query: string;
@@ -81,4 +96,19 @@ export interface WebSearchBackendRequest {
  */
 export interface WebSearchBackend {
   search(request: WebSearchBackendRequest): Promise<WebSearchBackendResult>;
+}
+
+/**
+ * `String#slice` counts UTF-16 code units and can cut a surrogate pair in
+ * half, leaving a lone surrogate that breaks serialization of the next model
+ * request. Back off one unit when the cut lands after a high surrogate.
+ *
+ * Shared by the result formatter and by backends that bound text they relay.
+ */
+export function sliceAtCharBoundary(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  let end = limit;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end--;
+  return text.slice(0, end);
 }

@@ -245,41 +245,49 @@ describe('GoalStatusStrip', () => {
     ).toBe('2.5M / 30.0M tokens');
   });
 
-  it('shows a running checkpoint stall streak, like the terminal footer pill', () => {
+  it('shows active time against its ceiling when the Goal has one', () => {
+    render('paused', { activeTimeMs: 723_000, activeTimeBudgetMs: 1_800_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s / 30m 0s');
+  });
+
+  it('shows active time alone when the Goal has no time ceiling', () => {
+    render('paused', { activeTimeMs: 723_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s');
+  });
+
+  it('shows finished turns against the turn ceiling', () => {
+    render('active', { turnCount: 3, turnBudget: 20 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]')?.textContent,
+    ).toBe('3 / 20 turns');
+  });
+
+  it('shows no turn figure without a turn ceiling, or before a turn finishes', () => {
+    render('active', { turnCount: 3 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+
+    render('active', { turnCount: 0, turnBudget: 20 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+  });
+
+  it('shows no checkpoint streak, even for a snapshot an older daemon filled in', () => {
     render('active', {
       checkpointStalls: 2,
       lastCheckpointFailure: 'Error: provider failed',
     });
-
-    expect(
-      container.querySelector('[data-testid="goal-checkpoint-stalls"]')
-        ?.textContent,
-    ).toBe('2/3 checks stalled');
-    // The label is ellipsized on a narrow pane, so it is also the tooltip.
-    expect(
-      container
-        .querySelector('[data-testid="goal-checkpoint-stalls"]')
-        ?.getAttribute('title'),
-    ).toBe('2/3 checks stalled');
-    // The failure text belongs to the Goals dialog; the strip has no room.
-    expect(container.textContent).not.toContain('provider failed');
-  });
-
-  it('keeps the streak on a Goal the stall breaker stopped', () => {
-    render('usage_limited', {
-      checkpointStalls: 3,
-      lastCheckpointFailure: 'Error: provider failed',
-    });
-
-    expect(
-      container.querySelector('[data-testid="goal-checkpoint-stalls"]')
-        ?.textContent,
-    ).toBe('3/3 checks stalled');
-    expect(container.textContent).not.toContain('provider failed');
-  });
-
-  it('shows no streak when no checkpoint has stalled', () => {
-    render('active', { lastCheckpointFailure: 'Error: provider failed' });
 
     expect(
       container.querySelector('[data-testid="goal-checkpoint-stalls"]'),

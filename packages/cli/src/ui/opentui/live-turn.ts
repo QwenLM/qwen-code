@@ -24,6 +24,16 @@
  * queue instead of dropping them.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
+import {
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
+  expandPendingPastePlaceholders,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
+import { isSlashCommand } from '../utils/commandUtils.js';
+import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
   useCallback,
   useEffect,
@@ -32,24 +42,50 @@ import {
   type RefObject,
 } from 'react';
 import { readFileSync } from 'node:fs';
+import { ShellExecutionService } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import {
+  MessageSenderType,
+  type Logger,
+} from '@qwen-code/qwen-code-core/core/logger.js';
 import {
   collectText,
   normalizeParts,
 } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import {
   foldLiveEvent,
   settleOpenTools,
+  snapshotCanonicalHistory,
+  allocateCanonicalHistoryId,
   type LiveHistoryItem,
 } from './live-session-model.js';
 import {
+  getInteractiveModSession,
+  MODS_FAILED_TO_INITIALIZE,
+} from '../../services/interactive-mod-session.js';
+import type { ModTurn } from '../../services/mod-session.js';
+import type { ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
+import {
   livePromptEvents,
   nextLivePromptId,
+  type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
+  type ExecutingShellCall,
+  type PreparedLiveRequest,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import {
+  restoreInputSubmissions,
+  type OpenTuiRestoredDraft,
+  type OpenTuiInputSubmission,
+  type OpenTuiCancelSettled,
+} from './input-submission.js';
+
+const debugLogger = createDebugLogger('OPENTUI_LIVE_TURN');
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -92,6 +128,13 @@ export function imagePathsToParts(imagePaths: readonly string[]): {
 
 export interface UseOpenTuiLiveTurnOptions {
   config: Config;
+  dualOutput?: DualOutputBridge | null;
+  logger?: Logger | null;
+  /**
+   * Gets back a prompt the Mods' `prompt.submit` hooks dropped, or one Esc
+   * cancelled while they ran without a composer to settle with.
+   */
+  onPromptReturned?: (submission: OpenTuiInputSubmission) => void;
 }
 
 /**
@@ -100,6 +143,13 @@ export interface UseOpenTuiLiveTurnOptions {
  * memory refresh, and the post-turn callback.
  */
 export interface OpenTuiSubmitOptions {
+  promptId?: string;
+  toolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    restoreResponseBinding?: RestoreToolResponseBinding;
+  };
+  deferUntilIdle?: boolean;
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
@@ -110,6 +160,11 @@ export interface OpenTuiSubmitOptions {
    * also submits without provenance.
    */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
+  hasUnknownInput?: boolean;
+  displayText?: string;
+  pasteExpansions?: ReadonlyMap<string, string>;
+  restoredDraft?: OpenTuiRestoredDraft;
   /**
    * The transcript already holds the user row for this submit, because the
    * dispatcher echoed the typed invocation. Set by a `submit_prompt` outcome:
@@ -117,6 +172,17 @@ export interface OpenTuiSubmitOptions {
    * returns before adding a USER history item for it.
    */
   invocationEchoed?: boolean;
+  /**
+   * What the Mods' `prompt.submit` hooks attached to a `?`-form command that
+   * starts this turn; it rides the turn's first send.
+   */
+  promptContext?: readonly string[];
+}
+
+export interface ForegroundShellOwner {
+  callId: string;
+  pid: number;
+  turn: number;
 }
 
 export interface OpenTuiLiveTurn {
@@ -131,10 +197,19 @@ export interface OpenTuiLiveTurn {
   isReceivingContent: boolean;
   /** Scheduler calls parked in awaiting_approval, awaiting a dialog. */
   waitingCalls: readonly WaitingCallInfo[];
-  /** Number of mid-turn prompts queued (composer queueLength parity). */
-  queueLength: number;
-  /** Pops the whole queue back into the composer (Esc parity). */
-  popQueue(): string | null;
+  foregroundShell: ForegroundShellOwner | null;
+  promoteShellToBackground(): boolean;
+  writeShellInput(owner: ForegroundShellOwner, input: string): boolean;
+  resizeShell(
+    owner: ForegroundShellOwner,
+    columns: number,
+    rows: number,
+  ): boolean;
+  scrollShell(owner: ForegroundShellOwner, lines: number): boolean;
+  /** Mid-turn queued prompts, oldest first (composer badge + Esc pop-back). */
+  messageQueue: readonly string[];
+  /** Pops composer submissions back together; generated turns stay queued. */
+  popQueue(): OpenTuiInputSubmission | null;
   /**
    * Submits a prompt (or queues it when a turn is in flight). A
    * `submit_prompt` outcome's per-turn options travel in `options`.
@@ -143,15 +218,66 @@ export interface OpenTuiLiveTurn {
     content: PartListUnion,
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
-  ): void;
+  ): boolean;
   /** Aborts the in-flight turn (Esc). */
-  interrupt(): void;
+  interrupt(onSettled?: OpenTuiCancelSettled): void;
+  retryLastPrompt(): void;
+  notifyInputProcessed(): void;
+  scheduleTool(
+    name: string,
+    args: Record<string, unknown>,
+    restoreResponseBinding?: RestoreToolResponseBinding,
+  ): boolean;
+  isCurrentHistory(snapshot: readonly LiveHistoryItem[]): boolean;
+  rewindTranscript(userId: string): readonly LiveHistoryItem[] | undefined;
   /** Replaces the transcript from a replay batch (session switch/resume). */
   resetTranscript(events: readonly OpenTuiStreamEvent[]): void;
   /** Folds one externally produced event (update notices, startup warnings). */
-  applyEvent(event: OpenTuiStreamEvent): void;
+  applyEvent(event: OpenTuiStreamEvent): readonly LiveHistoryItem[] | undefined;
   /** Drops a waiting call after its dialog settled. */
   settleWaitingCall(callId: string): void;
+}
+
+interface QueuedSubmission extends OpenTuiSteeringSubmission {
+  turnOptions?: OpenTuiSubmitOptions;
+  generated?: boolean;
+}
+
+/** The transcript row for a prompt the person typed. */
+function userRow(
+  entry: Pick<
+    OpenTuiInputSubmission,
+    'text' | 'displayText' | 'pasteExpansions'
+  >,
+  promptId: string,
+): OpenTuiStreamEvent {
+  const text = entry.displayText ?? entry.text;
+  return {
+    type: 'user',
+    text,
+    ...(entry.pasteExpansions?.size
+      ? {
+          recallText: expandPendingPastePlaceholders(
+            text,
+            entry.pasteExpansions,
+          ),
+        }
+      : {}),
+    promptId,
+    sentToModel: true,
+  };
+}
+
+/**
+ * Slash-form text, which neither the Mods' hooks nor their startup hold. Text
+ * sent with attached images is a prompt whatever its form: the shell sends it
+ * to the model without dispatching it as a command.
+ */
+function isSlashForm(
+  entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText' | 'imagePaths'>,
+): boolean {
+  if (entry.imagePaths?.length) return false;
+  return isSlashCommand((entry.displayText ?? entry.text).trim());
 }
 
 /** Folds a replay batch into a fresh item list (single commit). */
@@ -166,15 +292,50 @@ export function foldBatch(
 export function useOpenTuiLiveTurn(
   options: UseOpenTuiLiveTurnOptions,
 ): OpenTuiLiveTurn {
-  const { config } = options;
+  const { config, dualOutput, logger } = options;
+  const onPromptReturnedRef = useRef(options.onPromptReturned);
+  onPromptReturnedRef.current = options.onPromptReturned;
   const [items, setItems] = useState<readonly LiveHistoryItem[]>([]);
+  const itemsRef = useRef<readonly LiveHistoryItem[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [waitingCalls, setWaitingCalls] = useState<readonly WaitingCallInfo[]>(
     [],
   );
-  const queueRef = useRef<string[]>([]);
-  const [queueLength, setQueueLength] = useState(0);
+  const queueRef = useRef<QueuedSubmission[]>([]);
+  // queueRef stays the synchronous source — a turn drains and restores within
+  // one tick, before any render. This mirror only exists to be displayed.
+  const [queue, setQueue] = useState<readonly string[]>([]);
+  const syncQueue = useCallback(
+    () =>
+      setQueue(
+        queueRef.current.map(
+          ({ text, displayText, imagePaths }) =>
+            displayText ?? (text || `[${imagePaths?.length ?? 0} image]`),
+        ),
+      ),
+    [],
+  );
   const abortRef = useRef<AbortController | null>(null);
+  const skipRetryDelayRef = useRef<(() => void) | undefined>(undefined);
+  const failedRequestRef = useRef<{
+    request: PreparedLiveRequest;
+    promptId: string;
+    options?: OpenTuiSubmitOptions;
+  } | null>(null);
+  const activeTurnRef = useRef<{
+    seq: number;
+    prompt?: OpenTuiInputSubmission;
+    toolStarted: boolean;
+    meaningfulContent: boolean;
+    canUndoLog: boolean;
+    // Set by Esc or another interrupt, even after a Mod ended the turn.
+    interrupted?: boolean;
+    // The Mods' prompt.submit hooks hold the prompt: nothing has shown,
+    // recorded or sent it yet.
+    held?: boolean;
+    onCancelSettled?: OpenTuiCancelSettled;
+  } | null>(null);
+  const mountedRef = useRef(true);
 
   const streamingRef = useRef(false);
   // Output chars streamed this turn (ink streamingResponseLengthRef parity):
@@ -191,6 +352,92 @@ export function useOpenTuiLiveTurn(
   const waitingCallsRef = useRef<readonly WaitingCallInfo[]>([]);
   waitingCallsRef.current = waitingCalls;
 
+  const [, setExecutingShells] = useState<readonly ExecutingShellCall[]>([]);
+  const executingShellsRef = useRef<readonly ExecutingShellCall[]>([]);
+  const updateExecutingShells = useCallback(
+    (calls: readonly ExecutingShellCall[]) => {
+      executingShellsRef.current = calls;
+      setExecutingShells(calls);
+    },
+    [],
+  );
+  const getForegroundShell = useCallback((): ForegroundShellOwner | null => {
+    if (
+      !mountedRef.current ||
+      !activeTurnRef.current ||
+      abortRef.current?.signal.aborted
+    )
+      return null;
+    const shells = executingShellsRef.current.filter(
+      (call) =>
+        call.pid !== undefined &&
+        call.pid > 0 &&
+        !call.promoteAbortController?.signal.aborted,
+    );
+    return shells.length === 1
+      ? {
+          callId: shells[0].callId,
+          pid: shells[0].pid!,
+          turn: turnSeqRef.current,
+        }
+      : null;
+  }, []);
+  const ownsShell = useCallback(
+    (owner: ForegroundShellOwner) => {
+      const current = getForegroundShell();
+      return (
+        current !== null &&
+        current.callId === owner.callId &&
+        current.pid === owner.pid &&
+        current.turn === owner.turn
+      );
+    },
+    [getForegroundShell],
+  );
+  const promoteShellToBackground = useCallback(() => {
+    if (
+      !mountedRef.current ||
+      !activeTurnRef.current ||
+      abortRef.current?.signal.aborted
+    )
+      return false;
+    const shells = executingShellsRef.current.filter(
+      (call) =>
+        call.promoteAbortController &&
+        !call.promoteAbortController.signal.aborted,
+    );
+    if (shells.length !== 1) return false;
+    shells[0].promoteAbortController!.abort({ kind: 'background' });
+    updateExecutingShells(
+      executingShellsRef.current.filter((call) => call !== shells[0]),
+    );
+    return true;
+  }, [updateExecutingShells]);
+  const writeShellInput = useCallback(
+    (owner: ForegroundShellOwner, input: string) => {
+      if (!ownsShell(owner)) return false;
+      ShellExecutionService.writeToPty(owner.pid, input);
+      return true;
+    },
+    [ownsShell],
+  );
+  const resizeShell = useCallback(
+    (owner: ForegroundShellOwner, columns: number, rows: number) => {
+      if (!ownsShell(owner)) return false;
+      ShellExecutionService.resizePty(owner.pid, columns, rows);
+      return true;
+    },
+    [ownsShell],
+  );
+  const scrollShell = useCallback(
+    (owner: ForegroundShellOwner, lines: number) => {
+      if (!ownsShell(owner)) return false;
+      ShellExecutionService.scrollPty(owner.pid, lines);
+      return true;
+    },
+    [ownsShell],
+  );
+
   const setBusy = useCallback((busy: boolean) => {
     if (streamingRef.current === busy) return;
     streamingRef.current = busy;
@@ -204,52 +451,321 @@ export function useOpenTuiLiveTurn(
   }, []);
 
   const apply = useCallback((ev: OpenTuiStreamEvent) => {
-    setItems((prev) => foldLiveEvent(prev, ev));
+    if (!mountedRef.current) return;
+    itemsRef.current = foldLiveEvent(itemsRef.current, ev);
+    setItems(itemsRef.current);
+    return itemsRef.current;
   }, []);
 
-  const pushQueue = useCallback((text: string) => {
-    queueRef.current.push(text);
-    setQueueLength(queueRef.current.length);
-  }, []);
+  const pushQueue = useCallback(
+    (submission: QueuedSubmission) => {
+      queueRef.current.push(submission);
+      syncQueue();
+    },
+    [syncQueue],
+  );
 
-  const drainQueue = useCallback((): string[] => {
-    const drained = queueRef.current;
-    queueRef.current = [];
-    setQueueLength(0);
+  const drainQueue = useCallback((): OpenTuiSteeringSubmission[] => {
+    const drained = queueRef.current.filter((entry) => !entry.deferUntilIdle);
+    queueRef.current = queueRef.current.filter((entry) => entry.deferUntilIdle);
+    syncQueue();
     return drained;
-  }, []);
+  }, [syncQueue]);
 
-  const restoreQueue = useCallback((texts: readonly string[]) => {
-    const restored = texts.map((text) => text.trim()).filter(Boolean);
-    if (restored.length === 0) return;
-    queueRef.current = [...restored, ...queueRef.current];
-    setQueueLength(queueRef.current.length);
-  }, []);
+  const restoreQueue = useCallback(
+    (submissions: readonly OpenTuiSteeringSubmission[]) => {
+      if (submissions.length === 0) return;
+      queueRef.current = [...submissions, ...queueRef.current];
+      syncQueue();
+    },
+    [syncQueue],
+  );
+
+  const popQueue = useCallback((): OpenTuiInputSubmission | null => {
+    const entries = queueRef.current.filter((entry) => !entry.generated);
+    if (entries.length === 0) return null;
+    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
+    // blank line, not a single newline. Generated command payloads cannot
+    // be reconstructed as editable composer text, so they remain queued.
+    queueRef.current = queueRef.current.filter((entry) => entry.generated);
+    syncQueue();
+    return restoreInputSubmissions(entries);
+  }, [syncQueue]);
+
+  // A typed prompt the Mods' prompt.submit hooks hear, may hear once they
+  // finish loading, or that Mods which failed to load refuse; until then it
+  // has no row. Slash-form text keeps its own path, as it does in ink.
+  const hooksHear = useCallback(
+    (
+      entry: Pick<
+        OpenTuiInputSubmission,
+        'text' | 'displayText' | 'imagePaths'
+      >,
+    ) => {
+      const mods = getInteractiveModSession(config);
+      return (
+        (mods?.hearsPrompts === true ||
+          mods?.starting === true ||
+          mods?.failed === true) &&
+        !isSlashForm(entry)
+      );
+    },
+    [config],
+  );
 
   const runTurn = useCallback(
     async (
       prompt: PartListUnion,
       promptId: string,
       turnOptions?: OpenTuiSubmitOptions,
+      editablePrompt?: OpenTuiInputSubmission,
+      retry?: PreparedLiveRequest,
+      held = false,
     ) => {
       const seq = ++turnSeqRef.current;
+      const active: NonNullable<typeof activeTurnRef.current> = {
+        seq,
+        prompt: editablePrompt,
+        toolStarted: turnOptions?.toolCall !== undefined,
+        meaningfulContent: false,
+        canUndoLog: Boolean(editablePrompt && logger),
+        held: held && editablePrompt !== undefined,
+      };
+      activeTurnRef.current = active;
       const abort = new AbortController();
       abortRef.current = abort;
+      // The Mods hear the turn from its admission to its end below.
+      const mods = getInteractiveModSession(config);
+      let modTurn: ModTurn | undefined;
+      let modEnded = false;
+      // Declining every tool ends the turn as a cancel, as it does in ink.
+      let toolsCancelled = false;
       // A runTurn is a new user query, so the counter restarts; tool-result
       // continuations happen inside this same loop and keep accumulating.
       streamingCharsRef.current = 0;
       setReceiving(false);
       setBusy(true);
+      let prepared: PreparedLiveRequest | undefined;
+      let failed = false;
+      failedRequestRef.current = null;
+      skipRetryDelayRef.current = undefined;
+      let promptContext = turnOptions?.promptContext;
       try {
+        // Every turn but slash-form text waits for the Mods to load, as it
+        // does in ink, so no prompt or steering reaches the model before a
+        // guard can hear it; Mods that failed to load refuse those turns.
+        const slashForm = editablePrompt
+          ? isSlashForm(editablePrompt)
+          : typeof prompt === 'string' && isSlashCommand(prompt.trim());
+        if (mods && !slashForm && (mods.starting || mods.failed)) {
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const onAbort = () => reject(abort.signal.reason);
+              abort.signal.addEventListener('abort', onAbort, { once: true });
+              mods.ready
+                .finally(() =>
+                  abort.signal.removeEventListener('abort', onAbort),
+                )
+                .then(resolve, reject);
+            });
+          } catch (error) {
+            // An abort while waiting; finally hands a held prompt back.
+            if (abort.signal.aborted) throw error;
+            if (seq !== turnSeqRef.current) return;
+            // A session that failed to start before loading the Mods goes on
+            // to the send, which reports its own error.
+            if (mods.failed) {
+              apply({ type: 'error', text: MODS_FAILED_TO_INITIALIZE });
+              // The prompts waiting behind this one would each be refused in
+              // turn, so they come back with it, in the order they were
+              // sent; typed slash-form text stays queued, as no Mod refuses
+              // it. Generated entries cannot be edited back, so they go with
+              // the refusal above.
+              const returned = [
+                ...(active.held && editablePrompt ? [editablePrompt] : []),
+                ...queueRef.current.filter(
+                  (entry) => !entry.generated && !isSlashForm(entry),
+                ),
+              ];
+              active.held = false;
+              queueRef.current = queueRef.current.filter(
+                (entry) => !entry.generated && isSlashForm(entry),
+              );
+              syncQueue();
+              if (returned.length > 0)
+                onPromptReturnedRef.current?.(
+                  returned.length === 1
+                    ? returned[0]
+                    : restoreInputSubmissions(returned),
+                );
+              return;
+            }
+          }
+          if (seq !== turnSeqRef.current || abort.signal.aborted) return;
+        }
+        if (active.held && editablePrompt && mods) {
+          // The Mods hear the prompt before anything shows, records or sends
+          // it; until they answer, the transcript has no row for it.
+          let typed = editablePrompt;
+          const pastes = typed.pasteExpansions ?? new Map<string, string>();
+          const heard = expandPendingPastePlaceholders(
+            typed.displayText ?? typed.text,
+            pastes,
+          );
+          // An abort during the hooks rejects here; finally hands it back.
+          const submitted = await mods.submitPrompt(heard, abort.signal);
+          if (seq !== turnSeqRef.current || abort.signal.aborted) return;
+          active.held = false;
+          // A dropped prompt is neither shown nor recalled, since it may hold
+          // what the hook kept out; the composer gets it back to edit.
+          if ('drop' in submitted) {
+            apply({ type: 'error', text: submitted.drop });
+            onPromptReturnedRef.current?.(typed);
+            return;
+          }
+          promptContext = submitted.context?.length
+            ? submitted.context
+            : undefined;
+          const rewritten = submitted.text.trim();
+          if (rewritten !== heard.trim()) {
+            // Each paste comes back whole to be collapsed and framed again,
+            // or the rewrite is refused rather than sent unframed; attached
+            // images stay attached.
+            const collapsed = collapseRewrite(
+              typed.displayText ?? typed.text,
+              rewritten,
+              pastes,
+            );
+            if (!collapsed) {
+              apply({ type: 'error', text: REWRITE_CHANGED_PASTE });
+              onPromptReturnedRef.current?.(typed);
+              return;
+            }
+            const pasteExpansions = collapsed.pasteExpansions;
+            const modelText = pasteExpansions
+              ? framePasteExpansion(collapsed.text, pasteExpansions)
+              : rewritten;
+            prompt =
+              typeof prompt === 'string'
+                ? modelText
+                : [
+                    { text: modelText },
+                    ...normalizeParts(prompt).filter(
+                      (part) => part.text === undefined,
+                    ),
+                  ];
+            const rewrite = {
+              displayText: collapsed.text,
+              submittedPrompt: collapsed.text,
+              humanInput: typed.humanInput && { text: rewritten },
+              pasteExpansions,
+            };
+            typed = {
+              ...typed,
+              ...rewrite,
+              text: modelText,
+              restoredDraft: undefined,
+            };
+            turnOptions = { ...turnOptions, ...rewrite };
+            editablePrompt = typed;
+            active.prompt = typed;
+          }
+          apply(userRow(typed, promptId));
+        }
+        if (editablePrompt && logger) {
+          await logger.logMessage(
+            MessageSenderType.USER,
+            editablePrompt.displayText ??
+              editablePrompt.submittedPrompt ??
+              editablePrompt.text,
+          );
+        }
+        if (seq !== turnSeqRef.current || abort.signal.aborted) return;
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
+          checkpointHistory: {
+            allocateId: () => allocateCanonicalHistoryId(itemsRef.current),
+            snapshot: () =>
+              snapshotCanonicalHistory(
+                itemsRef.current.filter(
+                  (item) =>
+                    item.canonicalPending !== true &&
+                    !(item.kind === 'assistant' && item.streaming) &&
+                    !(item.kind === 'thinking' && !item.done) &&
+                    !(item.kind === 'tool' && !item.done),
+                ),
+              ),
+          },
+          dualOutput,
           modelOverride: turnOptions?.modelOverride,
+          toolCall: turnOptions?.toolCall,
+          retry,
+          onAcceptedSteering: (messages) => {
+            if (seq !== turnSeqRef.current) return;
+            active.canUndoLog = false;
+            for (const message of messages) {
+              void logger
+                ?.logMessage(MessageSenderType.USER, message)
+                .catch((error: unknown) =>
+                  debugLogger.debug('Could not log steering input', error),
+                );
+            }
+          },
+          onPreparedRequest: (request) => {
+            if (seq === turnSeqRef.current) prepared = request;
+          },
           submittedPrompt: turnOptions?.submittedPrompt,
+          humanInput: turnOptions?.humanInput,
+          promptContext,
+          workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
-          drainSteering: drainQueue,
-          restoreSteering: restoreQueue,
+          isCurrentTurn: () => seq === turnSeqRef.current,
+          ...(mods && {
+            onPromptAdmitted: () => {
+              // A retry, like ink's, has no typed prompt.
+              modTurn = mods.startTurn(
+                retry
+                  ? ''
+                  : (turnOptions?.humanInput?.text ??
+                      turnOptions?.submittedPrompt ??
+                      ''),
+                abort.signal,
+                () => {
+                  if (abort.signal.aborted) return false;
+                  // Ends the turn as Esc does; nothing returns to the composer.
+                  modEnded = true;
+                  abort.abort();
+                  return true;
+                },
+                promptId,
+              );
+            },
+            onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),
+            onToolsCancelled: () => {
+              toolsCancelled = true;
+            },
+          }),
+          // Steering reaches the model mid-turn as no prompt of its own, so
+          // while the Mods hear prompts, may hear them once they load, or
+          // refuse them after a failed load, queued ones wait to become turns.
+          drainSteering: () =>
+            seq === turnSeqRef.current &&
+            !mods?.hearsPrompts &&
+            !mods?.starting &&
+            !mods?.failed
+              ? drainQueue()
+              : [],
+          restoreSteering: (submissions) => {
+            if (seq === turnSeqRef.current) restoreQueue(submissions);
+          },
+          onExecutingShells: (calls) => {
+            if (mountedRef.current && seq === turnSeqRef.current) {
+              updateExecutingShells(abort.signal.aborted ? [] : calls);
+            }
+          },
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
+            active.toolStarted = true;
             setWaitingCalls((prev) =>
               prev.some((c) => c.callId === call.callId)
                 ? prev
@@ -258,9 +774,24 @@ export function useOpenTuiLiveTurn(
           },
         })) {
           if (seq !== turnSeqRef.current) return;
+          if (ev.type === 'retry-countdown')
+            skipRetryDelayRef.current = ev.skipDelay;
+          if (
+            ev.type === 'retry-countdown-clear' ||
+            ev.type === 'error' ||
+            ev.type === 'done'
+          )
+            skipRetryDelayRef.current = undefined;
+          if (ev.type === 'error') failed = true;
           // ink counts model text, thoughts and tool-args JSON toward the
           // token estimate, but only model text means content is arriving.
           // Tool output is tool-generated, so it counts nowhere.
+          if (ev.type === 'tool-start') active.toolStarted = true;
+          if (
+            (ev.type === 'text' && ev.delta.length > 0) ||
+            ev.type === 'image'
+          )
+            active.meaningfulContent = true;
           switch (ev.type) {
             case 'text':
               streamingCharsRef.current += ev.delta.length;
@@ -288,45 +819,180 @@ export function useOpenTuiLiveTurn(
         // the seq guard alone cannot tell them apart — gate on the signal
         // (R6-6). A decline of every confirmation without Esc is a genuinely
         // completed turn and keeps firing.
-        if (seq === turnSeqRef.current && !abort.signal.aborted) {
+        if (seq === turnSeqRef.current && !abort.signal.aborted && !failed) {
           void turnOptions?.onComplete?.().catch(() => {});
         }
       } catch (error) {
+        failed = true;
         if (seq !== turnSeqRef.current) return;
         if (abort.signal.aborted) {
           // Esc: ink settles every open tool as interrupted.
-          setItems((prev) => settleOpenTools([...prev], 'interrupted'));
+          itemsRef.current = settleOpenTools(
+            [...itemsRef.current],
+            'interrupted',
+          );
+          setItems(itemsRef.current);
         } else {
+          apply({ type: 'thinking-end' });
+          apply({ type: 'segment-end' });
           apply({
             type: 'error',
             text: error instanceof Error ? error.message : String(error),
           });
         }
       } finally {
+        void modTurn?.complete(
+          abort.signal.aborted || toolsCancelled
+            ? 'aborted'
+            : failed
+              ? 'error'
+              : undefined,
+        );
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
+          if (abort.signal.aborted) {
+            apply({ type: 'thinking-end' });
+            apply({ type: 'segment-end' });
+          }
+          skipRetryDelayRef.current = undefined;
+          if (failed && prepared && !abort.signal.aborted) {
+            failedRequestRef.current = {
+              request: prepared,
+              promptId,
+              options: turnOptions,
+            };
+          }
+          updateExecutingShells([]);
+          waitingCallsRef.current = [];
+          setWaitingCalls([]);
           setBusy(false);
-          // One queued submission per chained turn: a decline (e.g. an abort
-          // landing inside an @-expansion read) must consume only its own
-          // submission — the rest stay queued for the following boundaries,
-          // matching ink's pop-one-submission-per-settle drain.
-          const rest = queueRef.current;
-          if (rest.length > 0) {
-            const [text, ...remaining] = rest;
-            queueRef.current = remaining;
-            setQueueLength(remaining.length);
-            apply({ type: 'user', text });
-            // ink keeps provenance for a queued submission, and the raw text
-            // is what the stream layer expands `@path` mentions from.
-            void runTurn(text, nextLivePromptId(config), {
-              submittedPrompt: text,
+          if (activeTurnRef.current === active) activeTurnRef.current = null;
+          // An interrupt settles as a cancel whether or not a Mod ended the
+          // turn first; only a Mod's end alone lets the queue go on.
+          if (abort.signal.aborted && (!modEnded || active.interrupted)) {
+            const settled = active.onCancelSettled;
+            let queued = settled ? popQueue() : null;
+            // A prompt the hooks still held was never shown or sent, so it
+            // goes back ahead of the queue and whatever the composer holds.
+            const unheard = active.held ? active.prompt : undefined;
+            if (unheard && settled) {
+              queued = restoreInputSubmissions(
+                queued ? [unheard, queued] : [unheard],
+              );
+            } else if (unheard) {
+              onPromptReturnedRef.current?.(unheard);
+            }
+            queueRef.current = queueRef.current.filter(
+              (entry) => !entry.generated,
+            );
+            syncQueue();
+            const restored = settled?.({
+              kind: 'cancelled',
+              queued,
+              prompt:
+                active.toolStarted || unheard ? null : (active.prompt ?? null),
             });
+            if (
+              restored === true &&
+              !active.toolStarted &&
+              !active.meaningfulContent &&
+              queueRef.current.length === 0
+            ) {
+              const history = itemsRef.current;
+              const index = history.findLastIndex(
+                (item) => item.kind === 'user',
+              );
+              const user = history[index];
+              const onlySynthetic = history
+                .slice(index + 1)
+                .every((item) =>
+                  item.kind === 'info'
+                    ? (item.historyIsSynthetic ?? true)
+                    : [
+                        'error',
+                        'warning',
+                        'retry',
+                        'thinking',
+                        'away-recap',
+                        'stop-hook',
+                      ].includes(item.kind),
+                );
+              if (
+                user?.kind === 'user' &&
+                user.promptId === promptId &&
+                user.text ===
+                  (active.prompt?.displayText ?? active.prompt?.text) &&
+                onlySynthetic
+              ) {
+                itemsRef.current = history.slice(0, index);
+                setItems(itemsRef.current);
+                config
+                  .getLlmClient()
+                  ?.stripOrphanedUserEntriesFromHistory(true);
+                if (active.canUndoLog)
+                  void logger
+                    ?.removeLastUserMessage()
+                    .catch((error: unknown) =>
+                      debugLogger.debug(
+                        'Could not undo cancelled input log',
+                        error,
+                      ),
+                    );
+              }
+            }
+          } else {
+            // A declined read consumes only its own queued submission.
+            // Explicit aborts above never start another turn.
+            const rest = queueRef.current;
+            if (rest.length > 0) {
+              const [entry, ...remaining] = rest;
+              queueRef.current = remaining;
+              syncQueue();
+              const promptId =
+                entry.turnOptions?.promptId ?? nextLivePromptId(config);
+              const heldEntry = !entry.generated && hooksHear(entry);
+              if (!entry.turnOptions?.invocationEchoed && !heldEntry) {
+                apply(userRow(entry, promptId));
+              }
+              // ink keeps provenance for a queued submission, and the raw text
+              // is what the stream layer expands `@path` mentions from.
+              void runTurn(
+                entry.content,
+                promptId,
+                entry.generated
+                  ? entry.turnOptions
+                  : {
+                      ...entry.turnOptions,
+                      humanInput: entry.humanInput,
+                      displayText: entry.displayText,
+                      hasUnknownInput: entry.hasUnknownInput,
+                      pasteExpansions: entry.pasteExpansions,
+                      submittedPrompt: entry.submittedPrompt ?? entry.text,
+                    },
+                entry.generated ? undefined : entry,
+                undefined,
+                heldEntry,
+              );
+            }
           }
         }
       }
     },
-    [config, apply, drainQueue, restoreQueue, setBusy, setReceiving],
+    [
+      config,
+      logger,
+      dualOutput,
+      apply,
+      drainQueue,
+      restoreQueue,
+      setBusy,
+      setReceiving,
+      syncQueue,
+      popQueue,
+      updateExecutingShells,
+      hooksHear,
+    ],
   );
 
   const submit = useCallback(
@@ -334,46 +1000,204 @@ export function useOpenTuiLiveTurn(
       content: PartListUnion,
       imagePaths?: readonly string[],
       options?: OpenTuiSubmitOptions,
-    ) => {
-      const text =
+    ): boolean => {
+      if (!mountedRef.current) return false;
+      let text =
         typeof content === 'string'
           ? content
           : collectText(normalizeParts(content));
-      if (streamingRef.current) {
-        // The steering queue is text-only; say so instead of losing the
-        // attachments without a trace. Per-turn options ride on the queued
-        // text's own submit_prompt, never on the steering drain.
-        if (imagePaths && imagePaths.length > 0) {
-          apply({
-            type: 'warning',
-            text: 'Image attachments cannot be queued mid-turn and were dropped.',
-          });
+      const popped = options?.restoredDraft;
+      if (popped) {
+        options = { ...options };
+        delete options.restoredDraft;
+        const displayText = options.displayText ?? text;
+        if (displayText === popped.displayText) {
+          content = popped.modelText;
+          text = popped.modelText;
+          options = {
+            ...options,
+            displayText: popped.displayText,
+            submittedPrompt: popped.submittedPrompt,
+            humanInput: popped.humanInput,
+            hasUnknownInput: popped.hasUnknownInput,
+            pasteExpansions: popped.pasteExpansions,
+          };
+        } else {
+          if (popped.pasteExpansions?.size && !options.pasteExpansions?.size) {
+            content = expandPendingPastePlaceholders(
+              text,
+              popped.pasteExpansions,
+            );
+            text = content;
+            options.pasteExpansions = popped.pasteExpansions;
+          }
+          if (popped.hasUnknownInput) {
+            options.humanInput = undefined;
+            options.hasUnknownInput = true;
+          }
         }
-        if (text.trim()) pushQueue(text);
-        return;
       }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
       for (const notice of notices) apply({ type: 'warning', text: notice });
+      if (notices.length > 0) return false;
       const prompt: PartListUnion =
-        parts.length > 0 ? [{ text }, ...parts] : content;
-      const promptId = nextLivePromptId(config);
-      if (!options?.invocationEchoed) {
-        apply({ type: 'user', text, promptId, sentToModel: true });
+        parts.length > 0 ? [...normalizeParts(content), ...parts] : content;
+      if (
+        !text.trim() &&
+        normalizeParts(prompt).every((part) => part.text !== undefined)
+      ) {
+        return false;
       }
-      void runTurn(prompt, promptId, options);
+      const generated =
+        options?.invocationEchoed === true ||
+        options?.modelOverride !== undefined ||
+        options?.refreshContextFilesOnWrite !== undefined ||
+        options?.onComplete !== undefined ||
+        (typeof content !== 'string' && options?.submittedPrompt === undefined);
+      const inputMetadata = {
+        displayText: options?.displayText,
+        humanInput: options?.humanInput,
+        hasUnknownInput: options?.hasUnknownInput,
+        pasteExpansions: options?.pasteExpansions,
+      };
+      if (streamingRef.current) {
+        pushQueue({
+          ...inputMetadata,
+          text,
+          content: prompt,
+          imagePaths: imagePaths ? [...imagePaths] : undefined,
+          submittedPrompt: generated
+            ? options?.submittedPrompt
+            : (options?.submittedPrompt ?? text),
+          deferUntilIdle: generated || options?.deferUntilIdle,
+          turnOptions: generated
+            ? options
+            : { ...options, submittedPrompt: options?.submittedPrompt ?? text },
+          generated,
+        });
+        return true;
+      }
+      const promptId = options?.promptId ?? nextLivePromptId(config);
+      const held =
+        !generated &&
+        hooksHear({ text, displayText: options?.displayText, imagePaths });
+      if (!options?.invocationEchoed && !held) {
+        apply(
+          userRow(
+            {
+              text,
+              displayText: options?.displayText,
+              pasteExpansions: options?.pasteExpansions,
+            },
+            promptId,
+          ),
+        );
+      }
+      void runTurn(
+        prompt,
+        promptId,
+        options,
+        generated
+          ? undefined
+          : {
+              ...inputMetadata,
+              text,
+              imagePaths: imagePaths ? [...imagePaths] : undefined,
+              submittedPrompt: options?.submittedPrompt ?? text,
+            },
+        undefined,
+        held,
+      );
+      return true;
     },
-    [config, apply, pushQueue, runTurn],
+    [config, apply, pushQueue, runTurn, hooksHear],
   );
 
-  const interrupt = useCallback(() => {
-    abortRef.current?.abort();
+  const interrupt = useCallback(
+    (onSettled?: OpenTuiCancelSettled) => {
+      skipRetryDelayRef.current = undefined;
+      failedRequestRef.current = null;
+      const active = activeTurnRef.current;
+      if (active && active.seq === turnSeqRef.current) {
+        active.interrupted = true;
+        active.onCancelSettled ??= onSettled;
+        updateExecutingShells([]);
+        abortRef.current?.abort();
+      } else {
+        onSettled?.({ kind: 'cancelled', queued: null, prompt: null });
+      }
+    },
+    [updateExecutingShells],
+  );
+
+  const scheduleTool = useCallback(
+    (
+      name: string,
+      args: Record<string, unknown>,
+      restoreResponseBinding?: RestoreToolResponseBinding,
+    ) => {
+      if (!mountedRef.current || streamingRef.current) return false;
+      void runTurn([], nextLivePromptId(config), {
+        toolCall: {
+          name,
+          args,
+          ...(restoreResponseBinding ? { restoreResponseBinding } : {}),
+        },
+      });
+      return true;
+    },
+    [config, runTurn],
+  );
+
+  const notifyInputProcessed = useCallback(() => {
+    if (activeTurnRef.current) activeTurnRef.current.canUndoLog = false;
   }, []);
+
+  const retryLastPrompt = useCallback(() => {
+    const skip = skipRetryDelayRef.current;
+    if (skip) {
+      skipRetryDelayRef.current = undefined;
+      apply({ type: 'retry-countdown-clear', isContinuation: true });
+      skip();
+      return;
+    }
+    if (streamingRef.current || waitingCallsRef.current.length) return;
+    const failed = failedRequestRef.current;
+    if (!failed) {
+      apply({ type: 'info', text: 'No failed request to retry.' });
+      return;
+    }
+    let request = failed.request;
+    if (request.inlineModelOverride) {
+      request = {
+        ...request,
+        modelOverride: undefined,
+        inlineModelOverride: false,
+      };
+      apply({
+        type: 'info',
+        text: `Inline model override cleared on retry — retrying on the session model (${config.getModel()}).`,
+      });
+    }
+    void runTurn(
+      request.content,
+      failed.promptId,
+      failed.options,
+      undefined,
+      request,
+    );
+  }, [apply, config, runTurn]);
 
   const resetTranscript = useCallback(
     (events: readonly OpenTuiStreamEvent[]) => {
-      // Invalidate the in-flight generation first: its late events and
-      // settles are dead on arrival (P2-2).
+      const onReset = activeTurnRef.current?.onCancelSettled;
+      skipRetryDelayRef.current = undefined;
+      failedRequestRef.current = null;
+      // Commit the accepted partial before invalidating its generation; a late
+      // finally must not finalize the successor adapter.
+      dualOutput?.finalizeAssistantMessage();
       turnSeqRef.current += 1;
+      activeTurnRef.current = null;
       const abort = abortRef.current;
       abortRef.current = null;
       // Settle parked confirmations as Cancel so the scheduler's queue wakes
@@ -386,32 +1210,63 @@ export function useOpenTuiLiveTurn(
           .catch(() => {});
       }
       abort?.abort();
+      updateExecutingShells([]);
       queueRef.current = [];
-      setQueueLength(0);
+      syncQueue();
       waitingCallsRef.current = [];
       setWaitingCalls([]);
       // Synchronous: a submit right after the reset must start a fresh turn,
       // not land in the dying one's queue.
       setBusy(false);
-      setItems(foldBatch(events));
+      itemsRef.current = foldBatch(events);
+      setItems(itemsRef.current);
+      onReset?.({ kind: 'reset' });
     },
-    [setBusy],
+    [dualOutput, setBusy, syncQueue, updateExecutingShells],
+  );
+
+  const rewindTranscript = useCallback(
+    (userId: string) => {
+      const index = itemsRef.current.findIndex((item) => item.id === userId);
+      if (index < 0) return;
+      const retained = itemsRef.current
+        .slice(0, index)
+        .filter((item) => item.display?.kind !== 'collapse-summary')
+        .map(stripSuppressOnRestore);
+      resetTranscript([]);
+      itemsRef.current = retained;
+      setItems(retained);
+      return retained;
+    },
+    [resetTranscript],
+  );
+
+  const isCurrentHistory = useCallback(
+    (snapshot: readonly LiveHistoryItem[]) =>
+      mountedRef.current &&
+      !streamingRef.current &&
+      itemsRef.current === snapshot,
+    [],
   );
 
   const settleWaitingCall = useCallback((callId: string) => {
     setWaitingCalls((prev) => prev.filter((c) => c.callId !== callId));
   }, []);
 
-  const popQueue = useCallback((): string | null => {
-    if (queueRef.current.length === 0) return null;
-    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
-    // blank line, not a single newline. ink's peer/slash queue filters have no
-    // counterpart here — this queue only ever holds plain composer text
-    // (slash commands defer in the shell instead of queueing).
-    return drainQueue().join('\n\n');
-  }, [drainQueue]);
-
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      executingShellsRef.current = [];
+      skipRetryDelayRef.current = undefined;
+      failedRequestRef.current = null;
+      dualOutput?.finalizeAssistantMessage();
+      turnSeqRef.current += 1;
+      activeTurnRef.current = null;
+      queueRef.current = [];
+      abortRef.current?.abort();
+    };
+  }, [dualOutput]);
 
   return {
     items,
@@ -419,10 +1274,20 @@ export function useOpenTuiLiveTurn(
     streamingCharsRef,
     isReceivingContent,
     waitingCalls,
-    queueLength,
+    foregroundShell: getForegroundShell(),
+    promoteShellToBackground,
+    writeShellInput,
+    resizeShell,
+    scrollShell,
+    messageQueue: queue,
     popQueue,
     submit,
     interrupt,
+    retryLastPrompt,
+    notifyInputProcessed,
+    scheduleTool,
+    isCurrentHistory,
+    rewindTranscript,
     resetTranscript,
     applyEvent: apply,
     settleWaitingCall,

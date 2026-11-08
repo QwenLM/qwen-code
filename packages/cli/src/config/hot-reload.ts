@@ -347,12 +347,33 @@ export function registerModelProvidersHotReload(
       // providers gate skips every later unchanged event — without a retry
       // flag the half-applied state (registry reloaded, active client stale)
       // would persist until another modelProviders edit or a restart.
+      const alreadyPending = refreshAuthRetryPending;
       refreshAuthRetryPending = true;
+      // Keep the full stack on the debug channel for diagnosis…
       modelProvidersDebugLogger.error(
         `refreshAuth after modelProviders reload threw: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
       );
+      // …but also surface a concise, user-visible notice, mirroring the MCP
+      // listener above: `debugLogger.error` only shows under `--debug`, so
+      // e.g. a `wireApi` edit on the active model (the registry now holds it
+      // under the other route, and refreshing the old route rejects) would
+      // otherwise silently leave the session on the stale client. This does
+      // NOT auto-resolve or switch routes — a running session must never
+      // change APIs unasked; the user selects the new route explicitly.
+      // Emit once per failure episode: the retry flag re-enters this catch on
+      // every later settings event while the failure persists, and repeating
+      // the same notice on each unrelated edit would only be noise. A
+      // successful retry clears the flag, so a later fresh failure re-emits.
+      if (!alreadyPending) {
+        appEvents.emit(
+          AppEvent.LogError,
+          `Model provider settings reloaded, but re-authenticating the active model failed: ${
+            err instanceof Error ? err.message : String(err)
+          }. Select a model with /model or restart to apply the change.`,
+        );
+      }
     }
   };
   // Reconcile once at registration: the watcher is armed before

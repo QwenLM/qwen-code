@@ -7,11 +7,12 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
   HookEventName,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -22,6 +23,8 @@ import {
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
+import { advertisedMaxSessions } from '../serve/server/serve-features.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
@@ -30,7 +33,70 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('defaults regular subagents to background execution and requires a restart', () => {
+    expect(
+      getSettingsSchema().agents.properties.defaultBackground,
+    ).toMatchObject({
+      type: 'boolean',
+      default: true,
+      requiresRestart: true,
+      showInDialog: false,
+    });
+  });
+
+  it('exposes a default-on Generated UI setting that requires restarting its owner', () => {
+    expect(
+      getSettingsSchema().experimental.properties.generatedUi,
+    ).toMatchObject({
+      type: 'boolean',
+      default: true,
+      category: 'Experimental',
+      requiresRestart: true,
+      showInDialog: true,
+    });
+  });
+
+  it('declares a replace-only Web Shell approval mode allowlist', () => {
+    const { allowedApprovalModes } = getSettingsSchema().ui.properties;
+    expect(allowedApprovalModes).toMatchObject({
+      type: 'array',
+      default: undefined,
+      mergeStrategy: MergeStrategy.REPLACE,
+      showInDialog: false,
+      items: {
+        type: 'string',
+        // Pinned to the SDK vocabulary rather than restated as a literal, so
+        // a permission mode added there without this schema following turns
+        // this assertion red instead of shipping a stale editor enum.
+        enum: DAEMON_APPROVAL_MODES.filter((mode) => mode !== 'plan'),
+      },
+    });
+    // The key is workspace-restricted; the description is the only in-editor
+    // signal, so it must say so (mirrored verbatim into the VSCode schema).
+    expect(allowedApprovalModes.description).toMatch(
+      /values set in Workspace settings are ignored/,
+    );
+  });
+
   describe('getSettingsSchema', () => {
+    it('declares the operator-scoped model catalog refresh switch', () => {
+      expect(getSettingsSchema().model.properties.catalogRefresh).toMatchObject(
+        {
+          type: 'boolean',
+          default: true,
+          requiresRestart: true,
+          showInDialog: false,
+        },
+      );
+      expect(
+        getSettingsSchema().model.properties.catalogRefresh.description,
+      ).toMatch(/values set in Workspace settings are ignored/);
+      expect(
+        getSettingsSchema().privacy.properties.usageStatisticsEnabled
+          .description,
+      ).toMatch(/also stops the models.dev catalog refresh/);
+    });
+
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =
         getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
@@ -231,6 +297,14 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should warn that an execution sandbox refuses the LSP setting', () => {
+      const description =
+        getSettingsSchema().tools.properties.lspEnabled?.description ?? '';
+
+      expect(description).toContain('tools.executionSandbox');
+      expect(description).toContain('--safe-mode');
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties
@@ -257,6 +331,50 @@ describe('SettingsSchema', () => {
         getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
       ).toEqual({
         anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
+    // Type and bounds mirror resolveWebSearchTimeoutMs, which accepts only
+    // whole numbers in range: without them the write paths accept values the
+    // runtime silently replaces with the default. The maximum is core's
+    // constant so the schema cannot drift from the runtime contract.
+    it('should bound tools.webSearch.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
+        showInDialog: true,
+      });
+    });
+
+    it('should bound tools.webSearch.maxPerSession to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.maxPerSession,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
+    // The bundled Mem0 runtime validates this same field with its own zod copy
+    // (mem0-settings.ts `int().min(1).max(30_000).default(5000)`, pinned by
+    // mem0-settings.test.ts). Neither copy is derived from the other, so both
+    // are asserted against the documented contract in
+    // docs/users/features/mem0.md: drifting either one turns a test red.
+    it('should bound memory.mem0.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().memory.properties.mem0.jsonSchemaOverride
+          ?.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: 30_000,
+        default: 5000,
       });
     });
 
@@ -316,8 +434,8 @@ describe('SettingsSchema', () => {
       expect(advisorModel.type).toBe('string');
       expect(advisorModel.category).toBe('Model');
       expect(advisorModel.default).toBe('');
-      expect(advisorModel.requiresRestart).toBe(false);
-      expect(advisorModel.showInDialog).toBe(true);
+      expect(advisorModel.requiresRestart).toBe(true);
+      expect(advisorModel.showInDialog).toBe(false);
     });
 
     it('should define the built-in Explore model setting', () => {
@@ -331,14 +449,16 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
-    it('should keep cross-session messaging off by default', () => {
-      // The default is the entire security posture of the feature: shipping
-      // it flipped on would open every session on the box to peer messages.
+    it('should keep cross-session messaging on by default', () => {
+      // On by default since docs/design/2026-09-14-cross-session-messaging-default-on.md.
+      // This value is not what bounds a peer: the inbound gate is (review-class
+      // parity, an explicit hold or refuse), with the tighten-only workspace
+      // ranking and the per-session inbox token around it.
       const crossSessionMessaging =
         getSettingsSchema().agents.properties.crossSessionMessaging;
 
       expect(crossSessionMessaging.type).toBe('boolean');
-      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.default).toBe(true);
       expect(crossSessionMessaging.requiresRestart).toBe(true);
       expect(crossSessionMessaging.showInDialog).toBe(false);
     });
@@ -416,7 +536,8 @@ describe('SettingsSchema', () => {
       expect(timeout.category).toBe('Model');
       expect(timeout.default).toBeUndefined();
       expect(timeout.minimum).toBe(1);
-      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.maximum).toBe(900);
+      expect(timeout.description).toMatch(/^Deprecated\./);
       expect(timeout.requiresRestart).toBe(false);
       expect(timeout.showInDialog).toBe(false);
     });
@@ -448,6 +569,18 @@ describe('SettingsSchema', () => {
 
       expect(model.maxSessionTurns.type).toBe('integer');
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
+    it('should define model.loopProtection with warn as the default', () => {
+      const loopProtection =
+        getSettingsSchema().model.properties.loopProtection;
+
+      expect(loopProtection).toMatchObject({ type: 'enum', default: 'warn' });
+      expect(loopProtection.options?.map((option) => option.value)).toEqual([
+        'warn',
+        'stop',
+        'off',
+      ]);
     });
 
     it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
@@ -646,6 +779,9 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().security.properties.auth.showInDialog).toBe(
         false,
       );
+      expect(getSettingsSchema().tools.properties.freeform.showInDialog).toBe(
+        false,
+      );
       expect(getSettingsSchema().permissions.showInDialog).toBe(false);
       expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
       expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
@@ -720,6 +856,17 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.requiresRestart).toBe(true);
     });
 
+    it('should have arrowKeysScrollTranscript in ui settings', () => {
+      const arrowKeysScrollTranscript =
+        getSettingsSchema().ui.properties.arrowKeysScrollTranscript;
+      expect(arrowKeysScrollTranscript).toBeDefined();
+      expect(arrowKeysScrollTranscript.type).toBe('boolean');
+      // Default must stay false — bare ↑/↓ are input-history keys.
+      expect(arrowKeysScrollTranscript.default).toBe(false);
+      expect(arrowKeysScrollTranscript.showInDialog).toBe(true);
+      expect(arrowKeysScrollTranscript.requiresRestart).toBe(false);
+    });
+
     it('should expose tool call details as a live UI setting', () => {
       const showToolCallDetails =
         getSettingsSchema().ui.properties.showToolCallDetails;
@@ -752,8 +899,12 @@ describe('SettingsSchema', () => {
       expect(responseTokensPerSecond.requiresRestart).toBe(true);
     });
 
-    it('should pin serve sub-session caps to the runtime defaults', () => {
+    it('should pin serve limits to the runtime defaults', () => {
       const serve = getSettingsSchema().serve.properties;
+      expect(serve.maxSessions.type).toBe('integer');
+      expect(serve.maxSessions.minimum).toBe(0);
+      expect(serve.maxSessions.default).toBe(advertisedMaxSessions(undefined));
+      expect(serve.maxSessions.requiresRestart).toBe(true);
       expect(serve.maxConcurrentSubSessionsPerCaller.default).toBe(
         MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
       );

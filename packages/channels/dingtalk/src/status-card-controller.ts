@@ -27,7 +27,13 @@ const MAX_RETRY_INTERVAL_MS = 30_000;
 export const CONTENT_LIMIT = 20_000;
 export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
-type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
+type StatusState =
+  | 'Running'
+  | 'Completed'
+  | 'Failed'
+  | 'Stopped'
+  | 'Cancelled'
+  | 'Partial';
 
 interface TerminalIntent {
   content: string;
@@ -130,6 +136,59 @@ export class StatusCardController {
   private disposed = false;
 
   constructor(private readonly options: StatusCardControllerOptions) {}
+
+  async deliverCompletedResult(
+    target: { chatId: string; isGroup: boolean },
+    text: string,
+    sourceLabel?: string,
+    result: { status: string; partial?: boolean } = { status: 'completed' },
+  ): Promise<boolean> {
+    const content = sourceLabel
+      ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n${text}`
+      : text;
+    if (this.disposed || !text.trim() || content.length > CONTENT_LIMIT) {
+      return false;
+    }
+    const state =
+      result.status === 'failed'
+        ? 'Failed'
+        : result.status === 'stopped'
+          ? 'Stopped'
+          : result.status === 'cancelled'
+            ? 'Cancelled'
+            : result.partial || result.status !== 'completed'
+              ? 'Partial'
+              : 'Completed';
+    try {
+      await this.options.client.createAndDeliver({
+        templateId: STATUS_CARD_TEMPLATE_ID,
+        outTrackId: `qwen-result-${randomUUID()}`,
+        target,
+        cardParamMap: this.terminalCardParams(
+          content,
+          [this.statusStateLabel(state), this.options.model?.trim()]
+            .filter(Boolean)
+            .join(' · '),
+        ),
+      });
+      return true;
+    } catch (error) {
+      this.options.onError?.('completed result card', error);
+      return false;
+    }
+  }
+
+  private terminalCardParams(content: string, statusLine: string) {
+    return {
+      blockList: JSON.stringify([{ type: 0, markdown: content }]),
+      content,
+      copy_content: content,
+      flowStatus: 3,
+      statusLine,
+      hasAction: 'false',
+      stop_action: 'false',
+    };
+  }
 
   ensure(
     segment: ChannelOutputSegmentContext,
@@ -292,11 +351,12 @@ export class StatusCardController {
     segmentId: string,
     text: string,
     retainedContent?: (content: string) => string,
+    partial = false,
   ): Promise<boolean> {
     return this.finalize(
       segmentId,
       boundContent(text),
-      'Completed',
+      partial ? 'Partial' : 'Completed',
       false,
       retainedContent,
     );
@@ -593,20 +653,10 @@ export class StatusCardController {
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
-        cardParamMap: {
-          blockList: JSON.stringify([
-            {
-              type: 0,
-              markdown: intent.content,
-            },
-          ]),
-          content: intent.content,
-          copy_content: intent.content,
-          flowStatus: 3,
-          statusLine: intent.statusLine,
-          hasAction: 'false',
-          stop_action: 'false',
-        },
+        cardParamMap: this.terminalCardParams(
+          intent.content,
+          intent.statusLine,
+        ),
       });
       record.content = '';
       this.removeRecord(record);
@@ -742,6 +792,7 @@ export class StatusCardController {
         Failed: '已失败',
         Stopped: '已终止',
         Cancelled: '已取消',
+        Partial: '部分结果',
       }[state] ?? state
     );
   }

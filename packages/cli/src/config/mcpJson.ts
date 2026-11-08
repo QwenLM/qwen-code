@@ -13,6 +13,8 @@ import {
 import stripJsonComments from 'strip-json-comments';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import { getHomeEnvFallbackVars } from './home-env-fallback.js';
+import { readConfigFile } from './read-config-file.js';
+import { stripUtf8Bom } from './execution-sandbox-settings.js';
 
 /** Project-scoped MCP config filename, read from the workspace root. */
 export const PROJECT_MCP_FILENAME = '.mcp.json';
@@ -51,28 +53,40 @@ export interface LoadProjectMcpServersResult {
  * it behind approval. It never spawns a process, opens a transport, or
  * runs a health check. A missing file is normal (returns empty); a
  * malformed file is reported via `errors` and otherwise ignored so it can
- * never crash startup.
+ * never crash startup. With `strict`, only a truly absent file counts as
+ * none: an unreadable file is reported via `errors` too.
  */
 export function loadProjectMcpServers(
   projectRoot: string,
+  options: { strict?: boolean } = {},
 ): LoadProjectMcpServersResult {
   const filePath = path.join(projectRoot, PROJECT_MCP_FILENAME);
-  let raw: string;
+
+  let raw: string | undefined;
   try {
-    raw = fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    // Missing/unreadable file is the common case — not an error.
+    raw = options.strict
+      ? readConfigFile(filePath)
+      : fs.readFileSync(filePath, 'utf-8');
+  } catch (e) {
+    // Without strict, a missing or unreadable file is the common case — not
+    // an error.
+    if (!options.strict) {
+      return { servers: {}, literalServers: {}, path: undefined, errors: [] };
+    }
     return {
       servers: {},
       literalServers: {},
-      path: undefined,
-      errors: [],
+      path: filePath,
+      errors: [`Failed to read ${filePath}: ${(e as Error).message}`],
     };
+  }
+  if (raw === undefined) {
+    return { servers: {}, literalServers: {}, path: undefined, errors: [] };
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(raw));
+    parsed = JSON.parse(stripJsonComments(stripUtf8Bom(raw)));
   } catch (e) {
     return {
       servers: {},

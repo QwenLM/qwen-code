@@ -12,6 +12,7 @@ import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
 import insertIconUrl from '../assets/icons/insert.svg';
 import queueIconUrl from '../assets/icons/queue.svg';
+import sendNowIconUrl from '../assets/icons/send-now.svg';
 import type { getTranslator } from '../i18n';
 import { isCommandPrompt } from '../utils/localCommandQueue';
 import {
@@ -134,6 +135,23 @@ export interface QueuedPrompt {
   onAdmitted?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
+  /**
+   * The pending-prompts refresh sequence at the moment a submit body bound
+   * this row to `serverPromptId`; a bind the sync performed itself leaves it
+   * unset. A flight dispatched before that binding may have been served
+   * before the daemon admitted the prompt, so its snapshot can omit the row
+   * without the row having been removed: the sync's retention filter keeps a
+   * row bound at or after that flight's dispatch.
+   */
+  boundAtSeq?: number;
+  /**
+   * Provenance, not state: the daemon refused this message once with
+   * `session_idle`. A row carrying it is confirmed against a pending-prompt
+   * snapshot when it is eventually submitted — immediately, or later when a
+   * hold lifts and the drain releases it — instead of being echoed on the
+   * activity mirror's say-so, which another client's queued prompt can lag.
+   */
+  resubmittedAfterIdleRejection?: boolean;
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
   midTurnFailedAction?: 'delete' | 'edit';
@@ -148,8 +166,10 @@ export function QueuedPromptDisplay({
   t,
   canMutateMidTurn = false,
   canInsertMidTurn = true,
+  canSendMidTurnNow = false,
   onDelete,
   onInsert,
+  onSendNow,
   onEdit,
   onImagePreview,
   onAttachmentPreview,
@@ -158,8 +178,11 @@ export function QueuedPromptDisplay({
   t: ReturnType<typeof getTranslator>;
   canMutateMidTurn?: boolean;
   canInsertMidTurn?: boolean;
+  /** The daemon can deliver queued mid-turn messages on request. */
+  canSendMidTurnNow?: boolean;
   onDelete: (id: number) => void;
   onInsert: (id: number) => void;
+  onSendNow?: (id: number) => void;
   onEdit: (id: number) => void;
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -221,6 +244,11 @@ export function QueuedPromptDisplay({
           imageCount === 0 &&
           fileCount === 0 &&
           (prompt.inputAnnotations?.length ?? 0) === 0;
+        const canSendNow =
+          canSendMidTurnNow &&
+          onSendNow !== undefined &&
+          prompt.midTurnState === 'queued' &&
+          prompt.midTurnMessageId !== undefined;
         const hasStateSpinner =
           isSubmitting ||
           prompt.midTurnState === 'submitting' ||
@@ -235,13 +263,19 @@ export function QueuedPromptDisplay({
           isRemoving ||
           isInserting;
         const isEditDisabled = isBusy || isSummaryOnly;
+        const isDeleteDisabled =
+          isRunning ||
+          isMidTurnLocked ||
+          prompt.isEditing === true ||
+          isRemoving ||
+          isInserting;
         let editTitle = t('queue.editTip');
         if (isEditDisabled) {
           editTitle = isSummaryOnly
             ? t('queue.summaryEditDisabled')
             : t('queue.submittingDisabled');
         }
-        const deleteTitle = isBusy
+        const deleteTitle = isDeleteDisabled
           ? t('queue.submittingDisabled')
           : t('queue.deleteTip');
         return (
@@ -406,11 +440,32 @@ export function QueuedPromptDisplay({
                       {t('queue.insert')}
                     </button>
                   )}
+                  {canSendNow && (
+                    <button
+                      type="button"
+                      className={styles.queuedPromptAction}
+                      onClick={() => onSendNow?.(prompt.id)}
+                      disabled={isBusy}
+                      aria-label={t('queue.sendNow')}
+                      title={
+                        isBusy
+                          ? t('queue.submittingDisabled')
+                          : t('queue.sendNowTip')
+                      }
+                    >
+                      <span
+                        className={styles.queuedPromptActionIcon}
+                        style={cssUrlVar('--queued-icon-url', sendNowIconUrl)}
+                        aria-hidden="true"
+                      />
+                      {t('queue.sendNow')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={styles.queuedPromptAction}
                     onClick={() => onDelete(prompt.id)}
-                    disabled={isBusy}
+                    disabled={isDeleteDisabled}
                     aria-label={t('queue.delete')}
                     title={deleteTitle}
                   >

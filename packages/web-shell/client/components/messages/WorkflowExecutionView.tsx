@@ -22,6 +22,8 @@ import {
   XIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import type { OpenSubagentDetails } from '../../subagentDetailsContext';
+import { useWorkflowAgentDetails } from './workflow-agent-details';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { formatTimestamp } from '../MessageTimestamp';
@@ -238,7 +240,20 @@ function downloadWorkflowHistory(
       exportedAt: new Date().toISOString(),
       runs: runs.map((run) => ({
         id: run.id,
+        toolUseId: run.toolUseId,
         sourceRunId: run.sourceRunId,
+        sourceRef: run.sourceRef,
+        workflowCallsTruncated: run.workflowCallsTruncated,
+        workflowCalls: run.workflowCalls?.map(
+          ({ id, stepId, workflowName, status, startedAt, endedAt }) => ({
+            id,
+            stepId,
+            workflowName,
+            status,
+            startedAt,
+            endedAt,
+          }),
+        ),
         startMode: run.startMode,
         status: run.status,
         startTime: run.startTime,
@@ -256,6 +271,8 @@ function downloadWorkflowHistory(
           ({
             id,
             phaseVisitId,
+            stepId,
+            workflowCallId,
             status,
             dependsOn,
             queuedAt,
@@ -264,6 +281,8 @@ function downloadWorkflowHistory(
           }) => ({
             id,
             phaseVisitId,
+            stepId,
+            workflowCallId,
             status,
             dependsOn,
             queuedAt,
@@ -302,6 +321,7 @@ export function WorkflowExecutionView({
   historyActionBusy = false,
   onDeleteHistory,
   actions,
+  onOpenSubagent,
 }: {
   task: DaemonSessionWorkflowTaskStatus;
   sourceTask?: DaemonSessionWorkflowTaskStatus;
@@ -310,8 +330,10 @@ export function WorkflowExecutionView({
   onDeleteHistory?: (runId: string) => void;
   /** Run controls (pause / stop / rerun …) shown at the end of the metrics strip. */
   actions?: ReactNode;
+  onOpenSubagent?: OpenSubagentDetails;
 }) {
   const { t } = useI18n();
+  const openAgentDetails = useWorkflowAgentDetails(task, onOpenSubagent);
   const markerId = `workflow-arrow-${useId().replaceAll(':', '')}`;
   const [viewportElement, setViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -893,7 +915,10 @@ export function WorkflowExecutionView({
                   data-workflow-approval={approval?.approvalId}
                   data-path-emphasis={pathEmphasis}
                   aria-pressed={dispatch.id === selected?.id}
-                  onClick={() => setSelectedId(dispatch.id)}
+                  onClick={() => {
+                    setSelectedId(dispatch.id);
+                    openAgentDetails(dispatch);
+                  }}
                   onMouseEnter={() => setHoveredDispatchId(dispatch.id)}
                   onMouseLeave={() => setHoveredDispatchId('')}
                   onFocus={() => {

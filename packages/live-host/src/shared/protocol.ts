@@ -150,6 +150,12 @@ export type HostSelfChecks = {
   audioOutput: boolean;
   globalShortcut: boolean;
   appshot: boolean;
+  /**
+   * Browser Hosts only: they answer `host.capture_visual` from a screen the
+   * user shares with the page. This Host captures through Appshot and never
+   * sets it.
+   */
+  screenShare?: boolean;
 };
 
 export type LiveCallState =
@@ -194,11 +200,21 @@ export type LiveStatus = {
       'ready' | 'missing' | 'denied' | 'unavailable' | 'checking'
     >
   >;
-  host?: { version?: string; protocolVersion?: number };
+  host?: {
+    version?: string;
+    protocolVersion?: number;
+    /**
+     * `'browser'` when a Web Shell page holds the Host lease over `/live/web`.
+     * The daemon omits it for this native Host.
+     */
+    kind?: 'native' | 'browser';
+  };
 };
 
 export type HostHello = {
   type: 'host.hello';
+  /** Fixed by the ingress route on the daemon; this Host never sends it. */
+  kind?: 'native';
   displayCaptureV1?: true;
   subagentsV1?: true;
   protocolVersion: number;
