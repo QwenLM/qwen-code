@@ -206,8 +206,8 @@ class ManagedAgentServerIntegrationTest {
         String tenant = "tenant-revision-" + UUID.randomUUID();
         CommandAdmission first = applicationContext
                 .getBean(ManagedAgentService.class).createSession(tenant,
-                        "revision-create", "qwen-code", "1", null, null,
-                        List.of());
+                        "revision-actor", "revision-create", "qwen-code", "1",
+                        null, null, List.of());
         ManagedAgentProperties changed = new ManagedAgentProperties();
         changed.setAgentRevision("2");
         ManagedWorkspaceRegistry workspaces = applicationContext.getBean(
@@ -220,22 +220,25 @@ class ManagedAgentServerIntegrationTest {
                 harness, workspaces, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         CommandAdmission retry = upgraded.createSession(tenant,
-                "revision-create", "qwen-code", "1", null, null, List.of());
+                "revision-actor", "revision-create", "qwen-code", "1", null,
+                null, List.of());
         assertThat(retry.sessionId()).isEqualTo(first.sessionId());
         assertThat(retry.replayed()).isTrue();
         assertThatThrownBy(() -> upgraded.createSession(tenant,
-                "revision-create", "qwen-code", "2", null, null, List.of()))
+                "revision-actor", "revision-create", "qwen-code", "2", null,
+                null, List.of()))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("idempotency_conflict"));
         assertThatThrownBy(() -> upgraded.createSession(tenant,
-                "revision-new", "qwen-code", "1", null, null, List.of()))
+                "revision-actor", "revision-new", "qwen-code", "1", null,
+                null, List.of()))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("unsupported_feature"));
         CommandAdmission omitted = upgraded.createSession(tenant,
-                "revision-omitted", "qwen-code", null, null, null,
-                List.of());
+                "revision-actor", "revision-omitted", "qwen-code", null, null,
+                null, List.of());
         assertThat(store.requireSession(tenant, omitted.sessionId())
                 .agentRevision()).isEqualTo("2");
         assertThat(store.requireSession(tenant, first.sessionId())
