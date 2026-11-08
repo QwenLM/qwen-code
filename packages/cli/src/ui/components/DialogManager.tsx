@@ -69,12 +69,14 @@ import { getReasoningEffortsForConfig } from '../../acp-integration/model-config
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
   terminalWidth: number;
+  statusLineReservedRows?: number;
 }
 
 // Props for DialogManager
 export const DialogManager = ({
   addItem,
   terminalWidth,
+  statusLineReservedRows = STATUS_LINE_COMPOSER_ROWS,
 }: DialogManagerProps) => {
   const config = useConfig();
   const settings = useSettings();
@@ -343,7 +345,7 @@ export const DialogManager = ({
         availableTerminalHeight={Math.max(
           1,
           listDialogHeight -
-            (uiState.constrainHeight ? STATUS_LINE_COMPOSER_ROWS : 0),
+            (uiState.constrainHeight ? statusLineReservedRows : 0),
         )}
       />
     );

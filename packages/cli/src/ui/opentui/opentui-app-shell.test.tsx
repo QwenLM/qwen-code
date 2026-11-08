@@ -133,6 +133,7 @@ const mocks = vi.hoisted(() => {
     hooksAddInfo: null as ((text: string) => void) | null,
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
+    nativeLayoutProps: new WeakMap<object, Record<string, unknown>>(),
     statusLineState: null as StatusLineState | null,
     statusVimMode: undefined as string | undefined,
     worktree: null as null | {
@@ -183,6 +184,13 @@ const mocks = vi.hoisted(() => {
           {
             ...(key === undefined ? {} : { key }),
             'data-p': captured,
+            ref: (node: object | null) => {
+              if (node)
+                state.nativeLayoutProps.set(
+                  node,
+                  props as Record<string, unknown>,
+                );
+            },
           },
           children,
         );
@@ -4809,6 +4817,21 @@ describe('OpenTuiApp transcript scroll region', () => {
       expect(chrome?.textContent).toContain('input-prompt');
       expect(chrome?.textContent).toContain('footer');
       expect(mocks.state.footerProps).not.toBeNull();
+      const measureChrome = async (height: number) => {
+        const props = mocks.state.nativeLayoutProps.get(readLayout().chrome!)!;
+        await act(async () => {
+          (props['ref'] as (node: { height: number }) => void)({ height });
+          (props['onSizeChange'] as () => void)();
+        });
+      };
+      await measureChrome(regionHeight + 13);
+      expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
+        getDialogMaxHeight(24, STATIC_EXTRA_HEIGHT) - 13,
+      );
+      await measureChrome(6 + STATUS_LINE_COMPOSER_ROWS);
+      expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
+        regionHeight,
+      );
     } finally {
       vi.mocked(useTerminalDimensions).mockReturnValue({
         width: 120,

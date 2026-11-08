@@ -60,7 +60,7 @@ import { useWorktreeSession } from '../hooks/useWorktreeSession.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useStatusLineState } from '../hooks/useStatusLine.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
-import { useStatusLinePreviewHeight } from './use-status-line-preview-height.js';
+import { useStatusLinePreviewHeight } from '../hooks/use-status-line-preview-height.js';
 import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {

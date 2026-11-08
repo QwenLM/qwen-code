@@ -37,7 +37,7 @@ import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
 } from '../src/ui/utils/layoutUtils.js';
-import { useStatusLinePreviewHeight } from '../src/ui/opentui/use-status-line-preview-height.js';
+import { useStatusLinePreviewHeight } from '../src/ui/hooks/use-status-line-preview-height.js';
 import { STATUS_LINE_COMPOSER_ROWS } from '../src/ui/status-line-model.js';
 import { statusLineStyledText } from '../src/ui/opentui/status-line-text.js';
 import { dialogAreaWidth } from '../src/ui/opentui/dialogs-shared.js';
@@ -629,6 +629,8 @@ await scenario(
     for (const [width, region] of [
       [24, 1],
       [80, 5],
+      [80, 6],
+      [80, 7],
       [120, 15],
       [80, 16],
       [120, 30],
