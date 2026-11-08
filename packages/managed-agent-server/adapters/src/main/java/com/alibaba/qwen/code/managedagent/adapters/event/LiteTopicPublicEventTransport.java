@@ -17,8 +17,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 
 /**
@@ -55,7 +59,7 @@ public class LiteTopicPublicEventTransport implements EventTransport, Closeable 
     // looked up again, since its journal may appear later. Read and written
     // only by the executor's single thread.
     private final Map<String, String> workspaceCache = new LinkedHashMap<>(
-            16, 0.75f, true) {
+            16, 0.75F, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
             return size() > WORKSPACE_CACHE_SIZE;
@@ -66,10 +70,10 @@ public class LiteTopicPublicEventTransport implements EventTransport, Closeable 
             ClientServiceProvider provider, String topic, ObjectMapper mapper,
             BiFunction<String, String, Optional<String>> workspaces) {
         this(producer, provider, topic, mapper, workspaces,
-                new java.util.concurrent.ThreadPoolExecutor(1, 1, 0, java.util.concurrent.TimeUnit.MILLISECONDS,
-                        new java.util.concurrent.ArrayBlockingQueue<>(QUEUE_CAPACITY),
+                new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(QUEUE_CAPACITY),
                         Thread.ofPlatform().daemon().name("event-transport-public").factory(),
-                        new java.util.concurrent.ThreadPoolExecutor.AbortPolicy()));
+                        new ThreadPoolExecutor.AbortPolicy()));
     }
 
     // The executor is injectable so a test can distribute synchronously.
@@ -88,10 +92,10 @@ public class LiteTopicPublicEventTransport implements EventTransport, Closeable 
     /** Stops the distribution thread; the shared producer is the config's. */
     @Override
     public void close() {
-        if (executor instanceof java.util.concurrent.ExecutorService service) {
+        if (executor instanceof ExecutorService service) {
             service.shutdown();
             try {
-                service.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+                service.awaitTermination(2, TimeUnit.SECONDS);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }

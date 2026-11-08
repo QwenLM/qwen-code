@@ -45,6 +45,10 @@ const packageStyleSheetCache = new WeakMap<
   Document,
   { css: string; sheet: CSSStyleSheet }
 >();
+const adoptedPackageSheets = new WeakMap<
+  ShadowRoot,
+  Map<CSSStyleSheet, { users: number; owned: boolean }>
+>();
 
 function getWebShellStyleText(document: Document): string {
   // The lib build injects one tag per component entry (`index` and
@@ -119,13 +123,45 @@ export function installWebShellShadowStyles(
       (sheet): sheet is CSSStyleSheet => Boolean(sheet),
     );
     if (sheets.length === styles.length && sheets.length > 0) {
+      const ownedPackageSheet =
+        packageSheet !== null &&
+        !shadowRoot.adoptedStyleSheets.includes(packageSheet);
       shadowRoot.adoptedStyleSheets = [
         ...shadowRoot.adoptedStyleSheets,
-        ...sheets,
+        ...sheets.filter(
+          (sheet) => !shadowRoot.adoptedStyleSheets.includes(sheet),
+        ),
       ];
+      if (packageSheet) {
+        let installed = adoptedPackageSheets.get(shadowRoot);
+        if (!installed) {
+          installed = new Map();
+          adoptedPackageSheets.set(shadowRoot, installed);
+        }
+        const existing = installed.get(packageSheet);
+        if (existing) existing.users += 1;
+        else
+          installed.set(packageSheet, {
+            users: 1,
+            owned: ownedPackageSheet,
+          });
+      }
+      let released = false;
       return () => {
+        // The ref count is per install, so a second call would release a
+        // sibling install's reference and strip a still-mounted shell.
+        if (released) return;
+        released = true;
+        const installed = packageSheet
+          ? adoptedPackageSheets.get(shadowRoot)
+          : undefined;
+        const entry = packageSheet ? installed?.get(packageSheet) : undefined;
+        if (entry && --entry.users === 0 && packageSheet)
+          installed?.delete(packageSheet);
         shadowRoot.adoptedStyleSheets = shadowRoot.adoptedStyleSheets.filter(
-          (sheet) => !sheets.includes(sheet),
+          (sheet) =>
+            sheet !== additionalSheet &&
+            !(sheet === packageSheet && entry?.users === 0 && entry.owned),
         );
       };
     }

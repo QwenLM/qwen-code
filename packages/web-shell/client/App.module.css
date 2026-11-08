@@ -720,6 +720,20 @@
   overflow: hidden;
 }
 
+/* Host-mounted managed home has no .appChatEmpty ancestor, so give its
+   empty conversation the same shrink-to-content behavior here. The
+   centered group must exclude the session header, which stays pinned at
+   the top. */
+.chatPane[data-managed-home][data-managed-empty] .content {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.chatPane[data-managed-home][data-managed-empty] {
+  justify-content: center;
+  overflow-y: auto;
+}
+
 /* The chat view (message list + composer) stays mounted while a panel is shown,
    just hidden — so the composer keeps its unsent draft and attachments instead
    of losing them on unmount. */

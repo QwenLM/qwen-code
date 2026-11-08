@@ -214,7 +214,7 @@ class ManagedHookAdmissionIndexTest {
                         event -> {
                             assertThat(event.getLevel()).isEqualTo(Level.WARN);
                             assertThat(event.getThrowableProxy().getMessage())
-                                    .containsIgnoringCase("uq_ma_hook_once");
+                                    .containsIgnoringCase("uk_ma_hook_once");
                         });
         assertThat(
                         jdbc.queryForObject(

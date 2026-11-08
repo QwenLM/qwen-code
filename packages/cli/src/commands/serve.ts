@@ -15,7 +15,11 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
+import {
+  DEFAULT_RING_SIZE,
+  DEFAULT_RING_MAX_BYTES,
+  normalizeMaxRingBytes,
+} from '@qwen-code/acp-bridge/eventBus';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
@@ -250,10 +254,12 @@ interface ServeArgs {
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
+  'event-ring-max-bytes': number;
   'compacted-replay-max-bytes': number;
   'max-journal-events'?: number;
   'max-journal-bytes'?: number;
   workspace?: string | string[];
+  'conversations-dir'?: string;
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -400,6 +406,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
       })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Absolute working-directory root shared by standalone and Live Conversations. Overrides QWEN_CONVERSATIONS_DIR; defaults to ~/Documents/Qwen Code/Conversations.',
+      })
       .option('memory-project-scope', {
         type: 'string',
         choices: MEMORY_PROJECT_SCOPES,
@@ -527,6 +539,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
+        if (Array.isArray(argv['conversations-dir'])) {
+          throw new Error('pass --conversations-dir once.');
+        }
+        normalizeMaxRingBytes(
+          argv['event-ring-max-bytes'] as number | undefined,
+        );
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
@@ -583,6 +601,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
           'Must be a positive finite integer.',
+      })
+      .option('event-ring-max-bytes', {
+        type: 'number',
+        nargs: 1,
+        default: DEFAULT_RING_MAX_BYTES,
+        description:
+          'Per-session retained SSE replay ring byte cap, including the latest full commands snapshot. Must be a positive safe integer up to 256 MiB; no unlimited sentinel.',
       })
       .option('compacted-replay-max-bytes', {
         type: 'number',
@@ -881,7 +906,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           argv.managed ||
           argv.profile !== 'default' ||
           !argv.web ||
-          argv.workspace !== undefined
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined
         ) {
           throw new Error(
             '--managed-web-config cannot be combined with daemon execution or Managed local mode.',
@@ -916,6 +942,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           argv.profile !== 'default' ||
           !argv.web ||
           argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined ||
           argv.token !== undefined ||
           argv['tls-cert'] ||
           argv['tls-key'] ||
@@ -1175,6 +1202,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
+        eventRingMaxBytes: argv['event-ring-max-bytes'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
         ...(argv['max-journal-events'] !== undefined
           ? { maxJournalEvents: argv['max-journal-events'] }
@@ -1183,6 +1211,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { maxJournalBytes: argv['max-journal-bytes'] }
           : {}),
         workspace: argv.workspace,
+        ...(argv['conversations-dir'] !== undefined
+          ? { conversationsDir: argv['conversations-dir'] }
+          : {}),
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }
           : {}),
