@@ -92,6 +92,7 @@ import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/m
 import {
   getManagedExecutionDiagnostics,
   executionDiagnosticDigest,
+  isManagedDiagnosticPath,
   observeManagedToolResponse,
   type ManagedInvocationObservation,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
@@ -1845,6 +1846,20 @@ interface HostedPreparedRequest {
   todo?: boolean;
 }
 
+function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
+  return Boolean(
+    request.agent ||
+      request.message ||
+      request.team ||
+      request.command ||
+      request.planExit ||
+      request.question ||
+      request.skill ||
+      request.todo ||
+      request.workflow,
+  );
+}
+
 const diagnosticResults = new WeakMap<object, 'success'>();
 function convertToFunctionResponse(
   ...args: Parameters<typeof baseFunctionResponse>
@@ -3573,6 +3588,23 @@ export class HostedWorkspaceToolTurn {
   private diagnosticWorkspaceRead?: Promise<void>;
   private diagnosticRejectedRequests?: readonly HostedPreparedRequest[];
 
+  private noteDiagnostic(
+    callId: string,
+    patch: Partial<ManagedInvocationObservation>,
+  ): void {
+    this.diagnosticOverrides.set(callId, {
+      ...this.diagnosticOverrides.get(callId),
+      ...patch,
+    });
+  }
+
+  private resetDiagnosticBatch(): void {
+    this.diagnosticOverrides.clear();
+    this.diagnosticWorkspaceRead = undefined;
+    this.diagnosticWorkspaceContext = undefined;
+    this.diagnosticRejectedRequests = undefined;
+  }
+
   private diagnosticObservation(
     callId: string,
   ): ManagedInvocationObservation | undefined {
@@ -3592,15 +3624,7 @@ export class HostedWorkspaceToolTurn {
       fact.providerCallId = request.call.providerCallId ?? null;
       fact.toolKind = request.mcp
         ? 'mcp'
-        : request.agent ||
-            request.message ||
-            request.team ||
-            request.command ||
-            request.planExit ||
-            request.question ||
-            request.skill ||
-            request.todo ||
-            request.workflow
+        : skipsRuntimeBroker(request)
           ? 'hosted'
           : 'builtin';
       if (request.mcp && request.payloadJson) {
@@ -3624,16 +3648,8 @@ export class HostedWorkspaceToolTurn {
         const raw = request.input['file_path'];
         const path =
           typeof raw === 'string' &&
-          !raw.includes('://') &&
-          !raw.startsWith('/') &&
-          !raw.includes('\\') &&
-          ![...raw].some((character) => {
-            const code = character.codePointAt(0)!;
-            return (
-              code < 32 || code === 127 || (code >= 0xd800 && code <= 0xdfff)
-            );
-          }) &&
-          !raw.split('/').includes('..')
+          isManagedDiagnosticPath(raw) &&
+          !/[\u007f\ud800-\udfff]/u.test(raw)
             ? raw
             : null;
         const cwd = this.diagnosticWorkspaceContext?.cwdRelative;
@@ -3675,12 +3691,7 @@ export class HostedWorkspaceToolTurn {
     model: string,
     identity?: Pick<ChatRecord, 'uuid' | 'timestamp' | 'clientInitiatedSkills'>,
   ): Promise<string> {
-    if (type === 'assistant') {
-      this.diagnosticOverrides.clear();
-      this.diagnosticWorkspaceRead = undefined;
-      this.diagnosticWorkspaceContext = undefined;
-      this.diagnosticRejectedRequests = undefined;
-    }
+    if (type === 'assistant') this.resetDiagnosticBatch();
     const facts =
       type === 'tool_result'
         ? parts.flatMap((part) => {
@@ -3730,7 +3741,7 @@ export class HostedWorkspaceToolTurn {
       if (parts) await this.commit('assistant', parts, model, skillOrigin);
       this.diagnosticRejectedRequests = prepared;
       for (const [index, call] of calls.entries())
-        this.diagnosticOverrides.set(call.callId, {
+        this.noteDiagnostic(call.callId, {
           admission:
             errors[index] === undefined ? 'unknown' : admissions[index],
           execution: 'not_started',
@@ -3748,12 +3759,7 @@ export class HostedWorkspaceToolTurn {
   }
 
   setModelRound(round: number): void {
-    if (round !== this.logicalRound) {
-      this.diagnosticOverrides.clear();
-      this.diagnosticWorkspaceRead = undefined;
-      this.diagnosticWorkspaceContext = undefined;
-      this.diagnosticRejectedRequests = undefined;
-    }
+    if (round !== this.logicalRound) this.resetDiagnosticBatch();
     this.logicalRound = round;
   }
 
@@ -4171,6 +4177,10 @@ export class HostedWorkspaceToolTurn {
         let validationError: string | undefined;
         let validationAdmission: HostedPreparedRequest['validationAdmission'] =
           'invalid';
+        const denied = (message: string) => {
+          validationAdmission = 'denied';
+          return message;
+        };
         let input: Record<string, unknown>;
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
@@ -4208,8 +4218,7 @@ export class HostedWorkspaceToolTurn {
           !planExit &&
           !HOSTED_PUBLIC_PLAN_READS.has(call.name)
         ) {
-          validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
-          validationAdmission = 'denied';
+          validationError = denied(HOSTED_PUBLIC_PLAN_REFUSAL);
           input = { ...call.args };
         } else if (call.name === 'ask_user_question') {
           input = { ...call.args };
@@ -4227,8 +4236,7 @@ export class HostedWorkspaceToolTurn {
         } else if (planExit) {
           input = { ...call.args };
           if (!this.planning) {
-            validationError = 'Plan mode already ended for this Turn.';
-            validationAdmission = 'denied';
+            validationError = denied('Plan mode already ended for this Turn.');
           } else if (
             source.length !== 1 ||
             Object.keys(input).length !== 1 ||
@@ -4247,8 +4255,7 @@ export class HostedWorkspaceToolTurn {
             teamPlanAdmissionsEnabled()
           )
         ) {
-          validationError = hostedPlanModeRefusal();
-          validationAdmission = 'denied';
+          validationError = denied(hostedPlanModeRefusal());
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
@@ -4438,9 +4445,9 @@ export class HostedWorkspaceToolTurn {
           } else if (unsupportedKey !== undefined) {
             validationError = `Hosted Monitor received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
           } else if (!monitorAdmitted) {
-            validationError =
-              'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.';
-            validationAdmission = 'denied';
+            validationError = denied(
+              'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
+            );
           } else if (
             args['description'] !== undefined &&
             typeof args['description'] !== 'string'
@@ -4504,9 +4511,9 @@ export class HostedWorkspaceToolTurn {
               ['true', 'false'].includes(backgroundValue.toLowerCase())
             );
           if (!agentAdmitted) {
-            validationError =
-              'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
-            validationAdmission = 'denied';
+            validationError = denied(
+              'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.',
+            );
           } else if (this.publicChildren && args['isolation'] !== undefined) {
             validationError =
               'Public child agents share this Workspace; isolation is unavailable.';
@@ -4552,8 +4559,9 @@ export class HostedWorkspaceToolTurn {
             !sharedExtensionWorkspace &&
             this.sessionOwnerMayHoldMount()
           ) {
-            validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
-            validationAdmission = 'denied';
+            validationError = denied(
+              `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`,
+            );
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
@@ -4564,8 +4572,9 @@ export class HostedWorkspaceToolTurn {
             // outlives this Turn, so the background and fresh-turn advice
             // here would not release it. Swapping the two arms hands a
             // Session-owned hold advice that cannot act on it.
-            validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
-            validationAdmission = 'denied';
+            validationError = denied(
+              `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`,
+            );
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
@@ -4620,20 +4629,22 @@ export class HostedWorkspaceToolTurn {
               ['true', 'false'].includes(backgroundValue.toLowerCase())
             );
           if (!workflowAdmitted) {
-            validationError =
-              'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.';
-            validationAdmission = 'denied';
+            validationError = denied(
+              'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.',
+            );
           } else if (unsupportedKey !== undefined) {
             validationError = `Hosted workflow received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted workflow run_in_background must be a boolean.';
           } else if (this.sessionOwnerMayHoldMount()) {
-            validationError = `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
-            validationAdmission = 'denied';
+            validationError = denied(
+              `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`,
+            );
           } else if (!agentBackground && this.acquired) {
-            validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
-            validationAdmission = 'denied';
+            validationError = denied(
+              `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`,
+            );
           } else if (
             !agentBackground &&
             calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
@@ -4706,9 +4717,9 @@ export class HostedWorkspaceToolTurn {
           );
           const text = args['message'];
           if (role === undefined) {
-            validationError =
-              'Hosted session messages are unavailable on this Session profile.';
-            validationAdmission = 'denied';
+            validationError = denied(
+              'Hosted session messages are unavailable on this Session profile.',
+            );
           } else if (unsupportedKey !== undefined) {
             validationError =
               role === 'child'
@@ -4735,8 +4746,7 @@ export class HostedWorkspaceToolTurn {
               validationError =
                 'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
             } else if (memberMessageCommand && this.memberPlanMode) {
-              validationError = hostedPlanModeRefusal();
-              validationAdmission = 'denied';
+              validationError = denied(hostedPlanModeRefusal());
             } else if (
               memberMessageCommand &&
               this.memberIdentity?.name !== undefined &&
@@ -5340,18 +5350,7 @@ export class HostedWorkspaceToolTurn {
         // Broker pipeline below. Nor does a session message, a team tool,
         // or a session command, which commit only to this Session's
         // journal.
-        if (
-          request.agent ||
-          request.message ||
-          request.team ||
-          request.command ||
-          request.planExit ||
-          request.question ||
-          request.skill ||
-          request.todo ||
-          request.workflow
-        )
-          continue;
+        if (skipsRuntimeBroker(request)) continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -5467,7 +5466,7 @@ export class HostedWorkspaceToolTurn {
                     ])
                   : undefined;
               if (observation)
-                this.diagnosticOverrides.set(request.call.callId, {
+                this.noteDiagnostic(request.call.callId, {
                   executionCallId,
                 });
               return authority.appendExecutionEvent(
@@ -5529,8 +5528,7 @@ export class HostedWorkspaceToolTurn {
               executionCallId,
               args: request.input,
             });
-            this.diagnosticOverrides.set(request.call.callId, {
-              ...this.diagnosticOverrides.get(request.call.callId),
+            this.noteDiagnostic(request.call.callId, {
               taskId: managedChildTaskId(
                 authority.sessionHeader.sessionKey.sessionId,
                 executionCallId,
@@ -5556,8 +5554,7 @@ export class HostedWorkspaceToolTurn {
               ),
               debounceMs: 1_000,
             });
-            this.diagnosticOverrides.set(request.call.callId, {
-              ...this.diagnosticOverrides.get(request.call.callId),
+            this.noteDiagnostic(request.call.callId, {
               taskId: managedTaskId(
                 managedExtensionRecordKey(
                   authority.sessionHeader.sessionKey.sessionId,
@@ -5816,7 +5813,7 @@ export class HostedWorkspaceToolTurn {
           const success = original.some((part) => diagnosticResults.has(part));
           const fact = this.diagnosticObservation(request.call.callId);
           if (fact?.skill)
-            this.diagnosticOverrides.set(request.call.callId, {
+            this.noteDiagnostic(request.call.callId, {
               execution: success ? 'success' : 'unknown',
               skill: {
                 ...fact.skill,
@@ -6839,7 +6836,7 @@ export class HostedWorkspaceToolTurn {
       return parts;
     };
     if (signal.aborted) {
-      this.diagnosticOverrides.set(request.call.callId, {
+      this.noteDiagnostic(request.call.callId, {
         execution: 'not_started',
       });
       return answer(
@@ -7120,7 +7117,7 @@ export class HostedWorkspaceToolTurn {
     // its abort (a sibling's abandoned wait returned control) must not
     // stamp a new child the cancelled turn never started.
     if (signal.aborted) {
-      this.diagnosticOverrides.set(request.call.callId, {
+      this.noteDiagnostic(request.call.callId, {
         execution: 'not_started',
       });
       const skipped = convertToFunctionErrorResponse(
@@ -7139,7 +7136,7 @@ export class HostedWorkspaceToolTurn {
     const prompt = request.call.args['prompt'] as string;
     const childRunId = this.childRunIdFor(request.call.callId);
     if (!this.agentsAdmitted() && children.record(childRunId) === undefined) {
-      this.diagnosticOverrides.set(request.call.callId, {
+      this.noteDiagnostic(request.call.callId, {
         admission: 'denied',
         execution: 'not_started',
       });
@@ -7177,7 +7174,7 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           if (!(cause instanceof HostedTeamRefusal)) throw cause;
           if (children.record(childRunId) === undefined) {
-            this.diagnosticOverrides.set(request.call.callId, {
+            this.noteDiagnostic(request.call.callId, {
               admission: 'denied',
               execution: 'not_started',
             });
@@ -7292,7 +7289,7 @@ export class HostedWorkspaceToolTurn {
         envelopeBytes,
       });
       if (!admission.admitted) {
-        this.diagnosticOverrides.set(request.call.callId, {
+        this.noteDiagnostic(request.call.callId, {
           admission: admission.reason === 'byte_limit' ? 'invalid' : 'denied',
           execution: 'not_started',
         });
@@ -7356,8 +7353,7 @@ export class HostedWorkspaceToolTurn {
       );
     }
     const taskId = managedChildTaskId(key.sessionId, childRunId);
-    this.diagnosticOverrides.set(request.call.callId, {
-      ...this.diagnosticOverrides.get(request.call.callId),
+    this.noteDiagnostic(request.call.callId, {
       taskId,
     });
     if (member !== undefined && joining) {
@@ -7426,7 +7422,7 @@ export class HostedWorkspaceToolTurn {
     modelMessageId: string,
   ): Promise<Part[]> {
     if (signal.aborted) {
-      this.diagnosticOverrides.set(request.call.callId, {
+      this.noteDiagnostic(request.call.callId, {
         execution: 'not_started',
       });
       const skipped = convertToFunctionErrorResponse(
@@ -7470,7 +7466,7 @@ export class HostedWorkspaceToolTurn {
         envelopeBytes,
       });
       if (!admission.admitted) {
-        this.diagnosticOverrides.set(request.call.callId, {
+        this.noteDiagnostic(request.call.callId, {
           admission: admission.reason === 'byte_limit' ? 'invalid' : 'denied',
           execution: 'not_started',
         });
@@ -7522,8 +7518,7 @@ export class HostedWorkspaceToolTurn {
       );
     }
     const taskId = managedChildTaskId(key.sessionId, childRunId);
-    this.diagnosticOverrides.set(request.call.callId, {
-      ...this.diagnosticOverrides.get(request.call.callId),
+    this.noteDiagnostic(request.call.callId, {
       taskId,
     });
     const started = convertToFunctionResponse(
@@ -7577,7 +7572,7 @@ export class HostedWorkspaceToolTurn {
   ): Promise<Part[]> {
     const { name, callId, args } = request.call;
     if (signal.aborted) {
-      this.diagnosticOverrides.set(request.call.callId, {
+      this.noteDiagnostic(request.call.callId, {
         execution: 'not_started',
       });
       const skipped = convertToFunctionErrorResponse(
@@ -8169,8 +8164,7 @@ export class HostedWorkspaceToolTurn {
     signal: AbortSignal,
     journaled?: ReadonlySet<string>,
   ): Promise<Part[]> {
-    this.diagnosticOverrides.set(request.call.callId, {
-      ...this.diagnosticOverrides.get(request.call.callId),
+    this.noteDiagnostic(request.call.callId, {
       taskId: managedChildTaskId(
         this.session.authority.sessionHeader.sessionKey.sessionId,
         childRunId,

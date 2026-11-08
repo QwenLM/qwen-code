@@ -158,6 +158,16 @@ function invalid(): never {
   throw new ManagedSessionRecordError('Invalid Managed execution diagnostics.');
 }
 
+export function isManagedDiagnosticPath(path: string): boolean {
+  return (
+    !path.startsWith('/') &&
+    !path.includes('\\') &&
+    !path.includes('://') &&
+    !path.split('/').includes('..') &&
+    ![...path].some((character) => character.codePointAt(0)! < 32)
+  );
+}
+
 export function parseManagedExecutionEvidence(
   bytes: Buffer,
 ): ManagedExecutionEvidence {
@@ -237,13 +247,7 @@ export function parseManagedExecutionEvidence(
         !text(file.path, true) ||
         !text(file.cwdRelative, true) ||
         [file.path, file.cwdRelative].some(
-          (path) =>
-            path !== null &&
-            (path.startsWith('/') ||
-              path.includes('\\') ||
-              path.split('/').includes('..') ||
-              path.includes('://') ||
-              [...path].some((character) => character.codePointAt(0)! < 32)),
+          (path) => path !== null && !isManagedDiagnosticPath(path),
         )
       )
         invalid();
