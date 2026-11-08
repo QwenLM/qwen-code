@@ -3114,9 +3114,24 @@ export function createSessionControlPlane(
   /**
    * The additional policy guards shared by automatic teardown paths.
    */
-  function entryIsAutoCloseCandidate(entry: SessionEntry): boolean {
+  function entryIsAutoCloseCandidate(
+    entry: SessionEntry,
+    opts?: { allowChannelSubscribers?: boolean },
+  ): boolean {
     if (!entryCanStartConditionalClose(entry, true)) return false;
-    if (entry.events.subscriberCount > 0) return false;
+    // A channel worker keeps one SSE pump per cached route open. That pump is
+    // not a user watching the session; letting it pin the entry keeps the
+    // workspace at maxSessions after the channel has stopped using it. The
+    // reaper may look past it; the remaining guards below and the child's
+    // conditional-close probe still authorize teardown.
+    if (
+      entry.events.subscriberCount > 0 &&
+      !(
+        opts?.allowChannelSubscribers === true && entry.sourceType === 'channel'
+      )
+    ) {
+      return false;
+    }
     const owner = channelInfoForEntry(entry);
     // A probe the child could not answer is retried on the next snapshot, but
     // not on every snapshot forever: a Session the child can never settle
@@ -4349,7 +4364,13 @@ export function createSessionControlPlane(
         // Shared guards first (`pendingPromptCount` rather than `promptActive`,
         // so queued prompts and the FIFO hand-off gap between two prompts also
         // block the reap), then the reaper's own TTL policy on top.
-        if (!entryIsAutoCloseCandidate(entry)) continue;
+        if (
+          !entryIsAutoCloseCandidate(entry, {
+            allowChannelSubscribers: true,
+          })
+        ) {
+          continue;
+        }
         // Note: clientIds.size is NOT checked here. Close-on-last-detach
         // handles the normal path (client sends detach → immediate close).
         // The reaper covers the crash path where detach was never sent —
@@ -8009,6 +8030,7 @@ export function createSessionControlPlane(
     | 'lifecycleReplayIncomplete'
     | 'lastEventId'
     | 'eventEpoch'
+    | 'replayProjectionWatermark'
     | 'replayDegraded'
     | 'partial'
     | 'replayError'
@@ -8059,6 +8081,9 @@ export function createSessionControlPlane(
         lastEventId: snapshot.lastEventId,
         eventEpoch,
         ...replayStatus,
+        ...(snapshot.replayProjectionWatermark !== undefined
+          ? { replayProjectionWatermark: snapshot.replayProjectionWatermark }
+          : {}),
         ...(snapshot.degraded ? { replayDegraded: true } : {}),
         ...(entry.restoreHistoryHasMore === true
           ? { historyHasMore: true }
@@ -8201,6 +8226,7 @@ export function createSessionControlPlane(
       try {
         const lastEventId = entry.events.lastEventId;
         const eventEpoch = entry.events.epoch;
+        const projectionWatermark = entry.events.replayProjectionWatermark;
         const seenCursors = new Set<string>();
         let emptyPageCount = 0;
         let cursor: string | undefined;
@@ -8240,7 +8266,8 @@ export function createSessionControlPlane(
           !entry.promptActive &&
           !entry.backgroundTurn &&
           entry.events.epoch === eventEpoch &&
-          entry.events.lastEventId === lastEventId
+          entry.events.lastEventId === lastEventId &&
+          entry.events.replayProjectionWatermark === projectionWatermark
         ) {
           let compactedReplay = page.events;
           const turnErrorEvent = entry.turnErrorEvent;
@@ -8540,14 +8567,22 @@ export function createSessionControlPlane(
       );
     }
     const restored = await restoreSessionWithReplay(action, req, options);
-    return action === 'load' &&
-      req.compactedReplayMode === 'summary' &&
-      restored.compactedReplay
-      ? {
-          ...restored,
-          compactedReplay: summarizeReplay(restored.compactedReplay),
-        }
-      : restored;
+    if (
+      action === 'load' &&
+      (req.compactedReplayMode === 'summary' ||
+        req.liveReplayMode === 'summary')
+    ) {
+      const projected = {
+        ...restored,
+        ...(req.compactedReplayMode === 'summary' && restored.compactedReplay
+          ? { compactedReplay: summarizeReplay(restored.compactedReplay) }
+          : {}),
+      };
+      // Coalesced summary waiters can inherit the full owner's fields.
+      delete projected.replayProjectionWatermark;
+      return projected;
+    }
+    return restored;
   }
 
   async function restoreSessionWithReplay(

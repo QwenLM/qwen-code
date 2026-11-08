@@ -749,6 +749,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_github_setup',
   'workspace_github_prs',
   'workspace_git_worktrees',
+  'workspace_git_check_ignore',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -867,6 +868,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_github_setup' &&
       f !== 'workspace_github_prs' &&
       f !== 'workspace_git_worktrees' &&
+      f !== 'workspace_git_check_ignore' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -919,6 +921,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_github_setup',
   'workspace_github_prs',
   'workspace_git_worktrees',
+  'workspace_git_check_ignore',
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',
@@ -958,6 +961,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_session_shell',
   'dynamic_workspace_registration',
   'persistent_workspace_registration',
+  'workspace_order',
   'workspace_display_name',
   'scratch_workspace_registration',
   'git_workspace_clone',
@@ -3980,7 +3984,10 @@ describe('createServeApp', () => {
           ).toContain(feature);
           continue;
         }
-        if (feature === 'persistent_workspace_registration') {
+        if (
+          feature === 'persistent_workspace_registration' ||
+          feature === 'workspace_order'
+        ) {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
           ).toBe(true);
@@ -6034,6 +6041,68 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(managed.body.features).toContain('scheduled_task_session_reuse');
+    });
+
+    it('advertises workspace runtime stop only with the full managed stop wiring', async () => {
+      const bridge = Object.assign(fakeBridge(), {
+        stopWorkspaceRuntime: vi.fn(),
+        getRuntimeStopCompletion: vi.fn(),
+        getRuntimeStopSnapshot: vi.fn(),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const runtimeRemoval = {
+        beginDrain: vi.fn(),
+        cancelDrain: vi.fn(),
+        completeDrain: vi.fn(),
+        disposeRuntime: vi.fn().mockResolvedValue(undefined),
+        getActivity: vi.fn(() => ({
+          pendingSessionStarts: 0,
+          channelWorkers: 0,
+          voiceSessions: 0,
+        })),
+      };
+      const wiredDeps = {
+        bridge,
+        workspaceRegistry,
+        managedChildProcesses: {
+          registry: new ProcessRegistry(),
+          policy: createChildHeapPolicy({
+            budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+            mode: 'admit',
+          }),
+        },
+        workspaceRuntimeRemoval: runtimeRemoval,
+        voiceCoordinator: new WorkspaceVoiceCoordinator(),
+        getSessionBridges: () => [bridge],
+        manageScheduledTaskSessions: true,
+      };
+
+      // Every leg of the boot-time conjunction is present: the capabilities
+      // route must advertise the stop surface from that production wiring.
+      const wired = await request(
+        createServeApp(baseOpts, undefined, wiredDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(wired.body.features).toContain('workspace_runtime_stop');
+
+      // Drop exactly one required leg and the same route must stop
+      // advertising it, so a regression in any single leg is observable.
+      const { manageScheduledTaskSessions: _dropped, ...partialDeps } =
+        wiredDeps;
+      const missingLeg = await request(
+        createServeApp(baseOpts, undefined, partialDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingLeg.body.features).not.toContain('workspace_runtime_stop');
     });
 
     it('refuses scheduled task sessions in the Hosted Harness profile', () => {

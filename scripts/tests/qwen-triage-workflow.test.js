@@ -40,6 +40,10 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
+const triagePublisher = readFileSync(
+  '.github/scripts/triage-publish.mjs',
+  'utf8',
+);
 import {
   ATTRIBUTIONS,
   VERDICTS,
@@ -348,17 +352,25 @@ describe('qwen-triage tmux workflow', () => {
     expect(cleanStep).toContain('mkdir -p "$QWEN_HOME"');
     expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
     expect(cleanStep).toContain('echo "stale agent state cleaned"');
-    expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
+    // The direct launch carries QWEN_HOME in its env -i list; it must stay
+    // the same per-run path the clean step resets.
+    expect(runStep).toContain('"QWEN_HOME=${RUNNER_TEMP:?}/qwen-home"');
   });
 
-  it('pins the action reinstall to the version the job already runs', () => {
+  it('pins the CLI install the direct launch runs', () => {
     expect(workflow).toContain("id: 'ensure_qwen'");
     expect(workflow).toContain(
       'echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"',
     );
-    expect(workflow).toContain(
-      "qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'",
-    );
+    // Install from RUNNER_TEMP with an explicit registry: the persistent
+    // workspace may hold a previous run's tree whose .npmrc npm would read.
+    const ensureStep = step('Ensure qwen CLI');
+    expect(ensureStep).toContain('cd "${RUNNER_TEMP:?}"');
+    expect(ensureStep).toContain('--registry=https://registry.npmjs.org');
+    // The action's reinstall pin is gone with the action; the launch must
+    // use the installed CLI, not reinstall one.
+    expect(workflow).not.toContain('qwen_cli_version');
+    expect(step('Run Qwen Triage')).toContain('command -v qwen');
   });
 
   it('passes triage output through env before bash reads it', () => {
@@ -1107,7 +1119,9 @@ describe('qwen-triage tmux workflow', () => {
     expect(section).toContain('select(.user.login == $bot)');
     expect(section).toContain('startswith($m)');
     expect(section).not.toContain('contains($m)');
-    expect(section).toContain('re-resolve immediately before EACH patch');
+    // Writes are drafts now: the publisher resolves the id at publish time,
+    // so the agent never patches by a remembered id.
+    expect(section).toContain('PUBLISH TIME');
   });
 
   it('keeps the sandboxed-lane recommendation out of the local-only section', () => {
@@ -1161,7 +1175,7 @@ describe('qwen-triage tmux workflow', () => {
     // The assembly order is the other half: a section nothing assembles is
     // as dead as one nobody reads.
     const order = prSkill.slice(
-      prSkill.indexOf('Post a single Stage 2 comment'),
+      prSkill.indexOf('Draft a single Stage 2 comment'),
       prSkill.indexOf('### Stage 3'),
     );
     expect(order).toContain('(2b-bis)');
@@ -1239,16 +1253,21 @@ describe('qwen-triage tmux workflow', () => {
     expect(section).toContain('--paginate');
     expect(section).toContain('DISMISSED');
 
-    // The terminal-gate probe shares the same failure mode: an unpaginated
+    // The terminal-gate dedup shares the same failure mode: an unpaginated
     // read sees only the first 30 reviews, and re-runs land on exactly the
     // heavily-reviewed PRs where the gating review sits on a later page.
+    // Writes are drafts now, so the dedup lives in the publisher — the skill
+    // must delegate to it, and the publisher must keep the paginated,
+    // bot-scoped check.
     const terminalGate = prSkill.slice(
       prSkill.indexOf('Never create duplicates'),
       prSkill.indexOf('**Signature & footer:**'),
     );
-    expect(terminalGate).toContain('--paginate');
-    expect(terminalGate).toContain('.state == "CHANGES_REQUESTED"');
-    expect(terminalGate).not.toContain("--jq '[.[] | select");
+    expect(terminalGate).toContain("publisher's");
+    expect(terminalGate).toContain('CHANGES_REQUESTED');
+    expect(triagePublisher).toContain('--paginate');
+    expect(triagePublisher).toContain('CHANGES_REQUESTED');
+    expect(triagePublisher).toMatch(/user.*login|login.*user/);
   });
 
   it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
@@ -1575,6 +1594,7 @@ describe('qwen-triage verify workflow', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: commentBody,
           ISSUE_AUTHOR: author,
@@ -4108,6 +4128,7 @@ describe('qwen-triage verify hardening round 2', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: commentBody,
           ISSUE_AUTHOR: author,
@@ -4159,6 +4180,7 @@ describe('qwen-triage verify hardening round 2', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: '@qwen-code /verify',
           ISSUE_AUTHOR: '',
@@ -10142,5 +10164,36 @@ describe('stage 1-pre duplicate gate', () => {
     expect(summary).toContain('fully subsumed');
     expect(summary).not.toContain('production delta');
     expect(summary).not.toContain('production diff');
+  });
+});
+
+describe('triage agent-state ownership hand-back (#16616)', () => {
+  const restoreStep = () =>
+    parse(workflow).jobs['triage'].steps.find(
+      (s) => s.name === 'Restore workspace ownership after agent',
+    );
+
+  it('stays the always() tail of the triage job', () => {
+    const steps = parse(workflow).jobs['triage'].steps;
+    expect(steps[steps.length - 1].name).toBe(
+      'Restore workspace ownership after agent',
+    );
+    expect(restoreStep().if).toBe('always()');
+  });
+
+  it('hands back every RUNNER_TEMP path the context step chowned away', () => {
+    // The context step chowns these to node (uid 1000); each one left
+    // node-owned poisons the next host-user job on the shared pool.
+    const run = restoreStep().run;
+    for (const dir of [
+      '"$QWEN_HOME"',
+      '"$RUNNER_TEMP/triage-drafts"',
+      '"$RUNNER_TEMP/triage-results"',
+      '"$RUNNER_TEMP/triage-context"',
+    ]) {
+      expect(run).toContain(dir);
+    }
+    expect(run).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
+    expect(run).toContain('chown -R "$RUNNER_UID:$RUNNER_GID" "$handback"');
   });
 });

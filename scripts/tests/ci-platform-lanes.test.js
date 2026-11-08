@@ -116,8 +116,7 @@ describe('complete macOS test groups', () => {
 // The extended ceilings below, except the test lane's, are scoped to the
 // self-hosted pool: `runs-on` falls back to ubuntu-latest when
 // MAINTAINER_ECS_RUNNER_DISABLED=true (and, for the association-gated lanes,
-// for fork PRs from untrusted authors — lint_and_static reads lint_runner,
-// which routes every PR to the pool), so those hosted paths keep the
+// for untrusted fork PRs with the disposable pool disabled), so hosted paths keep the
 // pre-contention ceiling. The ARM64 fleet renders
 // `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
 // cannot key on the x64 fleet's name. Evaluate the real timeout expression for
@@ -391,8 +390,11 @@ it('reports the required Linux check only when the build and every shard pass', 
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
   expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
-  // On the shards' runners, not a hosted one that can queue it for minutes.
-  expect(gate['runs-on']).toBe(ci.jobs.test['runs-on']);
+  // The gate remains on the original association-gated runner, while test
+  // shards can opt into the disposable pool for untrusted forks.
+  expect(gate['runs-on']).toBe(
+    '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+  );
   expect(condOf('test_ubuntu')).toBe(condOf('test'));
   expect(gate.steps[0].run).toBe(
     'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
@@ -442,6 +444,66 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
     `\${RUNNER_TEMP}/${name}/${name}.tgz`,
   );
 });
+
+it
+  .skipIf(process.platform === 'win32')
+  .each(['test', 'web_shell_e2e_smoke', 'integration_no_ak'])(
+  'refreshes host assets on older PR checkouts in %s',
+  (job) => {
+    const root = mkdtempSync(join(tmpdir(), 'ci-host-assets-'));
+    try {
+      mkdirSync(join(root, 'scripts'));
+      mkdirSync(join(root, 'dist', 'opentui-assets'), { recursive: true });
+      writeFileSync(join(root, 'package.json'), '{"type":"module"}');
+      writeFileSync(
+        join(root, 'scripts', 'ci-build-cache.mjs'),
+        'throw new Error("usage: ci-build-cache.mjs key | build <dir> | pack <dir> | paths");',
+      );
+      writeFileSync(
+        join(root, 'scripts', 'copy_bundle_assets.js'),
+        `import { copyFileSync } from 'node:fs';
+export function copyOpenTuiAssets() {
+  copyFileSync('host-native.so', 'dist/opentui-assets/native.so');
+}
+`,
+      );
+      writeFileSync(join(root, 'host-native.so'), 'consumer-host');
+      writeFileSync(join(root, 'dist', 'cli.js'), 'built-bundle');
+      writeFileSync(
+        join(root, 'dist', 'opentui-assets', 'native.so'),
+        'build-host',
+      );
+      const runnerTemp = join(root, 'runner-temp');
+      const artifact = join(runnerTemp, 'unit-test-tree');
+      mkdirSync(artifact, { recursive: true });
+      execFileSync(
+        'tar',
+        ['-czf', join(artifact, 'unit-test-tree.tgz'), 'dist'],
+        {
+          cwd: root,
+        },
+      );
+      rmSync(join(root, 'dist'), { recursive: true });
+
+      const unpack = ci.jobs[job].steps.find(
+        (step) => step.name === 'Unpack the built tree',
+      );
+      execFileSync('bash', ['-e', '-o', 'pipefail', '-c', unpack.run], {
+        cwd: root,
+        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      });
+
+      expect(readFileSync(join(root, 'dist', 'cli.js'), 'utf8')).toBe(
+        'built-bundle',
+      );
+      expect(
+        readFileSync(join(root, 'dist', 'opentui-assets', 'native.so'), 'utf8'),
+      ).toBe('consumer-host');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
   expect(timeoutMinutesOn('integration_no_ak', ECS_RUNNER)).toBe(60);
@@ -802,15 +864,11 @@ describe('post-merge push lane', () => {
     ).toContain('classify_pr');
   });
 
-  it('keeps test on the association-gated output', () => {
-    // Nothing else reads test's runs-on: switching it to lint_runner would
-    // hand every untrusted fork the pool while the timeout pins above stayed
-    // green — timeoutMinutesOn derives each lane's output from its own
-    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
-    // expression, not an equality with lint_and_static — the two are meant
-    // to differ.
+  it('keeps test on the opt-in disposable output', () => {
+    // The classifier defaults this output to ubuntu_runner, but selects the
+    // disposable pool for untrusted forks only when explicitly enabled.
     expect(String(ci.jobs.test['runs-on'])).toBe(
-      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+      '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || \'["ubuntu-latest"]\') }}',
     );
   });
 
@@ -1910,7 +1968,11 @@ describe('platform lanes — a failing nightly is visible', () => {
     const cond = String(failureIssue.jobs.analyze.if);
     expect(cond).toContain("workflow_run.event == 'schedule'");
     expect(cond).toContain("workflow_run.head_branch == 'main'");
-    expect(cond).toContain("workflow_run.conclusion == 'failure'");
+    // The gate admits failure and timeout-backed cancelled runs (#16272); the
+    // live step discriminates a real timeout from a concurrency supersede.
+    expect(cond).toContain(
+      'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion)',
+    );
   });
 });
 

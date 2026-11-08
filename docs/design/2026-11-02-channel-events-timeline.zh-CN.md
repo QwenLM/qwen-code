@@ -78,6 +78,7 @@
 | `GithubAdapter` 原因过滤                                       | `inbound` / `skipped`，原因 `reason_filter`；单轮超过 20 条后，其余合并为一条带 `detail.filtered` 计数的记录 |
 | `GithubAdapter` 评论通道（`onlyMentioned` 未命中）             | `inbound` / `skipped`，原因 `mention_required`；窗口被保持期间每条评论只记一次                               |
 | `GithubAdapter` 去重命中                                       | `inbound` / `skipped`，原因 `duplicate`；窗口被保持期间每条评论只记一次                                      |
+| `GithubAdapter` 提及 bot 且被编辑过的旧评论                    | `inbound` / `skipped`，原因 `edited_comment`；窗口被保持期间每条评论只记一次                                 |
 | `GithubAdapter` 线程读取失败                                   | `inbound` / `failed`（窗口被保持）或 `skipped`，原因 `github_api_error`；窗口被保持期间节流                  |
 | `GithubAdapter.claimInboundTask`                               | `task` / `accepted`；目标是绑定会话时带 `sessionId`                                                          |
 | `GithubAdapter.transitionInboundTask`                          | `task` / `<state>`，带 `attempts`、`error` 与绑定的 `sessionId`；终态用词由 §5 覆盖                          |
@@ -141,7 +142,7 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 同一条规则也覆盖发生在任何任务被 claim 之前的退休：它们的 `inbound` / `skipped` 行在有待办条目时带上其中冻结的目标。只有溢出退休还会写死信记录；`watch_no_candidate` 与 `no_role_matched` 退休不写死信，skip 行就是事件唯一的痕迹——没有冻结的目标，它就说不出这个被退休的事件是否曾属于某个会话。
 
-**新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`，以及角色感知的两个出口：`bound_no_candidate`（评论的角色在完整快照下失去了匹配——`watch_no_candidate` 的非 watch 兄弟）、`siblings_still_follow`（gone 回退之所以退休，是因为其他角色仍关注该 PR、或投递环里已有该事件，公开回复会重复兄弟角色的私投递）。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`。`retireBoundTask` 的七个调用点里有六个会保留任务、仍可恢复，所以下一轮重试追加——那不是退休。例外是角色感知的公开抑制退休：它先调 `markPrivatelyRetired`，持久化终态 `cancelled`，所以那里追加失败留下的是不可恢复的记录，`failed` 行就是该事件的最后一个词。每一条终态行都写在它所描述的持久化步骤**之后**，因此删除或保存抛错时，不会为一个下一轮还会重跑的事件留下退休声明。
+**新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`，以及角色感知的两个出口：`bound_no_candidate`（评论的角色在完整快照下失去了匹配——`watch_no_candidate` 的非 watch 兄弟）、`siblings_still_follow`（gone 回退之所以退休，是因为其他角色仍关注该 PR、或投递环里已有该事件，公开回复会重复兄弟角色的私投递）。在其它评论会回退到公开路径的地方，只凭 mention 豁免进入绑定路径的评论改为以 `private_only_no_target` 退休，因为这样的评论永远不走公开路径。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`。`retireBoundTask` 的七个调用点里有六个会保留任务、仍可恢复，所以下一轮重试追加——那不是退休。例外是角色感知的公开抑制退休：它先调 `markPrivatelyRetired`，持久化终态 `cancelled`，所以那里追加失败留下的是不可恢复的记录，`failed` 行就是该事件的最后一个词。每一条终态行都写在它所描述的持久化步骤**之后**，因此删除或保存抛错时，不会为一个下一轮还会重跑的事件留下退休声明。
 
 有三处退休发生在任何任务被 claim 之前，因此没有 task 行可收尾，改记 `inbound` / `skipped`：完整快照下已无候选时记 `watch_no_candidate`；按 PR 的待办队列超过上限、最老的事件被未投递退休时记 `watch_pending_overflow`；有关注者但完整的新鲜快照下没有任何角色的模板链匹配该事件时记 `no_role_matched`——这是运维的订阅决策，不是缺席，所以公开路径同样不能回答它。
 
@@ -201,7 +202,7 @@ watch 守卫行还会区分成因。`hasUnreconciledWatchPending()` 在读取错
 
 ## 风险
 
-- 繁忙群渠道的环境消息跳过可能很频繁。日志靠轮转封顶，页面请求最新 200 条事件，没有无界增长。（100 是调用方不带 `limit` 时路由自身的默认值。）但只靠轮转不足以保住窗口的**有用性**：只要还有可恢复的入站任务——`accepted`、`running`，或 `failed` 且仍有重试次数——GitHub 的轮询游标就不前进，于是服务端每轮都返回同一批通知，而被过滤的通知在任何去重之前就被跳过。进行中的回合本身不会造成这一点：轮询循环 `await pollOnce()`，回合进行中根本不会发起新的轮询；真正可达的情形包括：任务失败但仍可重试，或因自身运行中的错误停在 `running`；channel 无法读写任务存储，或无法读取发布审计；GitHub 读取某个线程返回 5xx（最多保持 30 轮）；限流或凭据失败；以及 mark-as-read 持续失败。被保持的窗口每轮都从头重读；遇到限流或凭据失败时，该轮在 GitHub 拒绝的第一个线程处停止。一次真实运行（2 秒轮询 + 一个反复失败的回合）把同一批 300 条被过滤通知反复写入，直到日志轮转，把 accepted/posted 行挤出了页面窗口。因此适配器每轮最多记 20 条 `reason_filter`，其余合并为一条带 `detail.filtered` 的记录，页面把它渲染成计数。对真实适配器实测：15 轮共返回 4500 条通知，只写入 315 行而非 4500 行，且日志没有轮转。该额度按轮计算，因此真正新到的一批仍会被完整描述。窗口被保持时每轮都会重复的记录改为每个窗口只写一次：重新读到的评论的 `duplicate` 或 `mention_required` 跳过，以及因 API 错误被跳过的线程；每个窗口最多跟踪 8192 个不同的键，超出后新的键每轮都会写。失败线程的 `github_api_error` 记录在它本窗口内首个失败轮次以及每第十个失败轮次写入；限流或凭据失败在第一轮和每第十轮写入。
+- 繁忙群渠道的环境消息跳过可能很频繁。日志靠轮转封顶，页面请求最新 200 条事件，没有无界增长。（100 是调用方不带 `limit` 时路由自身的默认值。）但只靠轮转不足以保住窗口的**有用性**：只要还有可恢复的入站任务——`accepted`、`running`，或 `failed` 且仍有重试次数——GitHub 的轮询游标就不前进，于是服务端每轮都返回同一批通知，而被过滤的通知在任何去重之前就被跳过。进行中的回合本身不会造成这一点：轮询循环 `await pollOnce()`，回合进行中根本不会发起新的轮询；真正可达的情形包括：任务失败但仍可重试，或因自身运行中的错误停在 `running`；channel 无法读写任务存储，或无法读取发布审计；GitHub 读取某个线程返回 5xx（最多保持 30 轮）；限流或凭据失败；以及 mark-as-read 持续失败。被保持的窗口每轮都从头重读；遇到限流或凭据失败时，该轮在 GitHub 拒绝的第一个线程处停止。一次真实运行（2 秒轮询 + 一个反复失败的回合）把同一批 300 条被过滤通知反复写入，直到日志轮转，把 accepted/posted 行挤出了页面窗口。因此适配器每轮最多记 20 条 `reason_filter`，其余合并为一条带 `detail.filtered` 的记录，页面把它渲染成计数。对真实适配器实测：15 轮共返回 4500 条通知，只写入 315 行而非 4500 行，且日志没有轮转。该额度按轮计算，因此真正新到的一批仍会被完整描述。窗口被保持时每轮都会重复的记录改为每个窗口只写一次：重新读到的评论的 `duplicate`、`mention_required` 或 `edited_comment` 跳过，以及因 API 错误被跳过的线程；每个窗口最多跟踪 8192 个不同的键，超出后新的键每轮都会写。失败线程的 `github_api_error` 记录在它本窗口内首个失败轮次以及每第十个失败轮次写入；限流或凭据失败在第一轮和每第十轮写入。
 - 同步追加位于消息路径上。记录很小且失败被吞掉；改成异步队列会在崩溃时丢掉最后几条事件，而那时恰恰最需要它们。
 - 路由每次请求都读磁盘。读取以 64 KiB 分块 await、每次请求预算 4 MiB，因此一次轮询会让出事件循环而不是阻塞它；页面仅在标签页可见时每 5 秒轮询一次。
 

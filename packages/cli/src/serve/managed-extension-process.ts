@@ -123,7 +123,13 @@ export class ManagedExtensionProcessOwners {
     readonly args: readonly string[];
     readonly env: NodeJS.ProcessEnv;
     readonly cwd: string;
-  }): Promise<{ ownerId: string; child: ChildProcess }> {
+    readonly prereadOutput?: boolean;
+  }): Promise<{
+    ownerId: string;
+    child: ChildProcess;
+    preread?: { stdout: Buffer[]; stderr: Buffer[]; overflow: boolean };
+    detachPreread?: () => void;
+  }> {
     await this.recovering;
     if (
       !input.sessionId ||
@@ -158,6 +164,47 @@ export class ManagedExtensionProcessOwners {
     );
     child.on('error', () => undefined);
     child.stdio[3]?.on('error', () => undefined);
+    // Capture output from the instant the child exists: the membership wait
+    // below (and the durable save before it) yields the event loop, so a fast
+    // command can write and exit before the caller installs its own listeners.
+    // Attaching here, synchronously after spawn, leaves no window for bytes to
+    // be drained unread; the caller detaches and replays these buffers before
+    // wiring its live capture.
+    let preread:
+      | { stdout: Buffer[]; stderr: Buffer[]; overflow: boolean }
+      | undefined;
+    let detachPreread: (() => void) | undefined;
+    if (input.prereadOutput) {
+      const buffers = {
+        stdout: [] as Buffer[],
+        stderr: [] as Buffer[],
+        overflow: false,
+      };
+      // Bound the preread against the shell's own 1 MiB capture budget. Keep
+      // draining once the budget is spent (the listener stays attached) so the
+      // child never blocks on a full pipe, but flag the overflow so the shell
+      // can report outputCaptureLimitExceeded truthfully instead of silently
+      // dropping bytes.
+      let retained = 0;
+      const capture = (id: 'stdout' | 'stderr') => (chunk: Buffer) => {
+        const remaining = Math.max(0, 1024 * 1024 - retained);
+        if (chunk.length > remaining) buffers.overflow = true;
+        if (remaining) {
+          const prefix = chunk.subarray(0, remaining);
+          buffers[id].push(prefix);
+          retained += prefix.length;
+        }
+      };
+      const onStdout = capture('stdout');
+      const onStderr = capture('stderr');
+      child.stdout?.on('data', onStdout);
+      child.stderr?.on('data', onStderr);
+      preread = buffers;
+      detachPreread = () => {
+        child.stdout?.off('data', onStdout);
+        child.stderr?.off('data', onStderr);
+      };
+    }
     const owner = {
       ownerId,
       sessionId: input.sessionId,
@@ -202,8 +249,22 @@ export class ManagedExtensionProcessOwners {
           `${JSON.stringify({ executable: input.executable, args: input.args, env: input.env })}\n`,
         );
       }
-      return { ownerId, child };
+      return {
+        ownerId,
+        child,
+        ...(preread && detachPreread ? { preread, detachPreread } : {}),
+      };
     } catch (error) {
+      // A failed startup never hands detachPreread to a caller. Release the
+      // early listeners and their buffers here: the stopped child stays in the
+      // owner map, so otherwise child -> listener -> buffer would retain every
+      // preread byte for the lifetime of this instance, accumulating across
+      // repeated failed starts.
+      detachPreread?.();
+      if (preread) {
+        preread.stdout.length = 0;
+        preread.stderr.length = 0;
+      }
       // Unknown cleanup keeps the owner: nobody can reinterpret a failed
       // startup as permission to discard its process identity.
       child.stdio[3]?.destroy();
