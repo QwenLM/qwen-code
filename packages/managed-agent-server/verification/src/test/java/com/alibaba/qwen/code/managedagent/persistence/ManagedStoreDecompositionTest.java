@@ -137,7 +137,7 @@ class ManagedStoreDecompositionTest {
                 claimTurn/5::REQUIRED:DEFAULT:false renewTurn/5::REQUIRED:DEFAULT:false releaseTurnLease/4::REQUIRED:DEFAULT:false
                 markTurnRecoveryBlocked/6::REQUIRED:DEFAULT:false markTurnFailureRecovery/5::REQUIRED:DEFAULT:false requestRecoveryRecheck/3::REQUIRED:DEFAULT:false
                 parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
-                bindHarness/5::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
+                bindHarness/5::REQUIRED:DEFAULT:false bindSessionHarness/3::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
                 withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
                 retractContinuationOutput/6::REQUIRED:DEFAULT:false retractHarnessTurnOutput/7::REQUIRED:DEFAULT:false retractHarnessTurnOutput/10::REQUIRED:DEFAULT:false
                 recordHarnessEvents/6::REQUIRED:DEFAULT:false cancelUnadmittedTurn/4::REQUIRED:DEFAULT:false cancelBeforeAdmission/4::REQUIRED:DEFAULT:false

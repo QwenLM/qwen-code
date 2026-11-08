@@ -269,8 +269,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public StoreModels.SessionLineage findChildLineage(String tenantId,
-            String sessionId) {
+    public StoreModels.SessionLineage findChildLineage(String tenantId, String sessionId) {
         return sessionQueries.findChildLineage(tenantId, sessionId);
     }
 
@@ -476,8 +475,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Set<String> completedWorkspaceCloses(String tenantId,
-            List<String> sessionIds) {
+    public Set<String> completedWorkspaceCloses(String tenantId, List<String> sessionIds) {
         return sessionQueries.completedWorkspaceCloses(tenantId, sessionIds);
     }
 
@@ -638,8 +636,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public boolean hasExecutionRegistryFacts(String tenantId,
-            String sessionId) {
+    public boolean hasExecutionRegistryFacts(String tenantId, String sessionId) {
         return sessionQueries.hasExecutionRegistryFacts(tenantId, sessionId);
     }
 
@@ -742,8 +739,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionCommands.findCommand(tenantId, operation, idempotencyKey);
     }
 
-    public Optional<SessionRecord> findSession(String tenantId,
-            String sessionId) {
+    public Optional<SessionRecord> findSession(String tenantId, String sessionId) {
         return sessionQueries.findSession(tenantId, sessionId);
     }
 
@@ -772,13 +768,11 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionQueries.findLatestLifecycleOperations(tenantId, sessionIds);
     }
 
-    public Optional<TurnRecord> findTurn(String tenantId, String sessionId,
-            String turnId) {
+    public Optional<TurnRecord> findTurn(String tenantId, String sessionId, String turnId) {
         return sessionQueries.findTurn(tenantId, sessionId, turnId);
     }
 
-    public Map<String, TurnSummary> findActiveTurns(String tenantId,
-            List<String> sessionIds) {
+    public Map<String, TurnSummary> findActiveTurns(String tenantId, List<String> sessionIds) {
         return sessionQueries.findActiveTurns(tenantId, sessionIds);
     }
 
@@ -1031,6 +1025,11 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean bindHarness(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId) {
         return turnExecution.bindHarness(tenantId, sessionId, turnId, owner, harnessBootId);
+    }
+
+    @Transactional
+    public void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
+        sessionCommands.bindSessionHarness(tenantId, sessionId, harnessBootId);
     }
 
     @Transactional
