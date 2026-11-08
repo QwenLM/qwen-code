@@ -27,7 +27,11 @@ let listStandaloneSessionsPage: ReturnType<typeof vi.fn>;
 let stableClient: DaemonClient | undefined;
 let onOpen: ReturnType<typeof vi.fn>;
 
-async function render(currentSessionId = 'standalone', refreshPaused = false) {
+async function render(
+  currentSessionId = 'standalone',
+  refreshPaused = false,
+  sessionSource?: 'default' | 'channel' | 'scheduled_task',
+) {
   const client = (stableClient ??= {
     listWorkspaceSessionsPage,
     listStandaloneSessionsPage,
@@ -50,6 +54,7 @@ async function render(currentSessionId = 'standalone', refreshPaused = false) {
         ]}
         includeStandalone
         sourceMetadataEnabled
+        sessionSource={sessionSource}
         organizationEnabled
         currentSessionId={currentSessionId}
         refreshKey={0}
@@ -165,6 +170,36 @@ describe('recent sessions', () => {
       '/project',
       expect.objectContaining({ cursor: 'next' }),
     );
+  });
+
+  it('scopes the recent section to the active source switch', async () => {
+    // A daemon that ignores the sourceType filter: only the client-side
+    // scope may keep the section honest.
+    listWorkspaceSessionsPage.mockImplementation(async (cwd: string) => ({
+      sessions:
+        cwd === '/project'
+          ? [
+              session('default', '2026-10-22'),
+              session('bound', '2026-10-21', {
+                sourceType: 'scheduled_task',
+              }),
+            ]
+          : [],
+    }));
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        session('standalone', '2026-10-23', { sourceType: 'standalone' }),
+      ],
+    });
+    await render('standalone', false, 'scheduled_task');
+    expect(buttons().map((button) => button.title)).toEqual([
+      'bound · project',
+    ]);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith(
+      '/project',
+      expect.objectContaining({ sourceType: 'scheduled_task' }),
+    );
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
   });
 
   it('keeps existing row nodes visible while a session switch refresh is pending', async () => {

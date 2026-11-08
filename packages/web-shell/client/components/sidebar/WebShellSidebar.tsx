@@ -225,7 +225,7 @@ const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
-type SidebarSessionSource = 'default' | 'channel';
+type SidebarSessionSource = 'default' | 'channel' | 'scheduled_task';
 
 interface StandaloneSessionRowAdapter {
   active: boolean;
@@ -1757,7 +1757,7 @@ export function WebShellSidebar({
   // restored expansions.
   const awaitingInitialSessionCatalogBySourceRef = useRef<
     Record<SidebarSessionSource, boolean>
-  >({ default: true, channel: true });
+  >({ default: true, channel: true, scheduled_task: true });
   const [groupsCatalogReady, setGroupsCatalogReady] =
     useState(!organizationEnabled);
   // organizationEnabled can flip true mid-session (capabilities can land after
@@ -1976,10 +1976,10 @@ export function WebShellSidebar({
   );
   const previousRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
-  >({ default: null, channel: null });
+  >({ default: null, channel: null, scheduled_task: null });
   const previousSecondaryRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
-  >({ default: null, channel: null });
+  >({ default: null, channel: null, scheduled_task: null });
   const lastTrackedSessionSourceRef = useRef(sessionSource);
   const autoOpenedContextRef = useRef<string | null>(null);
   const resizeTeardownRef = useRef<((updateState: boolean) => void) | null>(
@@ -6368,16 +6368,25 @@ export function WebShellSidebar({
               className="w-full"
               aria-label={t('sidebar.archiveSessionSource')}
             >
-              <TabsTrigger value="default" className="min-w-0">
+              <TabsTrigger value="default" className="min-w-0 flex-initial">
                 <ListTodoIcon />
                 <span className="min-w-0 truncate">
                   {t('sidebar.sessionSource.tasks')}
                 </span>
               </TabsTrigger>
-              <TabsTrigger value="channel" className="min-w-0">
+              <TabsTrigger value="channel" className="min-w-0 flex-initial">
                 <MessageCircleIcon />
                 <span className="min-w-0 truncate">
                   {t('sidebar.sessionSource.channels')}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="scheduled_task"
+                className="min-w-0 flex-initial"
+              >
+                <CalendarClockIcon />
+                <span className="min-w-0 truncate">
+                  {t('sidebar.sessionSource.scheduledTasks')}
                 </span>
               </TabsTrigger>
             </TabsList>
@@ -7694,16 +7703,31 @@ export function WebShellSidebar({
                       className="w-full"
                       aria-label={t('sidebar.sessionSource')}
                     >
-                      <TabsTrigger value="default" className="min-w-0">
+                      <TabsTrigger
+                        value="default"
+                        className="min-w-0 flex-initial"
+                      >
                         <ListTodoIcon />
                         <span className="min-w-0 truncate">
                           {t('sidebar.sessionSource.tasks')}
                         </span>
                       </TabsTrigger>
-                      <TabsTrigger value="channel" className="min-w-0">
+                      <TabsTrigger
+                        value="channel"
+                        className="min-w-0 flex-initial"
+                      >
                         <MessageCircleIcon />
                         <span className="min-w-0 truncate">
                           {t('sidebar.sessionSource.channels')}
+                        </span>
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="scheduled_task"
+                        className="min-w-0 flex-initial"
+                      >
+                        <CalendarClockIcon />
+                        <span className="min-w-0 truncate">
+                          {t('sidebar.sessionSource.scheduledTasks')}
                         </span>
                       </TabsTrigger>
                     </TabsList>
@@ -8532,6 +8556,7 @@ export function WebShellSidebar({
                     workspaces={projectWorkspaces}
                     includeStandalone={standaloneSessionsVisible}
                     sourceMetadataEnabled={sourceMetadataEnabled}
+                    sessionSource={selectedSessionSource}
                     organizationEnabled={organizationEnabled}
                     currentSessionId={connection.sessionId}
                     refreshKey={
