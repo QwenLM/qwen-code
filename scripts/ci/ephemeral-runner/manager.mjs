@@ -241,6 +241,12 @@ export function createManager(config, dependencies = {}) {
       // unique suffix; accept that legacy shape so a deploy over a running
       // host loads (and then cleans up) its existing slots. The next start()
       // writes the suffixed name.
+      //
+      // This naming scheme is spelled out in three places: here, the
+      // identity-less sweep's `owned` filter, and the label-recovery matcher
+      // below. They must agree — a registration one of them accepts and
+      // another rejects is either leaked or deleted by guesswork — so change
+      // all three together (or lift them into one predicate) rather than one.
       const validRunnerName = (value) =>
         value === runnerName(slot) ||
         (value.startsWith(`${runnerName(slot)}-`) &&
@@ -439,7 +445,10 @@ export function createManager(config, dependencies = {}) {
       else {
         // A registration not reported offline may belong to a live runner
         // outside this host's view; only sweep ones GitHub already reports
-        // offline.
+        // offline. The name test is the same naming scheme as
+        // `validRunnerName` in the slot-state validation above (bare legacy
+        // display name, or that name plus a `-<8 hex>` suffix); the three
+        // copies change together.
         const owned = (await listRunners()).filter(
           (runner) =>
             typeof runner.name === 'string' &&
@@ -528,7 +537,9 @@ export function createManager(config, dependencies = {}) {
       // A recorded runnerName is exact. A label-recovered identity carries
       // only the instance name: main registered under the bare display name,
       // this version under a suffixed one, so match either form and let the
-      // runnerId checks below reject anything ambiguous.
+      // runnerId checks below reject anything ambiguous. This is the third
+      // copy of the naming scheme (`validRunnerName` in the slot-state
+      // validation is the reference); the three change together.
       const matches = state.runnerName
         ? (runner) => runner.name === state.runnerName
         : (runner) =>

@@ -793,6 +793,110 @@ test('a rejected sweep deletion is retried on the next cycle before the pile is 
   );
 });
 
+test('a 429-rejected sweep deletion promises the retry and the next cycle completes it', async (t) => {
+  // Two-cycle probe. Cycle 1 has its DELETE refused while the orphan pile is
+  // still on disk, so the error must name the retry and the registration must
+  // survive; cycle 2 must actually delete it. Sweeping after the pile was
+  // removed left the slot with neither state nor leftovers, so cleanup() never
+  // ran again and the registration leaked.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef' });
+  f.setRejectFirstDelete(429);
+  const manager = createManager(f.config, { command: f.command });
+  const deletedIds = () =>
+    f.calls
+      .filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .map((c) =>
+        c.args.find((v) => v.startsWith('/repos/owner/repo/actions/runners/')),
+      )
+      .filter(Boolean)
+      .map((v) => Number(v.split('/').pop()));
+  const creates = () =>
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length;
+
+  await assert.rejects(
+    manager.cycle(1),
+    /Runner 77 deletion was rejected \(HTTP 429\); retrying on the next cycle/,
+  );
+  assert.deepEqual(deletedIds(), [77], 'cycle 1 attempted exactly this slot');
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [77],
+    'the rejected registration survives cycle 1',
+  );
+  assert.equal(creates(), 0, 'no replacement while the rejection stands');
+
+  await manager.cycle(1);
+  // Cycle 2 also deletes the runner it just created for the job, so count only
+  // the registration under test.
+  assert.deepEqual(
+    deletedIds().filter((id) => id === 77),
+    [77, 77],
+    'cycle 2 retries the same runner',
+  );
+  assert.deepEqual(
+    f
+      .runnerList()
+      .map((entry) => entry.id)
+      .filter((id) => id === 77),
+    [],
+    'the registration is gone after the retry',
+  );
+});
+
+test('a foreign or missing identity blocks sweeping even this slot offline registration', async (t) => {
+  // The naming scheme assumes poolId is unique per host, so a pile whose
+  // instance labels are not all this slot's means the resources may belong to
+  // another pool sharing the host. Nothing may be swept by name then — not
+  // even this slot's own offline registration — and the slot must not be
+  // replenished while the pile blocks it. Another slot's registration and an
+  // online one are never candidates in any case.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-other-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({ 'qwen.pool': 'trial', 'qwen.slot': '1' });
+  f.setRunner({ id: 88, name: 'ecs-qwen-trial-01-cafe1234' });
+  f.setExtraRunners([
+    { id: 55, name: 'ecs-qwen-trial-02-abcdef12' },
+    { id: 99, name: 'ecs-qwen-trial-01-beef9999', status: 'online' },
+  ]);
+  const manager = createManager(f.config, { command: f.command });
+
+  await assert.rejects(
+    manager.cycle(1),
+    /Orphaned resources carry no unambiguous slot identity; manual reconciliation required/,
+  );
+  assert.deepEqual(
+    f.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE')),
+    [],
+    'no registration DELETE at all on a foreign or missing identity',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+    'the slot is not replenished while the pile blocks it',
+  );
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [88, 55, 99],
+    'this slot offline, the other slot, and the online registration all survive',
+  );
+});
+
 test('the identity-less sweep never deletes a registration without a status', async (t) => {
   const f = await fixture(t);
   const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
