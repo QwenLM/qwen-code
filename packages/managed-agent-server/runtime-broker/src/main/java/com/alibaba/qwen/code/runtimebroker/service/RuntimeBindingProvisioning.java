@@ -126,7 +126,8 @@ final class RuntimeBindingProvisioning {
                         || "runtime_external_unavailable".equals(failure.getCode()));
     }
 
-    CompletionStage<BindingContext> ensureBinding(RuntimeProvisionRequest request) {
+    CompletionStage<BindingContext> ensureBinding(
+            RuntimeProvisionRequest request) {
         RuntimeBindingRecord record = bindingRepository.findOrCreate(request);
         if (request.getScope().getLifecycleAuthority() != null
                 && (record.getState() == RuntimeBindingRecord.State.LOST

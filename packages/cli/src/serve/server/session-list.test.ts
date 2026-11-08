@@ -51,7 +51,10 @@ describe('merged session catalog pagination', () => {
     };
   }
 
-  async function persist(session: BridgeSessionSummary): Promise<void> {
+  async function persist(
+    session: BridgeSessionSummary,
+    promptTime = session.createdAt,
+  ): Promise<void> {
     const chats = path.join(
       new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
       'chats',
@@ -64,7 +67,7 @@ describe('merged session catalog pagination', () => {
         uuid: `${session.sessionId}-user`,
         parentUuid: null,
         sessionId: session.sessionId,
-        timestamp: session.createdAt,
+        timestamp: promptTime,
         type: 'user',
         message: { role: 'user', parts: [{ text: 'stored prompt' }] },
         cwd: workspaceCwd,
@@ -436,6 +439,40 @@ describe('merged session catalog pagination', () => {
     expect(seen).toEqual(
       [3, 2, 1, 0, 9].map((index) => summary(index).sessionId),
     );
+  });
+
+  it('binds a metadata page cursor to the question ordering', async () => {
+    // Prompt order (0,1,2,3) is the reverse of the file mtimes (3,2,1,0), so
+    // a cursor keyed by activity time sends page 2 back to page 1.
+    for (let index = 0; index < 4; index++) {
+      await persist(
+        summary(index),
+        new Date(Date.UTC(2026, 0, 1, 0, 9 - index)).toISOString(),
+      );
+    }
+    const { bridge } = bridgeFor([]);
+    const options = { size: 2, sortBy: 'lastUserPromptAt' as const };
+    const first = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      options,
+      { runtimeBaseDir },
+    );
+    expect(first.sessions.map((row) => row.sessionId)).toEqual([
+      summary(0).sessionId,
+      summary(1).sessionId,
+    ]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { ...options, cursor: first.nextCursor },
+      { runtimeBaseDir },
+    );
+    expect(second.sessions.map((row) => row.sessionId)).toEqual([
+      summary(2).sessionId,
+      summary(3).sessionId,
+    ]);
   });
 
   it('rejects an unfiltered legacy cursor as a metadata cursor', async () => {
