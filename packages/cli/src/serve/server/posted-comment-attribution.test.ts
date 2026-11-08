@@ -137,6 +137,26 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not split on separators inside quotes (read-only search)', () => {
+    // The `|` is inside the search pattern, not a pipeline: the quoted
+    // `gh pr comment` must not be mistaken for a real creation.
+    const pipe = shellResult(
+      "rg 'gh api|gh pr comment' transcript.jsonl",
+      'match: https://github.com/o/r/pull/1#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(pipe)).toEqual([]);
+    const semicolon = shellResult(
+      "grep 'gh pr comment; echo' transcript.jsonl",
+      'https://github.com/o/r/pull/1#issuecomment-222',
+    );
+    expect(extractPostedCommentIds(semicolon)).toEqual([]);
+    const or = shellResult(
+      "rg 'gh pr comment || gh issue comment' transcript.jsonl",
+      'https://github.com/o/r/pull/1#issuecomment-333',
+    );
+    expect(extractPostedCommentIds(or)).toEqual([]);
+  });
+
   it('attributes a creation whose output is a bare id (--jq .id)', () => {
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments -X POST --input payload.json --jq '.id'",

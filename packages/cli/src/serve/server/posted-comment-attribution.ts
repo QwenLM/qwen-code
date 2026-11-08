@@ -74,17 +74,46 @@ function stripQuotedSpans(command: string): string {
 }
 
 /**
- * Split a shell chain into pipeline stages. A write flag must sit in the SAME
- * stage as the collection path to count as a creation: `gh api …/comments
- * --jq … ; stat -f '%Sm' …` is a GET listing followed by an unrelated `-f`, not
- * a POST. Matching the flag anywhere in the whole command text over-attributed
- * every id such a read printed and silently withheld those comments from the
- * listing session.
+ * Split a shell chain into pipeline stages on separators OUTSIDE quotes only.
+ * A write flag must sit in the SAME stage as the collection path to count as a
+ * creation: `gh api …/comments --jq … ; stat -f '%Sm' …` is a GET listing
+ * followed by an unrelated `-f`, not a POST. Splitting inside quotes would also
+ * tear a read-only search such as `rg 'gh api|gh pr comment' …` into unbalanced
+ * fragments and mistake the quoted `gh pr comment` for a real creation, so a
+ * separator only ends a stage when no quote is open. A newline is a boundary
+ * too. Best-effort: escaped quotes are not modeled.
  */
 function commandSegments(command: string): string[] {
-  // A newline is a command boundary too: `gh api …/comments` followed on the
-  // next line by `stat -f …` is a read plus an unrelated -f, not a creation.
-  return command.split(/&&|\|\||[;|\n\r]/);
+  const segments: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ';' || ch === '|' || ch === '\n' || ch === '\r') {
+      segments.push(current);
+      current = '';
+      continue;
+    }
+    if (ch === '&' && command[i + 1] === '&') {
+      segments.push(current);
+      current = '';
+      i++;
+      continue;
+    }
+    current += ch;
+  }
+  segments.push(current);
+  return segments;
 }
 
 function isCreationCommand(command: string): boolean {
