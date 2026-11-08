@@ -132,7 +132,7 @@ public final class JdbcTenantGuardLocks {
                     return null;
                 }
                 if (!tenant.equals(ManagedSchemaRows.identity(result, "tenant_id"))) {
-                    throw new SQLException("Tenant guard identity hash collision");
+                    throw new IdentityCollision();
                 }
                 long id = result.getLong("id");
                 if (id <= 0 || result.next()) {
@@ -140,6 +140,17 @@ public final class JdbcTenantGuardLocks {
                 }
                 return id;
             }
+        }
+    }
+
+    /**
+     * A guard row already exists for this {@code tenant_key} but belongs to a different
+     * tenant. Callers that promise a documented refusal (the CSI retention guard) map this
+     * to their own 409 instead of letting the transaction wrapper report a store failure.
+     */
+    public static final class IdentityCollision extends RuntimeException {
+        IdentityCollision() {
+            super("Tenant guard identity hash collision");
         }
     }
 

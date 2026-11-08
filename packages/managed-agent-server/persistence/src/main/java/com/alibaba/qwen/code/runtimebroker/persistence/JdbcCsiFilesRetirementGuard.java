@@ -181,13 +181,23 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     private static boolean lockRetentionRoot(Connection connection, String tenantId) throws SQLException {
-        return JdbcTenantGuardLocks.lockExisting(connection, tenantId,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.OUTPUT_PUBLICATION, 10);
+        try {
+            return JdbcTenantGuardLocks.lockExisting(connection, tenantId,
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.OUTPUT_PUBLICATION, 10);
+        } catch (JdbcTenantGuardLocks.IdentityCollision collision) {
+            // The retention root belongs to another tenant: the documented refusal, never a
+            // generic store failure and never a silent overwrite.
+            throw unavailable();
+        }
     }
 
     private static void initializeRetentionRoot(Connection connection, String tenantId) throws SQLException {
-        JdbcTenantGuardLocks.lock(connection, tenantId,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.OUTPUT_PUBLICATION, 10);
+        try {
+            JdbcTenantGuardLocks.lock(connection, tenantId,
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.OUTPUT_PUBLICATION, 10);
+        } catch (JdbcTenantGuardLocks.IdentityCollision collision) {
+            throw unavailable();
+        }
     }
 
     public static Original lockManagedSession(Connection connection, String tenantId, String sessionId)

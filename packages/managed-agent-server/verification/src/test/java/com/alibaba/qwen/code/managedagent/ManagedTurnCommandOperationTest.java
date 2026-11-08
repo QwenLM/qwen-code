@@ -502,14 +502,14 @@ class ManagedTurnCommandOperationTest {
         // The open Turn still refuses the close, as before D7-1; its pending
         // cancel is not a Session operation.
         refused(() -> store.beginOperation(TENANT, sessionId,
-                OperationKind.CLOSE, "actor", "close-1", "close-digest"),
+                OperationKind.CLOSE, "owner", "close-1", "close-digest"),
                 HttpStatus.CONFLICT, "turn_active");
         claim(held);
         store.cancelBeforeAdmission(TENANT, sessionId, held.turnId(), OWNER);
         assertThat(operation(cancel.operationId()).state())
                 .isEqualTo("COMPLETED");
         assertThat(store.beginOperation(TENANT, sessionId,
-                OperationKind.CLOSE, "actor", "close-1", "close-digest")
+                OperationKind.CLOSE, "owner", "close-1", "close-digest")
                 .operation().state()).isEqualTo("PENDING");
     }
 
@@ -730,12 +730,12 @@ class ManagedTurnCommandOperationTest {
 
     Admission submit(String key, String digest) {
         return store.insertTurnCommand(TENANT, "SUBMIT_TURN", key, digest,
-                sessionId, INPUT, "sha256:" + "c".repeat(64), "actor");
+                sessionId, INPUT, "sha256:" + "c".repeat(64), "owner");
     }
 
     Admission cancel(String key, String digest, Admission turn) {
         return store.insertCancelCommand(TENANT, "CANCEL_TURN", key, digest,
-                sessionId, turn.turnId(), "actor");
+                sessionId, turn.turnId(), "owner");
     }
 
     // A Turn a Harness has admitted, released by its dispatcher.

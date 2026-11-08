@@ -892,7 +892,7 @@ public class ManagedAgentPropertiesTest {
             });
             mixed.withPropertyValues(DURABLE_KEY + "=false").run(started -> assertThat(started).hasFailed());
         }
-        for (String invalid : List.of("runtime-broker.child-workspaces-is_enabled=true", "harness.workspace-files-is_enabled=false")) {
+        for (String invalid : List.of("runtime-broker.child-workspaces-enabled=true", "harness.workspace-files-enabled=false")) {
             remote.withPropertyValues("qwen.managed-agent." + invalid).run(started -> assertThat(started).hasFailed());
         }
     }
@@ -934,7 +934,7 @@ public class ManagedAgentPropertiesTest {
         String entry = prefix + "resident-workspaces[0].";
         var values = new java.util.ArrayList<String>(List.of(
                 "qwen.managed-agent.harness.enabled=true", "qwen.managed-agent.harness.workspace-files-enabled=true",
-                "qwen.managed-agent.session-store.enabled=true", prefix + "is_enabled=true",
+                "qwen.managed-agent.session-store.enabled=true", prefix + "enabled=true",
                 prefix + "provisioner=kubernetes-workspace", prefix + "isolation-class=workspace",
                 TRUSTED_KEY + "=false", prefix + "resident-kubernetes-api-url=https://cluster.example",
                 prefix + "resident-kubernetes-token-file=/reviewed/token", prefix + "resident-kubernetes-ca-file=/reviewed/ca",
@@ -1056,8 +1056,8 @@ public class ManagedAgentPropertiesTest {
             supported.withPropertyValues("qwen.managed-agent.harness.approval-mode=" + mode)
                     .run(started -> assertThat(started).hasFailed());
         }
-        for (String invalid : List.of("harness.workspace-files-is_enabled=false", "harness.is_enabled=false",
-                "session-store.is_enabled=false", "runtime-broker.is_enabled=false",
+        for (String invalid : List.of("harness.workspace-files-enabled=false", "harness.enabled=false",
+                "session-store.enabled=false", "runtime-broker.enabled=false",
                 "runtime-broker.isolation-class=workspace", "runtime-broker.provisioner=kubernetes")) {
             supported.withPropertyValues("qwen.managed-agent." + invalid)
                     .run(started -> assertThat(started).hasFailed());

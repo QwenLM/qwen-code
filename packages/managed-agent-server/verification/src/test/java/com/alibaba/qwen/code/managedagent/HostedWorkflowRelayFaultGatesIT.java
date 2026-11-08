@@ -1153,7 +1153,7 @@ class HostedWorkflowRelayFaultGatesIT {
         fields.put("type", row.get("event_type"));
         fields.put("created_at", web ? created : created / 1000);
         fields.put("data", json.readTree(row.get("data_json").toString()));
-        Object terminal = row.get("terminal");
+        Object terminal = row.get("is_terminal");
         fields.put("terminal", terminal instanceof Boolean flag ? flag
                 : ((Number) terminal).intValue() != 0);
         ObjectNode node = json.createObjectNode();

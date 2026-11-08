@@ -98,7 +98,7 @@ class WorkspaceCreationSchemaMySqlIT {
             ManagedSchema.validate(source);
             assertEquals(1, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
-            assertThat(upgradedSession).containsEntry("is_plan_enabled", false)
+            assertThat(upgradedSession).containsEntry("is_plan_enabled", 0)
                     .containsEntry("public_child_agents_version", 0);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
             assertThat(upgradedTurn).containsKey("is_plan_enabled");

@@ -22,7 +22,7 @@ class ManagedAgentPackagingIT {
             assertThat(library.getEntry("application.yml")).isNull();
             assertThat(library.getEntry("application-managed-local.yml")).isNull();
         }
-        var classifiers = Boolean.getBoolean("managed.operator.tools.is_enabled")
+        var classifiers = Boolean.getBoolean("managed.operator.tools.enabled")
                 ? List.of("exec", "workspace-bundle", "workspace-migration", "workspace-maintenance-recovery",
                         "csi-session", "csi-runtime", "operator-recovery") : List.of("exec");
         for (String classifier : classifiers) {
@@ -58,7 +58,7 @@ class ManagedAgentPackagingIT {
 
     @Test
     void operatorRecoveryReadsDocumentedEnvironment() throws Exception {
-        assumeTrue(Boolean.getBoolean("managed.operator.tools.is_enabled"));
+        assumeTrue(Boolean.getBoolean("managed.operator.tools.enabled"));
         Path jar = Path.of(System.getProperty("managed.artifact.directory") + "/qwen-managed-agent-server-" + System.getProperty("managed.artifact.version")
                 + "-operator-recovery.jar").toAbsolutePath();
         Path log = directory.resolve("operator.log");

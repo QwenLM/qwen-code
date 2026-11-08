@@ -1932,16 +1932,16 @@ class ManagedAgentMySqlIT {
         for (Object[] lookup :
                 List.of(
                         new Object[] {
-                            "uq_ma_hook_once", "hook_once_key_hash = ?", sha256("once-7")
+                            "uk_ma_hook_once", "hook_once_key_hash = ?", sha256("once-7")
                         },
                         new Object[] {
-                            "uq_ma_hook_occurrence",
+                            "uk_ma_hook_occurrence",
                             "hook_occurrence_hash = ? AND hook_ordinal = ?",
                             sha256("occurrence-7"),
                             1
                         },
                         new Object[] {
-                            "uq_ma_hook_occurrence", "hook_occurrence_hash = ?", sha256("occurrence-7")
+                            "uk_ma_hook_occurrence", "hook_occurrence_hash = ?", sha256("occurrence-7")
                         },
                         new Object[] {
                             "idx_ma_hook_definition",
