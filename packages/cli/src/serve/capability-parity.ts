@@ -102,6 +102,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   unstable_session_resume: LEGACY_ONLY('deprecated alias of the legacy resume'),
   session_list: { standing: 'managed', evidence: 'surface:SESSION_LIST' },
+  session_last_user_prompt_sort: LEGACY_ONLY(
+    'no question-time sorting in Managed',
+  ),
   session_catalog_batch: LEGACY_ONLY('no batched catalog route in Managed'),
   session_info: LEGACY_ONLY('aggregate counts are a legacy disk scan'),
   session_source_metadata: NO_MANAGED_EQUIVALENT(
@@ -226,7 +229,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   session_tasks: { standing: 'managed', evidence: 'surface:TASK_LIST' },
   session_agents: NO_MANAGED_EQUIVALENT('no Managed session agent listing'),
-  session_agent_trace: NO_MANAGED_EQUIVALENT('no Managed agent trace route'),
+  session_agent_trace: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_AGENT_TRACE',
+  },
   scheduled_task_session_reuse: {
     standing: 'managed',
     evidence: 'surface:AUTOMATION_RUN',
@@ -245,9 +251,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   },
   session_stats: NO_MANAGED_EQUIVALENT('no Managed session statistics route'),
   session_lsp: NO_MANAGED_EQUIVALENT('no LSP in the Managed execution profile'),
-  session_resources: NO_MANAGED_EQUIVALENT(
-    'no Managed session resources route',
-  ),
+  session_resources: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_RESOURCES',
+  },
   session_status: NO_MANAGED_EQUIVALENT(
     'Managed Sessions are read, not status-probed',
   ),
