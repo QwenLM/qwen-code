@@ -74,7 +74,7 @@ function validate(c) {
     ) ||
     !Number.isInteger(c.slots) ||
     c.slots < 1 ||
-    c.slots > 10 ||
+    c.slots > 64 ||
     !Number.isInteger(c.runnerGroupId) ||
     c.runnerGroupId < 1 ||
     !Array.isArray(c.labels) ||

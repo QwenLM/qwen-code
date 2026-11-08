@@ -143,9 +143,10 @@ For untrusted fork PRs, `pr_test_runner` directly selects
 Real external PR run 42382582937, attempt 2, received empty repository variables
 even though the repository settings were populated. Direct routing removes that
 dependency. It requires no configuration relay or manual smoke workflow. The
-ten registered runners use the formal labels to validate actual CI. Keep the
-pool at ten slots until success rate, duration and resource use are stable;
-capacity changes are manual configuration changes, not queue-driven scaling.
+ten registered runners use the formal labels to validate actual CI. The
+manager accepts up to 64 slots per host; keep capacity conservative until
+success rate, duration and resource use are stable. Capacity changes are
+manual configuration changes, not queue-driven scaling.
 
 Existing global overrides still take precedence where their values are
 available. Fork-triggered runs cannot rely on those variables for rollback.

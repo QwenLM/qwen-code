@@ -81,8 +81,8 @@ label set matching the actual CI route. The current ARM64 pool registers only
 `self-hosted` and `ecs-qwen-ephemeral`. Omitting generic Linux/ARM64 labels keeps
 unrelated ARM64 jobs out of this pool. Validate the existing
 CI jobs with these formal labels rather than a separate smoke workflow. The
-example runs one slot; hz4 currently maintains ten fixed slots. Keep that
-capacity until real CI execution and resource use are stable. Restrict configuration and
+example runs one slot; hz4 currently maintains ten fixed slots, and the
+manager accepts up to 64 slots per host. Keep capacity conservative until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
 
 The `ttlSeconds` limit starts when the container starts, including idle time.
