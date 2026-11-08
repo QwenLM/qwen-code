@@ -2267,6 +2267,14 @@ export function registerWorkspaceManagementRoutes(
     },
   );
 
+  const managedWorkspaceCwdSet = (): Set<string> =>
+    new Set(
+      workspaceRegistry
+        .listManaged()
+        .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
+        .map((runtime) => runtime.workspaceCwd),
+    );
+
   app.get('/workspace-order', async (_req, res) => {
     if (!workspaceRegistrationStore) {
       res.status(501).json({
@@ -2277,8 +2285,16 @@ export function registerWorkspaceManagementRoutes(
     }
     try {
       const snapshot = await workspaceRegistrationStore.read();
-      res.json({ cwds: snapshot.workspaceOrder ?? [] });
-    } catch {
+      const known = managedWorkspaceCwdSet();
+      res.json({
+        cwds: (snapshot.workspaceOrder ?? []).filter((cwd) => known.has(cwd)),
+      });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to read workspace order: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       res.status(500).json({
         error: 'Failed to read workspace order',
         code: 'workspace_registration_store_error',
@@ -2308,12 +2324,7 @@ export function registerWorkspaceManagementRoutes(
         .json({ error: err.message, code: 'invalid_workspace_order' });
       return;
     }
-    const known = new Set(
-      workspaceRegistry
-        .listManaged()
-        .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
-        .map((runtime) => runtime.workspaceCwd),
-    );
+    const known = managedWorkspaceCwdSet();
     if (cwds.some((cwd) => !known.has(cwd))) {
       res.status(400).json({
         error: 'Workspace order contains an unregistered workspace',
@@ -2328,11 +2339,20 @@ export function registerWorkspaceManagementRoutes(
       } catch (err) {
         if (!(err instanceof WorkspaceRegistrationStoreCommittedError))
           throw err;
-        // The write committed; a lock-release failure must not roll back the UI.
+        try {
+          writeStderrLine(`qwen serve: ${err.message}`);
+        } catch {
+          // The order is committed; diagnostics are best-effort.
+        }
       }
       res.json({ cwds });
     } catch (err) {
       if (!sendStoreCapacityError(res, err)) {
+        writeStderrLine(
+          `qwen serve: failed to persist workspace order: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
         res.status(500).json({
           error: 'Failed to persist workspace order',
           code: 'workspace_registration_store_error',

@@ -13,7 +13,11 @@ import {
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
 import { readWorkspaceOrder, writeWorkspaceOrder } from './workspaceOrder';
-import { readWorkspaceExpanded } from './workspaceExpansion';
+import {
+  hasWorkspaceExpansionPreference,
+  readWorkspaceExpanded,
+} from './workspaceExpansion';
+import styles from './WebShellSidebar.module.css';
 
 const { connection, workspace, workspaceActions, active } = vi.hoisted(() => {
   const active = {
@@ -192,6 +196,26 @@ function workspaceOrderInDom(): string[] {
   );
 }
 
+type DragTransfer = {
+  effectAllowed: string;
+  dropEffect?: string;
+  setData: (format: string, data: string) => void;
+};
+
+function dispatchWorkspaceDrag(
+  element: Element,
+  name: string,
+  transfer: DragTransfer,
+  clientY = 0,
+): void {
+  const event = new Event(name, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    dataTransfer: { value: transfer },
+    clientY: { value: clientY },
+  });
+  act(() => element.dispatchEvent(event));
+}
+
 async function openWorkspaceMenu(cwd: string): Promise<void> {
   const row = workspaceRows().find(
     (candidate) =>
@@ -237,6 +261,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   connection.sessionId = null;
+  connection.workspaceCwd = '/tmp/project';
   connection.capabilities = capabilities;
   workspace.capabilities = capabilities;
   workspace.baseUrl = '';
@@ -342,19 +367,19 @@ describe('WebShellSidebar workspace order', () => {
           .querySelector('button[aria-expanded]')!
           .getAttribute('aria-expanded'),
       ),
-    ).toEqual(['true', 'false']);
-    const collapseAll = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Collapse all workspaces"]',
+    ).toEqual(['false', 'false']);
+    const expandAll = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Expand all workspaces"]',
     );
-    expect(collapseAll).not.toBeNull();
-    act(() => collapseAll!.click());
+    expect(expandAll).not.toBeNull();
+    act(() => expandAll!.click());
     expect(
       workspaceRows().map((row) =>
         row
           .querySelector('button[aria-expanded]')!
           .getAttribute('aria-expanded'),
       ),
-    ).toEqual(['false', 'false']);
+    ).toEqual(['true', 'true']);
   });
 
   it.each([false, true])(
@@ -489,19 +514,17 @@ describe('WebShellSidebar workspace order', () => {
         .click(),
     );
     const transfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() };
-    const dispatchDrag = (element: Element, name: string, clientY = 0) => {
-      const event = new Event(name, { bubbles: true, cancelable: true });
-      Object.defineProperties(event, {
-        dataTransfer: { value: transfer },
-        clientY: { value: clientY },
-      });
-      act(() => element.dispatchEvent(event));
-    };
+    const dispatchDrag = (element: Element, name: string, clientY = 0) =>
+      dispatchWorkspaceDrag(element, name, transfer, clientY);
     const source =
       workspaceRows()[2]!.querySelector<HTMLButtonElement>(
         '[draggable="true"]',
       )!;
     dispatchDrag(source, 'dragstart');
+    expect(transfer.setData).toHaveBeenCalledWith(
+      'application/x-qwen-workspace-cwd',
+      '/tmp/third',
+    );
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
@@ -564,6 +587,69 @@ describe('WebShellSidebar workspace order', () => {
     ).toBe('true');
   });
 
+  it('does not move a collapsed primary preference onto a different workspace', async () => {
+    renderSidebar();
+    await flushSidebar();
+    act(() =>
+      workspaceRows()[0]!
+        .querySelector<HTMLButtonElement>('button[aria-expanded]')!
+        .click(),
+    );
+    expect(readWorkspaceExpanded('primary')).toBe(false);
+    workspace.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.slice(0, 2).map((entry) => ({
+        ...entry,
+        primary: entry.id === 'second',
+      })),
+    };
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      workspaceRows().map((row) =>
+        row
+          .querySelector('button[aria-expanded]')!
+          .getAttribute('aria-expanded'),
+      ),
+    ).toEqual(['false', 'true']);
+    expect(readWorkspaceExpanded('second')).toBe(true);
+  });
+
+  it('does not carry a provisional preference across a host switch', async () => {
+    connection.workspaceCwd = '/tmp/project-link';
+    workspace.capabilities = {
+      qwenCodeVersion: capabilities.qwenCodeVersion,
+      features: capabilities.features,
+    };
+    renderSidebar();
+    await flushSidebar();
+    act(() =>
+      workspaceRows()[0]!
+        .querySelector<HTMLButtonElement>('button[aria-expanded]')!
+        .click(),
+    );
+    expect(readWorkspaceExpanded('primary:/tmp/project-link')).toBe(false);
+    workspace.baseUrl = 'http://other-host';
+    workspace.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) => ({
+        ...entry,
+        id: `other-${entry.id}`,
+        cwd: `/other${entry.cwd}`,
+      })),
+    };
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      workspaceRows().map((row) =>
+        row
+          .querySelector('button[aria-expanded]')!
+          .getAttribute('aria-expanded'),
+      ),
+    ).toEqual(['true', 'true', 'true']);
+    expect(hasWorkspaceExpansionPreference('other-primary')).toBe(false);
+  });
+
   it('does not apply a bulk request to a newly focused host', async () => {
     renderSidebar();
     await flushSidebar();
@@ -586,10 +672,12 @@ describe('WebShellSidebar workspace order', () => {
     renderSidebar();
     await flushSidebar();
     expect(
-      workspaceRows()[1]!
-        .querySelector('button[aria-expanded]')
-        ?.getAttribute('aria-expanded'),
-    ).toBe('true');
+      workspaceRows().map((row) =>
+        row
+          .querySelector('button[aria-expanded]')!
+          .getAttribute('aria-expanded'),
+      ),
+    ).toEqual(['true', 'true', 'true']);
     expect(
       window.localStorage.getItem(
         'qwen.web-shell.sidebar.workspace-expanded:other-second',
@@ -679,5 +767,162 @@ describe('WebShellSidebar workspace order', () => {
     await openWorkspaceMenu('/tmp/third');
     expect(menuItemLabels()).toContain('Move up');
     expect(menuItemLabels()).not.toContain('Move down');
+  });
+
+  it('drops after a row when the pointer is past its midpoint', async () => {
+    renderSidebar();
+    await flushSidebar();
+    const transfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() };
+    const dispatchDrag = (element: Element, name: string, clientY = 0) =>
+      dispatchWorkspaceDrag(element, name, transfer, clientY);
+    const source =
+      workspaceRows()[2]!.querySelector<HTMLButtonElement>(
+        '[draggable="true"]',
+      )!;
+    dispatchDrag(source, 'dragstart');
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    const target = container.querySelector<HTMLElement>(
+      '[data-sidebar-workspace="/tmp/project"]',
+    )!;
+    target.getBoundingClientRect = () => ({
+      top: 0,
+      height: 20,
+      bottom: 20,
+      left: 0,
+      right: 100,
+      width: 100,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    dispatchDrag(target, 'dragover', 18);
+    expect(target.classList.contains(styles.workspaceDropAfter)).toBe(true);
+    dispatchDrag(target, 'drop', 18);
+    expect(workspaceOrderInDom()).toEqual([
+      '/tmp/project',
+      '/tmp/third',
+      '/tmp/second',
+    ]);
+    expect(readWorkspaceOrder(window.location.origin)).toEqual([
+      '/tmp/project',
+      '/tmp/third',
+      '/tmp/second',
+    ]);
+  });
+
+  it('clears the drop indicator when the pointer leaves the row', async () => {
+    renderSidebar();
+    await flushSidebar();
+    const transfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() };
+    const dispatchDrag = (element: Element, name: string, clientY = 0) =>
+      dispatchWorkspaceDrag(element, name, transfer, clientY);
+    const source =
+      workspaceRows()[2]!.querySelector<HTMLButtonElement>(
+        '[draggable="true"]',
+      )!;
+    dispatchDrag(source, 'dragstart');
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    const target = container.querySelector<HTMLElement>(
+      '[data-sidebar-workspace="/tmp/project"]',
+    )!;
+    dispatchDrag(target, 'dragover');
+    expect(target.classList.contains(styles.workspaceDropBefore)).toBe(true);
+    dispatchDrag(target, 'dragleave');
+    expect(target.classList.contains(styles.workspaceDropBefore)).toBe(false);
+    dispatchDrag(source, 'dragend');
+  });
+
+  it('restores the sidebar scroll position after the drag collapse', async () => {
+    renderSidebar();
+    await flushSidebar();
+    const body = container.querySelector<HTMLElement>(`.${styles.body}`)!;
+    body.scrollTop = 150;
+    const transfer = { effectAllowed: '', setData: vi.fn() };
+    const dispatchDrag = (element: Element, name: string) =>
+      dispatchWorkspaceDrag(element, name, transfer);
+    const source =
+      workspaceRows()[2]!.querySelector<HTMLButtonElement>(
+        '[draggable="true"]',
+      )!;
+    dispatchDrag(source, 'dragstart');
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    expect(
+      workspaceRows()[0]!
+        .querySelector('button[aria-expanded]')!
+        .getAttribute('aria-expanded'),
+    ).toBe('false');
+    body.scrollTop = 0;
+    dispatchDrag(source, 'dragend');
+    expect(body.scrollTop).toBe(150);
+  });
+
+  it('saves a drag reorder to the server when the capability is advertised', async () => {
+    workspace.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'workspace_order'],
+    };
+    workspace.client.getWorkspaceOrder.mockResolvedValueOnce({ cwds: [] });
+    renderSidebar();
+    await flushSidebar();
+    const transfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() };
+    const dispatchDrag = (element: Element, name: string) =>
+      dispatchWorkspaceDrag(element, name, transfer);
+    const source =
+      workspaceRows()[2]!.querySelector<HTMLButtonElement>(
+        '[draggable="true"]',
+      )!;
+    dispatchDrag(source, 'dragstart');
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    const target = container.querySelector<HTMLElement>(
+      '[data-sidebar-workspace="/tmp/project"]',
+    )!;
+    dispatchDrag(target, 'dragover');
+    dispatchDrag(target, 'drop');
+    await flushSidebar();
+    expect(workspace.client.setWorkspaceOrder).toHaveBeenCalledWith([
+      '/tmp/third',
+      '/tmp/project',
+      '/tmp/second',
+    ]);
+    expect(readWorkspaceOrder(window.location.origin)).toEqual([]);
+  });
+
+  it('migrates a provisional primary expansion preference onto the workspace id', async () => {
+    localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:primary:/tmp/project-link',
+      'false',
+    );
+    connection.workspaceCwd = '/tmp/project-link';
+    workspace.capabilities = {
+      qwenCodeVersion: capabilities.qwenCodeVersion,
+      features: capabilities.features,
+    };
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      workspaceRows()[0]!
+        .querySelector('button[aria-expanded]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+    workspace.capabilities = capabilities;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      workspaceRows()[0]!
+        .querySelector('button[aria-expanded]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+    expect(readWorkspaceExpanded('primary')).toBe(false);
+    expect(hasWorkspaceExpansionPreference('primary:/tmp/project-link')).toBe(
+      false,
+    );
   });
 });

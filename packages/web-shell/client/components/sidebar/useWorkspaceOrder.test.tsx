@@ -86,6 +86,22 @@ it('prevents overlapping saves and restores the previous order on failure', asyn
   expect(current.canReorder).toBe(true);
 });
 
+it('releases the pending-save latch after a rejected write', async () => {
+  render();
+  await flushReact();
+  vi.mocked(options.client.setWorkspaceOrder).mockRejectedValueOnce(
+    new Error('disk full'),
+  );
+  await act(async () => current.saveOrder(['/a', '/b']));
+  expect(options.client.setWorkspaceOrder).toHaveBeenCalledTimes(1);
+  vi.mocked(options.client.setWorkspaceOrder).mockResolvedValueOnce({
+    cwds: ['/a', '/b'],
+  });
+  await act(async () => current.saveOrder(['/a', '/b']));
+  expect(options.client.setWorkspaceOrder).toHaveBeenCalledTimes(2);
+  expect(current.order).toEqual(['/a', '/b']);
+});
+
 it('blocks sorting after an initial read failure rather than overwriting the server', async () => {
   vi.mocked(options.client.getWorkspaceOrder).mockRejectedValue(
     new Error('offline'),

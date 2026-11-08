@@ -17,6 +17,10 @@ Add an accessible expand/collapse icon beside the workspace heading. If any
 workspace is expanded, collapse all; otherwise expand all and reveal the outer
 list. Expansion shows the existing five-session preview, resetting Show more.
 Individual workspace controls and persisted expansion preferences remain usable.
+Expansion preferences follow a workspace across primary/secondary role changes.
+The primary row writes the workspace id as well as the `primary:<cwd>` slot key,
+which only bridges the period before the registered workspace list names that
+id.
 
 Allow dragging a workspace header onto another header, inserting before or
 after its midpoint. Keep menu-based Move up/down as the keyboard-accessible alternative.
@@ -26,7 +30,8 @@ Persist the cwd order as optional `workspaceOrder` metadata in the existing
 workspace registration snapshot. Reuse its file lock, atomic write, size bound
 and primary-workspace-scoped file under the Qwen home. Do not reorder the
 registration array or runtime registry: their order has startup semantics.
-Missing workspaces are ignored for display; newly added workspaces append.
+Missing workspaces are ignored for display; GET returns that currently
+managed subset so a read is a valid write body; newly added workspaces append.
 
 Expose authenticated `GET /workspace-order` and strictly guarded
 `POST /workspace-order` with `{ cwds: string[] }`. POST follows the daemon's
@@ -56,8 +61,8 @@ of scope.
 During a drag, temporarily hide mounted session bodies and show closed folder
 icons without changing expansion preferences or preview state. A completed or
 cancelled drag restores each workspace's original display, including Show more,
-group expansion and search results. Persist only a valid drop. Locked single
-workspace views do not offer sorting.
+group expansion, search results and the sidebar scroll position. Persist only
+a valid drop. Locked single workspace views do not offer sorting.
 
 Defer temporary collapse until the native drag has started: synchronously
 moving a lower source header during `dragstart` cancels Chromium's drag.

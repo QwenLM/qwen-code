@@ -1081,6 +1081,10 @@ describe('WorkspaceSection session loading', () => {
     expect(container.textContent).toContain('Session 6');
     renderSection({ client, expanded: true });
     await flush();
+    expect(
+      container.querySelector<HTMLElement>('[class*="sessions"]')?.style
+        .display,
+    ).not.toBe('none');
     expect(container.textContent).toContain('Session 6');
 
     renderSection({ client, expanded: false });

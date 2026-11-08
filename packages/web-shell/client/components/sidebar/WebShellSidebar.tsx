@@ -1416,8 +1416,9 @@ export function WebShellSidebar({
   );
   const workspaceOrderFeatures =
     workspace.capabilities?.features ?? connection.capabilities?.features;
+  const registeredPrimaryWorkspace = workspaces.find((entry) => entry.primary);
   const primaryWorkspaceCwd =
-    workspaces.find((entry) => entry.primary)?.cwd ??
+    registeredPrimaryWorkspace?.cwd ??
     workspace.capabilities?.workspaceCwd ??
     connection.workspaceCwd;
   const {
@@ -1444,6 +1445,12 @@ export function WebShellSidebar({
   const primaryWorkspaceExpansionId = `primary:${
     primaryWorkspaceCwd ?? 'default'
   }`;
+  const readPrimaryExpanded = useCallback(() => {
+    const workspaceId = registeredPrimaryWorkspace?.id;
+    return workspaceId && hasWorkspaceExpansionPreference(workspaceId)
+      ? readWorkspaceExpanded(workspaceId)
+      : readWorkspaceExpanded(primaryWorkspaceExpansionId);
+  }, [registeredPrimaryWorkspace?.id, primaryWorkspaceExpansionId]);
   const workspaceSessionActive =
     Boolean(connection.sessionId) &&
     (connection.sessionContext === undefined ||
@@ -1788,7 +1795,7 @@ export function WebShellSidebar({
     );
   }, [railLayout, sidebarMinWidth]);
   const [projectExpanded, setProjectExpanded] = useState(() =>
-    readWorkspaceExpanded(primaryWorkspaceExpansionId),
+    readPrimaryExpanded(),
   );
   const [showAllProjectSessions, setShowAllProjectSessions] = useState(false);
   const [workspaceExpansionRequest, setWorkspaceExpansionRequest] = useState<{
@@ -1803,7 +1810,7 @@ export function WebShellSidebar({
   }, [workspaceExpansionRequest]);
   const [workspaceDrag, setWorkspaceDrag] = useState<{
     cwd: string;
-    targetCwd: string;
+    targetCwd?: string;
     after: boolean;
   } | null>(null);
   const workspaceDragStartRef = useRef<
@@ -1813,14 +1820,24 @@ export function WebShellSidebar({
       }
     | undefined
   >(undefined);
+  const sidebarBodyRef = useRef<HTMLDivElement>(null);
+  const workspaceDragScrollTopRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     window.clearTimeout(workspaceDragStartRef.current?.timer);
     workspaceDragStartRef.current = undefined;
+    workspaceDragScrollTopRef.current = undefined;
     setWorkspaceExpansionRequest(undefined);
     setSecondaryWorkspaceExpanded({});
     setWorkspaceDrag(null);
     return () => window.clearTimeout(workspaceDragStartRef.current?.timer);
   }, [workspaceOrderScope, primaryWorkspaceCwd]);
+  useEffect(() => {
+    if (workspaceDrag) return;
+    const scrollTop = workspaceDragScrollTopRef.current;
+    if (scrollTop === undefined) return;
+    workspaceDragScrollTopRef.current = undefined;
+    if (sidebarBodyRef.current) sidebarBodyRef.current.scrollTop = scrollTop;
+  }, [workspaceDrag]);
   const [projectsExpanded, setProjectsExpanded] = useState(
     () => hideProjectHeader || readWorkspaceExpanded('projects'),
   );
@@ -1850,18 +1867,36 @@ export function WebShellSidebar({
     setShowAllProjectSessions(false);
   }, [projectExpanded, primaryWorkspaceExpansionId, selectedSessionSource]);
 
-  const previousPrimaryExpansionIdRef = useRef(primaryWorkspaceExpansionId);
+  const previousPrimaryExpansionRef = useRef({
+    id: primaryWorkspaceExpansionId,
+    registeredId: registeredPrimaryWorkspace?.id,
+    scope: workspaceOrderScope,
+  });
   useEffect(() => {
-    const previousId = previousPrimaryExpansionIdRef.current;
-    previousPrimaryExpansionIdRef.current = primaryWorkspaceExpansionId;
-    if (previousId !== primaryWorkspaceExpansionId) {
+    const previous = previousPrimaryExpansionRef.current;
+    previousPrimaryExpansionRef.current = {
+      id: primaryWorkspaceExpansionId,
+      registeredId: registeredPrimaryWorkspace?.id,
+      scope: workspaceOrderScope,
+    };
+    if (
+      previous.scope === workspaceOrderScope &&
+      previous.registeredId === undefined &&
+      registeredPrimaryWorkspace?.id !== undefined &&
+      previous.id !== registeredPrimaryWorkspace.id
+    ) {
       migrateWorkspaceExpansionPreference(
-        previousId,
-        primaryWorkspaceExpansionId,
+        previous.id,
+        registeredPrimaryWorkspace.id,
       );
     }
-    setProjectExpanded(readWorkspaceExpanded(primaryWorkspaceExpansionId));
-  }, [primaryWorkspaceExpansionId]);
+    setProjectExpanded(readPrimaryExpanded());
+  }, [
+    primaryWorkspaceExpansionId,
+    registeredPrimaryWorkspace?.id,
+    workspaceOrderScope,
+    readPrimaryExpanded,
+  ]);
 
   useEffect(() => {
     sidebarMountedRef.current = true;
@@ -2330,6 +2365,9 @@ export function WebShellSidebar({
     setProjectExpanded(expanded);
     setShowAllProjectSessions(false);
     writeWorkspaceExpanded(primaryWorkspaceExpansionId, expanded);
+    if (registeredPrimaryWorkspace) {
+      writeWorkspaceExpanded(registeredPrimaryWorkspace.id, expanded);
+    }
     if (expanded) {
       setProjectsExpanded(true);
       writeWorkspaceExpanded('projects', true);
@@ -7420,6 +7458,7 @@ export function WebShellSidebar({
             </div>
           )}
           <div
+            ref={sidebarBodyRef}
             className={styles.body}
             onScroll={(event) =>
               setBodyScrolled(event.currentTarget.scrollTop > 0)
@@ -7812,6 +7851,19 @@ export function WebShellSidebar({
                               });
                             }
                           }}
+                          onDragLeave={(event) => {
+                            if (
+                              event.relatedTarget instanceof Node &&
+                              event.currentTarget.contains(event.relatedTarget)
+                            ) {
+                              return;
+                            }
+                            if (workspaceDrag?.targetCwd !== ws.cwd) return;
+                            setWorkspaceDrag({
+                              ...workspaceDrag,
+                              targetCwd: undefined,
+                            });
+                          }}
                           onDrop={(event) => {
                             if (!workspaceDrag || !canReorderWorkspaces) return;
                             event.preventDefault();
@@ -7849,9 +7901,11 @@ export function WebShellSidebar({
                                     onDragStart: (event) => {
                                       event.dataTransfer.effectAllowed = 'move';
                                       event.dataTransfer.setData(
-                                        'text/plain',
+                                        'application/x-qwen-workspace-cwd',
                                         ws.cwd,
                                       );
+                                      workspaceDragScrollTopRef.current =
+                                        sidebarBodyRef.current?.scrollTop;
                                       setOpenWorkspaceMenuId(null);
                                       // Moving the source during dragstart cancels native dragging.
                                       workspaceDragStartRef.current = {
@@ -7953,6 +8007,7 @@ export function WebShellSidebar({
                                       primaryWorkspaceExpansionId,
                                       expanded,
                                     );
+                                    writeWorkspaceExpanded(ws.id, expanded);
                                     setProjectExpanded(expanded);
                                   }
                                 : (expanded) => {

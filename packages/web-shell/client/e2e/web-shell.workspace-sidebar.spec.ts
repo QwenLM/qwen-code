@@ -110,7 +110,7 @@ test('bulk collapse/expand retains headers and five-session previews', async ({
   await page.screenshot({ path: testInfo.outputPath('expanded.png') });
 });
 
-test('drag sorts, temporarily collapses and restores mixed expansion and Show all', async ({
+test('drag sorts, temporarily collapses and restores mixed expansion and Show all @smoke', async ({
   page,
 }, testInfo) => {
   await workspaceRow(page, 0)
@@ -173,7 +173,7 @@ test('drag sorts, temporarily collapses and restores mixed expansion and Show al
     .toEqual([workspaces[1]!.cwd, workspaces[0]!.cwd, workspaces[2]!.cwd]);
 });
 
-test('menu sorting saves on the server and a failed save restores the previous order', async ({
+test('menu sorting saves on the server and a failed save restores the previous order @smoke', async ({
   page,
 }) => {
   await header(page, 0).hover();
@@ -218,6 +218,7 @@ test('cancelling and dropping outside restore display without persisting an orde
   expect(await order(page)).toEqual(
     workspaces.map((workspace) => workspace.cwd),
   );
+  expect(scenario.workspaceOrder).toEqual([]);
   expect(
     await page.evaluate(() =>
       window.localStorage.getItem(
