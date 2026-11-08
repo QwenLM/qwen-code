@@ -115,7 +115,6 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     public default boolean supportsRuntimeSkillImport() { return false; }
-    public default boolean supportsPersonalMcpOAuth() { return false; }
 
     public default Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
         throw new UnsupportedOperationException("Runtime Skill import is unavailable");

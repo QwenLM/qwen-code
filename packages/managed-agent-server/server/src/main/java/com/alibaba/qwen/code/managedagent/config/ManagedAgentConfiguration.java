@@ -14,7 +14,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
  * endpoints.
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({ManagedAgentProperties.class, ManagedMcpOAuthProperties.class})
+@EnableConfigurationProperties(ManagedAgentProperties.class)
 @EnableScheduling
 @EnableTransactionManagement(proxyTargetClass = true)
 @Import({

@@ -352,11 +352,6 @@ public class SurfaceAdmissionAcceptanceTest {
             SurfaceRegistry entry) throws Exception {
         MvcResult result = mvc.perform(requestFor(entry, FOREIGN, tenant))
                 .andReturn();
-        if (entry.ruleClass() == RuleClass.OAUTH_CALLBACK) {
-            assertThat(result.getResponse().getStatus()).isEqualTo(400);
-            assertThat(result.getResponse().getContentAsString()).doesNotContain("actor_scope_mismatch");
-            return;
-        }
         assertThat(result.getResponse().getStatus())
                 .as("%s answered %d for a cross-tenant principal",
                         entry.routeKey(), result.getResponse().getStatus())
@@ -371,23 +366,6 @@ public class SurfaceAdmissionAcceptanceTest {
             belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
                     throws Exception {
         switch (entry.ruleClass()) {
-            case OAUTH_CALLBACK -> {
-                var response = mvc.perform(get(entry.template())).andReturn().getResponse();
-                assertThat(response.getStatus()).isEqualTo(400);
-                assertThat(response.getHeader("Cache-Control")).isEqualTo("no-store");
-                assertThat(response.getHeader("Referrer-Policy")).isEqualTo("no-referrer");
-                assertThat(response.getHeader("Content-Security-Policy"))
-                        .isEqualTo("default-src 'none'; frame-ancestors 'none'");
-                assertThat(response.getContentAsString()).contains("Return to the original Managed Agent page");
-                assertThat(com.alibaba.qwen.code.managedagent.security.PublicSurface.covers(entry.template())).isFalse();
-            }
-            case SESSION_MCP_OAUTH_MANAGEMENT -> {
-                expect(entry, null, 401, "actor_required");
-                expect(entry, STRANGER, 404, "session_not_found");
-                expect(entry, READER, 403, "extension_management_forbidden");
-                expect(entry, OPERATOR, 403, "extension_management_forbidden");
-                expect(entry, OWNER_RANK, 403, "extension_management_forbidden");
-            }
             case SESSION_WORKTREE -> {
                 expect(entry, null, 401, "actor_required");
                 if (entry.template().endsWith("/options")) {
@@ -1543,29 +1521,20 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
         }
         if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
-            if (entry.template().contains("/imports")) {
-                String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
-                        ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest() + "\",\"compilerVersion\":1,"
-                                + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}")
-                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                query.add("metadata=" + metadata);
-            } else {
-                String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
-                        ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
-                                + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
-                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                query.add("manifest=" + manifest);
-                if ("POST".equals(entry.method())) {
-                    query.add("packageDigest=" + digest());
-                }
+            String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
+                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            query.add("manifest=" + manifest);
+            if ("POST".equals(entry.method())) {
+                query.add("packageDigest=" + digest());
             }
             if (entry.surface() == Surface.WEBSHELL) {
                 query.add("workspaceId=ws");
             }
         } else if (entry.surface() == Surface.PUBLIC
                 && (entry.capabilities().contains(Capability.EXTENSION_GET)
-                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE)
-                || entry.capabilities().contains(Capability.EXTENSION_INSPECTION))) {
+                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE))) {
             query.add("packageDigest=" + digest());
         }
         if (path.startsWith("/internal/managed-tool-publications/")
@@ -1644,10 +1613,7 @@ public class SurfaceAdmissionAcceptanceTest {
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
                     + "\"expectedCommittedSequence\":0}";
             case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
-            case EXTENSION_CONFIG_GET -> entry.template().endsWith("/operations/lookup")
-                    ? (publicSurface ? "{" : "{\"sessionId\":\"" + session + "\",")
-                            + "\"idempotencyKey\":\"extensions-probe\"}"
-                    : "{\"sessionId\":\"" + session + "\"}";
+            case EXTENSION_CONFIG_GET -> "{\"sessionId\":\"" + session + "\"}";
             case EXTENSION_CONFIG_APPLY -> {
                 if (entry == SurfaceRegistry.PUBLIC_SESSION_EXTENSIONS_APPLY) {
                     yield "{\"expectedConfigRevision\":0,\"extensions\":[]}";
@@ -1658,28 +1624,11 @@ public class SurfaceAdmissionAcceptanceTest {
                 yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
             }
             case EXTENSION_LIST -> "{\"workspaceId\":\"ws\"}";
-            case EXTENSION_GET, EXTENSION_INSPECTION -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
-            case RUNTIME_SKILL_IMPORT -> publicSurface ? "{}" : "{\"sessionId\":\"" + session + "\""
-                    + (entry.template().endsWith("/imports") ? ",\"idempotencyKey\":\"skills-probe\"" : "") + "}";
-            case MCP_OAUTH_QUERY -> "{\"sessionId\":\"" + session + "\"}";
-            case MCP_OAUTH_MANAGE -> {
-                String prefix = "{\"sessionId\":\"" + session + "\"";
-                if (entry.template().endsWith("/start")) {
-                    yield prefix + ",\"serverId\":\"ext_fixture:server\",\"browserNonce\":\"" + "n".repeat(43) + "\",\"idempotencyKey\":\"oauth-probe\"}";
-                }
-                if (entry.template().endsWith("/revoke")) {
-                    yield prefix + ",\"credentialId\":\"mcred_11111111-1111-4111-8111-111111111111\",\"expectedGeneration\":1}";
-                }
-                yield prefix + ",\"attemptId\":\"mauth_11111111-1111-4111-8111-111111111111\""
-                        + (entry.template().endsWith("/complete") ? ",\"browserNonce\":\"" + "n".repeat(43) + "\"" : "") + "}";
-            }
+            case EXTENSION_GET -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
             case EXTENSION_SETTINGS_GET -> "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\"}";
             case EXTENSION_SETTINGS_SET -> publicSurface ? "{\"expectedRevision\":0,\"values\":{}}"
                     : "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"idempotencyKey\":\"settings-probe\",\"expectedRevision\":0,\"values\":{}}";
-            case EXTENSION_OPERATION -> entry.template().endsWith("/lookup")
-                    ? (publicSurface ? "{" : "{\"workspaceId\":\"ws\",")
-                            + "\"kind\":\"publish\",\"idempotencyKey\":\"publish-probe\"}"
-                    : "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
+            case EXTENSION_OPERATION -> "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
             case SESSION_CREATE -> publicSurface
                     ? "{\"agent_id\":\"qwen-code\",\"input\":[],"
                             + "\"workspace\":{\"workspace_id\":\"ws\"}}"

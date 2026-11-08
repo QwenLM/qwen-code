@@ -101,7 +101,6 @@ export function createHostedHarnessContract(
       'session-extension-packages/1',
       'managed-package-preparation/1',
       'managed-runtime-skill-import/1',
-      'managed-mcp-oauth/1',
       'recovery-cleanup/1',
       'targeted-cancel/1',
       // GET /session/:id/events writes keepalive comments while no event

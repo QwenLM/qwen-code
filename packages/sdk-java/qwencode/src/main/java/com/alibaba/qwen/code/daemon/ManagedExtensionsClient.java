@@ -166,42 +166,6 @@ public final class ManagedExtensionsClient {
                 header(idempotencyKey));
     }
 
-    public Map<String, Object> apply(String sessionId, long expectedConfigRevision, List<Map<String, Object>> pins,
-            List<Map<String, Object>> mcpAuthBindings, String idempotencyKey) {
-        return json("POST", session(sessionId), Map.of("selectionVersion", 2, "expectedConfigRevision", expectedConfigRevision,
-                "extensions", pins, "mcpAuthBindings", mcpAuthBindings), header(idempotencyKey));
-    }
-
-    public Map<String, Object> queryMcpOAuth(String sessionId, List<Map<String, Object>> pins) {
-        return oauth(sessionId, "query", pins == null ? Map.of() : Map.of("extensions", pins));
-    }
-
-    public Map<String, Object> startMcpOAuth(String sessionId, String serverId, Map<String, Object> pin,
-            String browserNonce, String idempotencyKey) {
-        Map<String, Object> body = new java.util.LinkedHashMap<>(Map.of("serverId", serverId, "browserNonce", browserNonce,
-                "idempotencyKey", header(idempotencyKey)));
-        if (pin != null) {
-            body.put("pin", pin);
-        }
-        return oauth(sessionId, "start", body);
-    }
-
-    public Map<String, Object> mcpOAuthStatus(String sessionId, String attemptId) {
-        return oauth(sessionId, "status", Map.of("attemptId", attemptId));
-    }
-
-    public Map<String, Object> completeMcpOAuth(String sessionId, String attemptId, String browserNonce) {
-        return oauth(sessionId, "complete", Map.of("attemptId", attemptId, "browserNonce", browserNonce));
-    }
-
-    public Map<String, Object> revokeMcpOAuth(String sessionId, String credentialId, long expectedGeneration) {
-        return oauth(sessionId, "revoke", Map.of("credentialId", credentialId, "expectedGeneration", expectedGeneration));
-    }
-
-    private Map<String, Object> oauth(String sessionId, String action, Map<String, Object> body) {
-        return json("POST", "v1/agents/sessions/" + segment(sessionId) + "/mcp-oauth/" + action, body, null);
-    }
-
     public Map<String, Object> configurationOperation(String sessionId, String operationId) {
         return json("GET", session(sessionId) + "/operations/" + segment(operationId), null, null);
     }

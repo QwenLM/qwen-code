@@ -84,7 +84,6 @@ export interface ManagedExtensionRuntimeDependencies {
     sessionId: string,
     contextBinding: unknown,
   ) => Promise<void>;
-  readonly bindMcpTokenAuthority?: (sessionId: string, value: unknown) => void;
   readonly admitted: (sessionId: string) => Promise<boolean>;
   readonly idle: (sessionId: string) => boolean;
   readonly skillSource?: (
@@ -173,12 +172,6 @@ export class ManagedExtensionRuntime {
 
   async closeSkillSnapshots(): Promise<void> {
     await this.skillSources?.close();
-  }
-
-  bindMcpTokenAuthority(sessionId: string, value: unknown): void {
-    if (!this.dependencies.bindMcpTokenAuthority)
-      throw new Error('Personal MCP token delivery is unavailable.');
-    this.dependencies.bindMcpTokenAuthority(sessionId, value);
   }
 
   async status(sessionId: string): Promise<ManagedExtensionRuntimeState> {
@@ -855,8 +848,6 @@ export function registerManagedExtensionRuntimeRoutes(
           ![
             'contextBinding,operation,protocolVersion,sessionKey',
             'contextBinding,operation,protocolVersion,runtimeSessionId,sessionKey',
-            'contextBinding,mcpTokenAuthority,operation,protocolVersion,sessionKey',
-            'contextBinding,mcpTokenAuthority,operation,protocolVersion,runtimeSessionId,sessionKey',
           ].includes(Object.keys(body).sort().join(',')) ||
           body['protocolVersion'] !== 1 ||
           (body['runtimeSessionId'] !== undefined &&
@@ -881,8 +872,6 @@ export function registerManagedExtensionRuntimeRoutes(
           runtimeSessionId,
           body['contextBinding'],
         );
-        if (body['mcpTokenAuthority'] !== undefined)
-          runtime.bindMcpTokenAuthority(sessionId, body['mcpTokenAuthority']);
         const operation = body['operation'] as Record<string, unknown>;
         let result: unknown;
         if (

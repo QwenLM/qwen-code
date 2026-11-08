@@ -106,7 +106,6 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 new ThreadPoolExecutor.AbortPolicy());
         server.setExecutor(executor);
         server.createContext(ROUTE_PREFIX, this::handle);
-        server.createContext(ROUTE_PREFIX + "/runtime-leases/", this::handleMcpToken);
         if (nativeReadback != null) {
             server.createContext(CsiNativeReadbackProtocol.PATH, exchange -> handleNative(exchange, nativeReadback));
         }
@@ -114,56 +113,6 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     public void start() {
         server.start();
-    }
-
-    private void handleMcpToken(HttpExchange exchange) {
-        exchange.getResponseHeaders().set("Cache-Control", "no-store");
-        try {
-            String path = exchange.getRequestURI().getRawPath();
-            String prefix = ROUTE_PREFIX + "/runtime-leases/";
-            String suffix = "/mcp/token";
-            if (!"POST".equals(exchange.getRequestMethod())
-                    || exchange.getRequestURI().getRawQuery() != null
-                    || !path.startsWith(prefix)
-                    || !path.endsWith(suffix)
-                    || path.length() < prefix.length() + suffix.length()) {
-                throw notFound();
-            }
-            String lease = pathId(path.substring(prefix.length(), path.length() - suffix.length()));
-            List<String> authorization = exchange.getRequestHeaders().get("Authorization");
-            if (authorization == null
-                    || authorization.size() != 1
-                    || authorization.getFirst().length() > 519
-                    || !authorization.getFirst().matches("Bearer [A-Za-z0-9._~+/-]{1,512}=*")) {
-                throw new RuntimeBrokerException(
-                        401,
-                        "managed_mcp_token_unauthorized",
-                        "Original Runtime authentication failed.",
-                        false);
-            }
-            String type = exchange.getRequestHeaders().getFirst("Content-Type");
-            if (type == null
-                    || !"application/json".equals(type.split(";", 2)[0].trim())
-                    || !"no-store".equals(exchange.getRequestHeaders().getFirst("Cache-Control"))) {
-                throw new IllegalArgumentException("Invalid personal MCP token headers");
-            }
-            byte[] bytes;
-            try (var input = exchange.getRequestBody()) {
-                bytes = input.readNBytes(16 * 1024 + 1);
-            }
-            if (bytes.length > 16 * 1024) {
-                throw tooLarge();
-            }
-            sendJson(
-                    exchange,
-                    200,
-                    service.personalMcpToken(
-                            lease,
-                            authorization.getFirst().substring(7),
-                            JsonCodec.parseObject(bytes, "MCP token")));
-        } catch (Throwable error) {
-            sendError(exchange, error);
-        }
     }
 
     public void registerCsiApplicationAuthority(String tenantId, String sessionId,

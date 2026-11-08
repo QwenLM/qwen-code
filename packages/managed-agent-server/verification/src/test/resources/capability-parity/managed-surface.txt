@@ -11,7 +11,6 @@ STORE_TRANSACTION_LIST GET /internal/managed-session-store/v1/sessions/{sessionI
 STORE_TRANSACTION_LIST GET /internal/managed-session-store/v1/sessions/{sessionId}/transactions:recent internal
 PUB_FINISHED GET /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/finished internal
 PUB_OPERATION_GET GET /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/operations/{operationId} internal
-MCP_OAUTH_CALLBACK GET /oauth/mcp/callback public
 AUTOMATION_LIST GET /v1/agent-automations public
 AUTOMATION_GET GET /v1/agent-automations/{automationId} public
 AUTOMATION_RUN_LIST GET /v1/agent-automations/{automationId}/runs public
@@ -74,11 +73,6 @@ RUNTIME_SKILL_IMPORT POST /api/agent/web-shell/v1/session-extensions/skills/cand
 RUNTIME_SKILL_IMPORT POST /api/agent/web-shell/v1/session-extensions/skills/imports webshell
 RUNTIME_SKILL_IMPORT POST /api/agent/web-shell/v1/session-extensions/skills/snapshot webshell
 EXTENSION_CONFIG_APPLY POST /api/agent/web-shell/v1/session-extensions/submit webshell
-MCP_OAUTH_MANAGE POST /api/agent/web-shell/v1/session-mcp-oauth/complete webshell
-MCP_OAUTH_QUERY POST /api/agent/web-shell/v1/session-mcp-oauth/query webshell
-MCP_OAUTH_MANAGE POST /api/agent/web-shell/v1/session-mcp-oauth/revoke webshell
-MCP_OAUTH_MANAGE POST /api/agent/web-shell/v1/session-mcp-oauth/start webshell
-MCP_OAUTH_MANAGE POST /api/agent/web-shell/v1/session-mcp-oauth/status webshell
 MCP_MANAGEMENT POST /api/agent/web-shell/v1/session-mcp/management/operations/query webshell
 MCP_MANAGEMENT POST /api/agent/web-shell/v1/session-mcp/management/query webshell
 MCP_MANAGEMENT POST /api/agent/web-shell/v1/session-mcp/management/submit webshell
@@ -180,11 +174,6 @@ EXTENSION_CONFIG_APPLY POST /v1/agents/sessions/{sessionId}/extensions/operation
 RUNTIME_SKILL_IMPORT POST /v1/agents/sessions/{sessionId}/extensions/skills/imports public
 RUNTIME_SKILL_IMPORT POST /v1/agents/sessions/{sessionId}/extensions/skills/snapshot public
 MCP_MANAGEMENT POST /v1/agents/sessions/{sessionId}/mcp-management/commands public
-MCP_OAUTH_MANAGE POST /v1/agents/sessions/{sessionId}/mcp-oauth/complete public
-MCP_OAUTH_QUERY POST /v1/agents/sessions/{sessionId}/mcp-oauth/query public
-MCP_OAUTH_MANAGE POST /v1/agents/sessions/{sessionId}/mcp-oauth/revoke public
-MCP_OAUTH_MANAGE POST /v1/agents/sessions/{sessionId}/mcp-oauth/start public
-MCP_OAUTH_MANAGE POST /v1/agents/sessions/{sessionId}/mcp-oauth/status public
 SESSION_RECOVERY_RECHECK POST /v1/agents/sessions/{sessionId}/recovery/recheck public
 TASK_CANCEL POST /v1/agents/sessions/{sessionId}/tasks/{taskId}/cancel public
 SESSION_UNARCHIVE POST /v1/agents/sessions/{sessionId}/unarchive public

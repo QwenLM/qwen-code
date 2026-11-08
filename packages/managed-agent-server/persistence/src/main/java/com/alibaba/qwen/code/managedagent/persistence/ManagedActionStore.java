@@ -481,7 +481,12 @@ public class ManagedActionStore
             long now) {
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
-        ManagedMcpOAuthAdmission.requireActorForUpdate(jdbc, tenantId, sessionId, actorId);
+        jdbc.queryForObject(
+                "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id ="
+                        + " ? AND session_kind = 'PUBLIC' FOR UPDATE",
+                String.class,
+                tenantId,
+                sessionId);
         byte[] actorKey = actorScopeKey(tenantId, actorId);
         OwnerRow ownerRow = ownerRow(tenantId, sessionId);
         // The immutable owner arms answer before the replay; the mutable

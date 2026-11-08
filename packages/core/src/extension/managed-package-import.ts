@@ -30,7 +30,7 @@ export interface ManagedPackageImportMetadata {
   sourceKind: 'skill' | 'extension' | 'mcp';
   target: ManagedPackageTarget;
   sourceDigest: string;
-  compilerVersion: 1 | 2;
+  compilerVersion: 1;
   packageName?: string;
 }
 
@@ -82,9 +82,7 @@ export function parseManagedPackageImportMetadata(
     !['linux', 'darwin'].includes(String(target['platform'])) ||
     !['x64', 'arm64', 'any'].includes(String(target['arch'])) ||
     !['skill', 'extension', 'mcp'].includes(String(input['sourceKind'])) ||
-    ![MANAGED_PACKAGE_COMPILER_VERSION, 2].includes(
-      input['compilerVersion'] as number,
-    ) ||
+    input['compilerVersion'] !== MANAGED_PACKAGE_COMPILER_VERSION ||
     typeof input['sourceDigest'] !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(input['sourceDigest']) ||
     (input['packageName'] !== undefined &&

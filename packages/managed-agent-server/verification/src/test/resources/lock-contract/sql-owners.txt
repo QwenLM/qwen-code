@@ -181,6 +181,7 @@ com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT CO
 com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT COUNT(*) FROM ma_turn t JOIN ma_session s ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=? AND t.is_plan_enabled=TRUE AND s.session_kind='PUBLIC' AND s.parent_session_id IS NULL
 com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT approval_mode FROM ma_session WHERE tenant_id = ? AND session_id = ? AND session_kind = 'PUBLIC'
 com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT owner_actor_key, creator_actor_key, workspace_id, tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ? AND session_kind = 'PUBLIC'
+com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? AND session_kind = 'PUBLIC' FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT session_id FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/ManagedActionStore.java|SELECT status, workspace_storage_id FROM ma_session WHERE tenant_id = ? AND session_id = ?
@@ -194,11 +195,6 @@ com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionRecordStore.java|
 com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionRecordStore.java|SELECT session_id FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND parent_session_id = ? AND parent_child_run_id = ? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionRecordStore.java|SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedLegacySessionGuard.java|SELECT is_csi_guard FROM ma_session
-com/alibaba/qwen/code/managedagent/persistence/ManagedMcpOAuthAdmission.java|SELECT actor_id,generation,state,binding_json FROM ma_mcp_credential WHERE tenant_id=? AND workspace_id=(SELECT workspace_id FROM ma_session WHERE tenant_id=? AND session_id=?) AND credential_id=? FOR UPDATE
-com/alibaba/qwen/code/managedagent/persistence/ManagedMcpOAuthAdmission.java|SELECT personal_execution_actor_key FROM ma_session WHERE tenant_id=? AND session_id=?
-com/alibaba/qwen/code/managedagent/persistence/ManagedMcpOAuthAdmission.java|SELECT personal_execution_actor_key,personal_auth_config_revision FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE
-com/alibaba/qwen/code/managedagent/persistence/ManagedMcpOAuthAdmission.java|SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? AND session_kind = 'PUBLIC' FOR UPDATE
-com/alibaba/qwen/code/managedagent/persistence/ManagedMcpOAuthAdmission.java|UPDATE ma_session SET personal_execution_actor_key=?,personal_auth_config_revision=? WHERE tenant_id=? AND session_id=? AND personal_auth_config_revision<=?
 com/alibaba/qwen/code/managedagent/persistence/ManagedProjectionResourceCollector.java|AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.is_csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT
 com/alibaba/qwen/code/managedagent/persistence/ManagedProjectionResourceCollector.java|SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? AND is_recovery_protected = TRUE
 com/alibaba/qwen/code/managedagent/persistence/ManagedProjectionResourceCollector.java|SELECT tenant_id FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND recovery_status <> 'READY'

@@ -18,9 +18,6 @@ import java.util.Set;
  * MCP and extension configuration.
  */
 public interface SessionPolicyStore {
-    public default boolean supportsPersonalMcpExecution() { return false; }
-    public default void requirePersonalMcpActor(String tenant, String session, String actor) { }
-    public default void requirePersonalMcpUnattended(String tenant, String session) { }
     public default Map<String, WebShellModelContext> findModelContexts(
             String tenantId, List<String> sessionIds) {
         return Map.of();

@@ -346,33 +346,18 @@ try {
     const traffic = exchanges.length;
     const callsBeforeReload = modelCalls;
     const rejectLoad = blocked && !retryRelease;
-    const lostBeforeForward = fault === 'release-before-forward';
-    const drainExchanges = new Set<Exchange>();
-    const detach = async () => {
-      const offset = exchanges.length;
-      const result = await json(
-        `/session/${sessionId}/detach`,
-        {},
-        lostBeforeForward ? 503 : 204,
-      );
-      for (const entry of exchanges.slice(offset)) drainExchanges.add(entry);
-      if (lostBeforeForward)
-        assert.equal(result.error, 'managed_session_close_failed');
-    };
-    await detach();
+    await json(`/session/${sessionId}/detach`, {}, 204);
     const loaded = await json(
       `/session/${sessionId}/load`,
       {
         managedSessionStore: connection,
         toolProfile: 'hosted-workspace-files/1',
       },
-      rejectLoad || lostBeforeForward ? 409 : 200,
+      rejectLoad ? 409 : 200,
     );
-    if (lostBeforeForward)
-      assert.equal(loaded.error, 'hosted_session_already_attached');
     if (rejectLoad) assert.equal(loaded.error, 'hosted_turn_recovery_required');
     else {
-      if (!lostBeforeForward) clientId = loaded.clientId;
+      clientId = loaded.clientId;
       if (retryRelease) {
         await waitUntil(async () => {
           if (proxyFailure) throw proxyFailure;
@@ -404,7 +389,7 @@ try {
           1,
         );
       }
-      await detach();
+      await json(`/session/${sessionId}/detach`, {}, 204);
     }
     // A blocked turn's owed mount handback (#13800) keeps retrying on its
     // own clock and is not reload traffic.
@@ -424,7 +409,6 @@ try {
         assert.deepEqual(entry.fields, {
           ...original.fields,
           requestId: entry.fields['requestId'],
-          ...(drainExchanges.has(entry) ? { drain: true } : {}),
         });
       }
     } else assert.deepEqual(cleanupRetries, []);

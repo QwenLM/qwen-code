@@ -44,17 +44,9 @@ public final class ManagedConfigInstall {
         long before = count(body.get("previousConfigRevision"), 0);
         check(count(body.get("configRevision"), 1) == before + 1, "Invalid effective configuration revision");
         JsonNode command = body.get("command");
-        Set<String> commandFields = new HashSet<>(Set.of("operationId", "actorKey", "expectedRevision", "extensions"));
-        if (command.has("mcpChange")) {
-            commandFields.add("mcpChange");
-        }
-        if (command.has("selectionVersion")) {
-            check(command.path("selectionVersion").isIntegralNumber() && command.path("selectionVersion").asInt() == 2,
-                    "Invalid extension selection version");
-            commandFields.addAll(Set.of("selectionVersion", "mcpAuthBindings"));
-            authBindings(command.get("mcpAuthBindings"));
-        }
-        ManagedExtensionRecords.closed(command, commandFields, "Extension apply command");
+        ManagedExtensionRecords.closed(command, command.has("mcpChange")
+                ? Set.of("operationId", "actorKey", "expectedRevision", "extensions", "mcpChange")
+                : Set.of("operationId", "actorKey", "expectedRevision", "extensions"), "Extension apply command");
         if (command.has("mcpChange")) {
             mcpChange(command.get("mcpChange"));
         }
@@ -97,18 +89,6 @@ public final class ManagedConfigInstall {
             if (pin.has("settingsRevision")) {
                 count(pin.get("settingsRevision"), 1);
             }
-        }
-    }
-
-    public static void authBindings(JsonNode bindings) {
-        check(bindings != null && bindings.isArray() && bindings.size() <= 32, "Invalid personal MCP bindings");
-        Set<String> ids = new HashSet<>();
-        for (JsonNode binding : bindings) {
-            ManagedExtensionRecords.closed(binding, Set.of("serverId", "credentialId", "credentialGeneration"), "Personal MCP binding");
-            check(binding.path("serverId").isTextual() && binding.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}")
-                    && ids.add(binding.path("serverId").asText()) && binding.path("credentialId").isTextual()
-                    && binding.path("credentialId").asText().matches("mcred_[0-9a-f-]{36}"), "Invalid personal MCP binding");
-            count(binding.get("credentialGeneration"), 1);
         }
     }
 

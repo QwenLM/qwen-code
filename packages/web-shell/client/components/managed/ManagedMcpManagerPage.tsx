@@ -38,7 +38,6 @@ import {
 } from './managed-session-storage';
 import { useManagedMcpManagement } from './use-managed-mcp-management';
 import { ManagedExtensionInstaller } from './ManagedExtensionInstaller';
-import { ManagedMcpOAuthManager } from './ManagedMcpOAuthManager';
 import type {
   ManagedExtensionCatalog,
   ManagedExtensionInspection,
@@ -394,29 +393,7 @@ function ManagedMcpManagerContent({
           </AlertDescription>
         </Alert>
       )}
-      {packages &&
-        workspaceId &&
-        sessionId &&
-        (packages.snapshot.selectionVersion === 2 ||
-          packages.catalog.extensions.some(
-            (entry) =>
-              entry.manifest.compilerVersion === 2 &&
-              packages.snapshot.extensions.some(
-                (pin) => pin.extensionId === entry.pin.extensionId,
-              ),
-          )) && (
-          <ManagedMcpOAuthManager
-            key={`oauth:${provider.storageKey}:${workspaceId}:${sessionId}`}
-            provider={provider}
-            workspaceId={workspaceId}
-            sessionId={sessionId}
-            snapshot={packages.snapshot}
-            onChanged={() => {
-              void loadPackages().catch(() => setPackageError(true));
-              void management.refresh();
-            }}
-          />
-        )}
+
       {!sessionId ? (
         <p role="status">{t('managed.mcp.selectSession')}</p>
       ) : !workspaceId ? (

@@ -815,15 +815,6 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public boolean supportsPersonalMcpOAuth() {
-        try {
-            return client().capabilities().getFeatures().contains("managed-mcp-oauth/1");
-        } catch (RuntimeException unavailable) {
-            return false;
-        }
-    }
-
-    @Override
     public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
         try {
             requireReadyForNewWork(tenant, session, false);

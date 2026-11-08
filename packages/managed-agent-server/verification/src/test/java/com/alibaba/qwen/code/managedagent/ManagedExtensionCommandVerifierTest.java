@@ -170,40 +170,6 @@ class ManagedExtensionCommandVerifierTest {
         }
     }
 
-    @Test
-    void acceptsVersionTwoCommandsAndRetainsPersonalIdentityAndVersionFences() throws IOException {
-        ObjectNode bundle = JSON.createObjectNode().put("kind", "managed-extension-config-bundle")
-                .put("formatVersion", 2).put("configRevision", 1).putNull("executionActorKey");
-        bundle.set("packages", JSON.valueToTree(List.of(Map.of("pin", Map.of("extensionId", EXTENSION)))));
-        bundle.putArray("mcpAuthBindings");
-        replaceBundle(bundle);
-        verify();
-        String actor = DigestUtils.sha256Hex("owner");
-        bundle.put("executionActorKey", actor);
-        bundle.withArray("mcpAuthBindings").addObject().put("serverId", EXTENSION + ":tools")
-                .put("credentialId", "mcred_00000000-0000-4000-8000-000000000001").put("credentialGeneration", 1);
-        jdbc.update("UPDATE ma_session SET personal_execution_actor_key=?,personal_auth_config_revision=1"
-                + " WHERE tenant_id=? AND session_id=?", actor, "tenant", "harness");
-        replaceBundle(bundle);
-        verify();
-        bundle.put("executionActorKey", DigestUtils.sha256Hex("another-owner"));
-        replaceBundle(bundle);
-        assertEquals(403, assertThrows(RuntimeBrokerException.class, this::verify).getStatusCode());
-        bundle.put("executionActorKey", actor).put("formatVersion", 3);
-        replaceBundle(bundle);
-        assertEquals(403, assertThrows(RuntimeBrokerException.class, this::verify).getStatusCode());
-        bundle.put("formatVersion", 2).putArray("mcpAuthBindings");
-        replaceBundle(bundle);
-        assertEquals(403, assertThrows(RuntimeBrokerException.class, this::verify).getStatusCode());
-    }
-
-    private void replaceBundle(ObjectNode bundle) throws IOException {
-        activeConfig.set("bundleRef", resource("managed-extension-config-bundle", bundle));
-        ObjectNode ref = resource("managed-config_install", activeConfig);
-        jdbc.update("UPDATE ma_session_record SET record_resource_id=? WHERE tenant_id=? AND session_id=?"
-                + " AND domain='config_install'", ref.path("resourceId").asText(), "tenant", "harness");
-    }
-
     private void verify() { verifier.verify(runtime, session, JSON.convertValue(operation, new TypeReference<>() { })); }
 
     private ObjectNode resource(String kind, JsonNode body) throws IOException {

@@ -493,25 +493,3 @@ it.each(['X-Auth-Token', 'X-Custom-Credential'])(
     ).toThrow('settings placeholders');
   },
 );
-
-it('refuses a static Authorization placeholder alongside personal OAuth', () => {
-  expect(() =>
-    buildManagedMcpInput({
-      name: 'docs',
-      serverName: 'docs',
-      transport: 'streamable-http',
-      command: '',
-      args: '[]',
-      url: 'https://mcp.example/mcp',
-      environment: '{}',
-      headers: JSON.stringify({ Authorization: 'Bearer ${TOKEN}' }),
-      secretKeys: ['TOKEN'],
-      auth: {
-        type: 'oauth',
-        providerId: 'fixture',
-        resourceUri: 'https://mcp.example/mcp',
-        scopes: ['read'],
-      },
-    }),
-  ).toThrow('no static Authorization header');
-});

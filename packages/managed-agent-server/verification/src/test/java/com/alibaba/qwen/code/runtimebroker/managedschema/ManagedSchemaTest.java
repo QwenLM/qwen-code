@@ -51,8 +51,6 @@ class ManagedSchemaTest {
             Map.entry("ma_extension_package", List.of("package_key")),
             Map.entry("ma_extension_settings", List.of("settings_key")),
             Map.entry("ma_extension_operation", List.of("operation_key")),
-            Map.entry("ma_mcp_oauth_attempt", List.of("attempt_key")),
-            Map.entry("ma_mcp_credential", List.of("credential_key")),
             Map.entry("ma_storage", List.of("alias_key")),
             Map.entry("ma_runtime_slot", List.of("request_key")),
             Map.entry("ma_runtime_binding", List.of("binding_id")),
@@ -651,8 +649,7 @@ class ManagedSchemaTest {
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
         Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation", "ma_session_worktree",
-                "ma_mcp_oauth_attempt", "ma_mcp_credential"));
+        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation", "ma_session_worktree"));
         assertEquals(
                 originalTargets,
                 inventory.values().stream()

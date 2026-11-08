@@ -51,6 +51,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
@@ -127,7 +128,12 @@ public class ManagedAgentStore implements AgentStateStore {
         List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         ResidentWorkspaces residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
-        AgentSessionPolicies.requireAgentRevision(agentRevision);
+        if (StringUtils.isBlank(agentRevision)
+                || agentRevision.length() > 128) {
+            throw new IllegalArgumentException(
+                    "qwen.managed-agent.agent-revision must contain 1-128"
+                            + " characters");
+        }
 
         AgentStoreRows storeRows = new AgentStoreRows(harnessRules, jdbc, objectMapper);
         this.eventJournal = new AgentEventJournal(storeRows, jdbc, clock, eventPublisher);
@@ -625,19 +631,6 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public boolean hasExecutionRegistryFacts(String tenantId, String sessionId) {
         return sessionQueries.hasExecutionRegistryFacts(tenantId, sessionId);
-    }
-
-    @Override
-    public boolean supportsPersonalMcpExecution() { return true; }
-
-    @Override
-    public void requirePersonalMcpActor(String tenant, String session, String actor) {
-        sessionPolicies.requirePersonalMcpActor(tenant, session, actor);
-    }
-
-    @Override
-    public void requirePersonalMcpUnattended(String tenant, String session) {
-        sessionPolicies.requirePersonalMcpUnattended(tenant, session);
     }
 
     @Override

@@ -584,7 +584,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public CommandAdmission createPublicChildSession(String tenantId, String parentSessionId,
             String childRunId, String description, String prompt, com.fasterxml.jackson.databind.JsonNode snapshot) {
-        store.requirePersonalMcpUnattended(tenantId, parentSessionId);
         List<Map<String, Object>> input = inputPolicy.input(List.of(new InputBlock("input_text",
                 description.isBlank() ? prompt : "[" + description + "]\n\n" + prompt)), false);
         return insertChildSession(tenantId, parentSessionId, childRunId,
@@ -1818,7 +1817,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     void requireRecoveryOperator(SessionRecord session, String actorId) {
-        store.requirePersonalMcpActor(session.tenantId(), session.sessionId(), actorId);
         requireCancellerRole(session, actorId);
         requireCancellerShape(session, actorId);
     }

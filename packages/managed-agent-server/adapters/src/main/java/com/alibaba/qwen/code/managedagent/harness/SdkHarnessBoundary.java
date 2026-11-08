@@ -180,9 +180,6 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     public boolean supportsRuntimeSkillImport() { return call(delegate::supportsRuntimeSkillImport); }
 
     @Override
-    public boolean supportsPersonalMcpOAuth() { return call(delegate::supportsPersonalMcpOAuth); }
-
-    @Override
     public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
         return call(() -> delegate.runtimeSkillCandidates(tenant, session));
     }

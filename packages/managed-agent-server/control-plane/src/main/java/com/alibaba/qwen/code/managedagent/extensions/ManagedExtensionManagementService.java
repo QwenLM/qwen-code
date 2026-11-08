@@ -28,8 +28,6 @@ import java.util.function.Supplier;
 
 @Service
 public class ManagedExtensionManagementService {
-    @org.springframework.beans.factory.annotation.Autowired
-    private org.springframework.beans.factory.ObjectProvider<ManagedMcpOAuthService> oauth;
     private final SessionPolicyStore store;
     private final ManagedAgentService sessions;
     private final ManagedExtensionRecordStore records;
@@ -100,8 +98,7 @@ public class ManagedExtensionManagementService {
 
     public JsonNode submit(String tenant, String actor, String sessionId, String key, JsonNode command) {
         ManagedAgentService.validateIdempotencyKey(key);
-        boolean v2 = command != null && command.path("selectionVersion").isIntegralNumber() && command.path("selectionVersion").asLong() == 2;
-        if (command == null || !command.isObject() || command.size() != (v2 ? 4 : 2) || !command.has("extensions")
+        if (command == null || !command.isObject() || command.size() != 2 || !command.has("extensions")
                 || !command.path("expectedConfigRevision").isIntegralNumber()
                 || !command.path("expectedConfigRevision").canConvertToLong()
                 || command.path("expectedConfigRevision").longValue() < 0
@@ -110,31 +107,12 @@ public class ManagedExtensionManagementService {
         }
         try {
             ManagedConfigInstall.pins(command.get("extensions"));
-            if (v2) {
-                ManagedConfigInstall.authBindings(command.get("mcpAuthBindings"));
-            }
         } catch (ManagedExtensionRecords.InvalidRecordException error) {
             throw invalid();
         }
         String operationId = applyOperationId(tenant, actor, sessionId, key);
         SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
         packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
-        JsonNode current = records.currentMcpSettings(tenant, sessionId);
-        if (!v2 && current != null && current.path("command").path("selectionVersion").asInt() == 2) {
-            throw new ManagedAgentException(409, "extension_selection_upgrade_required", "This Session requires a version 2 extension selection.");
-        }
-        if (v2) {
-            if (!harness.supportsPersonalMcpOAuth()) {
-                throw unsupported();
-            }
-            ManagedMcpOAuthService service = oauth == null ? null : oauth.getIfAvailable();
-            if (service == null) {
-                throw unsupported();
-            }
-            service.validateBindings(tenant, actor, session, command.get("mcpAuthBindings"),
-                    java.util.stream.StreamSupport.stream(command.get("extensions").spliterator(), false)
-                            .map(pin -> json.convertValue(pin, com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin.class)).toList());
-        }
         if (!harness.supportsSessionExtensions()) {
             throw unsupported();
         }
@@ -147,10 +125,6 @@ public class ManagedExtensionManagementService {
         request.put("actorKey", DigestUtils.sha256Hex(actor));
         request.put("expectedRevision", command.get("expectedConfigRevision").asLong());
         request.put("extensions", json.convertValue(command.get("extensions"), List.class));
-        if (v2) {
-            request.put("selectionVersion", 2);
-            request.put("mcpAuthBindings", json.convertValue(command.get("mcpAuthBindings"), List.class));
-        }
         return invoke(() -> harness.applyExtensions(tenant, sessionId, request), sessionId, operationId);
     }
 
@@ -178,20 +152,10 @@ public class ManagedExtensionManagementService {
         JsonNode requestedRef = "recoverPrevious".equals(body.path("mode").asText()) && "preparing".equals(phase)
                 ? body.path("restoresBundleRef") : body.path("bundleRef");
         result.set("requestedExtensions", requestedRef.isNull() ? body.path("command").get("extensions") : bundlePins(tenant, sessionId, requestedRef));
-        JsonNode requestedBundle = requestedRef.isObject() ? read(tenant, sessionId, requestedRef) : null;
-        if (body.path("command").path("selectionVersion").asInt() == 2 || requestedBundle != null && requestedBundle.path("formatVersion").asInt() == 2) {
-            result.put("selectionVersion", 2);
-            result.putArray("mcpAuthBindings");
-        }
         JsonNode active = body;
         for (int step = 0; step < 4096; step++) {
             if ("active".equals(active.path("phase").asText())) {
-                JsonNode activeBundle = read(tenant, sessionId, active.get("bundleRef"));
-                result.set("extensions", bundlePins(activeBundle));
-                if (activeBundle.path("formatVersion").asInt() == 2) {
-                    result.put("selectionVersion", 2);
-                    result.set("mcpAuthBindings", activeBundle.get("mcpAuthBindings"));
-                }
+                result.set("extensions", bundlePins(tenant, sessionId, active.get("bundleRef")));
                 break;
             }
             if (active.path("previousRecordRef").isNull()) {
@@ -212,10 +176,6 @@ public class ManagedExtensionManagementService {
 
     private ArrayNode bundlePins(String tenant, String sessionId, JsonNode ref) {
         JsonNode bundle = read(tenant, sessionId, ref);
-        return bundlePins(bundle);
-    }
-
-    private ArrayNode bundlePins(JsonNode bundle) {
         if (!"managed-extension-config-bundle".equals(bundle.path("kind").asText()) || !bundle.path("packages").isArray()) {
             throw corrupt();
         }

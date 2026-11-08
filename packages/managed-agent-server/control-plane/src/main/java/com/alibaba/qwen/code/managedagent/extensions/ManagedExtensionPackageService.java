@@ -89,7 +89,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
             }
             var input = json.readValue(encoded, ManagedExtensionPackages.ImportMetadata.class);
             if (input == null || input.sourceKind() == null || !Set.of("skill", "extension", "mcp").contains(input.sourceKind())
-                    || input.compilerVersion() != 1 && input.compilerVersion() != 2 || input.target() == null
+                    || input.compilerVersion() != 1 || input.target() == null
                     || input.target().platform() == null || input.target().arch() == null
                     || !Set.of("linux", "darwin").contains(input.target().platform())
                     || !Set.of("x64", "arm64", "any").contains(input.target().arch())
@@ -204,10 +204,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
             throw invalid();
         }
         for (Pin pin : pins) {
-            if (repository.get(tenant, workspace, pin).manifest().schemaVersion() == 2) {
-                throw new ManagedAgentException(409, "unsupported_feature",
-                        "Create the Session first, then explicitly install and authorize personal MCP packages.");
-            }
+            repository.get(tenant, workspace, pin);
             if (pin.settingsRevision() != null && !repository.hasSettings(tenant, workspace, pin)) {
                 throw missing();
             }
@@ -224,8 +221,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
                 throw invalid();
             }
             Manifest manifest = json.readValue(bytes, Manifest.class);
-            if (manifest == null || manifest.schemaVersion() != manifest.compilerVersion()
-                    || manifest.schemaVersion() != 1 && manifest.schemaVersion() != 2
+            if (manifest == null || manifest.schemaVersion() != 1 || manifest.compilerVersion() != 1
                     || manifest.name() == null || !manifest.name().matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
                     || manifest.version() == null || manifest.version().isBlank() || manifest.version().length() > 128
                     || manifest.target() == null || manifest.target().platform() == null || manifest.target().arch() == null

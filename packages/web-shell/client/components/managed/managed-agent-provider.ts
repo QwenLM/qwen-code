@@ -19,13 +19,6 @@ import type {
   ManagedMcpManagementSnapshot,
 } from './managed-mcp-management-types';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
-import type {
-  ManagedMcpOAuthAttempt,
-  ManagedMcpOAuthSnapshot,
-  ManagedMcpOAuthRevocation,
-  ManagedMcpOAuthStart,
-} from './managed-mcp-oauth-types';
-
 export type ManagedAgentSessionPhase =
   | 'created'
   | 'admitted'
@@ -546,37 +539,6 @@ export interface ManagedAgentProvider {
       pin: ManagedExtensionPin,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedExtensionCatalog['extensions'][number]>;
-  };
-  readonly mcpOAuth?: {
-    query(
-      sessionId: string,
-      extensions: ManagedExtensionPin[] | undefined,
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedMcpOAuthSnapshot>;
-    start(
-      sessionId: string,
-      input: {
-        serverId: string;
-        browserNonce: string;
-        pin?: ManagedExtensionPin;
-      },
-      options: ManagedAgentCommandOptions,
-    ): Promise<ManagedMcpOAuthStart>;
-    status(
-      sessionId: string,
-      attemptId: string,
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedMcpOAuthAttempt>;
-    complete(
-      sessionId: string,
-      input: { attemptId: string; browserNonce: string },
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedMcpOAuthAttempt>;
-    revoke(
-      sessionId: string,
-      input: { credentialId: string; expectedGeneration: number },
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedMcpOAuthRevocation>;
   };
   readonly mcpManagement?: {
     /** Explicit tenant/actor namespace for pending commands saved in this tab. */

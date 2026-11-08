@@ -166,10 +166,10 @@ class HostedPublicWorkspaceIT {
                     null, null, "actor", 200).path("status").asText()).isEqualTo("completed");
             assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
                     String.class, tenant, session, turn)).isEqualTo("COMPLETED");
-            assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
-                    .toString()).contains("G0_USER_QUESTION_DONE");
         });
         assertThat(modelRequests).hasSize(2);
+        assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
+                .toString()).contains("G0_USER_QUESTION_DONE");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?", Long.class, session)).isZero();
     }
 
@@ -180,7 +180,6 @@ class HostedPublicWorkspaceIT {
         publicChildren = true;
         publicChildQuestions = true;
         shell = true;
-        approvals = true;
         definitionApproval = true;
         shellLifecycleV2 = true;
         Path root = boot().getFirst().resolve("child");

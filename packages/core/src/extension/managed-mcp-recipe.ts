@@ -5,12 +5,6 @@
  */
 
 export interface ManagedMcpRecipe {
-  auth?: {
-    type: 'oauth';
-    providerId: string;
-    resourceUri: string;
-    scopes: string[];
-  };
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -37,7 +31,6 @@ const fields = new Set([
   'httpUrl',
   'headers',
   'type',
-  'auth',
 ]);
 
 function text(value: unknown): value is string {
@@ -121,47 +114,6 @@ export function parseManagedMcpRecipe(
       )
     )
       invalid();
-  }
-  if (recipe['auth'] !== undefined) {
-    const auth = recipe['auth'] as Record<string, unknown>;
-    if (
-      !auth ||
-      typeof auth !== 'object' ||
-      Array.isArray(auth) ||
-      Object.keys(auth).sort().join(',') !==
-        'providerId,resourceUri,scopes,type' ||
-      auth['type'] !== 'oauth' ||
-      !text(auth['providerId']) ||
-      !/^[A-Za-z0-9._-]{1,128}$/u.test(auth['providerId']) ||
-      !text(auth['resourceUri']) ||
-      recipe['command'] !== undefined ||
-      Object.keys((recipe['headers'] ?? {}) as object).some(
-        (key) => key.toLowerCase() === 'authorization',
-      ) ||
-      !Array.isArray(auth['scopes']) ||
-      auth['scopes'].length < 1 ||
-      auth['scopes'].length > 128 ||
-      !auth['scopes'].every(
-        (scope) =>
-          text(scope) && /^[\x21\x23-\x5b\x5d-\x7e]{1,256}$/u.test(scope),
-      ) ||
-      new Set(auth['scopes']).size !== auth['scopes'].length
-    )
-      invalid();
-    try {
-      const resource = new URL(auth['resourceUri'] as string);
-      if (
-        !['http:', 'https:'].includes(resource.protocol) ||
-        resource.username ||
-        resource.password ||
-        resource.hash ||
-        resource.href !==
-          new URL((recipe['httpUrl'] ?? recipe['url']) as string).href
-      )
-        invalid();
-    } catch {
-      invalid();
-    }
   }
   return structuredClone(recipe) as ManagedMcpRecipe;
 }

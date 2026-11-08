@@ -33,11 +33,7 @@ import type {
   ManagedExtensionManifest,
   ManagedExtensionInspection,
 } from './managed-extension-types';
-import {
-  isManagedExtensionPins,
-  isManagedMcpAuthBindings,
-  managedExtensionSelection,
-} from './managed-extension-types';
+import { isManagedExtensionPins } from './managed-extension-types';
 import {
   getManagedClientId,
   managedRequestId,
@@ -166,9 +162,7 @@ export function ManagedExtensionsManagerPage({
             saved.key &&
             isManagedExtensionPins(saved.selection?.extensions) &&
             Number.isSafeInteger(saved.selection.expectedConfigRevision) &&
-            (!('selectionVersion' in saved.selection) ||
-              (saved.selection.selectionVersion === 2 &&
-                isManagedMcpAuthBindings(saved.selection.mcpAuthBindings)))
+            true
           )
             setPending(saved);
           else sessionStorage.removeItem(storageKey);
@@ -223,7 +217,10 @@ export function ManagedExtensionsManagerPage({
       if (!management || !sessionId || !snapshot) return;
       const input = pending ?? {
         key: managedRequestId(),
-        selection: managedExtensionSelection(snapshot, selection),
+        selection: {
+          expectedConfigRevision: snapshot.revision,
+          extensions: selection,
+        },
       };
       setPending(input);
       if (storageKey) {

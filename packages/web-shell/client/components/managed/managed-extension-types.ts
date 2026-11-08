@@ -12,74 +12,8 @@ export type ManagedExtensionSettings =
   components['schemas']['ManagedExtensionPackageSettings'];
 export type ManagedExtensionSnapshot =
   components['schemas']['ManagedExtensionManagementSnapshot'];
-export type ManagedExtensionSelection = Omit<
-  components['schemas']['ManagedExtensionApplySelection'],
-  'selectionVersion' | 'mcpAuthBindings'
-> &
-  (
-    | { selectionVersion?: never; mcpAuthBindings?: never }
-    | { selectionVersion: 2; mcpAuthBindings: ManagedMcpAuthBinding[] }
-  );
-
-export type ManagedMcpAuthBinding =
-  components['schemas']['ManagedMcpAuthBinding'];
-
-export function isManagedMcpAuthBindings(
-  value: unknown,
-): value is ManagedMcpAuthBinding[] {
-  if (!Array.isArray(value) || value.length > 32) return false;
-  const servers = new Set<string>();
-  return value.every((binding: unknown) => {
-    if (!binding || typeof binding !== 'object' || Array.isArray(binding))
-      return false;
-    const entry = binding as Record<string, unknown>;
-    if (
-      Object.keys(entry).sort().join(',') !==
-        'credentialGeneration,credentialId,serverId' ||
-      typeof entry['serverId'] !== 'string' ||
-      !entry['serverId'] ||
-      entry['serverId'].length > 512 ||
-      typeof entry['credentialId'] !== 'string' ||
-      !entry['credentialId'] ||
-      entry['credentialId'].length > 512 ||
-      !Number.isSafeInteger(entry['credentialGeneration']) ||
-      Number(entry['credentialGeneration']) < 1 ||
-      servers.has(entry['serverId'])
-    )
-      return false;
-    servers.add(entry['serverId']);
-    return true;
-  });
-}
-
-export function managedExtensionSelection(
-  snapshot: Pick<
-    ManagedExtensionSnapshot,
-    'revision' | 'selectionVersion' | 'mcpAuthBindings' | 'extensions'
-  >,
-  extensions: ManagedExtensionPin[],
-): ManagedExtensionSelection {
-  return snapshot.selectionVersion === 2
-    ? {
-        selectionVersion: 2,
-        expectedConfigRevision: snapshot.revision,
-        extensions,
-        mcpAuthBindings: (snapshot.mcpAuthBindings ?? []).filter((binding) =>
-          extensions.some((pin) => {
-            const previous = snapshot.extensions.find(
-              (entry) => entry.extensionId === pin.extensionId,
-            );
-            return (
-              binding.serverId.startsWith(`${pin.extensionId}:`) &&
-              previous?.packageRevision === pin.packageRevision &&
-              previous.packageDigest === pin.packageDigest &&
-              previous.settingsRevision === pin.settingsRevision
-            );
-          }),
-        ),
-      }
-    : { expectedConfigRevision: snapshot.revision, extensions };
-}
+export type ManagedExtensionSelection =
+  components['schemas']['ManagedExtensionApplySelection'];
 
 export type ManagedExtensionImportMetadata =
   components['schemas']['ManagedExtensionImportMetadata'];
@@ -151,14 +85,6 @@ export function requireExtensionSnapshot(
     if (!isManagedExtensionPins(pins))
       throw new Error('Invalid Managed extension selection');
   }
-  if (
-    (value.selectionVersion !== undefined && value.selectionVersion !== 2) ||
-    (value.selectionVersion === 2 &&
-      !isManagedMcpAuthBindings(value.mcpAuthBindings)) ||
-    (value.selectionVersion === undefined &&
-      value.mcpAuthBindings !== undefined)
-  )
-    throw new Error('Invalid Managed MCP authorization bindings');
   if (
     value.operation &&
     (!/^[0-9a-f-]{36}$/i.test(value.operation.operationId) ||

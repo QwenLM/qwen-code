@@ -233,9 +233,6 @@ class ManagedExtensionPackageServiceTest {
     void validatesManifestWithoutResolvingHostEnvironment() throws Exception {
         String encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(json.writeValueAsBytes(manifest));
         assertThat(service.decodeManifest(encoded)).isEqualTo(manifest);
-        var oauthManifest = new Manifest(2, 2, "oauth", "1.0.0", new Target("linux", "any"), List.of("mcp"));
-        assertThat(service.decodeManifest(Base64.getUrlEncoder().withoutPadding().encodeToString(json.writeValueAsBytes(oauthManifest))))
-                .isEqualTo(oauthManifest);
         var mixedVersion = new Manifest(1, 2, "mixed", "1.0.0", new Target("linux", "any"), List.of("mcp"));
         assertThatThrownBy(() -> service.decodeManifest(Base64.getUrlEncoder().withoutPadding().encodeToString(json.writeValueAsBytes(mixedVersion))))
                 .isInstanceOf(ManagedAgentException.class);

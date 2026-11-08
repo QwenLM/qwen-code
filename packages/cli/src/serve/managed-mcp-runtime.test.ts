@@ -25,7 +25,6 @@ import {
   type ManagedMcpDefinition,
   type ManagedMcpManifest,
 } from './managed-mcp-runtime.js';
-import { ManagedMcpOAuthError } from './managed-mcp-oauth.js';
 import {
   ManagedToolExecutor,
   type ManagedToolSet,
@@ -145,17 +144,11 @@ function stdioDefinition(serverRevision = 1): ManagedMcpDefinition {
 
 function runtime(
   definitions: readonly ManagedMcpDefinition[] = [stdioDefinition()],
-  accessToken?: import('./managed-mcp-oauth.js').ManagedMcpAccessTokenProvider,
 ): ManagedMcpRuntime {
   const instance = new ManagedMcpRuntime(
     { ...sessionKey, workspaceGeneration: '1' },
     async (id) => (id === runtimeSessionId ? directory : undefined),
-    {
-      version: definitions.some((definition) => definition.oauth) ? 2 : 1,
-      servers: definitions,
-    } satisfies ManagedMcpManifest,
-    undefined,
-    accessToken,
+    { version: 1, servers: definitions } satisfies ManagedMcpManifest,
   );
   runtimes.push(instance);
   return instance;
@@ -1739,31 +1732,17 @@ describe('Managed MCP Runtime', () => {
     ).toBe('managed_mcp_grant_invalid');
   });
 
-  it.each([
-    ['streamable-http', false],
-    ['sse', false],
-    ['streamable-http', true],
-    ['sse', true],
-  ] as const)(
-    'runs real %s discovery and raw resource requests (personal OAuth=%s)',
-    async (transport, personal) => {
+  it.each(['streamable-http', 'sse'] as const)(
+    'runs real %s discovery and raw resource requests',
+    async (transport) => {
       let events: ServerResponse | undefined;
       let failPrompts = true;
       const methods: string[] = [];
       const accepts: string[] = [];
-      const bearerTokens: string[] = [];
-      let issued = 0;
-      let denyToken = false;
       const server = createServer(async (request, response) => {
-        if (personal) {
-          expect(request.headers['authorization']).toMatch(
-            /^Bearer current-access-[0-9]+$/,
-          );
-          bearerTokens.push(String(request.headers['authorization']));
-        } else
-          expect(request.headers['authorization']).toBe(
-            'Bearer scoped-test-secret',
-          );
+        expect(request.headers['authorization']).toBe(
+          'Bearer scoped-test-secret',
+        );
         if (request.method === 'DELETE') {
           response.writeHead(503).end();
           return;
@@ -1840,37 +1819,18 @@ describe('Managed MCP Runtime', () => {
         server.listen(0, '127.0.0.1', resolve),
       );
       const address = server.address() as { port: number };
-      const instance = runtime(
-        [
-          {
-            tenantId: sessionKey.tenantId,
-            workspaceId: sessionKey.workspaceId,
-            serverId: 'fixture',
-            serverRevision: 1,
-            definitionDigest,
-            transport,
-            url: `http://127.0.0.1:${address.port}/mcp`,
-            ...(personal
-              ? {
-                  oauth: {
-                    resourceUri: `http://127.0.0.1:${address.port}/mcp`,
-                    credentialId: 'credential',
-                    credentialGeneration: 1,
-                    configRevision: 2,
-                    executionActorKey: 'a'.repeat(64),
-                  },
-                }
-              : { headers: { Authorization: 'Bearer scoped-test-secret' } }),
-          },
-        ],
-        personal
-          ? async (context) => {
-              if (denyToken) throw new ManagedMcpOAuthError();
-              expect(context.configRevision).toBe(2);
-              return `current-access-${++issued}`;
-            }
-          : undefined,
-      );
+      const instance = runtime([
+        {
+          tenantId: sessionKey.tenantId,
+          workspaceId: sessionKey.workspaceId,
+          serverId: 'fixture',
+          serverRevision: 1,
+          definitionDigest,
+          transport,
+          url: `http://127.0.0.1:${address.port}/mcp`,
+          headers: { Authorization: 'Bearer scoped-test-secret' },
+        },
+      ]);
       const configured = await settled(instance, configure());
       if (transport === 'sse') expect(accepts).toEqual(['text/event-stream']);
       expect(configured.error).toBeUndefined();
@@ -1920,30 +1880,9 @@ describe('Managed MCP Runtime', () => {
       expect(result.response?.['contents']).toEqual([
         { uri: 'data://binary', blob: 'AQID' },
       ]);
-      if (personal) {
-        expect(bearerTokens.length).toBeGreaterThan(3);
-        expect(new Set(bearerTokens).size).toBe(bearerTokens.length);
-      }
       expect(
         methods.filter((method) => method === 'resources/read'),
       ).toHaveLength(1);
-      if (personal) {
-        denyToken = true;
-        const refused = await settled(
-          instance,
-          invoke(recovered.catalog!, 'refused-http', {
-            kind: 'resource_read',
-            uri: 'data://binary',
-          }),
-        );
-        expect(refused).toMatchObject({
-          state: 'settled',
-          error: { code: 'managed_mcp_authorization_unavailable' },
-        });
-        expect(
-          methods.filter((method) => method === 'resources/read'),
-        ).toHaveLength(1);
-      }
       expect(
         (
           await settled(instance, {

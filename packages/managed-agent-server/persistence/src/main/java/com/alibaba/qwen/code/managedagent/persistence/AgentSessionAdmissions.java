@@ -460,7 +460,7 @@ final class AgentSessionAdmissions {
         if (existing.isEmpty()) {
             WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, parentSessionId);
         }
-        SessionRecord parent = storeRows.requireUnattendedSessionForUpdate(tenantId,
+        SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
                 || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {

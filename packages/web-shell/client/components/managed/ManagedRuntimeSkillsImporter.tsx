@@ -334,10 +334,7 @@ export function ManagedRuntimeSkillsImporter({
                       sourceKind: 'skill',
                       target: preview.target,
                       sourceDigest: preview.sourceDigest,
-                      compilerVersion:
-                        preview.inspection.manifest.compilerVersion === 2
-                          ? 2
-                          : 1,
+                      compilerVersion: 1,
                     },
                     expectedSettingsRevision: 0,
                     settingsKeys: [],

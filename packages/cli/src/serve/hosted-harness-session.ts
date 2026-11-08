@@ -3612,21 +3612,6 @@ async function executeHostedTurn(
   workflowLaunch?: HostedWorkflowLaunch,
 ): Promise<ChatRecord> {
   const authority = session.managed.authority;
-  const personalMcp =
-    (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0;
-  if (
-    personalMcp &&
-    (workflowLaunch !== undefined ||
-      isWakeInputSource(
-        pendingSessionInputs(
-          authority.eventsInSequenceRange(1, authority.committedSequence),
-        ).find((input) => input.turnId === promptId)?.source ?? '',
-      ))
-  ) {
-    throw new Error(
-      'Personal MCP authorization does not support unattended or delegated execution.',
-    );
-  }
   const promptInput = workflowLaunch
     ? { text, parts: [{ text }], attachments: [] }
     : await readHostedInput(session.managed, promptId, text);
@@ -4006,22 +3991,18 @@ async function executeHostedTurn(
                         packages: session.extensionBundle.packages,
                       }
                     : undefined,
-                  extensionAgents: personalMcp
-                    ? undefined
-                    : extensionAgentsOf(session),
+                  extensionAgents: extensionAgentsOf(session),
                   allowedToolNames: session.extensionAgentTools,
                   profile: session.toolProfile,
                   foregroundOnly: session.foregroundOnly,
                   context: workspaceContext,
-                  childRuns: personalMcp ? undefined : session.childRuns,
-                  monitors: personalMcp ? undefined : session.monitors,
-                  backgroundLane: personalMcp
-                    ? undefined
-                    : session.backgroundLane,
-                  childAgents: personalMcp ? undefined : childAgentsOf(session),
+                  childRuns: session.childRuns,
+                  monitors: session.monitors,
+                  backgroundLane: session.backgroundLane,
+                  childAgents: childAgentsOf(session),
                   childDepth: session.childDepth,
-                  messages: personalMcp ? undefined : session.messages,
-                  teams: personalMcp ? undefined : session.teams,
+                  messages: session.messages,
+                  teams: session.teams,
                   commands: session.commands,
                   memberPlanMode: await ensureMemberPlanMode(session),
                   publicPlanMode:
@@ -6878,8 +6859,6 @@ export function registerHostedHarnessSessionRoutes(
           source === SESSION_MESSAGE_INPUT_SOURCE;
         session.monitorWake = new HostedMonitorWakeScheduler({
           next: async () => {
-            if ((session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0)
-              return undefined;
             // The whole committed prefix, not a bounded page: a notification
             // input lands late in the log, and a default-sized read would
             // hide every one of them once the Session passes that page.
@@ -10330,13 +10309,6 @@ export function registerHostedHarnessSessionRoutes(
       const childRunId = body?.['childRunId'];
       const kind = body?.['kind'];
       if (
-        (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0 &&
-        ['dispatch_started', 'attach', 'accept', 'mark_accepted'].includes(
-          String(kind),
-        )
-      )
-        return error(res, 409, 'personal_mcp_delegation_unsupported');
-      if (
         typeof operationId !== 'string' ||
         !HOSTED_UUID.test(operationId) ||
         typeof childRunId !== 'string' ||
@@ -11087,13 +11059,6 @@ export function registerHostedHarnessSessionRoutes(
       kind === 'settle_delivery' &&
       body?.['outcome'] === 'unknown' &&
       /^channel-reconcile:[0-9a-f]{64}$/.test(operationId);
-    if (
-      (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0 &&
-      ['submit_input', 'claim_delivery', 'resend_delivery'].includes(
-        String(kind),
-      )
-    )
-      return error(res, 409, 'personal_mcp_delegation_unsupported');
     if (
       typeof operationId !== 'string' ||
       (!HOSTED_UUID.test(operationId) && !reconciliation)
@@ -13492,11 +13457,6 @@ export function registerHostedHarnessSessionRoutes(
     const operationId = body?.['operationId'];
     const kind = body?.['kind'];
     const scheduleId = body?.['scheduleId'];
-    if (
-      (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0 &&
-      ['define_schedule', 'fire_run'].includes(String(kind))
-    )
-      return error(res, 409, 'personal_mcp_delegation_unsupported');
     if (
       typeof operationId !== 'string' ||
       !HOSTED_UUID.test(operationId) ||

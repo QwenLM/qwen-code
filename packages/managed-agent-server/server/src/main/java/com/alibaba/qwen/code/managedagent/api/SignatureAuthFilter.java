@@ -301,10 +301,8 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         String content = request.getContentType();
         return content != null && content.equalsIgnoreCase(MediaType.APPLICATION_OCTET_STREAM_VALUE)
                 && ("POST".equals(request.getMethod())
-                && (path.matches("/v1/agents/workspaces/[^/]+/extensions(?:/imports(?:/preview)?)?")
-                || path.equals("/api/agent/web-shell/v1/workspace-extensions/publish")
-                || path.equals("/api/agent/web-shell/v1/workspace-extensions/imports")
-                || path.equals("/api/agent/web-shell/v1/workspace-extensions/imports/preview"))
+                && (path.matches("/v1/agents/workspaces/[^/]+/extensions")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/publish"))
                 || "PUT".equals(request.getMethod())
                 && path.matches("/v1/agents/workspaces/[^/]+/extensions/ext_[a-f0-9-]{36}/packages/[a-f0-9]{64}"));
     }
