@@ -390,10 +390,11 @@ it('reports the required Linux check only when the build and every shard pass', 
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
   expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
-  // The gate checks out nothing, so it rides the disposable pool on every
-  // trigger; only the kill-switch reverts it to hosted.
+  // The gate follows the shards' fleet (the sibling aggregates' shape):
+  // pinning a REQUIRED context to the manually sized disposable pool
+  // parked it in an empty-runner queue for 110 minutes.
   expect(gate['runs-on']).toBe(
-    "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"ecs-qwen-ephemeral\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
   );
   expect(condOf('test_ubuntu')).toBe(condOf('test'));
   expect(gate.steps[0].run).toBe(

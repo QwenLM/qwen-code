@@ -1520,10 +1520,11 @@ jobs:
     name: 'Test (ubuntu-latest, Node 22.x)'
     needs: ['classify_pr', 'test_build', 'test']
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    # A one-line aggregate that checks out nothing: the disposable pool runs
-    # it on every trigger (a hosted runner queued it for 9 minutes after the
-    # last shard finished), with the kill-switch as the only hosted fallback.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Follows the shards' fleet (the sibling aggregates' shape): a REQUIRED
+    # context pinned to the manually sized disposable pool queued 110
+    # minutes with no runner (job 128729488158); timeout-minutes does not
+    # cover queue time and the kill-switch cannot reach fork runs.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'

@@ -60,8 +60,11 @@ jobs:
     # PR code, read-only token, no secrets) and takes it off the hosted queue.
     # The kill-switch reverts to hosted, where every step behaves as before.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Leave room for cold dependency setup before both render passes.
-    timeout-minutes: 45
+    # Cold-store pool runs measured 22m+ installs before any render, so the
+    # pool arm gets 90 and hosted keeps 45. runner.environment is not
+    # available here; key off the same variable runs-on reads. Rationale and
+    # measurements: docs/design/2026-11-07-ephemeral-container-runners.md.
+    timeout-minutes: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' && 45 || 90 }}"
     steps:
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -86,6 +89,12 @@ jobs:
 
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
+        env:
+          # Lane-calibrated: the shared 2 GiB default passed an 89%-used
+          # slot that ENOSPC'd minutes later (run 42478651795); the percent
+          # ceiling is what refuses that shape.
+          DISK_FLOOR_MIN_FREE_KB: '8388608'
+          DISK_FLOOR_MAX_USED_PCT: '85'
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       - name: 'Cache pnpm store (hosted)'
@@ -108,17 +117,25 @@ jobs:
       # The slim pool image lacks the DejaVu baseline (#15383) and ffmpeg.
       # One best-effort apt step supplies both: without the fonts the shots
       # would render in a fallback family, without ffmpeg the inline GIFs
-      # degrade to .webm-only. A blocked Debian mirror warns and degrades
-      # instead of sinking the preview. (fonts-dejavu-mono must not be
-      # added: it does not exist on the pool image's Debian 12 (bookworm);
-      # fonts-dejavu-core already ships DejaVuSansMono.ttf, and one unknown
-      # package would fail the whole apt transaction — including ffmpeg.)
+      # degrade to .webm-only. The archive is a hard requirement (the
+      # preceding --with-deps step needs it); only THIS extra install
+      # degrades, with bounded apt calls so a stall lands in the warning
+      # branch. fonts-dejavu-mono must never be added: no bookworm build,
+      # and one unknown package fails the whole transaction incl. ffmpeg.
       - name: 'Install font baseline and ffmpeg (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
-          if sudo -n apt-get update -qq \
-            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-dejavu-core ffmpeg; then
+          apt_config="${RUNNER_TEMP}/apt-visuals.conf"
+          printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
+          if sudo -n env APT_CONFIG="${apt_config}" apt-get update -qq \
+            && sudo -n env APT_CONFIG="${apt_config}" DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-dejavu-core ffmpeg; then
             sudo -n fc-cache -f >/dev/null 2>&1 || true
+            # A half-applied transaction otherwise renders drifted shots
+            # green (~26 px, #15383).
+            if ! fc-match -f '%{family}' sans-serif | grep -q DejaVu \
+              || ! fc-match -f '%{family}' monospace | grep -q DejaVu; then
+              echo "::warning::font baseline still drifted after install; screenshots may not match the DejaVu metrics."
+            fi
           else
             echo "::warning::could not install fonts-dejavu/ffmpeg from the Debian archive; screenshots may use a fallback font and flow recordings stay .webm-only (no inline GIFs)."
           fi
@@ -145,7 +162,10 @@ jobs:
         continue-on-error: true
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-visuals'
-        run: 'npm run test:e2e:visuals --workspace=packages/web-shell'
+        # Two workers like the pooled smoke lane: os.cpus() sees the host's
+        # cores inside the 4-CPU container, and an unpinned run starved the
+        # runner itself (run 42494910412).
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- --workers=2'
 
       # --- Before/after: render the PR's MERGE-BASE too, then keep only CHANGED
       # views. The merge-base — NOT the base-branch tip — is the correct "before"
@@ -225,7 +245,7 @@ jobs:
         continue-on-error: true
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
-        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts collaboration.spec.ts ask-user-details.spec.ts'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- --workers=2 screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts collaboration.spec.ts ask-user-details.spec.ts'
 
       - name: 'Compose before/after and keep only changed views'
         env:

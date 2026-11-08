@@ -183,25 +183,44 @@ keep their current routing. This avoids migrating browser system dependencies
 that the new image has not verified, and leaves the routing image relationship
 of the existing classifier job and the other workflows unchanged.
 
-Update 2026-11-08: two credential-free jobs have since moved onto this pool.
-The main CI `Test (ubuntu-latest, Node 22.x)` aggregate gate checks out no code
-and runs a single shell comparison, so it needs none of the image's unverified
-dependencies. The Web-shell Visuals capture job matches the pool's security
+Update 2026-11-08: the credential-free Web-shell Visuals capture job has
+moved onto this pool; the main CI `Test (ubuntu-latest, Node 22.x)`
+aggregate gate was tried here and moved back off (below).
+The capture job matches the pool's security
 model exactly (untrusted PR code, read-only token, only the event-scoped
 `GITHUB_TOKEN`), which supersedes the browser-dependency exclusion above for
 this one job: it reuses the image's Node behind the self-hosted preflight,
-gates on the disk floor, and installs the DejaVu font baseline plus ffmpeg
+gates on a lane-calibrated disk floor (8 GiB free and at most 85% used —
+the shared 2 GiB default passed a slot with 14.6 GB free on an 89%-used
+filesystem and pnpm died on ENOSPC minutes later), renders with pinned
+`--workers=2` (an unpinned run sizes Chromium from the host's cores inside
+the 4-CPU container and starved the runner process itself), carries a
+routed 90-minute pool ceiling against the hosted 45 (two cold installs
+measured 22m18s plus a Chromium download past 36m48s), and installs the
+DejaVu font baseline plus ffmpeg
 best-effort at runtime — apt egress and the Debian archive stay hard
 requirements because the earlier `playwright install --with-deps` step needs
 the same archive; the best-effort step degrades only its own extra
 font/ffmpeg install failure to fallback fonts and .webm-only recordings
-instead of failing the preview. The first pooled render still needs
-acceptance for cold-install duration, apt egress and font metrics. Both jobs revert to hosted under `MAINTAINER_ECS_RUNNER_DISABLED`.
+instead of failing the preview, with bounded apt calls and a post-install
+font check. The first complete pooled render still needs acceptance for
+font metrics and end-to-end duration. The capture reverts to hosted under
+`MAINTAINER_ECS_RUNNER_DISABLED` on same-repo runs; fork-triggered runs
+receive empty repository variables (see the fork section above), so the
+real fork-path escape is changing the selector on `main`, not the switch.
 The E2E OpenTUI leg deliberately stays hosted: it injects long-lived model
 secrets, which this pool's boundary forbids until a separate trusted pool
-exists. The aggregate gate no longer follows the `linux_runner` dispatch
-input or `LINUX_RUNNER_FLEET`; that is intentional — it is architecture- and
-checkout-independent, and the fleet-wide kill-switch is its escape hatch.
+exists.
+
+Update 2026-11-09: the aggregate gate no longer rides this pool. It is a
+required context on `pull_request`, `push` and `merge_group`, and pinning
+it to the manually sized pool parked it in an empty-runner queue for 110
+minutes (job 128729488158) while sibling jobs were served in ~3 —
+`timeout-minutes` does not cover queue time, and the fleet-wide
+kill-switch cannot reach fork runs. It now follows the classifier's
+`ubuntu_runner` exactly like the sibling aggregates: persistent fleet for
+trusted events, hosted for untrusted forks, kill-switch honored through
+the classifier on every path.
 
 The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
 ARM64 runners, and the 2026-11-08 live query showed 22 online slot
