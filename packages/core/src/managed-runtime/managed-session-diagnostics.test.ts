@@ -142,19 +142,29 @@ function fixture(revisions: number[], maintenance = false) {
     read,
     publish,
     events,
+    resource,
   };
 }
 
 describe('Managed diagnostic restore', () => {
   it.each([
-    ['user', false, []],
-    ['user', true, ['unclosed_model_attempt']],
-    ['assistant', false, ['legacy_history']],
+    ['user', false, false, []],
+    ['user', false, true, ['unclosed_model_attempt']],
+    ['assistant', false, false, ['legacy_history']],
+    ['assistant', true, false, []],
+    ['assistant', true, true, ['unclosed_model_attempt']],
   ] as const)(
-    'infers legacy coverage from assistant history only (role=%s, interrupted=%s)',
-    async (role, interrupted, gaps) => {
+    'infers legacy coverage from model history only (role=%s, clientSkills=%s, interrupted=%s)',
+    async (role, clientSkills, interrupted, gaps) => {
       const state = fixture([]);
-      state.events.push({ kind: 'message.committed', payload: { role } });
+      const contentRef = state.resource('managed-message', {
+        type: role,
+        ...(clientSkills ? { clientInitiatedSkills: true } : {}),
+      });
+      state.events.push({
+        kind: 'message.committed',
+        payload: { role, contentRef },
+      });
       if (interrupted)
         state.events.push({
           kind: 'model.attempt',
@@ -173,6 +183,42 @@ describe('Managed diagnostic restore', () => {
       }
     },
   );
+
+  it('does not let client Skill scaffolding hide later legacy model history', async () => {
+    const state = fixture([]);
+    for (const clientSkills of [true, false]) {
+      const contentRef = state.resource('managed-message', {
+        type: 'assistant',
+        ...(clientSkills ? { clientInitiatedSkills: true } : {}),
+      });
+      state.events.push({
+        kind: 'message.committed',
+        payload: { role: 'assistant', contentRef },
+      });
+    }
+    await state.diagnostics.restore();
+    await state.diagnostics.publishTurnFallback('next-turn');
+    const saved = JSON.parse(state.publish.mock.calls[0][1].toString());
+    expect(saved.statistics.coverage.gaps).toEqual(['legacy_history']);
+  });
+
+  it('recognizes the client Skill marker in a chunked assistant record', async () => {
+    const state = fixture([]);
+    const part = state.resource('managed-message-part', {
+      type: 'assistant',
+      clientInitiatedSkills: true,
+    });
+    const contentRef = state.resource('managed-message-chunks', {
+      parts: [part],
+    });
+    state.events.push({
+      kind: 'message.committed',
+      payload: { role: 'assistant', contentRef },
+    });
+    await state.diagnostics.restore();
+    await state.diagnostics.publishTurnFallback('next-turn');
+    expect(state.publish).not.toHaveBeenCalled();
+  });
 
   it('does not classify null abandoned usage as legacy or clear earlier recovery gaps', async () => {
     const state = fixture([1]);

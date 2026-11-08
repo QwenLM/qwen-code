@@ -18,6 +18,7 @@ import {
   assertManagedSessionDurableRef,
 } from './managed-session-records.js';
 import { parseHistoryMaintenance } from './managed-history-maintenance-record.js';
+import { readManagedMessageBody } from './managed-message-chunks.js';
 import {
   addModelStatisticsGap,
   boundManagedCommittedContext,
@@ -160,13 +161,30 @@ export class ManagedSessionDiagnostics {
       }
     }
     const recoveryGaps = this.statistics.coverage.gaps;
-    legacy ||=
-      refs.size === 0 &&
-      events.some(
-        (event) =>
-          event.kind === 'message.committed' &&
-          event.payload['role'] === 'assistant',
-      );
+    if (!legacy && refs.size === 0) {
+      for (const event of events) {
+        if (
+          event.kind !== 'message.committed' ||
+          event.payload['role'] !== 'assistant'
+        )
+          continue;
+        const record = JSON.parse(
+          (
+            await readManagedMessageBody(
+              (ref) => this.session.resources.read(ref),
+              assertManagedSessionDurableRef(
+                event.payload['contentRef'],
+                'message contentRef',
+              ),
+            )
+          ).toString('utf8'),
+        ) as { clientInitiatedSkills?: boolean };
+        if (record.clientInitiatedSkills !== true) {
+          legacy = true;
+          break;
+        }
+      }
+    }
     const revisionDigests = new Map<number, string>();
     const statisticsRefs = [...refs.values()];
     for (let index = 0; index < statisticsRefs.length; index += 8) {
