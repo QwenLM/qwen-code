@@ -7885,10 +7885,13 @@ export function registerHostedHarnessSessionRoutes(
       // rather than failing the load (the Workspace-level cascade stays
       // the backstop). The Broker answers Runtime Session ids, and
       // hostedRuntimeSessionId is idempotent, so the close's drain maps a
-      // restored entry back to itself. The set's only reader is the close's
-      // drain loop, which sits in the v1-only close block: a lifecycle-v2
-      // Session would restore an obligation its close never drains, so the
-      // restore stays off that load (#13986 R1-3).
+      // restored entry back to itself. The restore stays off a lifecycle-v2
+      // load (#13986 R1-3). Its original reason — v2 had no drain — is gone
+      // now that settle_resources drains the set too (R24-1), but the gate
+      // stays for a different one: a restored id can be a deterministic Hook
+      // owner, and the v2 drain releases it terminally, which would tombstone
+      // the id a reload recomputes (R13-1/R14-1). Re-enabling the restore for
+      // v2 belongs with the keep-READY drain, not ahead of it.
       if (
         !create &&
         brokerOptions &&
@@ -8354,11 +8357,18 @@ export function registerHostedHarnessSessionRoutes(
             );
           else if (hasHostedCleanupDebt(session.managed))
             throw new Error('Runtime cleanup remains owed after drain.');
-          // A Hook-configured turn acquires through hooks.acquire() and writes
-          // no cleanup descriptor, so the debt drain above stops nothing for
-          // it. Its background run is owed client-side as a held Runtime, and
-          // only stopping that run lifts the release-mount busy guard below
-          // (R24-1). Drain it here, where the v1 close already does.
+          // Drain the Runtimes a turn left held, where the v1 close already
+          // does, so a live background run stops before the handback asks for
+          // the mount back (R24-1). Scope: this reaches the obligations a wake
+          // turn's held aftermath and a cleanup hold register. A Hook-
+          // configured turn registers NEITHER — it acquires through
+          // hooks.acquire(), writes no cleanup descriptor, and finish() skips
+          // the broker.release() whose 409 catch is the only assignment of
+          // runtimeHeld — so for that shape this loop is empty and the close
+          // still parks on recovery-required below. That gap is pinned by
+          // 'never registers a held Runtime for a Hook-configured turn' and
+          // needs a keep-READY drain to close: the release used here would
+          // tombstone the deterministic Hook owner (R13-1/R14-1).
           let heldDrainUnproven = false;
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {

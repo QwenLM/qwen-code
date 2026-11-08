@@ -22457,15 +22457,18 @@ describe('Hosted Harness no-tool session', () => {
     expect(order).toContain('handback');
   });
 
-  it('drains the held Runtime a Hook turn leaves without cleanup debt on a v2 close (R24-1)', async () => {
+  it('drains a registered held Runtime with no cleanup debt on a v2 close (R24-1)', async () => {
     const toolProfile = 'hosted-workspace-shell/1';
     const f = await recoveryFileSession(toolProfile);
     await f.submit();
     await f.idle();
     f.resident.monitorWake?.close();
-    // No f.owe(): a Hook-configured turn acquires through hooks.acquire() and
-    // never writes a cleanup descriptor, so the debt drain has nothing to stop.
-    // What the turn does leave is the held Runtime, recorded client-side.
+    // The obligation is seeded, not produced by a turn: the producers that
+    // register one without a cleanup descriptor are a wake turn's held
+    // aftermath and a cleanup hold. A Hook-configured turn registers nothing
+    // (pinned by 'never registers a held Runtime for a Hook-configured turn'),
+    // so this case deliberately does NOT claim to cover the Hook shape — it
+    // pins the drain for the shapes that do reach it.
     expect(hasHostedCleanupDebt(f.resident.managed)).toBe(false);
     f.resident.heldRuntimeTurns.add(PROMPT_ID);
     let backgroundLive = true;
