@@ -844,7 +844,9 @@ function findFinalAnswerIndexForDisplay(
     // after the answer above it.
     if (
       isExecutionWorkStep(item) ||
-      (item.type === 'message' && isMidTurnInjectedDebugMessage(item.message))
+      (item.type === 'message' &&
+        item.message.role === 'system' &&
+        isMidTurnInjectedDebugMessage(item.message))
     )
       return answerIdx;
     if (
