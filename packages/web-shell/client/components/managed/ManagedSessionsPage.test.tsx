@@ -4471,6 +4471,12 @@ describe('ManagedSessionsPage', () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', { phase: 'running' }),
     );
+    // Queue support decides whether a running turn can promise the
+    // "processing" copy; without it the page resolves the idle copy instead.
+    provider.userMessages = {
+      query: vi.fn(async () => ({ paused: false, messages: [] })),
+      command: vi.fn(),
+    } as never;
     await render(
       's1',
       'en',
@@ -4540,7 +4546,7 @@ describe('ManagedSessionsPage', () => {
     expect(
       header?.querySelector('[data-testid="chat-header-workspace"]'),
     ).toBeNull();
-    expect(header?.textContent).not.toContain('completed');
+    expect(header?.textContent).not.toContain('Completed');
   });
 
   it('keeps managed copy by default so the standalone page is unchanged', async () => {
@@ -4628,10 +4634,11 @@ describe('ManagedSessionsPage', () => {
     expect(renderWelcomeHeader).toHaveBeenCalled();
     expect(container.textContent).toContain('HOST-CREATION-WELCOME');
     expect(container.textContent).not.toContain('Welcome to');
-    // The aligned composer copy reaches the creation screen too.
+    // The aligned composer copy reaches the creation screen too: with no host
+    // override it falls back to the ordinary placeholder, same as App.
     expect(
       container.querySelector('textarea')?.getAttribute('aria-label'),
-    ).toContain('Message this session');
+    ).toContain('Type a message');
     expect(
       container.querySelector('textarea')?.getAttribute('aria-label'),
     ).not.toContain('Message the managed agent');
@@ -4695,6 +4702,54 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('textarea')?.getAttribute('aria-label'),
     ).toBe('Ask about this repo');
+  });
+
+  it('falls back to the ordinary composer placeholder on the aligned creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
+    };
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+      },
+    );
+    // No host override: the aligned creation composer resolves the ordinary
+    // placeholder, not the managed-only copy.
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Type a message or @ file path');
+  });
+
+  it('clears the restore busy flag when a pending record cannot be restored', async () => {
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(key, '{');
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+      },
+    );
+    expect(container.textContent).toContain('may already have been submitted');
+    // The failed restore must not hold the composer in the processing state.
+    expect(mocks.editorProps?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
   });
 
   it('renders the host composer footer instead of managed fixed-model hints', async () => {

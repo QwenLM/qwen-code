@@ -138,6 +138,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
         <section
           data-testid="managed-conversation"
           data-session={props.sessionId ?? 'new'}
+          data-navigation-target={String(props.navigationTarget)}
           data-interactive={props.interactive}
           data-skills-workspace={props.creationSkills?.workspaceCwd}
           data-workspace={props.workspaceId}
@@ -54913,6 +54914,10 @@ describe('Managed home integration', () => {
       '[data-testid="managed-conversation"]',
     );
     expect(managed).not.toBeNull();
+    // The page keys its home layout off `navigationTarget !== undefined`, so
+    // the fixture must observe the value itself, not only its truthiness:
+    // `undefined` would flip the page back to its inline navigation.
+    expect(managed?.dataset.navigationTarget).toBe('null');
     // With no sidebar the page must not portal its inline navigation anywhere.
     expect(
       document.querySelector('nav[aria-label="Managed sessions"]'),

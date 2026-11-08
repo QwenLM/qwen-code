@@ -740,6 +740,13 @@ export interface WebShellCustomization {
    * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，避免对话区重复一遍。
    */
   showManagedSessionHeader?: boolean;
+  /**
+   * Host welcome slots. Managed surfaces (the managed session empty state and
+   * the workspace-binding creation screen) invoke the same renderers but can
+   * only supply a workspace-relative `cwd`, no daemon `version`, and no
+   * `hideTips` flag — renderers that branch on those fields must tolerate the
+   * managed shape (see `WelcomeHeaderProps`).
+   */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
   parseUserMessageContent?: UserMessageContentParser;

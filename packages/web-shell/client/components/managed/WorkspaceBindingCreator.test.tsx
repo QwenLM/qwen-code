@@ -7,6 +7,10 @@ import type { ComponentProps } from 'react';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCustomization,
+} from '../../customization';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type {
   ManagedAgentProvider,
@@ -98,22 +102,25 @@ describe('WorkspaceBindingCreator', () => {
     strict = false,
     workspaceId?: string,
     extra: Partial<ComponentProps<typeof WorkspaceBindingCreator>> = {},
+    customization: WebShellCustomization = {},
   ) {
     await act(async () => {
       const content = (
         <I18nProvider language="en">
-          <WorkspaceBindingCreator
-            provider={provider}
-            clientId="client-a"
-            onCreated={onCreated}
-            onAbandoned={onAbandoned}
-            workspaceId={workspaceId}
-            onSelectWorkspace={onSelectWorkspace}
-            onWorkspaceCreated={onWorkspaceCreated}
-            interactive={interactive}
-            creationSkills={creationSkills}
-            {...extra}
-          />
+          <WebShellCustomizationProvider value={customization}>
+            <WorkspaceBindingCreator
+              provider={provider}
+              clientId="client-a"
+              onCreated={onCreated}
+              onAbandoned={onAbandoned}
+              workspaceId={workspaceId}
+              onSelectWorkspace={onSelectWorkspace}
+              onWorkspaceCreated={onWorkspaceCreated}
+              interactive={interactive}
+              creationSkills={creationSkills}
+              {...extra}
+            />
+          </WebShellCustomizationProvider>
         </I18nProvider>
       );
       root.render(strict ? <StrictMode>{content}</StrictMode> : content);
@@ -2896,6 +2903,31 @@ describe('WorkspaceBindingCreator', () => {
     expect(provider.submitPrompt).not.toHaveBeenCalled();
     expect(commit).toHaveBeenCalledOnce();
     expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a', 'ws-a');
+  });
+
+  it('hands the resolved model id to host welcome renderers on the creation screen', async () => {
+    directCreation();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      modelPresets: [{ agentId: 'agent-a', modelId: 'model-x', label: 'X' }],
+    };
+    const renderWelcomeHeader = vi.fn(() => null);
+    await render(true, false, undefined, { renderWelcomeHeader });
+    // The welcome renderer receives the same model id the composer footer
+    // shows — not the agent id the preset also carries.
+    expect(renderWelcomeHeader).toHaveBeenCalledWith(
+      expect.objectContaining({ currentModel: 'model-x' }),
+    );
+  });
+
+  it('renders the host composer footer on the creation screen', async () => {
+    directCreation();
+    const CustomFooter = vi.fn(() => <div>HOST-CREATION-FOOTER</div>);
+    await render(true, false, undefined, {
+      renderComposerFooter: CustomFooter,
+    });
+    expect(CustomFooter).toHaveBeenCalled();
+    expect(container.textContent).toContain('HOST-CREATION-FOOTER');
   });
 
   it('uses the Workspace default without showing separate directory controls', async () => {

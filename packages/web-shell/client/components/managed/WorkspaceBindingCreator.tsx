@@ -25,7 +25,11 @@ import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
 import { WelcomeHeader, type WelcomeHeaderProps } from '../WelcomeHeader';
-import { useWebShellCustomization } from '../../customization';
+import { getComposerPlaceholderKey } from '../../utils/composerInputState';
+import {
+  useWebShellCustomization,
+  type ComposerFooterRenderer,
+} from '../../customization';
 import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceExecutionSelect } from '../workspaces/WorkspaceExecutionSelect';
 import type {
@@ -234,6 +238,7 @@ export function WorkspaceBindingCreator({
   onOpenHandoffSource,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  renderComposerFooter,
   alignManagedChatWithHost = false,
 }: {
   provider: ManagedAgentProvider;
@@ -264,6 +269,12 @@ export function WorkspaceBindingCreator({
    * empty state and App both keep: a host that supplies both slots gets both.
    */
   renderWelcomeFooter?: (props: WelcomeHeaderProps) => ReactNode;
+  /**
+   * Host composer footer for the creation surface, passed through from the
+   * managed page like the welcome slots so the first screen does not drop the
+   * footer the session view shows.
+   */
+  renderComposerFooter?: ComposerFooterRenderer;
   /**
    * Mirrors the managed composer: aligned hosts get the ordinary placeholder,
    * not the managed-only prompt copy.
@@ -406,6 +417,7 @@ export function WorkspaceBindingCreator({
   );
   const agentId = selectedPreset?.agentId ?? binding.agentId;
   const modelId = selectedPreset?.modelId;
+  const welcomeModel = modelId ?? agentId;
 
   const [nextCursor, setNextCursor] = useState<string>();
   const [supported, setSupported] = useState(false);
@@ -728,6 +740,8 @@ export function WorkspaceBindingCreator({
     : supportsApprovalModeSelection
       ? currentOptions?.approvalMode
       : undefined;
+  const composerFooterModel =
+    pending?.modelId ?? pending?.agentId ?? selectedModel;
 
   async function loadMore() {
     const abort = lifetime.current;
@@ -1750,7 +1764,7 @@ export function WorkspaceBindingCreator({
               const welcomeProps = {
                 version: '',
                 cwd: '',
-                currentModel: agentId,
+                currentModel: welcomeModel,
                 currentMode: '',
               };
               return (
@@ -1819,9 +1833,7 @@ export function WorkspaceBindingCreator({
               showChatWidthToggle={false}
               contextChipPlacement="below"
               gitContextControl={worktreeControl}
-              currentModel={
-                pending?.modelId ?? pending?.agentId ?? selectedModel
-              }
+              currentModel={composerFooterModel}
               modelControlsDisabled={
                 busy || workspaceCreating || Boolean(pending)
               }
@@ -2020,11 +2032,18 @@ export function WorkspaceBindingCreator({
               }
               placeholderText={
                 alignManagedChatWithHost
-                  ? // The host override map wins, otherwise this surface keeps
-                    // its own aligned default. It only creates work, so it is
-                    // never "processing".
-                    composerPlaceholders?.idle?.trim() ||
-                    t('splitView.composerPlaceholder')
+                  ? // The host override map wins per state, otherwise the
+                    // ordinary composer's localized default — the same
+                    // resolution App applies.
+                    composerPlaceholders?.[
+                      busy ? 'processing' : 'idle'
+                    ]?.trim() ||
+                    t(
+                      getComposerPlaceholderKey({
+                        isPreparingPrompt: busy,
+                        isStreaming: false,
+                      }),
+                    )
                   : t('managed.prompt')
               }
               onSubmit={(text, images, files, commit, metadata) => {
@@ -2032,6 +2051,17 @@ export function WorkspaceBindingCreator({
                 return false;
               }}
             />
+            {(() => {
+              const Footer = renderComposerFooter;
+              return Footer ? (
+                <Footer
+                  disabled={busy || workspaceCreating || Boolean(pending)}
+                  isRunning={busy}
+                  currentMode={displayedApprovalMode ?? ''}
+                  currentModel={composerFooterModel}
+                />
+              ) : null;
+            })()}
             {worktreeStatus}
           </div>
         </div>

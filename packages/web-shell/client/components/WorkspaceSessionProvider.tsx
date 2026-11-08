@@ -670,6 +670,16 @@ function StandaloneSessionGate({
       />
     );
   }
+  // A managed view carrying a standalone context (a bookmarked
+  // `?context=standalone&managed=1` on a host that does not mount
+  // ManagedStandaloneApp, or the managed→standalone transition window) never
+  // resolves a daemon standalone session — the resolver effect early-returns
+  // on `!standaloneSupported`, which is exactly what the exemption above
+  // removed. Return before the resolution ladder so the view renders the
+  // managed page instead of stranding on "Resolving session…".
+  if (managedProvided) {
+    return <WorkspaceSessionProviderWorkspace {...routedProps} />;
+  }
   if (attachedSessionId === sessionId) {
     return <WorkspaceSessionProviderWorkspace {...routedProps} />;
   }

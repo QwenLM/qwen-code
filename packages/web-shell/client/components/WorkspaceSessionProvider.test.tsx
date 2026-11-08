@@ -598,6 +598,52 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.providerMounts).toBe(1);
   });
 
+  it('exempts the workspace-error gate for a managed view carrying a standalone context', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'error',
+      capabilities: undefined,
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ managedAgentProvider: { canCancel: true } }}
+        />,
+      );
+    });
+
+    // The managed home bypasses the daemon gate: the provider mounts instead
+    // of the workspace-unavailable surface.
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'standalone-a',
+      sessionContext: { kind: 'standalone' },
+    });
+  });
+
+  it('skips the standalone resolution ladder for a managed view', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    // Capabilities present but without the standalone feature: the resolver
+    // effect early-returns, so the managed view must render before the
+    // resolution gates instead of stranding on "Resolving session…".
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ managedAgentProvider: { canCancel: true } }}
+        />,
+      );
+    });
+
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('Resolving session');
+  });
+
   it.each([
     '/session/old-runtime?workspace=missing',
     '/app/session/old-runtime?workspace=missing',

@@ -546,7 +546,8 @@ function ManagedSessionsContent({
   const [error, setError] = useState<string>();
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
-  const [busy, setBusy] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(true);
   const userMessages = useManagedUserMessages(
     provider,
     interactive ? sessionId : undefined,
@@ -812,17 +813,20 @@ function ManagedSessionsContent({
     const abort = new AbortController();
     lifetime.current = abort;
     setPendingRestoreFailed(false);
-    setBusy(true);
+    setRestoreBusy(true);
     void readManagedPending(pendingKey).then(
       (value) => {
         if (abort.signal.aborted) return;
         const saved = readPending(pendingKey, value);
         pendingRef.current = saved;
         setPending(saved);
-        setBusy(false);
+        setRestoreBusy(false);
       },
       () => {
-        if (!abort.signal.aborted) setPendingRestoreFailed(true);
+        if (!abort.signal.aborted) {
+          setPendingRestoreFailed(true);
+          setRestoreBusy(false);
+        }
       },
     );
     return () => abort.abort();
@@ -1058,6 +1062,7 @@ function ManagedSessionsContent({
       !abort ||
       abort.signal.aborted ||
       busy ||
+      pendingRestoreFailed ||
       encoding.current ||
       lifecycle.blocked(sessionId) ||
       modelChange.isBlocked() ||
@@ -1644,6 +1649,7 @@ function ManagedSessionsContent({
   const composerDisabled =
     !interactive ||
     busy ||
+    restoreBusy ||
     Boolean(pending) ||
     lifecycle.blocked(sessionId) ||
     modelChange.blocked ||
@@ -1758,7 +1764,7 @@ function ManagedSessionsContent({
               pendingRef.current = undefined;
               setPending(undefined);
               setPendingRestoreFailed(false);
-              setBusy(false);
+              setRestoreBusy(false);
               setError(undefined);
             }}
           >
@@ -2025,6 +2031,7 @@ function ManagedSessionsContent({
                 onAbandoned={() => setListRevision((current) => current + 1)}
                 renderWelcomeHeader={renderWelcomeHeader}
                 renderWelcomeFooter={renderWelcomeFooter}
+                renderComposerFooter={CustomComposerFooter}
                 alignManagedChatWithHost={alignManagedChatWithHost}
               />
             )}
@@ -2072,9 +2079,11 @@ function ManagedSessionsContent({
                     !detail.loading &&
                     !summary?.failure
                       ? (() => {
-                          // Mirror App's welcomeHeaderProps: real workspace
-                          // values, not literal placeholders, so a host renderer
-                          // that branches on cwd/mode behaves the same here.
+                          // Best-effort mirror of App's welcomeHeaderProps:
+                          // real workspace values, not literal placeholders.
+                          // Managed surfaces have no absolute cwd, no daemon
+                          // version and no hideTips flag — see
+                          // WelcomeHeaderProps for the documented shape.
                           const welcomeProps = {
                             version: '',
                             cwd: summary?.workspace?.cwdRelative ?? '',
@@ -2642,15 +2651,19 @@ function ManagedSessionsContent({
                         // Resolve exactly like the ordinary composer in App:
                         // the host override map wins per state, otherwise the
                         // localized default for that state. A running turn is
-                        // "processing", not a managed-only queue hint.
+                        // "processing", and a non-managed queue needs the same
+                        // userMessages.supported operand the ordinary path
+                        // checks before promising to queue.
                         const state =
-                          Boolean(active) || busy ? 'processing' : 'idle';
+                          (Boolean(active) && userMessages.supported) || busy
+                            ? 'processing'
+                            : 'idle';
                         const custom = composerPlaceholders?.[state];
                         return custom?.trim()
                           ? custom
                           : t(
                               getComposerPlaceholderKey({
-                                isPreparingPrompt: busy,
+                                isPreparingPrompt: busy || restoreBusy,
                                 isStreaming: Boolean(active),
                               }),
                             );
