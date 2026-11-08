@@ -78,6 +78,24 @@ function parsePools(text) {
 
 const pools = parsePools(workflow);
 
+// Comment lines carry no behavior: a pin that greps the raw text stays
+// green when the real command is commented out (measured on this file's
+// first revision). Behavioral pins read the step body with comments gone.
+function codeLines(body) {
+  return body
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+}
+
+// (runner, by) pairs from the include matrix, so routing mode is pinned
+// per leg — flipping an hz leg to label routing starves it silently.
+function parseLegs(text) {
+  return [
+    ...text.matchAll(/- runner:\s*'([^']+)'\s*\n\s*by:\s*'([^']+)'/g),
+  ].map((m) => ({ runner: m[1], by: m[2] }));
+}
+
 function jobsFixture({
   failed = [],
   timedOut = [],
@@ -112,12 +130,15 @@ function jobsFixture({
 }
 
 // Two failed pools, one timed out (a pool wedged on a slow npm fetch is the
-// shape that produced the v0.22.3 incident), the rest healthy.
-const STALE_POOLS = pools.slice(0, 3);
-const HEALTHY_POOLS = pools.slice(3);
+// shape that produced the v0.22.3 incident), the rest healthy. The stale
+// set spans BOTH routing families so the reporter's pool naming replays
+// on a name-routed hz leg too, not only on the hk label legs.
+const firstHz = pools.findIndex((pool) => pool.includes('hz'));
+const STALE_POOLS = [...pools.slice(0, 2), pools[firstHz === -1 ? 2 : firstHz]];
+const HEALTHY_POOLS = pools.filter((pool) => !STALE_POOLS.includes(pool));
 const DEFAULT_JOBS = jobsFixture({
-  failed: pools.slice(0, 2),
-  timedOut: pools.slice(2, 3),
+  failed: STALE_POOLS.slice(0, 2),
+  timedOut: STALE_POOLS.slice(2),
   succeeded: HEALTHY_POOLS,
 });
 
@@ -143,10 +164,49 @@ describe('ECS runner qwen update workflow', () => {
     // updating only /usr/local left them serving the stale copy (every hz
     // host was on 0.26.0 after 0.27.0 shipped). Both prefixes must update,
     // and verify must pin BOTH absolute paths, not just the PATH winner.
-    assert.ok(workflow.includes('npm install -g --prefix /usr '));
+    // Behavioral pins: read the step bodies with comments stripped, so
+    // commenting a command out turns these red instead of staying green.
+    const update = codeLines(stepBody('Update qwen'));
+    assert.ok(update.includes('npm install -g --prefix /usr '));
+    // npm exits EEXIST on a /usr/bin/qwen that is a regular file or a
+    // foreign-prefix symlink; the bin path must be removed first, and only
+    // after the /usr/local install succeeded (one working CLI survives a
+    // failed leg). The second install is gated on the legacy copy existing
+    // so hk hosts do not grow a second 156 MB tree nothing reads.
     assert.ok(
-      workflow.includes('for pinned in /usr/local/bin/qwen /usr/bin/qwen'),
+      update.includes('[ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]'),
     );
+    const rmIndex = update.indexOf('sudo rm -f /usr/bin/qwen');
+    const localInstall = update.indexOf('npm install -g --prefix /usr/local');
+    const usrInstall = update.indexOf('npm install -g --prefix /usr ');
+    assert.ok(rmIndex > localInstall);
+    assert.ok(usrInstall > rmIndex);
+    const verify = codeLines(stepBody('Verify version'));
+    assert.ok(
+      verify.includes('for pinned in /usr/local/bin/qwen /usr/bin/qwen'),
+    );
+    // The loop must actually assert, not just echo: dropping the test line
+    // while keeping the loop was a green mutation on the first revision.
+    const loopBody = verify.slice(verify.indexOf('for pinned in'));
+    assert.ok(loopBody.includes('if [ -e "${pinned}" ]'));
+    assert.ok(loopBody.includes('test "${pinned_actual}" = "${VERSION}"'));
+  });
+
+  it('routes every hz leg by name and every hk leg by label', () => {
+    // Flipping an hz leg to label routing starves it silently (no runner
+    // carries ecs-update-hz-N), and the reporter only fires on failure —
+    // a leg that never starts is quieter than a red one.
+    const legs = parseLegs(workflow);
+    assert.ok(legs.length >= 10);
+    for (const leg of legs) {
+      if (leg.runner.includes('hz')) {
+        assert.equal(leg.by, 'name', `${leg.runner} must route by name`);
+        assert.ok(leg.runner.startsWith('ecs-qwen-'));
+      } else {
+        assert.equal(leg.by, 'label', `${leg.runner} must route by label`);
+        assert.ok(leg.runner.startsWith('ecs-update-hk-'));
+      }
+    }
   });
 
   it('pins the 90-minute resolve budget', () => {

@@ -128,11 +128,23 @@ jobs:
             # only /usr/local left hz serving the old version through
             # /usr/bin whenever PATH order or a cached hash favored it
             # (observed: every hz host stuck on 0.26.0 after 0.27.0 shipped).
+            # The second install only runs where the legacy copy exists —
+            # hk hosts have no /usr/bin/qwen and must not pay for a second
+            # 156 MB tree nothing reads. -L catches a dangling symlink too,
+            # which -e alone would silently skip.
             for attempt in 1 2 3; do
               sudo rm -rf /usr/local/lib/node_modules/@qwen-code/.qwen-code-* /usr/lib/node_modules/@qwen-code/.qwen-code-* 2>/dev/null || true
               # --prefix pins the install: on the hk-4/hk-5 machines root's
               # npm global prefix is a custom Node directory.
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}" \
+              if ! sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+                :
+              elif [ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]; then
+                exit 0
+              # npm refuses (EEXIST) to replace a /usr/bin/qwen that is a
+              # regular file or a symlink into another prefix. Remove the
+              # bin path only AFTER the /usr/local install succeeded, so a
+              # failed leg still leaves one working CLI on the host.
+              elif sudo rm -f /usr/bin/qwen \
                 && sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
