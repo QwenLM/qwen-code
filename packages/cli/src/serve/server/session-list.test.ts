@@ -409,6 +409,35 @@ describe('merged session catalog pagination', () => {
     expect(second.nextCursor).toBeUndefined();
   });
 
+  it('keeps a live-only row reachable on later organized pages under question sort', async () => {
+    for (let index = 0; index < 4; index++) await persist(summary(index));
+    const { bridge } = bridgeFor([
+      { ...summary(9), updatedAt: summary(20).createdAt },
+    ]);
+    const options = {
+      size: 2,
+      view: 'organized' as const,
+      group: 'all',
+      sortBy: 'lastUserPromptAt' as const,
+    };
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 3; page++) {
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor },
+        { runtimeBaseDir },
+      );
+      seen.push(...result.sessions.map((row) => row.sessionId));
+      cursor = result.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen).toEqual(
+      [3, 2, 1, 0, 9].map((index) => summary(index).sessionId),
+    );
+  });
+
   it('rejects an unfiltered legacy cursor as a metadata cursor', async () => {
     const { bridge } = bridgeFor([]);
     await expect(

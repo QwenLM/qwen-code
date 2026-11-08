@@ -7786,6 +7786,16 @@ export function WebShellSidebar({
                     <IconChevron expanded={projectsExpanded} />
                   </button>
                   <div className={styles.projectsHeaderActions}>
+                    {searchInProjectHeader &&
+                      !sectionView &&
+                      questionSortSupported &&
+                      sessionContent === undefined && (
+                        <SessionSortMenu
+                          value={sessionSort}
+                          onChange={changeSessionSort}
+                          triggerClassName={styles.projectsHeaderAction}
+                        />
+                      )}
                     {!channelView &&
                       !lockedWorkspaceCwd &&
                       onOpenWorkspacesOverview && (

@@ -32,9 +32,11 @@ export function writeSessionSort(host: string, sort: SessionSort): void {
 export function SessionSortMenu({
   value,
   onChange,
+  triggerClassName = 'rounded-lg p-2 hover:bg-accent',
 }: {
   value: SessionSort;
   onChange: (value: SessionSort) => void;
+  triggerClassName?: string;
 }) {
   const { t } = useI18n();
   return (
@@ -42,7 +44,7 @@ export function SessionSortMenu({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="rounded-lg p-2 hover:bg-accent"
+          className={triggerClassName}
           aria-label={t('sidebar.sessionSort')}
           title={t(
             value === 'lastUserPromptAt'

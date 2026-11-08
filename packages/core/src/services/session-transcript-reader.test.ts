@@ -1037,6 +1037,9 @@ describe('SessionTranscriptReader', () => {
         jsonLine({ ...record('u2', null, 'numeric'), timestamp: '123' }),
       );
       expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      // The previous read warmed the cache; without a reset the longer payload
+      // would be served from that cached undefined without parsing.
+      resetSessionTranscriptIndexCacheForTest();
       await writeRawTranscript(
         jsonLine({ ...record('u3', null, 'numeric value'), timestamp: 123 }),
       );
@@ -1076,6 +1079,32 @@ describe('SessionTranscriptReader', () => {
       expect(
         await new SessionService(workspaceDir).getLastUserPromptAt(sessionId),
       ).toBeUndefined();
+    });
+
+    it('rejects a cached foreign snapshot on the warm service read without scanning', async () => {
+      const foreign = {
+        ...record('u1', null, 'foreign'),
+        cwd: path.join(runtimeDir, 'foreign-workspace'),
+      };
+      const file = await writeRecords([foreign]);
+      const builds = countBuilds(file);
+      expect(
+        await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+          sessionId,
+        ),
+      ).toBe(foreign.timestamp);
+      expect(builds.count).toBe(1);
+
+      const stat = vi.spyOn(fs, 'stat');
+      expect(
+        await new SessionService(workspaceDir).getLastUserPromptAt(
+          sessionId,
+          'active',
+          { preferCache: true },
+        ),
+      ).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+      expect(builds.count).toBe(1);
     });
 
     it.each([false, true])(

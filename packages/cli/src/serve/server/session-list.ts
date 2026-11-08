@@ -1112,8 +1112,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
           );
         } else if (
           // Preserve legacy first-page-only insertion unless the caller
-          // requests pagination across the complete merged catalog.
-          (isFirstPage || readOptions.paginateMerged) &&
+          // requests pagination across the complete merged catalog. Question
+          // sorting also needs later pages: a live-only row has no question
+          // time yet, so it sorts last and would otherwise be unreachable.
+          (isFirstPage ||
+            readOptions.paginateMerged ||
+            options.sortBy === 'lastUserPromptAt') &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
