@@ -1861,7 +1861,11 @@ describe('ScheduledTasksDialog multi-workspace', () => {
 
   const findWorkspaceSelect = () =>
     Array.from(document.querySelectorAll('label'))
-      .find((label) => label.querySelector('span')?.textContent === 'Workspace')
+      .find((label) =>
+        Array.from(label.querySelectorAll('span')).some(
+          (span) => span.textContent?.trim() === 'Workspace',
+        ),
+      )
       ?.querySelector('select');
 
   it.each(['create', 'edit'])(
@@ -1869,8 +1873,8 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     async (mode) => {
       await mountMulti({ primary: [baseTask({})] }, [WORKSPACES[0]!]);
       expect(
-        document.querySelector('[title="/repo/main"]')?.textContent,
-      ).toContain('Main Workspace');
+        document.querySelector('[title="/repo/main"]')?.textContent?.trim(),
+      ).toBe('Main Workspace');
 
       click(
         mode === 'create'
@@ -1882,8 +1886,8 @@ describe('ScheduledTasksDialog multi-workspace', () => {
         '[role="group"][aria-label="Workspace"]',
       );
       expect(
-        field?.querySelector('[title="/repo/main"]')?.textContent,
-      ).toContain('Main Workspace');
+        field?.querySelector('[title="/repo/main"]')?.textContent?.trim(),
+      ).toBe('Main Workspace');
       expect(field?.textContent).not.toContain('Fixed by host');
 
       if (mode === 'create') {
@@ -1910,19 +1914,25 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     },
   );
 
-  it('shows a host-locked workspace name even without a workspace catalog', async () => {
+  it.each([
+    { context: 'without a workspace catalog', catalog: [] },
+    {
+      context: 'over a conflicting catalog name',
+      catalog: [{ ...WORKSPACES[1]!, displayName: 'Catalog name' }],
+    },
+  ])('shows the host-locked workspace name $context', async ({ catalog }) => {
     const secondary = WORKSPACES[1]!;
-    await mountMulti({ 'id-other': [baseTask({})] }, [], secondary);
+    await mountMulti({ 'id-other': [baseTask({})] }, catalog, secondary);
     expect(
-      document.querySelector('[title="/repo/other"]')?.textContent,
-    ).toContain('Payments API');
+      document.querySelector('[title="/repo/other"]')?.textContent?.trim(),
+    ).toBe('Payments API');
     click(findButton('New scheduled task'));
     const field = document.querySelector(
       '[role="group"][aria-label="Workspace"]',
     );
     expect(
-      field?.querySelector('[title="/repo/other"]')?.textContent,
-    ).toContain('Payments API');
+      field?.querySelector('[title="/repo/other"]')?.textContent?.trim(),
+    ).toBe('Payments API');
     expect(field?.textContent).toContain('Fixed by host');
     expect(findWorkspaceSelect()).toBeUndefined();
     expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
@@ -1936,8 +1946,8 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       onOpenSession,
     });
     expect(
-      document.querySelector('[title="/legacy/project"]')?.textContent,
-    ).toContain('project');
+      document.querySelector('[title="/legacy/project"]')?.textContent?.trim(),
+    ).toBe('project');
     click(findButtonContaining('View conversation'));
     await flush();
     expect(onOpenSession).toHaveBeenCalledWith('sess-42');
@@ -1946,8 +1956,8 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       '[role="group"][aria-label="Workspace"]',
     );
     expect(
-      field?.querySelector('[title="/legacy/project"]')?.textContent,
-    ).toContain('project');
+      field?.querySelector('[title="/legacy/project"]')?.textContent?.trim(),
+    ).toBe('project');
     expect(findWorkspaceSelect()).toBeUndefined();
   });
 
@@ -2002,6 +2012,10 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     // The picker offers the two trusted workspaces (untrusted excluded).
     const wsSelect = findWorkspaceSelect();
     expect(wsSelect).toBeDefined();
+    const decoration = document.createElement('span');
+    decoration.setAttribute('aria-hidden', 'true');
+    wsSelect!.labels![0]!.prepend(decoration);
+    expect(findWorkspaceSelect()).toBe(wsSelect);
     expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
     // Options show each workspace label with no "(primary)" tag on the primary
     // entry (the label this PR removed). Guards the visible dropdown

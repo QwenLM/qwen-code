@@ -209,6 +209,22 @@ function inWorkspace(task: DaemonScheduledTask): [] | [string] {
   return task.workspaceCwd !== undefined ? [task.workspaceCwd] : [];
 }
 
+function renderWorkspacePill(
+  cwd: string,
+  candidates: readonly DaemonWorkspaceCapability[],
+) {
+  return (
+    <span className={styles.workspacePill} title={cwd}>
+      <span className={styles.workspaceIcon} aria-hidden="true">
+        <FolderIcon />
+      </span>
+      <span className={styles.workspaceName}>
+        {workspaceLabelForCwd(cwd, candidates)}
+      </span>
+    </span>
+  );
+}
+
 /** The text a manual run sends: the prompt, or for a gated task the
  * instruction to run the gate first. */
 function manualRunPrompt(task: DaemonScheduledTask): string {
@@ -671,6 +687,9 @@ export function ScheduledTasksDialog({
   // derived arrays are stable identities — `reload` depends on them, and a fresh
   // array each render would re-fire its mount effect in a loop.
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
+  const workspaceLabelCandidates = lockedWorkspace
+    ? [lockedWorkspace, ...workspaceList]
+    : workspaceList;
   const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
   // The workspaces the page can actually read + write: every trusted one, PLUS
   // the primary even when it is untrusted. The primary is reached through the
@@ -1747,16 +1766,10 @@ export function ScheduledTasksDialog({
                 <span className={styles.fieldLabel}>
                   {t('scheduledTasks.workspace')}
                 </span>
-                <span className={styles.workspacePill} title={formWorkspaceCwd}>
-                  <span className={styles.workspaceIcon} aria-hidden="true">
-                    <FolderIcon />
-                  </span>
-                  <span className={styles.workspaceName}>
-                    {formWorkspace
-                      ? workspaceLabel(formWorkspace)
-                      : workspaceLabelForCwd(formWorkspaceCwd, workspaceList)}
-                  </span>
-                </span>
+                {renderWorkspacePill(
+                  formWorkspaceCwd,
+                  workspaceLabelCandidates,
+                )}
                 {lockedWorkspace && (
                   <span className={styles.fieldHint}>
                     {t('scheduledTasks.workspaceFixedByHost')}
@@ -2337,21 +2350,11 @@ export function ScheduledTasksDialog({
               })()}
 
               <div className={styles.cardFooter}>
-                {taskWorkspaceCwd && (
-                  <span
-                    className={styles.workspacePill}
-                    title={taskWorkspaceCwd}
-                  >
-                    <span className={styles.workspaceIcon} aria-hidden="true">
-                      <FolderIcon />
-                    </span>
-                    <span className={styles.workspaceName}>
-                      {lockedWorkspace?.cwd === taskWorkspaceCwd
-                        ? workspaceLabel(lockedWorkspace)
-                        : workspaceLabelForCwd(taskWorkspaceCwd, workspaceList)}
-                    </span>
-                  </span>
-                )}
+                {taskWorkspaceCwd &&
+                  renderWorkspacePill(
+                    taskWorkspaceCwd,
+                    workspaceLabelCandidates,
+                  )}
                 <span className={styles.schedulePill}>
                   <span className={styles.clockIcon} aria-hidden="true">
                     <Clock3Icon />

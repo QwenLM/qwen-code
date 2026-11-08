@@ -33,6 +33,9 @@ Changes belong to `ScheduledTasksDialog.tsx`, its collocated tests and existing
 styles, the English/Chinese strings in `i18n.tsx`, and the scheduled-task user
 documentation. No new component, public prop, or request is needed.
 
+Both surfaces share a file-local pill renderer and workspace-name candidates.
+The host-locked workspace comes first so its supplied name takes precedence.
+
 Validate single-workspace creation/editing, host-locked secondary workspaces,
 legacy primary-path capabilities, and unchanged multi-workspace selection.
 Assertions must cover visible names/full-path titles and the original mutation
