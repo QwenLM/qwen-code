@@ -829,6 +829,40 @@ function parseRequestedSessionSource(
   return source;
 }
 
+/**
+ * Key for the worktree ownership lock (`acquireWorktreeOwnershipOp`) of a
+ * sidecar's recorded checkout. Best-effort canonical: the reset route keys
+ * by the fully validated realpath, which agrees whenever the checkout still
+ * exists. A missing checkout falls back to the raw sidecar path, and the
+ * restore never attests it.
+ */
+function ownershipLockKeyForWorktree(recordedPath: string): string {
+  try {
+    return fs.realpathSync(recordedPath);
+  } catch {
+    return recordedPath;
+  }
+}
+
+/**
+ * Refuses a restore whose worktree checks would act on a checkout this
+ * request does not hold the ownership lock for: a reset of that checkout
+ * could move its ownership, or roll back its supersede link, while the
+ * restore reads it. A plain error, so the restore fails closed (500) like
+ * the untyped integrity failures there; a later restore re-reads the sidecar
+ * and takes the right lock.
+ */
+function assertWorktreeOwnershipLockHeld(
+  heldKey: string | undefined,
+  checkoutKey: string,
+): void {
+  if (heldKey !== checkoutKey) {
+    throw new Error(
+      'Worktree ownership lock does not cover the restored checkout',
+    );
+  }
+}
+
 interface ReconcileRestoredSessionWorktreeInput {
   runtime: WorkspaceRuntime;
   workspaceCwd: string;
@@ -846,6 +880,11 @@ interface ReconcileRestoredSessionWorktreeInput {
   session: BridgeRestoredSession;
   /** Must match whether the bridge restore was asked to defer its question. */
   deferRestoreAskUserQuestionPrompt: boolean;
+  /**
+   * Key of the ownership lock the caller holds, or `undefined` when it took
+   * none. The non-legacy checks refuse a checkout this key does not cover.
+   */
+  heldWorktreeOwnershipLockKey: string | undefined;
   /** Checked just before the session is marked `persisted-v1`. */
   assertRuntimeGenerationOpen: (() => void) | undefined;
   /**
@@ -872,11 +911,11 @@ interface ReconcileRestoredSessionWorktreeInput {
  * The caller owns three things, as `restoreSessionHandler` does:
  * - The worktree ownership lock (`acquireWorktreeOwnershipOp`), taken when
  *   its own read before the bridge restore finds a sidecar that records
- *   its workspace, and held across the bridge restore and this call. This
- *   function does not know which checkout is locked: a sidecar that was
- *   missing, legacy or `invalid` at that earlier read is validated here
- *   without the lock, and one that now names a different checkout without
- *   that checkout's lock.
+ *   its workspace, and held across the bridge restore and this call. Its
+ *   key is passed in as `heldWorktreeOwnershipLockKey`: a sidecar that was
+ *   missing, legacy or `invalid` at that earlier read, or that now names a
+ *   different checkout, reaches the non-legacy checks without this
+ *   checkout's lock and is refused there.
  * - A deferred restore question: fired only after this call returns, and
  *   discarded by `cleanupRestoredSession`.
  * - Live-conversation runtimes: they skip this call, and the caller places
@@ -889,6 +928,7 @@ async function reconcileRestoredSessionWorktree({
   restoredStorageSessionId,
   session,
   deferRestoreAskUserQuestionPrompt,
+  heldWorktreeOwnershipLockKey,
   assertRuntimeGenerationOpen,
   cleanupRestoredSession,
   daemonLog,
@@ -1004,6 +1044,14 @@ async function reconcileRestoredSessionWorktree({
         throw new Error('Worktree sidecar is missing or invalid');
       }
       const sidecar = sidecarResult.session;
+      // The ownership lock was keyed by the read before the bridge
+      // restore. A sidecar that was missing, legacy or invalid then,
+      // or that now names another checkout, reaches here without
+      // this checkout's lock.
+      assertWorktreeOwnershipLockHeld(
+        heldWorktreeOwnershipLockKey,
+        ownershipLockKeyForWorktree(sidecar.worktreePath),
+      );
       // For a Channel restore whose earlier read found a sidecar that
       // records its workspace, restoreSessionHandler already refused a
       // superseded sidecar under the ownership lock; every other restore
@@ -1059,6 +1107,9 @@ async function reconcileRestoredSessionWorktree({
       } catch {
         throw new Error('Worktree checkout is missing or inaccessible');
       }
+      // Again on the path the checks below act on, in case the
+      // checkout appeared since the key was derived from the raw path.
+      assertWorktreeOwnershipLockHeld(heldWorktreeOwnershipLockKey, realTarget);
       const contained = candidateRoots.some((root) => {
         try {
           const realRoot = fs.realpathSync(root);
@@ -4430,6 +4481,7 @@ export function registerSessionRoutes(
       let suppressWorktreeContextRestore = false;
       let deferRestoreAskUserQuestionPrompt = false;
       let releaseWorktreeRestore: (() => void) | undefined;
+      let heldWorktreeOwnershipLockKey: string | undefined;
       try {
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
@@ -4538,17 +4590,9 @@ export function registerSessionRoutes(
                 isPart4AWorktreeRestore &&
                 sidecarBeforeRestore.state === 'valid'
               ) {
-                // Best-effort canonical key for the ownership lock: the
-                // reset route keys by the fully validated realpath, which
-                // agrees whenever the checkout still exists. A missing
-                // checkout falls back to the raw sidecar path and fails
-                // closed later in the restore's own validation.
-                const recordedPath = sidecarBeforeRestore.session.worktreePath;
-                try {
-                  part4AWorktreeKey = fs.realpathSync(recordedPath);
-                } catch {
-                  part4AWorktreeKey = recordedPath;
-                }
+                part4AWorktreeKey = ownershipLockKeyForWorktree(
+                  sidecarBeforeRestore.session.worktreePath,
+                );
               }
             } else {
               suppressWorktreeContextRestore = isChannelRestore;
@@ -4562,6 +4606,7 @@ export function registerSessionRoutes(
             if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
               releaseWorktreeRestore =
                 await acquireWorktreeOwnershipOp(part4AWorktreeKey);
+              heldWorktreeOwnershipLockKey = part4AWorktreeKey;
               if (isChannelRestore) {
                 // A reset moved this session's worktree ownership to a
                 // replacement: never restore the superseded session — tell
@@ -4574,6 +4619,17 @@ export function registerSessionRoutes(
                     restoredStorageSessionId,
                   ),
                 );
+                if (
+                  sidecarUnderLock.state === 'valid' &&
+                  sidecarUnderLock.session.workspaceCwd !== undefined
+                ) {
+                  assertWorktreeOwnershipLockHeld(
+                    heldWorktreeOwnershipLockKey,
+                    ownershipLockKeyForWorktree(
+                      sidecarUnderLock.session.worktreePath,
+                    ),
+                  );
+                }
                 if (
                   sidecarUnderLock.state === 'valid' &&
                   sidecarUnderLock.session.supersededBy !== undefined
@@ -4779,6 +4835,7 @@ export function registerSessionRoutes(
             restoredStorageSessionId,
             session,
             deferRestoreAskUserQuestionPrompt,
+            heldWorktreeOwnershipLockKey,
             assertRuntimeGenerationOpen,
             cleanupRestoredSession,
             daemonLog,
