@@ -39,12 +39,17 @@ const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'shell']);
 /**
  * Commands that CREATE a comment or review. Reads/lists (`gh pr view`,
  * `gh api` GET, `listComments`) deliberately do not match, so inspecting a
- * comment never suppresses its delivery.
+ * comment never suppresses its delivery. Subcommand patterns are tested on the
+ * quote-stripped stage; path patterns on a quote-unwrapped copy (a quoted
+ * collection path still counts).
  */
-const CREATION_COMMAND_PATTERNS: readonly RegExp[] = [
+const SUBCOMMAND_PATTERNS: readonly RegExp[] = [
   /\bgh\s+pr\s+comment\b/,
   /\bgh\s+issue\s+comment\b/,
   /\bgh\s+pr\s+review\b/,
+];
+
+const PATH_PATTERNS: readonly RegExp[] = [
   // gh api / curl writing to a comments or reviews collection.
   /\bgh\s+api\b[\s\S]*?\b(?:issues|pulls)\/\d+\/(?:comments|reviews)\b[\s\S]*?(?:-X\s+POST|--method\s+POST|-f\s|--field\s|-F\s|--raw-field\s|--input\s)/,
   /\bcurl\b[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/(?:comments|reviews)\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)/,
@@ -60,7 +65,14 @@ const CREATION_COMMAND_PATTERNS: readonly RegExp[] = [
  * pattern matches and a session that only read comments is recorded as their
  * author, permanently withholding events it should receive.
  */
-const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|-X\s*)["']?GET\b/i;
+const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|-X\s*)GET\b/i;
+
+/**
+ * A quoted GET method value (`--method "GET"`, `-X 'GET'`) is a real GET flag;
+ * unwrap it so the veto still sees it after quote-stripping. GET text inside a
+ * quoted body (`-f body='--method GET'`) is not a flag and must not veto a POST.
+ */
+const QUOTED_GET_VALUE_PATTERN = /(--method[=\s]+|-X\s*)["']GET["']/gi;
 
 /**
  * Drop quoted spans so a creation subcommand or write flag inside a quoted
@@ -99,15 +111,35 @@ function commandSegments(command: string): string[] {
       current += ch;
       continue;
     }
+    // A backslash-newline is a line continuation, not a command boundary: the
+    // write flag on the continued line belongs to the same stage as the path.
+    if (
+      ch === '\\' &&
+      (command[i + 1] === '\n' ||
+        (command[i + 1] === '\r' && command[i + 2] === '\n'))
+    ) {
+      current += ' ';
+      i += command[i + 1] === '\r' ? 2 : 1;
+      continue;
+    }
     if (ch === ';' || ch === '|' || ch === '\n' || ch === '\r') {
       segments.push(current);
       current = '';
       continue;
     }
-    if (ch === '&' && command[i + 1] === '&') {
-      segments.push(current);
-      current = '';
-      i++;
+    if (ch === '&') {
+      // `&&` ends a stage; `&>` and `>&` are redirections, not boundaries; a
+      // lone `&` backgrounds the command and ends the stage.
+      if (command[i + 1] === '&') {
+        segments.push(current);
+        current = '';
+        i++;
+      } else if (command[i + 1] === '>' || current.endsWith('>')) {
+        current += ch;
+      } else {
+        segments.push(current);
+        current = '';
+      }
       continue;
     }
     current += ch;
@@ -116,26 +148,48 @@ function commandSegments(command: string): string[] {
   return segments;
 }
 
-function isCreationCommand(command: string): boolean {
-  for (const segment of commandSegments(command)) {
-    // An explicit GET is a read even with field flags (gh api sends them as
-    // query parameters on a GET). Test the RAW segment so a quoted method value
-    // (`--method "GET"`) is still vetoed before quote-stripping would erase it.
-    if (EXPLICIT_GET_PATTERN.test(segment)) continue;
-    const stripped = stripQuotedSpans(segment);
-    if (CREATION_COMMAND_PATTERNS.some((pattern) => pattern.test(stripped))) {
-      return true;
-    }
+function segmentIsCreation(segment: string): boolean {
+  // An explicit GET is a read even with field flags (gh api sends them as query
+  // parameters on a GET). Unwrap a quoted GET method value first so the veto
+  // still sees it, then strip quoted spans so GET text inside a body does not
+  // veto a genuine POST.
+  const getProbe = stripQuotedSpans(
+    segment.replace(QUOTED_GET_VALUE_PATTERN, '$1GET'),
+  );
+  if (EXPLICIT_GET_PATTERN.test(getProbe)) return false;
+  const stripped = stripQuotedSpans(segment);
+  if (SUBCOMMAND_PATTERNS.some((pattern) => pattern.test(stripped)))
+    return true;
+  // A quoted collection path still counts, so test the path patterns on a copy
+  // with quote characters removed (content kept). Require the stage to actually
+  // start with gh api / curl so a read-only search quoting such a command is not
+  // mistaken for a creation.
+  const unwrapped = segment.replace(/['"]/g, '');
+  if (
+    /^\s*(?:gh\s+api|curl)\b/.test(unwrapped) &&
+    PATH_PATTERNS.some((pattern) => pattern.test(unwrapped))
+  ) {
+    return true;
   }
   return false;
 }
 
-/** Which collection an api/curl creation targeted, for bare JSON `id`s. */
+/** The first stage that is a creation, for both detection and target typing. */
+function creationSegment(command: string): string | undefined {
+  return commandSegments(command).find((segment) => segmentIsCreation(segment));
+}
+
+/**
+ * Which collection the creation stage targeted, for bare JSON `id`s. Inspect the
+ * creation stage only, so a command that also reads another collection does not
+ * key the created id to the wrong one.
+ */
 function creationTarget(
-  command: string,
+  segment: string,
 ): 'issue-comment' | 'review-comment' | undefined {
-  if (/\bissues\/\d+\/comments\b/.test(command)) return 'issue-comment';
-  if (/\bpulls\/\d+\/comments\b/.test(command)) return 'review-comment';
+  const unwrapped = segment.replace(/['"]/g, '');
+  if (/\bissues\/\d+\/comments\b/.test(unwrapped)) return 'issue-comment';
+  if (/\bpulls\/\d+\/comments\b/.test(unwrapped)) return 'review-comment';
   return undefined;
 }
 
@@ -175,7 +229,8 @@ export function extractPostedCommentIds(entry: unknown): string[] {
       output.match(/^Command: ([\s\S]*?)\nDirectory:/)?.[1] ??
       output.match(/^Command: ([\s\S]*?)\nOutput:/)?.[1] ??
       '';
-    if (!command || !isCreationCommand(command)) continue;
+    const segment = command ? creationSegment(command) : undefined;
+    if (!segment) continue;
     const result =
       output.match(/\nOutput: ([\s\S]*?)\nError:/)?.[1] ??
       output.match(/\nOutput: ([\s\S]*)$/)?.[1] ??
@@ -187,9 +242,9 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     for (const match of result.matchAll(/discussion_r(\d+)/g)) {
       ids.add(reviewCommentKey(match[1]!));
     }
-    // A bare JSON `id` only counts when the command targeted a comments
+    // A bare JSON `id` only counts when the creation stage targeted a comments
     // collection, so an unrelated numeric id in the output is not grabbed.
-    const target = creationTarget(command);
+    const target = creationTarget(segment);
     if (target) {
       for (const match of result.matchAll(/"id"\s*:\s*(\d+)/g)) {
         ids.add(

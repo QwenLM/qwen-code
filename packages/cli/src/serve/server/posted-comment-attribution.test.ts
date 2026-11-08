@@ -177,6 +177,55 @@ describe('extractPostedCommentIds', () => {
     );
   });
 
+  it('attributes a creation with a quoted collection path', () => {
+    const entry = shellResult(
+      'gh api "repos/o/r/issues/42/comments" -X POST -f body=x',
+      '{"id":99}',
+    );
+    expect(extractPostedCommentIds(entry)).toContain(issueCommentKey('99'));
+  });
+
+  it('attributes a creation whose write flag is on a backslash-continued line', () => {
+    const entry = shellResult(
+      'gh api repos/o/r/pulls/6535/comments \\\n  -f body=note -f commit_id=abc -f path=a.ts -F line=3',
+      '{"id":102}',
+    );
+    expect(extractPostedCommentIds(entry)).toContain(reviewCommentKey('102'));
+  });
+
+  it('does not attribute a read backgrounded before an unrelated -f command', () => {
+    // A lone `&` ends the stage, so the read is not merged with `stat -f`.
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments --jq '.[].id' & stat -f %Sm x",
+      '111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a creation that redirects with >& or &>', () => {
+    const redir = shellResult(
+      'gh api repos/o/r/issues/42/comments -X POST -f body=x 2>&1',
+      '{"id":131}',
+    );
+    expect(extractPostedCommentIds(redir)).toContain(issueCommentKey('131'));
+  });
+
+  it('keys a creation to its own collection when another collection is read', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments --jq '.[0].id' ; gh api repos/o/r/pulls/42/comments -X POST -f body=x",
+      '{"id":900}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([reviewCommentKey('900')]);
+  });
+
+  it('does not veto a POST whose quoted body merely quotes --method GET', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments -X POST -f body='--method GET' --jq '.id'",
+      '45678',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('45678')]);
+  });
+
   it('does not attribute a GET listing chained with an unrelated -f (stat -f)', () => {
     // The write flag must be in the same pipeline stage as the collection
     // path; a trailing `stat -f` in the chain is not a POST body field.
@@ -296,5 +345,29 @@ describe('postedCommentIdsForTranscript (incremental scan)', () => {
     dir = await mkdtemp(join(tmpdir(), 'posted-comments-'));
     const ids = await postedCommentIdsForTranscript(join(dir, 'absent.jsonl'));
     expect(ids.size).toBe(0);
+  });
+
+  it('evicts the oldest cached transcript past the bound', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'posted-comments-'));
+    const paths: string[] = [];
+    for (let i = 0; i < 257; i++) {
+      const p = join(dir, `s${i}.jsonl`);
+      const entry = shellResult(
+        'gh pr comment 1 --body a',
+        `https://github.com/o/r/pull/1#issuecomment-${i}`,
+      );
+      await writeFile(p, JSON.stringify(entry) + '\n');
+      paths.push(p);
+    }
+    const first = await postedCommentIdsForTranscript(paths[0]!);
+    expect([...first]).toEqual([issueCommentKey('0')]);
+    for (let i = 1; i < 257; i++) {
+      await postedCommentIdsForTranscript(paths[i]!);
+    }
+    // The oldest entry was evicted, so re-scanning rebuilds a fresh set rather
+    // than returning the cached instance (removing the eviction keeps it cached).
+    const rescan = await postedCommentIdsForTranscript(paths[0]!);
+    expect([...rescan]).toEqual([issueCommentKey('0')]);
+    expect(rescan).not.toBe(first);
   });
 });

@@ -22807,6 +22807,72 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(cursor.dispatchedComments ?? []).not.toContain('IC_555');
       });
 
+      it('leaves other-account inline review comments to the notification lanes', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 780,
+            node_id: 'PRRC_780',
+            body: 'an external reviewer note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'someone-else' },
+            path: 'src/a.ts',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('PRRC_780');
+      });
+
+      it('does not re-deliver an already-dispatched comment on a re-list', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        // A held window re-lists the same comment; the dedupe key must skip it.
+        const ch = channel as unknown as {
+          cursor: { dispatchedComments?: string[] };
+          prWatchState: {
+            entries: Record<string, { commentLastFetchAt?: number }>;
+          };
+        };
+        ch.prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('fails open when the attribution lookup throws', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockRejectedValue(new Error('lookup unavailable'));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // Missing authorship evidence must not withhold the comment.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
       it('withholds a comment the bound session itself posted', async () => {
         await initChannel(commentWatchConfig, { boundSessions });
         boundSessions.postedCommentIds = vi
