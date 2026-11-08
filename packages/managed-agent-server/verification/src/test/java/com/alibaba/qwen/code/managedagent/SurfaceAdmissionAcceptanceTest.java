@@ -352,10 +352,6 @@ public class SurfaceAdmissionAcceptanceTest {
             SurfaceRegistry entry) throws Exception {
         MvcResult result = mvc.perform(requestFor(entry, FOREIGN, tenant))
                 .andReturn();
-        assertThat(result.getResponse().getStatus()).isEqualTo(400);
-            assertThat(result.getResponse().getContentAsString()).doesNotContain("actor_scope_mismatch");
-            return;
-        }
         assertThat(result.getResponse().getStatus())
                 .as("%s answered %d for a cross-tenant principal",
                         entry.routeKey(), result.getResponse().getStatus())
