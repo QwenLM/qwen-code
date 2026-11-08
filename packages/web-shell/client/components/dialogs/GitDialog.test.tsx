@@ -156,6 +156,16 @@ afterEach(() => {
   mockState.capabilities = undefined;
 });
 
+const DIRTY_FILE = {
+  path: 'a.ts',
+  added: 1,
+  removed: 0,
+  isBinary: false,
+  isUntracked: false,
+  isDeleted: false,
+  truncated: false,
+};
+
 describe('GitDialog', () => {
   it('switches views inside one dialog with complete tab semantics', async () => {
     workspaceGitDiff.mockResolvedValue({
@@ -470,7 +480,7 @@ describe('GitDialog', () => {
     ).toBe('true');
   });
 
-  it('passes gitCwd to commit and push SDK calls in the commit view', async () => {
+  it('refuses to commit when the diff lists no uncommitted files', async () => {
     workspaceGitDiff.mockResolvedValue({
       v: 1,
       workspaceCwd: '/repo',
@@ -538,17 +548,126 @@ describe('GitDialog', () => {
     });
     await flush();
 
+    // Nothing is selected, so the dialog must not reach the daemon with an
+    // empty pathspec (git rejects it) and must tell the user why.
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+    expect(workspaceGitPush).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Select at least one file to commit',
+    );
+  });
+
+  it('commits only the selected files and leaves the rest dirty', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 3,
+      linesAdded: 2,
+      linesRemoved: 0,
+      files: [
+        {
+          path: 'a.ts',
+          added: 1,
+          removed: 0,
+          isBinary: false,
+          isUntracked: false,
+          isDeleted: false,
+          truncated: false,
+        },
+        {
+          path: 'b.ts',
+          added: 1,
+          removed: 0,
+          isBinary: false,
+          isUntracked: false,
+          isDeleted: false,
+          truncated: false,
+        },
+        {
+          path: 'c.ts',
+          added: 0,
+          removed: 0,
+          isBinary: false,
+          isUntracked: true,
+          isDeleted: false,
+          truncated: false,
+        },
+      ],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({
+      sha: 'abc1234',
+      subject: 'fix: a only',
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            gitCwd="/worktrees/wt"
+            sessionId="session-worktree"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const checkboxes = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ),
+    );
+    // Every dirty file starts selected.
+    expect(checkboxes.map((box) => box.checked)).toEqual([true, true, true]);
+
+    // Uncheck b.ts so it stays out of this commit.
+    await act(async () => {
+      checkboxes[1].click();
+    });
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'fix: a only');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-dialog] button',
+      ),
+    ).find(
+      (b) =>
+        b.textContent?.trim() === 'Commit' && b.getAttribute('role') !== 'tab',
+    );
+    expect(commitBtn).toBeTruthy();
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
     expect(workspaceGitCommit).toHaveBeenCalledWith(
-      'fix: test commit',
-      { all: true },
+      'fix: a only',
+      { paths: ['a.ts', 'c.ts'] },
       '/worktrees/wt',
       'session-worktree',
     );
-    expect(workspaceGitPush).toHaveBeenCalledWith(
-      { setUpstream: true },
-      '/worktrees/wt',
-      'session-worktree',
-    );
+    // The diff is re-read after a successful commit so the checklist matches
+    // what is still dirty.
+    expect(workspaceGitDiff.mock.calls.length).toBeGreaterThan(1);
   });
 
   it('clamps to the diff view when the capability is withdrawn mid-session', async () => {
@@ -728,10 +847,10 @@ describe('GitDialog', () => {
       v: 1,
       workspaceCwd: '/repo',
       available: true,
-      filesCount: 0,
-      linesAdded: 0,
+      filesCount: 1,
+      linesAdded: 1,
       linesRemoved: 0,
-      files: [],
+      files: [DIRTY_FILE],
       hiddenCount: 0,
     });
     workspaceGitCommit.mockResolvedValue({
@@ -790,7 +909,7 @@ describe('GitDialog', () => {
 
     expect(workspaceGitCommit).toHaveBeenCalledWith(
       'fix: commit only',
-      { all: true },
+      { paths: ['a.ts'] },
       undefined,
       undefined,
     );
@@ -799,6 +918,16 @@ describe('GitDialog', () => {
   });
 
   it('reports commit-success-push-failed when the push rejects', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+      files: [DIRTY_FILE],
+      hiddenCount: 0,
+    });
     workspaceGitCommit.mockResolvedValue({
       sha: 'def5678',
       subject: 'test commit',

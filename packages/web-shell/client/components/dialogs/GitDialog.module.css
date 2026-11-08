@@ -50,6 +50,49 @@
   margin-top: 8px;
 }
 
+.commitFiles {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  padding: 6px 10px 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+.commitFilesLegend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted-foreground, #666);
+}
+
+.commitFileList {
+  display: flex;
+  flex-direction: column;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.commitFile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.commitFileStatus {
+  flex: none;
+  width: 12px;
+  color: var(--muted-foreground, #666);
+}
+
+.commitFilePath {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .commitMessage {
   width: 100%;
   min-height: 80px;

@@ -943,6 +943,71 @@ describe('gitCommit', () => {
 
     await expect(gitCommit(dir, 'noop', { all: true })).rejects.toThrow();
   });
+
+  it('commits only the selected paths and leaves the rest dirty', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'two\n', 'b.txt': 'two\n' });
+
+    await gitCommit(dir, 'update a only', { paths: ['a.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'a.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('?? b.txt');
+  });
+
+  it('keeps work staged outside the selection out of the commit', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'two\n', 'b.txt': 'two\n' });
+    git(dir, 'add', 'b.txt');
+
+    await gitCommit(dir, 'update a only', { paths: ['a.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'a.txt',
+    );
+    // b.txt is still staged, untouched by the scoped commit.
+    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('b.txt');
+  });
+
+  it('records both sides of a rename from the post-rename path alone', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+
+    await gitCommit(dir, 'rename file', { paths: ['new.txt'] });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    // git records the deletion and the addition; rename detection then pairs
+    // them into a single `{old => new}` entry.
+    expect(
+      git(dir, 'show', '--name-status', '-M', '--format=', 'HEAD').trim(),
+    ).toBe('R100\told.txt\tnew.txt');
+  });
+
+  it('stages a newly created file that is only selected by paths', async () => {
+    const dir = makeRepo();
+    write(dir, { 'new/deep.txt': 'fresh\n' });
+
+    await gitCommit(dir, 'add one new file', { paths: ['new/deep.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'new/deep.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('rejects a selection that escapes the repository', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'two\n' });
+
+    await expect(
+      gitCommit(dir, 'bad', { paths: ['../escape.txt'] }),
+    ).rejects.toThrow('invalid commit path');
+    await expect(
+      gitCommit(dir, 'bad', { paths: ['/etc/passwd'] }),
+    ).rejects.toThrow('invalid commit path');
+  });
 });
 
 describe('gitPull', () => {

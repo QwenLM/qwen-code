@@ -717,8 +717,30 @@ async function handleCommit(
     return;
   }
   const all = body['all'] === true;
+  const rawPaths = body['paths'];
+  if (rawPaths !== undefined) {
+    if (
+      !Array.isArray(rawPaths) ||
+      rawPaths.length === 0 ||
+      rawPaths.some((p) => typeof p !== 'string' || !p)
+    ) {
+      res.status(400).json({
+        error: 'invalid_paths',
+        message: 'paths must be a non-empty array of strings',
+      });
+      return;
+    }
+    if (all) {
+      res.status(400).json({
+        error: 'paths_conflict_with_all',
+        message: 'paths and all are mutually exclusive',
+      });
+      return;
+    }
+  }
+  const paths = rawPaths as string[] | undefined;
   try {
-    const result = await gitCommit(cwd, message.trim(), { all }, env);
+    const result = await gitCommit(cwd, message.trim(), { all, paths }, env);
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);
