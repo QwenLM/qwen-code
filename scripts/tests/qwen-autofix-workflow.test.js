@@ -96,6 +96,20 @@ const routeJob =
 const reviewScanJob =
   workflow.match(/\n {2}review-scan:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
+// The command lane (af-161): each of these steps is the visible half of a
+// command route already accepted, and each carries CI_DEV_BOT_PAT on the
+// persistent pool. Each is its job's only step, so the slice bounds on the
+// GENERIC next job-level line rather than on whichever job follows today.
+const commandStepOf = (name) =>
+  workflow.match(
+    new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n {2}\\S|$)`),
+  )?.[0] ?? '';
+const commandStepNames = [
+  'Toggle takeover label',
+  'Post re-arm marker',
+  'Acknowledge takeover state change',
+];
+const commandSteps = commandStepNames.map(commandStepOf);
 const issueAutofixJob =
   workflow.match(/\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
@@ -7727,6 +7741,9 @@ exit 1
         env: {
           ...process.env,
           PATH: `${bin}:${process.env.PATH}`,
+          // The step mints its hermetic gh config dir under RUNNER_TEMP
+          // (af-161); the runner always provides it, so the fixture must.
+          RUNNER_TEMP: dir,
           GITHUB_TOKEN: 'pat',
           AUTOFIX_BOT: 'qwen-code-dev-bot',
           REPO: 'QwenLM/qwen-code',
@@ -11891,12 +11908,15 @@ exit 1
       expect(step).toContain('sudo -n apt-get install');
       expect(step).not.toContain('sudo apt-get');
     }
-    // "Short jobs stay hosted" is the design rule — the carve-out is the
-    // scan lane: route and review-scan gate the WHOLE fan-out, and a
+    // "Short jobs stay hosted" is the design rule, with two carve-outs.
+    // The scan lane: route and review-scan gate the WHOLE fan-out, and a
     // hosted-runner backlog queued route past the cron period so the cron
-    // supersede rule starved every scan round (2026-08-25). They share the
-    // heavy jobs' exact expression, fork-trust clause and kill-switch
-    // included. The command jobs stay hosted.
+    // supersede rule starved every scan round (2026-08-25). The command
+    // lane (af-161): route accepting a command in seconds is invisible
+    // while its only visible half waits for a hosted runner — on
+    // 2026-11-08 an accepted /takeover left its PR unlabeled and unacked
+    // behind a 39-49 minute hosted queue. Both lanes share the heavy
+    // jobs' exact expression, fork-trust clause and kill-switch included.
     expect(routeJob).toContain(ecsRunsOn);
     expect(reviewScanJob).toContain(ecsRunsOn);
     // af-148 carve-out premise: neither job checks code out, so the shared
@@ -11942,7 +11962,12 @@ exit 1
           new RegExp(`\\n {2}${name}:[\\s\\S]*?(?=\\n {2}[a-z][a-z0-9-]*:\\n)`),
         )?.[0] ?? '';
       expect(job, `job slice missing: ${name}`).toBeTruthy();
-      expect(job).toContain("runs-on: 'ubuntu-latest'");
+      expect(job).toContain(ecsRunsOn);
+      // Same af-148 premise as the scan lane, and it is what lets these
+      // jobs skip the workspace restore/wipe hygiene: no checkout, so no
+      // PR code ever lands in the reused workspace. Adding one forces a
+      // deliberate update of that requirement.
+      expect(job).not.toContain('actions/checkout');
     }
     // issue-autofix, build-cli, and review-address each stage the qwen shim
     // against the workspace bundle.
@@ -12714,7 +12739,9 @@ exit 1
     // (af-148), so route and review-scan carry the same reroute hardening
     // in the same loop — one preamble shape, one edit site: a planted
     // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
-    // collaborator-permission lookups into a local socket.
+    // collaborator-permission lookups into a local socket. The command
+    // lane joins that pool for the same reason and pays the same price
+    // (af-161): its identity check is what gates the label write.
     for (const [step, firstGh, configMint] of [
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
@@ -12726,6 +12753,11 @@ exit 1
       [postStatusCommentStep, 'JOB_ID="$(hermetic_gh api', 'wrapper'],
       [routeStep, 'gh api "repos/${REPO}/collaborators', 'guarded'],
       [reviewScanJob, 'gh pr view', 'guarded'],
+      ...commandSteps.map((step) => [
+        step,
+        'GH_TOKEN="${GITHUB_TOKEN}" gh api user',
+        'guarded',
+      ]),
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -13081,7 +13113,7 @@ exit 1
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('aborts route and review-scan before any gh call when the gh config dir cannot be minted', () => {
+  it('aborts the scan and command lanes before any gh call when the gh config dir cannot be minted', () => {
     // Behavioural witness for the guarded-mint pin above: without the guard,
     // `export VAR="$(mktemp ...)"` reports export's status, not the
     // substitution's, so a failing mktemp sails through bash -e with an
@@ -13090,8 +13122,9 @@ exit 1
     // step under a mktemp that refuses ONLY the gh-config template (later
     // plain mktemp calls must keep working so the unguarded mutant provably
     // reaches gh) and a gh stub that records every call: the step must fail
-    // loud before the first record. Probed: restoring the unguarded export
-    // makes both cases record a gh call and drop the ::error abort.
+    // loud before the first record. Probed on all five cases: restoring the
+    // unguarded export makes each record a gh call and drop the ::error
+    // abort — the command steps get as far as the PAT identity check.
     const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
       encoding: 'utf8',
     }).stdout.trim();
@@ -13125,6 +13158,19 @@ exit 1
           GITHUB_TOKEN: 'pat',
         },
       },
+      // The command lane (af-161) carries the same PAT onto the same pool.
+      // Its first gh call is the bot-identity check that gates the label
+      // write, so the abort has to land in front of that too.
+      ...commandStepNames.map((name, i) => ({
+        name,
+        block: commandSteps[i].match(/run: \|-\n([\s\S]*)$/)?.[1],
+        env: {
+          REPO: 'QwenLM/qwen-code',
+          PR: '1234',
+          GITHUB_TOKEN: 'pat',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+        },
+      })),
     ];
     for (const { name, block, env } of cases) {
       expect(block, name).toBeTruthy();
@@ -21068,6 +21114,9 @@ exit 1
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
+            // The step mints its hermetic gh config dir under RUNNER_TEMP
+            // (af-161); the runner always provides it, so the fixture must.
+            RUNNER_TEMP: dir,
             GITHUB_TOKEN: 'x',
             PR: '7354',
             REPO: 'QwenLM/qwen-code',

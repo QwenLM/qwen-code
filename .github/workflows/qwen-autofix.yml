@@ -1607,7 +1607,10 @@ jobs:
     concurrency:
       group: 'qwen-autofix-takeover-cmd-${{ needs.route.outputs.cmd_pr }}'
       cancel-in-progress: false
-    runs-on: 'ubuntu-latest'
+    # Persistent pool, not hosted: this is the maintainer-facing half of a
+    # command route already accepted, and a hosted backlog left it silent.
+    # Full rationale → qwen-autofix.md#af-161
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -1621,6 +1624,19 @@ jobs:
     steps:
       - name: 'Toggle takeover label'
         run: |-
+          # gh reroute hardening, mirroring the scan lane: the pool's shared
+          # ~/.config/gh is attacker-writable and this step's gh calls carry
+          # CI_DEV_BOT_PAT. The mint is guarded because `export VAR="$(...)"`
+          # reports export's status, not the substitution's — an empty
+          # GH_CONFIG_DIR is gh's fallback to that shared config.
+          # Full rationale → qwen-autofix.md#af-161
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           api_error_file="$(mktemp)"
           if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
             api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
@@ -1867,7 +1883,8 @@ jobs:
     concurrency:
       group: 'qwen-autofix-retry-cmd-${{ needs.route.outputs.retry_pr }}'
       cancel-in-progress: false
-    runs-on: 'ubuntu-latest'
+    # Full rationale → qwen-autofix.md#af-161
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -1878,6 +1895,19 @@ jobs:
     steps:
       - name: 'Post re-arm marker'
         run: |-
+          # gh reroute hardening, mirroring the scan lane: the pool's shared
+          # ~/.config/gh is attacker-writable and this step's gh calls carry
+          # CI_DEV_BOT_PAT. The mint is guarded because `export VAR="$(...)"`
+          # reports export's status, not the substitution's — an empty
+          # GH_CONFIG_DIR is gh's fallback to that shared config.
+          # Full rationale → qwen-autofix.md#af-161
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           # The marker only counts when the AUTOFIX_BOT authored it (both the
           # scan and the address-side recheck filter markers by that login), so
           # a mis-scoped PAT would post a comment that silently does nothing.
@@ -1921,7 +1951,8 @@ jobs:
     concurrency:
       group: 'qwen-autofix-takeover-ack-${{ needs.route.outputs.ack_pr }}'
       cancel-in-progress: false
-    runs-on: 'ubuntu-latest'
+    # Full rationale → qwen-autofix.md#af-161
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -1937,6 +1968,19 @@ jobs:
     steps:
       - name: 'Acknowledge takeover state change'
         run: |-
+          # gh reroute hardening, mirroring the scan lane: the pool's shared
+          # ~/.config/gh is attacker-writable and this step's gh calls carry
+          # CI_DEV_BOT_PAT. The mint is guarded because `export VAR="$(...)"`
+          # reports export's status, not the substitution's — an empty
+          # GH_CONFIG_DIR is gh's fallback to that shared config.
+          # Full rationale → qwen-autofix.md#af-161
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           api_error_file="$(mktemp)"
           if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
             api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
