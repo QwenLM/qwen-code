@@ -76,6 +76,13 @@ export interface ChannelEventRecord {
   number?: number;
   actor?: string;
   sessionId?: string;
+  /**
+   * Workspace owning `sessionId`, when the writer knows it. Bound-session
+   * delivery can target a session in another workspace, and a client needs
+   * the owner to open it; absent on records written before this field
+   * existed, where clients fall back to the journal's own workspace.
+   */
+  sessionWorkspaceCwd?: string;
   messageId?: string;
   durationMs?: number;
   error?: string;
@@ -186,6 +193,8 @@ export function normalizeChannelEventRecord(
   if (actor) record.actor = actor;
   const sessionId = text(raw['sessionId'], 120);
   if (sessionId) record.sessionId = sessionId;
+  const sessionWorkspaceCwd = text(raw['sessionWorkspaceCwd'], 1024);
+  if (sessionWorkspaceCwd) record.sessionWorkspaceCwd = sessionWorkspaceCwd;
   const messageId = text(raw['messageId'], 120);
   if (messageId) record.messageId = messageId;
   const durationMs = finiteNumber(raw['durationMs']);

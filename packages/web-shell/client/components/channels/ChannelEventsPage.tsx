@@ -9,6 +9,7 @@ import {
   ActivityIcon,
   AlertCircleIcon,
   ArrowLeftIcon,
+  MessageSquareIcon,
   RefreshCwIcon,
 } from 'lucide-react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
@@ -17,9 +18,11 @@ import {
   useChannels,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { workspaceLabel } from '../../utils/workspace';
+import { isSafeHref } from '../messages/Markdown';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -38,6 +41,7 @@ import {
   SelectValue,
 } from '../ui/select';
 import { Spinner } from '../ui/spinner';
+import { githubEventNumber, githubEventWebUrl } from './channel-platform';
 import styles from './ChannelEventsPage.module.css';
 
 interface ChannelEventsPageProps {
@@ -49,15 +53,25 @@ const EVENT_TYPES = ['inbound', 'outbound', 'task', 'poll'] as const;
 type EventTypeFilter = (typeof EVENT_TYPES)[number] | 'all';
 const ALL_CHANNELS = '__all__';
 
-const KNOWN_OUTCOMES = new Set([
+/**
+ * Outcomes the page knows how to label. Anything else renders as its raw
+ * token, so a new adapter outcome degrades to an unreadable-but-safe row
+ * rather than a missing translation key. Exported for the catalog
+ * completeness test: every entry here needs an EN and a ZH label.
+ */
+export const KNOWN_OUTCOMES = new Set([
   'accepted',
   'skipped',
   'posted',
   'suppressed',
   'posting',
   'failed',
+  'failed_ambiguous',
   'ok',
+  'degraded',
   'running',
+  'delivered',
+  'retired',
   'reply_pending',
   'cancelled',
 ]);
@@ -67,6 +81,7 @@ export function ChannelEventsPage({
   initialFocusRef,
 }: ChannelEventsPageProps) {
   const { t, language } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const workspace = useWorkspace();
   const supportsChannelEvents =
     workspace.capabilities?.features.includes('channel_management') === true;
@@ -136,10 +151,15 @@ export function ChannelEventsPage({
     [language],
   );
 
-  const outcomeLabel = (outcome: string) =>
-    KNOWN_OUTCOMES.has(outcome)
-      ? t(`channelEvents.outcome.${outcome}`)
-      : outcome;
+  // The watch-guard recovery edge keeps `degraded` on the wire (the outcome
+  // vocabulary is unchanged); labeling it "Degraded" would read as an ongoing
+  // failure, so the reason names the label instead.
+  const outcomeLabel = (outcome: string, reason?: string) =>
+    reason === 'watch_reconcile_recovered'
+      ? t('channelEvents.outcome.recovered')
+      : KNOWN_OUTCOMES.has(outcome)
+        ? t(`channelEvents.outcome.${outcome}`)
+        : outcome;
 
   return (
     <div className={styles.page}>
@@ -301,11 +321,28 @@ export function ChannelEventsPage({
                   .reverse()
                   .map((event, index) => {
                     const at = new Date(event.at);
+                    // Same derivation the URL uses: the shared inbound path
+                    // journals without `number`, only `thread: 'pr:42'`.
+                    const number = githubEventNumber(event);
                     const target = event.repository
                       ? `${event.repository}${
-                          event.number !== undefined ? `#${event.number}` : ''
+                          number !== undefined ? `#${number}` : ''
                         }`
                       : event.thread;
+                    const targetUrl = githubEventWebUrl(
+                      event,
+                      // The journal's merged metadata is authoritative:
+                      // system settings can override a same-named workspace
+                      // channel, which the scope-local listing would miss.
+                      // The listing stays as the fallback for older daemons
+                      // that do not send channelLinkMeta.
+                      data?.channelLinkMeta?.[event.channel] ??
+                        channels[event.channel]?.config,
+                    );
+                    const safeTargetUrl =
+                      targetUrl && isSafeHref(targetUrl)
+                        ? targetUrl
+                        : undefined;
                     return (
                       <li
                         key={`${event.at}-${event.channel}-${index}`}
@@ -326,10 +363,27 @@ export function ChannelEventsPage({
                           className={styles.outcome}
                           data-outcome={event.outcome}
                         >
-                          {outcomeLabel(event.outcome)}
+                          {outcomeLabel(event.outcome, event.reason)}
                         </span>
                         <span className={styles.target}>
-                          {target ?? ''}
+                          {safeTargetUrl ? (
+                            <a
+                              href={safeTargetUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className={styles.targetLink}
+                              aria-label={t('channelEvents.openTarget', {
+                                target: target ?? '',
+                              })}
+                              onClick={(click) =>
+                                openExternalLink(click, safeTargetUrl)
+                              }
+                            >
+                              {target ?? ''}
+                            </a>
+                          ) : (
+                            (target ?? '')
+                          )}
                           {event.actor ? (
                             <span className={styles.actor}>@{event.actor}</span>
                           ) : null}
@@ -340,12 +394,38 @@ export function ChannelEventsPage({
                               {event.reason ?? event.triggerKind}
                             </code>
                           ) : null}
+                          {event.sessionId ? (
+                            <code
+                              className={styles.markerCode}
+                              title={event.sessionId}
+                            >
+                              {t('channelEvents.session', {
+                                id: event.sessionId.slice(0, 8),
+                              })}
+                            </code>
+                          ) : null}
                           {event.type === 'poll' &&
                           typeof event.detail?.['notifications'] ===
                             'number' ? (
                             <span className={styles.duration}>
                               {t('channelEvents.notifications', {
                                 count: event.detail['notifications'] as number,
+                              })}
+                            </span>
+                          ) : null}
+                          {event.type === 'poll' &&
+                          typeof event.detail?.['streak'] === 'number' ? (
+                            <span className={styles.duration}>
+                              {t('channelEvents.streak', {
+                                count: event.detail['streak'] as number,
+                              })}
+                            </span>
+                          ) : null}
+                          {event.type === 'poll' &&
+                          typeof event.detail?.['sessions'] === 'number' ? (
+                            <span className={styles.duration}>
+                              {t('channelEvents.sessions', {
+                                count: event.detail['sessions'] as number,
                               })}
                             </span>
                           ) : null}
@@ -362,6 +442,35 @@ export function ChannelEventsPage({
                                 ms: event.durationMs,
                               })}
                             </span>
+                          ) : null}
+                          {event.sessionId ? (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className={styles.sessionButton}
+                              aria-label={t('channelEvents.openSession')}
+                              title={t('channelEvents.openSession')}
+                              onClick={() => {
+                                // Same navigation path as markdown session
+                                // links and turn notifications. Older
+                                // records lack the owner workspace; the
+                                // journal's own workspace is the fallback
+                                // (correct for the Channel's own reply
+                                // session).
+                                window.dispatchEvent(
+                                  new CustomEvent('qwen:open-session', {
+                                    detail: {
+                                      sessionId: event.sessionId,
+                                      workspaceCwd:
+                                        event.sessionWorkspaceCwd ??
+                                        workspaceCwd,
+                                    },
+                                  }),
+                                );
+                              }}
+                            >
+                              <MessageSquareIcon />
+                            </Button>
                           ) : null}
                         </span>
                         {event.error ? (

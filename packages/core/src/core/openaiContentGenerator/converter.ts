@@ -57,13 +57,23 @@ const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
 
 /**
- * Extended usage type that supports both OpenAI standard format and alternative formats
- * Some models return cached_tokens at the top level instead of in prompt_tokens_details
+ * Extended usage type that supports both OpenAI standard format and alternative
+ * formats: some models return cached_tokens at the top level instead of in
+ * prompt_tokens_details.
+ *
+ * `cache_write_tokens` is a standard OpenAI Chat Completions field, added to
+ * the SDK's `PromptTokensDetails` in v7; this package pins v5, so the types
+ * here predate it. Moonshot documents it under `prompt_tokens_details`; it is
+ * absent from providers that only report cache reads, and stays `undefined`
+ * there. The value reaches GenAI telemetry's
+ * `gen_ai.usage.cache_creation.input_tokens` unchanged.
  */
 interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
+  // The pinned SDK declares `prompt_tokens_details` without this member; both
+  // converters read it through this interface so there is one spelling. The
+  // base member does not admit `null`, so the override must not either.
   prompt_tokens_details?: OpenAI.CompletionUsage.PromptTokensDetails & {
-    // Standard upstream from openai v7; declared locally for the current SDK pin.
     cache_write_tokens?: number;
   };
 }
@@ -103,6 +113,34 @@ export interface ExtendedCompletionChunkDelta
   extends OpenAI.Chat.ChatCompletionChunk.Choice.Delta {
   reasoning_content?: string | null;
   reasoning?: string | null;
+}
+
+type OpenAIToolCallWithThoughtSignature =
+  OpenAI.Chat.ChatCompletionMessageToolCall & {
+    thoughtSignature?: string;
+    extra_content?: { google: { thought_signature: string } };
+  };
+
+function readThoughtSignature(toolCall: unknown): string | undefined {
+  const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const call = asRecord(toolCall);
+  const direct = call?.['thoughtSignature'];
+  const nested = asRecord(asRecord(call?.['extra_content'])?.['google'])?.[
+    'thought_signature'
+  ];
+  const directSignature = typeof direct === 'string' ? direct : undefined;
+  const nestedSignature = typeof nested === 'string' ? nested : undefined;
+  if (
+    directSignature !== undefined &&
+    nestedSignature !== undefined &&
+    directSignature !== nestedSignature
+  ) {
+    return undefined;
+  }
+  return directSignature ?? nestedSignature;
 }
 
 // Threshold for treating an exact-repeat chunk as a cumulative marker rather
@@ -678,7 +716,7 @@ function processContent(
 
   const contentParts: OpenAIContentPart[] = [];
   const reasoningParts: string[] = [];
-  const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
+  const toolCalls: OpenAIToolCallWithThoughtSignature[] = [];
   let toolCallIndex = 0;
   const emittedFunctionCallIds = new Set<string>();
   const emittedFunctionResponseIds = new Set<string>();
@@ -770,6 +808,7 @@ function processContent(
         emittedFunctionCallIds.add(callId);
       }
 
+      const thoughtSignature = part.thoughtSignature;
       toolCalls.push({
         id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
@@ -777,6 +816,14 @@ function processContent(
           name: normalizeMcpToolName(part.functionCall.name || ''),
           arguments: JSON.stringify(part.functionCall.args || {}),
         },
+        ...(typeof thoughtSignature === 'string'
+          ? {
+              thoughtSignature,
+              extra_content: {
+                google: { thought_signature: thoughtSignature },
+              },
+            }
+          : {}),
       });
       toolCallIndex += 1;
     }
@@ -1471,6 +1518,7 @@ export function convertOpenAIResponseToLlm(
           if (toolCall.function.arguments) {
             args = safeJsonParse(toolCall.function.arguments, {});
           }
+          const thoughtSignature = readThoughtSignature(toolCall);
 
           parts.push({
             functionCall: {
@@ -1478,6 +1526,7 @@ export function convertOpenAIResponseToLlm(
               name: toolCall.function.name,
               args,
             },
+            ...(thoughtSignature !== undefined ? { thoughtSignature } : {}),
           });
         }
       }
@@ -1774,6 +1823,7 @@ export function convertOpenAIChunkToLlm(
     if (choice.delta?.tool_calls) {
       for (const toolCall of choice.delta.tool_calls) {
         const index = toolCall.index ?? 0;
+        const thoughtSignature = readThoughtSignature(toolCall);
 
         // Process the tool call chunk through the streaming parser
         const parseResult = toolCall.function?.arguments
@@ -1782,12 +1832,14 @@ export function convertOpenAIChunkToLlm(
               toolCall.function.arguments,
               toolCall.id,
               toolCall.function.name,
+              thoughtSignature,
             )
           : toolCallParser.addChunk(
               index,
               '', // Empty chunk for metadata-only updates
               toolCall.id,
               toolCall.function?.name,
+              thoughtSignature,
             );
 
         const { id: callId, name: toolName } = toolCallParser.getToolCallMeta(
@@ -2028,6 +2080,9 @@ export function convertOpenAIChunkToLlm(
               name: toolCall.name,
               args: toolCall.args,
             },
+            ...(toolCall.thoughtSignature !== undefined
+              ? { thoughtSignature: toolCall.thoughtSignature }
+              : {}),
           });
         }
       }

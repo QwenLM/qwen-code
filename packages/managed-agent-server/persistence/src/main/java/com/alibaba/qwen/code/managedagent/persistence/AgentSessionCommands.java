@@ -107,7 +107,7 @@ final class AgentSessionCommands {
                     throw AgentSessionPolicies.workspaceExecutionUnavailable();
                 }
             }
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
             throw new ManagedAgentException(409, "session_not_active",
@@ -343,8 +343,7 @@ final class AgentSessionCommands {
     // outcome stays answerable through the same contract as the pre-read
     // probe. A tombstoned Session answers the reads' 404 instead of the
     // live-Session refusal.
-    void requireRenameReplayOwner(SessionRecord session,
-            CommandRecord previous, String actorId) {
+    void requireRenameReplayOwner(SessionRecord session, CommandRecord previous, String actorId) {
         if (!previous.admitsReplayBy(actorId) && session.workspace() != null
                 && !workspaces.createdSession(session.tenantId(), actorId,
                         session.sessionId())) {
@@ -590,7 +589,7 @@ final class AgentSessionCommands {
             requireSameMutation(command, requestDigest, sessionId);
             if ("FAILED".equals(command.status())) {
                 if (session.workspace() != null) {
-                    WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+                    WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
                 }
                 sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
                 validateMutationStatus(session, kind);
@@ -607,7 +606,7 @@ final class AgentSessionCommands {
                     true);
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
         validateMutationStatus(session, kind);
@@ -634,8 +633,7 @@ final class AgentSessionCommands {
                         + " = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
                 session.lastSequence(), ManagedReceipts.commandKey(tenantId, operation, idempotencyKey));
         // Older retired commands may have left their requested event behind.
-        String requestedSource = mutationSource(operation, idempotencyKey,
-                "requested");
+        String requestedSource = mutationSource(operation, idempotencyKey, "requested");
         if (!eventJournal.hasSourceEvent(tenantId, sessionId, requestedSource)) {
             eventJournal.appendEvent(tenantId, sessionId, null,
                     mutationEvent(kind, "requested"),
@@ -690,15 +688,14 @@ final class AgentSessionCommands {
                             + " request was retired.");
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         validateMutationStatus(session, kind);
         long now = clock.millis();
         Map<String, Object> data = Map.of("sessionId", sessionId);
         switch (kind) {
             case RENAME -> {
-                jdbc.update("UPDATE ma_session SET title = ?,"
-                                + " harness_boot_id ="
+                jdbc.update("UPDATE ma_session SET title = ?," + " harness_boot_id ="
                                 + " COALESCE(harness_boot_id, ?),"
                                 + " gmt_modified = ?, version = version + 1"
                                 + " WHERE tenant_id = ? AND session_id = ?",
@@ -709,8 +706,7 @@ final class AgentSessionCommands {
             // An archived Session was closed first, so it stays closed.
             case UNARCHIVE -> jdbc.update("UPDATE ma_session SET"
                             + " status = 'CLOSED', gmt_modified = ?, version ="
-                            + " version + 1 WHERE tenant_id = ? AND"
-                            + " session_id = ?",
+                            + " version + 1 WHERE tenant_id = ? AND" + " session_id = ?",
                     now, tenantId, sessionId);
         }
         jdbc.update(
@@ -720,8 +716,7 @@ final class AgentSessionCommands {
                 ManagedReceipts.commandKey(tenantId, operation, idempotencyKey));
         eventJournal.appendEvent(tenantId, sessionId, null,
                 mutationEvent(kind, "completed"), data, false,
-                mutationSource(operation, idempotencyKey,
-                        "completed"), now);
+                mutationSource(operation, idempotencyKey, "completed"), now);
         return storeRows.requireSessionForUpdate(tenantId, sessionId);
     }
 
@@ -788,8 +783,7 @@ final class AgentSessionCommands {
                 tenantId,
                 sessionId,
                 operationId,
-                kind.name(),
-                actorKey,
+                kind.name(), actorKey,
                 idempotencyKey,
                 requestDigest,
                 sessionStatus,
@@ -819,8 +813,7 @@ final class AgentSessionCommands {
      * is itself unknown. A Turn that has not ended leaves its cancels
      * pending, so cancels of one Turn coalesce.
      */
-    void settleTurnCommands(String tenantId, String sessionId,
-            String turnId, long now) {
+    void settleTurnCommands(String tenantId, String sessionId, String turnId, long now) {
         // Current reads only: every caller holds the Session row, but its
         // snapshot may predate that lock and miss a cancel committed since.
         TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
@@ -894,8 +887,7 @@ final class AgentSessionCommands {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"
                             + " admission_stage = ?, delivery_state = ?,"
                             + " receipt_id = ?, failure_code = ?,"
-                            + " available_at = ?, gmt_modified = ?,"
-                            + " completed_at = ? WHERE"
+                            + " available_at = ?, gmt_modified = ?," + " completed_at = ? WHERE"
                             + " operation_key = ? AND state = 'PENDING'",
                     state, state, admissionStage,
                     completed ? "CONFIRMED" : "BLOCKED",
@@ -926,8 +918,7 @@ final class AgentSessionCommands {
                 false, operationId);
     }
 
-    Optional<CommandRecord> findCommand(String tenantId,
-            String operation, String idempotencyKey) {
+    Optional<CommandRecord> findCommand(String tenantId, String operation, String idempotencyKey) {
         return findCommand(tenantId, operation, idempotencyKey, false);
     }
 
@@ -1020,14 +1011,12 @@ final class AgentSessionCommands {
     }
 
     // A mutation leaves the status unchanged until it completes.
-    static void validateMutationStatus(SessionRecord session,
-            SessionMutationKind kind) {
+    static void validateMutationStatus(SessionRecord session, SessionMutationKind kind) {
         AgentSessionPolicies.requireSessionStatus(session.status(),
                 kind == SessionMutationKind.RENAME ? "ACTIVE" : "ARCHIVED");
     }
 
-    static String mutationEvent(SessionMutationKind kind,
-            String phase) {
+    static String mutationEvent(SessionMutationKind kind, String phase) {
         if ("completed".equals(phase)) {
             return kind == SessionMutationKind.RENAME ? "session.updated"
                     : "session.unarchived";
@@ -1066,13 +1055,23 @@ final class AgentSessionCommands {
                         Integer.class,
                         tenantId,
                         sessionId,
-                        attempts.getFirst(),
-                        mutationEvent(kind, "completed"));
+                        attempts.getFirst(), mutationEvent(kind, "completed"));
         return later != null && later > 0;
     }
 
-    static String mutationSource(String operation,
-            String idempotencyKey, String phase) {
+    static String mutationSource(String operation, String idempotencyKey, String phase) {
         return "control:" + operation + ":" + idempotencyKey + ":" + phase;
+    }
+
+    // Automation-verb session boot-id bind (#14548); fill only when still empty.
+    void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
+        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        if (harnessBootId.equals(session.harnessBootId())) {
+            return;
+        }
+        jdbc.update("UPDATE ma_session SET harness_boot_id = COALESCE(harness_boot_id, ?),"
+                        + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                harnessBootId, clock.millis(), tenantId, sessionId);
     }
 }

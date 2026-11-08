@@ -27,6 +27,7 @@ export {
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
@@ -73,6 +74,25 @@ export {
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
 } from './bound-session-delivery.js';
+export {
+  BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS,
+  BOUND_ACTION_VARIABLE_MAX_CODE_POINTS,
+  BOUND_EVENT_PLATFORMS,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
+  boundActionTemplateEntries,
+  buildBoundEventPrompt,
+  isBoundActionKey,
+  renderBoundActionTemplate,
+  resolveBoundActionTemplate,
+  validateBoundActionEntries,
+} from './bound-session-prompt.js';
+export type {
+  BoundActionKeyVocabulary,
+  BoundActionTemplateSource,
+  BoundActionValues,
+  BoundEventPlatform,
+  BoundEventPromptParts,
+} from './bound-session-prompt.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -132,7 +152,7 @@ export {
   truncateCodePoints,
   truncateUtf16Units,
 } from './sanitize.js';
-export { isTerminalTaskLifecycleType } from './types.js';
+export { isTerminalTaskLifecycleType, PR_BINDING_ROLES } from './types.js';
 export {
   CHANNEL_OUTPUT_MODE_FIELD,
   DEFAULT_CHANNEL_OUTPUT_MODE,
@@ -154,6 +174,7 @@ export type {
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigFieldOption,
   ChannelConfigNestedFieldDescriptor,
   ChannelConfigNumberFieldDescriptor,
   ChannelConfigObjectFieldDescriptor,
@@ -188,6 +209,7 @@ export type {
   GroupConfig,
   GroupPolicy,
   PrBindingEntry,
+  PrBindingRole,
   PrBindingsSnapshot,
   PrBindingSummary,
   PrivatePolicy,

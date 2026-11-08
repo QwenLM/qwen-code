@@ -146,26 +146,54 @@ export function invalidateWorkspaceSessionListCache(
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
-    kind: 'numeric' | 'organized' | 'live' | 'parent' | 'metadata' = 'numeric',
+    kind:
+      | 'numeric'
+      | 'persisted'
+      | 'organized'
+      | 'live'
+      | 'parent'
+      | 'metadata' = 'numeric',
   ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
   }
 }
 
-function parseSessionCursor(cursor: string): number | undefined {
-  if (cursor === '') return undefined;
+/**
+ * True when `cursor` addresses a position in the persisted session store: a
+ * bare page offset, or one of the composite `"<mtime>|<name>"` cursors minted
+ * by listSessions when a page ends inside a group of files sharing an mtime.
+ * Callers use this to pick the persisted listing path over the live one; it
+ * only classifies the shape, `parseSessionCursor` still rejects bad values.
+ */
+export function isPersistedSessionCursor(cursor: string): boolean {
+  if (cursor === '') return false;
   const trimmed = cursor.trim();
-  const parsed = Number(trimmed);
-  if (
-    trimmed === '' ||
-    !Number.isFinite(parsed) ||
-    parsed < 0 ||
-    parsed > Number.MAX_SAFE_INTEGER
-  ) {
-    throw new InvalidCursorError(cursor);
+  if (trimmed === '') return false;
+  // Composite cursors are opaque to this layer beyond their mtime prefix. An
+  // empty prefix ("|name") is malformed: Number('') is 0, so without this
+  // guard it would pass as a real position and answer 200 with an empty page.
+  const parts = trimmed.split('|');
+  if (parts.length === 2 && parts[0].trim() !== '' && parts[1].length > 0) {
+    const mtime = Number(parts[0]);
+    if (Number.isFinite(mtime) && mtime >= 0) return true;
   }
-  return parsed;
+  const parsed = Number(trimmed);
+  return (
+    Number.isFinite(parsed) && parsed >= 0 && parsed <= Number.MAX_SAFE_INTEGER
+  );
+}
+
+function parseSessionCursor(cursor: string): number | string | undefined {
+  if (cursor === '') return undefined;
+  if (!isPersistedSessionCursor(cursor)) {
+    throw new InvalidCursorError(cursor, 'persisted');
+  }
+  const trimmed = cursor.trim();
+  // A bare offset parses as a number; a composite cursor stays opaque so it
+  // can be handed back to the persisted listing layer verbatim.
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : trimmed;
 }
 
 interface OrganizedCursor {
@@ -503,12 +531,10 @@ async function enrichPrSidecars(
         ...summary,
         prs: sidecarToPrInfos(result.prs),
       });
-    } else if (result.status === 'invalid') {
-      // An unreadable sidecar is UNKNOWN bindings, not an unbind: flag it
-      // so authoritative consumers (the PR-bindings snapshot) degrade to
-      // partial instead of silently dropping the session.
-      bySessionId.set(sessionId, { ...summary, prsReadFailed: true });
     }
+    // An unreadable sidecar is UNKNOWN bindings, not an unbind: leave `prs`
+    // unset rather than projecting an empty list. The PR-bindings snapshot
+    // reads the sidecars itself and reports such a session as partial.
   }
 }
 
@@ -705,11 +731,9 @@ async function liveOnlySummary(
   }
   if (result.status === 'ok') {
     summary.prs = mergeSummaryPrs(sidecarToPrInfos(result.prs), live.prs);
-  } else if (result.status === 'invalid') {
-    // Unknown bindings, not an unbind; the live entry's own bindings (if
-    // any) survive via the spread above.
-    summary.prsReadFailed = true;
   }
+  // Invalid: unknown bindings, not an unbind; the live entry's own bindings
+  // (if any) survive via the spread above.
   return summary;
 }
 
@@ -734,7 +758,7 @@ async function loadAllPersistedSummaries(
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
   let scanPages = 0;
-  let cursor: number | undefined;
+  let cursor: number | string | undefined;
   do {
     scanPages += 1;
     const page = await sessionService.listSessions({
@@ -1465,16 +1489,16 @@ async function listWorkspaceSessionsForResponseInRuntime(
     );
   }
 
-  let numericCursor: number | undefined;
+  let persistedCursor: number | string | undefined;
   if (options?.cursor != null) {
-    numericCursor = parseSessionCursor(options.cursor);
+    persistedCursor = parseSessionCursor(options.cursor);
   }
-  const isFirstPage = numericCursor === undefined;
+  const isFirstPage = persistedCursor === undefined;
 
   const sessionService = new SessionService(workspaceCwd);
   const archiveState = options?.archiveState ?? 'active';
   const persisted = await sessionService.listSessions({
-    cursor: numericCursor,
+    cursor: persistedCursor,
     size: pageSize,
     archiveState,
     excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],

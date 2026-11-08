@@ -13,6 +13,7 @@
         <qwen.cli.entry>${managed.module.root}/../../dist/cli.js</qwen.cli.entry>
         <maven.install.skip>true</maven.install.skip>
         <maven.deploy.skip>true</maven.deploy.skip>
+        <argLine></argLine>
     </properties>
     <dependencies>
         <dependency>
@@ -170,8 +171,13 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
+                    <!-- The suite's single fork outgrows the default quarter of a 16 GB hosted runner. -->
+                    <argLine>@{argLine} -XX:MaxRAMPercentage=40</argLine>
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
+                    <!-- H2 fixtures retain named databases for the JVM's lifetime.
+                         Keep those catalogs scoped to a test class, not the whole suite. -->
+                    <reuseForks>false</reuseForks>
                     <systemPropertyVariables>
                         <managed.module.root>${managed.module.root}</managed.module.root>
                         <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
@@ -316,7 +322,7 @@
                                     qwen.hosted.mysql.isolation = true
                                 </configurationParameters>
                             </properties>
-                            <forkedProcessTimeoutInSeconds>11591</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>11658</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
