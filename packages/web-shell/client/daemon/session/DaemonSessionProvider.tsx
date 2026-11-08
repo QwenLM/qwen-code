@@ -6732,6 +6732,7 @@ function hasActiveGenerationSignal(
       event.type === 'assistant.text.delta' ||
       event.type === 'thought.text.delta' ||
       (event.type === 'tool.update' &&
+        !event.nameOnly &&
         !event.toolCallId.startsWith('mcp-app-')),
   );
 }
