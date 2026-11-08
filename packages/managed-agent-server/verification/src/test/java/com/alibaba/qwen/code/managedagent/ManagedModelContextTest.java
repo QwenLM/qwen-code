@@ -212,6 +212,24 @@ class ManagedModelContextTest {
     }
 
     @Test
+    void aStartedAttemptDoesNotInferLegacyCoverageFromItsJournalRevision() {
+        var journal = open(TENANT, "started-diagnostics", true);
+        ObjectNode route = json.createObjectNode().put("version", 1).put("turnId", "turn-1")
+                .put("model", "probe").putNull("budget");
+        commit(journal, request(journal, "started", ExtensionRecordJournal.bytes(route), "managed-hosted-model-route",
+                "started", 1000, event -> {
+                    ObjectNode payload = (ObjectNode) event.get("payload");
+                    payload.set("routeRef", payload.get("usageRef"));
+                    payload.putNull("usageRef").putNull("inputCheckpointRef");
+                }));
+        var read = records.findModelDiagnostics(TENANT, "started-diagnostics");
+        assertThat(read.readRevision()).isEqualTo(2L);
+        assertThat(read.context()).isNull();
+        assertThat(read.statistics()).isNull();
+        assertThat(read.coverageGaps()).isEmpty();
+    }
+
+    @Test
     void absentAndLegacyDiagnosticsKeepUnknownObservationTimes() {
         var missing = records.findModelDiagnostics(TENANT, "absent");
         assertThat(missing.context()).isNull();

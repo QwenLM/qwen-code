@@ -124,7 +124,9 @@ function fixture(revisions: number[], maintenance = false) {
   const publish = vi.fn(async (_kind: string, _bytes: Buffer) => refs[0]);
   const session = {
     authority: {
-      committedSequence: events.length,
+      get committedSequence() {
+        return events.length;
+      },
       sessionHeader: { sessionKey: { sessionId } },
       eventsInSequenceRange: () => events,
       extensionRecordsInDomain: () => [],
@@ -144,6 +146,34 @@ function fixture(revisions: number[], maintenance = false) {
 }
 
 describe('Managed diagnostic restore', () => {
+  it.each([
+    ['user', false, []],
+    ['user', true, ['unclosed_model_attempt']],
+    ['assistant', false, ['legacy_history']],
+  ] as const)(
+    'infers legacy coverage from assistant history only (role=%s, interrupted=%s)',
+    async (role, interrupted, gaps) => {
+      const state = fixture([]);
+      state.events.push({ kind: 'message.committed', payload: { role } });
+      if (interrupted)
+        state.events.push({
+          kind: 'model.attempt',
+          payload: {
+            attemptId: 'interrupted',
+            state: 'started',
+            usageRef: null,
+          },
+        });
+      await state.diagnostics.restore();
+      await state.diagnostics.publishTurnFallback('next-turn');
+      if (gaps.length === 0) expect(state.publish).not.toHaveBeenCalled();
+      else {
+        const saved = JSON.parse(state.publish.mock.calls[0][1].toString());
+        expect(saved.statistics.coverage.gaps).toEqual(gaps);
+      }
+    },
+  );
+
   it('does not classify null abandoned usage as legacy or clear earlier recovery gaps', async () => {
     const state = fixture([1]);
     const ref = state.refs[0];

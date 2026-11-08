@@ -91,7 +91,7 @@ final class ManagedModelDiagnosticProjection {
             List<String> gaps = new ArrayList<>();
             if (stats != null) {
                 stats.path("coverage").path("gaps").forEach(gap -> gaps.add(gap.textValue()));
-            } else if (context != null || before != null && before > 1) {
+            } else if (context != null) {
                 gaps.add("legacy_history");
             }
             Long observed = null;

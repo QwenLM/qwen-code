@@ -507,6 +507,122 @@ it('persists the model-facing Skill batch budget so replay cannot restore discar
   ]);
 });
 
+it.each(['plan', 'member', 'invalid', 'resident'] as const)(
+  'records the refusal admission and leaves collateral calls unknown (%s)',
+  async (reason) => {
+    await enableManagedExecutionDiagnostics(session);
+    let batch: ToolCallRequestInfo[] = calls;
+    if (reason === 'plan' || reason === 'member') {
+      vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+      turn = createTurn(
+        false,
+        { mode: 'auto-edit' },
+        undefined,
+        undefined,
+        reason === 'plan' ? 'public' : 'member',
+      );
+    } else if (reason === 'invalid') {
+      batch = [{ ...calls[0], args: { file_path: 123 } }, calls[1]];
+    } else {
+      broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+      turn = createTurn();
+      batch = [
+        calls[0],
+        {
+          ...calls[1],
+          name: 'web_fetch',
+          args: { url: 'https://example.com' },
+        },
+      ];
+    }
+    const signal = new AbortController().signal;
+    await turn.declarations(signal);
+    await turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      signal,
+    );
+    const event = session.authority.lastEventOfKind('message.committed')!;
+    const evidence = parseManagedExecutionEvidence(
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['diagnosticsRef'],
+          'diagnosticsRef',
+        ),
+      ),
+    );
+    expect(evidence.observations.map((value) => value.admission)).toEqual(
+      reason === 'invalid' ? ['invalid', 'unknown'] : ['unknown', 'denied'],
+    );
+    expect(
+      evidence.observations.every((value) => value.execution === 'not_started'),
+    ).toBe(true);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['policy', 'invalid', 'collateral'] as const)(
+  'keeps Hook refusal classification when a sibling has invalid Unicode (%s)',
+  async (reason) => {
+    await enableManagedExecutionDiagnostics(session);
+    const fire = vi
+      .fn<HostedHookSession['fire']>()
+      .mockImplementation(async (event, _occurrence, input) => {
+        if (event !== HookEventName.PreToolUse) return undefined;
+        if (input['tool_name'] === 'run_shell_command')
+          return {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedInput: { command: '\ud800' },
+            },
+          };
+        if (reason === 'policy') return { decision: 'block', reason: 'policy' };
+        if (reason === 'invalid')
+          return {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedInput: { file_path: '../outside' },
+            },
+          };
+        return undefined;
+      });
+    turn = createTurn(true, { mode: 'yolo' }, hookSession(fire));
+    const batch: ToolCallRequestInfo[] = [
+      calls[0],
+      { ...calls[1], name: 'run_shell_command', args: { command: 'pwd' } },
+    ];
+    await turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    );
+    const event = session.authority.lastEventOfKind('message.committed')!;
+    const evidence = parseManagedExecutionEvidence(
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['diagnosticsRef'],
+          'diagnosticsRef',
+        ),
+      ),
+    );
+    expect(evidence.observations.map((value) => value.admission)).toEqual([
+      reason === 'policy'
+        ? 'denied'
+        : reason === 'invalid'
+          ? 'invalid'
+          : 'unknown',
+      'invalid',
+    ]);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
 it.each([
   [{ cwdRelative: 'docs', contextRevision: '7' }, 'docs/file.txt'],
   [null, null],

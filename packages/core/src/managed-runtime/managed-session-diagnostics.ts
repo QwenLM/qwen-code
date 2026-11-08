@@ -162,7 +162,11 @@ export class ManagedSessionDiagnostics {
     const recoveryGaps = this.statistics.coverage.gaps;
     legacy ||=
       refs.size === 0 &&
-      events.some((event) => event.kind === 'message.committed');
+      events.some(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['role'] === 'assistant',
+      );
     const revisionDigests = new Map<number, string>();
     const statisticsRefs = [...refs.values()];
     for (let index = 0; index < statisticsRefs.length; index += 8) {

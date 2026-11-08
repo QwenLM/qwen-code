@@ -1818,6 +1818,7 @@ class HostedToolInputInlineLimitError extends Error {
 interface HostedPreparedRequest {
   call: ToolCallRequestInfo;
   validationError?: string;
+  validationAdmission: 'invalid' | 'denied';
   input: Record<string, unknown>;
   isShell: boolean;
   inputDigest?: string;
@@ -3610,7 +3611,7 @@ export class HostedWorkspaceToolTurn {
           fact.serverId = route.input.serverId;
       }
       fact.admission = request.validationError
-        ? 'invalid'
+        ? request.validationAdmission
         : batch?.refusals[index] !== undefined
           ? 'denied'
           : 'allowed';
@@ -3699,6 +3700,7 @@ export class HostedWorkspaceToolTurn {
   private async refuseBatch(
     calls: ToolCallRequestInfo[],
     errors: Array<string | undefined>,
+    admissions: ReadonlyArray<'invalid' | 'denied'>,
     parts: Part[] | undefined,
     model: string,
     skillOrigin:
@@ -3729,7 +3731,8 @@ export class HostedWorkspaceToolTurn {
       this.diagnosticRejectedRequests = prepared;
       for (const [index, call] of calls.entries())
         this.diagnosticOverrides.set(call.callId, {
-          admission: errors[index] === undefined ? 'denied' : 'invalid',
+          admission:
+            errors[index] === undefined ? 'unknown' : admissions[index],
           execution: 'not_started',
         });
       await this.commit('tool_result', responses, model);
@@ -3810,6 +3813,7 @@ export class HostedWorkspaceToolTurn {
             return this.refuseBatch(
               plan.calls.map((item) => item.call),
               plan.calls.map(() => APPROVAL_REFUSALS.cancelled),
+              plan.calls.map(() => 'denied'),
               undefined,
               plan.model,
               undefined,
@@ -3862,6 +3866,7 @@ export class HostedWorkspaceToolTurn {
           throw new Error('Original Shell publication identity is missing.');
         requests.push({
           call: item.call,
+          validationAdmission: 'invalid',
           input: input.input,
           runtimeCallId: item.runtimeCallId,
           payloadJson: input.payloadJson,
@@ -3913,6 +3918,7 @@ export class HostedWorkspaceToolTurn {
         return this.refuseBatch(
           plan.calls.map((item) => item.call),
           plan.calls.map(() => APPROVAL_REFUSALS.cancelled),
+          plan.calls.map(() => 'denied'),
           undefined,
           plan.model,
           undefined,
@@ -4163,6 +4169,8 @@ export class HostedWorkspaceToolTurn {
           throw new Error('Hosted Workspace profile refused a tool call.');
         ids.add(call.callId);
         let validationError: string | undefined;
+        let validationAdmission: HostedPreparedRequest['validationAdmission'] =
+          'invalid';
         let input: Record<string, unknown>;
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
@@ -4201,23 +4209,27 @@ export class HostedWorkspaceToolTurn {
           !HOSTED_PUBLIC_PLAN_READS.has(call.name)
         ) {
           validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
+          validationAdmission = 'denied';
           input = { ...call.args };
         } else if (call.name === 'ask_user_question') {
           input = { ...call.args };
           try {
             hostedQuestions(input);
-            if (source.length !== 1 || !this.questionsAdmitted())
+            if (source.length !== 1 || !this.questionsAdmitted()) {
               validationError =
                 'ask_user_question must be the only call in a supported Session batch.';
+              if (source.length === 1) validationAdmission = 'denied';
+            }
           } catch (cause) {
             if (!(cause instanceof HostedQuestionInputError)) throw cause;
             validationError = cause.message;
           }
         } else if (planExit) {
           input = { ...call.args };
-          if (!this.planning)
+          if (!this.planning) {
             validationError = 'Plan mode already ended for this Turn.';
-          else if (
+            validationAdmission = 'denied';
+          } else if (
             source.length !== 1 ||
             Object.keys(input).length !== 1 ||
             typeof input['plan'] !== 'string' ||
@@ -4236,6 +4248,7 @@ export class HostedWorkspaceToolTurn {
           )
         ) {
           validationError = hostedPlanModeRefusal();
+          validationAdmission = 'denied';
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
@@ -4291,6 +4304,7 @@ export class HostedWorkspaceToolTurn {
             validationError = this.backgroundShellAdmitted()
               ? 'Hosted Shell is_background must be a boolean; correct the arguments before retrying.'
               : 'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+            validationAdmission = backgroundIllFormed ? 'invalid' : 'denied';
           } else if (
             args['description'] !== undefined &&
             typeof args['description'] !== 'string'
@@ -4426,6 +4440,7 @@ export class HostedWorkspaceToolTurn {
           } else if (!monitorAdmitted) {
             validationError =
               'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.';
+            validationAdmission = 'denied';
           } else if (
             args['description'] !== undefined &&
             typeof args['description'] !== 'string'
@@ -4491,6 +4506,7 @@ export class HostedWorkspaceToolTurn {
           if (!agentAdmitted) {
             validationError =
               'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
+            validationAdmission = 'denied';
           } else if (this.publicChildren && args['isolation'] !== undefined) {
             validationError =
               'Public child agents share this Workspace; isolation is unavailable.';
@@ -4537,6 +4553,7 @@ export class HostedWorkspaceToolTurn {
             this.sessionOwnerMayHoldMount()
           ) {
             validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+            validationAdmission = 'denied';
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
@@ -4548,6 +4565,7 @@ export class HostedWorkspaceToolTurn {
             // here would not release it. Swapping the two arms hands a
             // Session-owned hold advice that cannot act on it.
             validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
+            validationAdmission = 'denied';
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
@@ -4604,6 +4622,7 @@ export class HostedWorkspaceToolTurn {
           if (!workflowAdmitted) {
             validationError =
               'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.';
+            validationAdmission = 'denied';
           } else if (unsupportedKey !== undefined) {
             validationError = `Hosted workflow received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
           } else if (backgroundIllFormed) {
@@ -4611,8 +4630,10 @@ export class HostedWorkspaceToolTurn {
               'Hosted workflow run_in_background must be a boolean.';
           } else if (this.sessionOwnerMayHoldMount()) {
             validationError = `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+            validationAdmission = 'denied';
           } else if (!agentBackground && this.acquired) {
             validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
+            validationAdmission = 'denied';
           } else if (
             !agentBackground &&
             calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
@@ -4687,6 +4708,7 @@ export class HostedWorkspaceToolTurn {
           if (role === undefined) {
             validationError =
               'Hosted session messages are unavailable on this Session profile.';
+            validationAdmission = 'denied';
           } else if (unsupportedKey !== undefined) {
             validationError =
               role === 'child'
@@ -4714,6 +4736,7 @@ export class HostedWorkspaceToolTurn {
                 'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
             } else if (memberMessageCommand && this.memberPlanMode) {
               validationError = hostedPlanModeRefusal();
+              validationAdmission = 'denied';
             } else if (
               memberMessageCommand &&
               this.memberIdentity?.name !== undefined &&
@@ -4892,6 +4915,7 @@ export class HostedWorkspaceToolTurn {
         return {
           call,
           validationError,
+          validationAdmission,
           input,
           isShell,
           inputDigest,
@@ -4950,6 +4974,7 @@ export class HostedWorkspaceToolTurn {
             ? undefined
             : 'Resident Workspace supports only read_file, write_file and edit.',
         ),
+        calls.map(() => 'denied'),
         parts,
         model,
         skillOrigin,
@@ -4962,6 +4987,11 @@ export class HostedWorkspaceToolTurn {
         calls,
         requests.map(
           (request, index) => unicodeErrors[index] ?? request.validationError,
+        ),
+        requests.map((request, index) =>
+          unicodeErrors[index] === undefined
+            ? request.validationAdmission
+            : 'invalid',
         ),
         parts,
         model,
@@ -4997,6 +5027,7 @@ export class HostedWorkspaceToolTurn {
       return this.refuseBatch(
         calls,
         requests.map((request) => request.validationError),
+        requests.map((request) => request.validationAdmission),
         parts,
         model,
         skillOrigin,
@@ -5164,6 +5195,13 @@ export class HostedWorkspaceToolTurn {
             requests.map((request) => request.call),
             requests.map(
               (_, index) => decidedInputs.unicode[index] ?? decided[index],
+            ),
+            requests.map((_, index) =>
+              decidedInputs.unicode[index] !== undefined
+                ? 'invalid'
+                : requests[index].validationError !== undefined
+                  ? requests[index].validationAdmission
+                  : 'denied',
             ),
             undefined,
             model,
