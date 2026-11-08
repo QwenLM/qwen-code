@@ -160,6 +160,8 @@ Note that under `groupPolicy: "pairing"`, access is granted per repository: once
 
 The adapter detects mentions by scanning comment text and first-contact issue or PR bodies for `@bot-username` using a case-insensitive regex. It does not trust `reason: "mention"` alone because that value is sticky at the thread level. Other reasons select review, triage, followed-thread, or fallback prompts.
 
+Editing an older comment to add the mention does not reach the bot. GitHub notifies the bot of the new mention, but the adapter reads only comments created after its poll cursor (see [How It Works](#how-it-works)). The Channel events page records such a comment, when it mentions the bot and was edited after the cursor, as skipped with the reason `edited_comment`. A comment the channel already took (answered it, or read it in a batch of followed-thread comments) gets no row, but that record is bounded, so the row can also name an older comment the bot answered before. A mention added later to an issue or pull request body is answered only while the bot has not read the thread yet, since the body is read only on first contact; after that it is not answered and leaves no row. To ask the bot, post a new comment.
+
 ## How It Works
 
 The adapter uses GitHub's Notifications API as a wake-up signal:
