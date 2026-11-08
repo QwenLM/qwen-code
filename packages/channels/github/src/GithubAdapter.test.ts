@@ -2342,6 +2342,49 @@ describe('GithubChannel', () => {
         ]);
       });
 
+      it('journals a mention added by an edit once while the window is held', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [
+                issueNotification(1, `2026-07-02T01:0${poll}:00.000Z`),
+                issueNotification(2),
+              ];
+            }
+            if (params.issue_number === 2) throw transient();
+            const old = '2026-06-30T08:00:00.000Z';
+            return [
+              makeComment({
+                created_at: old,
+                updated_at: '2026-07-02T00:30:00.000Z',
+              }),
+              // Edited during the held window, after the first poll.
+              ...(poll > 1
+                ? [
+                    makeComment({
+                      id: 1002,
+                      created_at: old,
+                      updated_at: '2026-07-02T00:40:00.000Z',
+                    }),
+                  ]
+                : []),
+            ];
+          },
+        );
+
+        for (let i = 0; i < 3; i++) await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          journal()
+            .filter((row) => row['reason'] === 'edited_comment')
+            .map((row) => row['messageId']),
+        ).toEqual(['C_1001', 'C_1002']);
+      });
+
       it('does not spend the 5xx budget on polls a rate limit stopped', async () => {
         await initFailing();
         let poll = 0;
@@ -8921,6 +8964,180 @@ describe('GithubChannel', () => {
           messageId: 'C_1001',
         }),
       ]);
+    });
+
+    describe('a mention added by editing an older comment', () => {
+      // The cursor is 2026-07-01T00:00:00.000Z and the notification's
+      // updated_at is 2026-07-02T10:00:00.000Z: the window between them.
+      const edited = (overrides: Record<string, unknown> = {}) =>
+        makeComment({
+          created_at: '2026-06-30T08:00:00.000Z',
+          updated_at: '2026-07-02T09:30:00.000Z',
+          ...overrides,
+        });
+
+      async function pollWith(
+        reason: string,
+        comments: Array<Record<string, unknown>>,
+      ) {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            makeNotification({
+              reason,
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+          ])
+          .mockResolvedValueOnce(comments);
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: { title: 'Test Issue', body: '', user: { login: 'alice' } },
+        });
+        await pollOnce();
+      }
+
+      it.each([
+        ['edited inside the window', {}],
+        [
+          'created at the window start',
+          { created_at: '2026-07-01T00:00:00.000Z' },
+        ],
+        [
+          'edited at the notification time',
+          { updated_at: '2026-07-02T10:00:00.000Z' },
+        ],
+        [
+          'edited after the notification',
+          { updated_at: '2026-07-02T11:00:00.000Z' },
+        ],
+        [
+          'written by a mixed-case login',
+          { user: { id: 10001, login: 'Alice' } },
+        ],
+        ['mentioning the bot in another case', { body: '@Test-Bot please' }],
+      ])(
+        'is recorded as skipped, not answered (%s)',
+        async (_name, overrides) => {
+          await initWithoutLoop();
+
+          await pollWith('mention', [edited(overrides)]);
+
+          expect(channel.inboundEnvelopes).toHaveLength(0);
+          expect(readJournal()).toEqual([
+            expect.objectContaining({
+              type: 'inbound',
+              outcome: 'skipped',
+              reason: 'edited_comment',
+              triggerKind: 'comment',
+              repository: 'owner/repo',
+              thread: 'issue:42',
+              number: 42,
+              messageId: 'C_1001',
+              actor: 'alice',
+            }),
+          ]);
+          // The row is the notification's only trace: the window commits.
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it('records each such comment of a thread, past the ones it skips', async () => {
+        await initWithoutLoop();
+        channel.cursor = {
+          lastProcessedAt: '2026-07-01T00:00:00.000Z',
+          // An older metadata floor must not narrow the comment window.
+          metaFloor: '2026-06-01T00:00:00.000Z',
+          dispatchedComments: ['C_1002'],
+        };
+
+        await pollWith('mention', [
+          edited({ id: 1001, body: 'no mention here' }),
+          edited({ id: 1002 }),
+          edited({ id: 1003 }),
+          edited({ id: 1004, user: { id: 10002, login: 'bob' } }),
+          edited({ id: 1005, user: null }),
+          edited({ id: 1006, node_id: undefined }),
+          // Last edited at the cursor: the window that ended there read it.
+          edited({ id: 1007, updated_at: '2026-07-01T00:00:00.000Z' }),
+          edited({ id: 1008, body: undefined }),
+        ]);
+
+        expect(
+          readJournal()
+            .filter((row) => row['reason'] === 'edited_comment')
+            .map((row) => [row['messageId'], row['actor']]),
+        ).toEqual([
+          ['C_1003', 'alice'],
+          ['C_1004', 'bob'],
+          ['C_1005', 'unknown'],
+          ['1006', 'alice'],
+        ]);
+      });
+
+      it('is recorded on the aggregate lane too', async () => {
+        await initWithoutLoop();
+
+        await pollWith('comment', [
+          edited(),
+          makeComment({ id: 1002, body: 'a new comment' }),
+        ]);
+
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+        expect(channel.inboundEnvelopes[0]!.text).toContain(
+          '@alice: a new comment',
+        );
+        expect(channel.inboundEnvelopes[0]!.text).not.toContain(
+          'please fix this',
+        );
+        expect(
+          readJournal()
+            .filter((row) => row['reason'] === 'edited_comment')
+            .map((row) => row['messageId']),
+        ).toEqual(['C_1001']);
+      });
+
+      it.each([
+        ['it does not mention the bot', { body: 'no mention here' }],
+        [
+          'it was edited before the window',
+          { updated_at: '2026-06-30T09:00:00.000Z' },
+        ],
+        [
+          'it was edited at the window start',
+          { updated_at: '2026-07-01T00:00:00.000Z' },
+        ],
+        ['it has no update time', { updated_at: null }],
+        [
+          'it was created inside the window',
+          { created_at: '2026-07-02T09:00:00.000Z' },
+        ],
+        [
+          'it was created before the thread was last read',
+          { created_at: '2026-07-01T06:00:00.000Z' },
+        ],
+        ['the bot wrote it', { user: { id: 99999, login: 'test-bot' } }],
+        ['it has no creation time', { created_at: null }],
+      ])('is not recorded when %s', async (_name, overrides) => {
+        await initWithoutLoop();
+
+        await pollWith('mention', [edited(overrides)]);
+
+        expect(
+          readJournal().filter((row) => row['reason'] === 'edited_comment'),
+        ).toEqual([]);
+      });
+
+      it('is not recorded when the channel already took the comment', async () => {
+        await initWithoutLoop();
+        channel.cursor = {
+          lastProcessedAt: '2026-07-01T00:00:00.000Z',
+          dispatchedComments: ['C_1001'],
+        };
+
+        await pollWith('mention', [edited()]);
+
+        expect(readJournal()).toEqual([]);
+      });
     });
 
     it('records the inbound acceptance, task transitions, and publication', async () => {
