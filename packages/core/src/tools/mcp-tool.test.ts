@@ -3021,6 +3021,49 @@ describe('DiscoveredMCPTool', () => {
       expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
+    it('does not repair a server the operator disconnected after the abort', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      // Deliberate teardown writes the same CONNECTED -> DISCONNECTED
+      // transition, which is why the invocation must also check the client it
+      // called: a manager that stopped it has already flipped it.
+      const client: McpDirectClient & { getStatus: () => MCPServerStatus } = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+        getStatus: () => MCPServerStatus.CONNECTED,
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // Operator Disconnect / disable / shutdown: the client leaves CONNECTED
+      // and the registry then reports DISCONNECTED.
+      (client as { getStatus: () => MCPServerStatus }).getStatus = () =>
+        MCPServerStatus.DISCONNECTED;
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await Promise.resolve();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
     it('should not reconnect for an MCP isError result', async () => {
       const initialClient: McpDirectClient = {
         callTool: vi.fn().mockResolvedValueOnce({
